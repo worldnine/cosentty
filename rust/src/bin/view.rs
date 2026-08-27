@@ -889,21 +889,32 @@ impl App {
         self.cursor_rows().map(|(first, _)| self.row_top(first))
     }
 
-    /// Keep the cursor's source line within the viewport of `body_h` rows:
-    /// scrolling up aligns its FIRST display row to the top, scrolling down
-    /// aligns its LAST display row (wrapped continuations, card rows and
-    /// tall images included) to the bottom. akapen's `keep_cursor_visible`.
+    /// Keep the cursor's source line within the viewport of `body_h` rows,
+    /// always leaving ONE row below the cursor's last display row for the
+    /// frame's bottom rule. Scrolling up aligns the FIRST display row to
+    /// the top; scrolling down keeps the LAST display row + rule row on
+    /// screen. When the cursor is on the very LAST source line, the bottom
+    /// rule is what matters, so the viewport goes all the way to max
+    /// scroll (G does the same). akapen's `keep_cursor_visible`.
     fn follow_cursor(&mut self, body_h: u16) {
-        let body_h = body_h.max(1);
+        let body_h = body_h.max(2); // cursor row + at least one rule row
         let Some((first, last)) = self.cursor_rows() else { return };
         let top = self.row_top(first);
         let bottom = self.row_top(last) + self.rows[last].height();
         if top < self.scroll {
             self.scroll = top;
-        } else if bottom > self.scroll + body_h {
-            self.scroll = bottom - body_h;
+        } else if bottom + 1 > self.scroll + body_h {
+            // Reserve the row below the cursor for the bottom rule.
+            self.scroll = bottom + 1 - body_h;
         }
         self.scroll = self.scroll.min(self.max_scroll(body_h));
+        // On the very last source line, keep the bottom rule visible by
+        // letting the viewport reach the document's end.
+        if let Some(last_src) = self.last_src() {
+            if self.cursor == last_src {
+                self.scroll = self.max_scroll(body_h);
+            }
+        }
     }
 
     /// Wheel scroll: move the viewport by `delta` height units and leave
@@ -1509,6 +1520,13 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> bool {
         (KeyCode::Char('G'), false) => {
             if let Some(s) = app.last_src() {
                 app.goto_src(s);
+            }
+            // Pin the viewport at the document end so the bottom rule is
+            // visible: cursor-follow alone stops when the last content row
+            // is on screen, one row short of the frame's bottom rule.
+            if app.view_h > 0 {
+                app.scroll = app.max_scroll(app.view_h);
+                app.follow = false;
             }
         }
         // Paging moves the CURSOR by a screenful / half (akapen): the
@@ -2568,8 +2586,9 @@ mod tests {
         app.rebuild(22); // line 3 wraps to 3 rows: rows 3,4,5
         app.goto_src(3);
         app.follow_cursor(4);
-        // rows 3..=5 must be inside a 4-row viewport -> scroll = 6 - 4
-        assert_eq!(app.scroll, 2);
+        // rows 3..=5 inside a 4-row viewport, with one row below for the
+        // bottom rule -> scroll = 6 - 4 + 1
+        assert_eq!(app.scroll, 3);
         app.goto_src(0);
         app.follow_cursor(4);
         assert_eq!(app.scroll, 0);
