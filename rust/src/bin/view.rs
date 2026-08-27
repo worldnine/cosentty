@@ -876,9 +876,12 @@ impl App {
         self.rows.iter().map(Row::height).sum()
     }
 
-    /// Largest scroll offset that still fills a `body_h`-row viewport.
-    fn max_scroll(&self, body_h: u16) -> u16 {
-        self.total_height().saturating_sub(body_h)
+    /// Largest scroll offset. The frame (content + 2 rule rows) scrolls as
+    /// a whole; at max scroll the bottom rule sits on the band's last row:
+    /// scroll = text.y + total - (body.y + band_h - 1) = total + 2 - band_h
+    /// (text.y = body.y + 1).
+    fn max_scroll(&self, band_h: u16) -> u16 {
+        self.total_height().saturating_add(2).saturating_sub(band_h)
     }
 
     /// Y offset of the cursor line's first display row, if it has any.
@@ -1987,11 +1990,14 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // border glyph there — never touch the screen edge. The text column
     // then sits one more column in (`▊ text`), and the right border carries
     // the scrollbar thumb only, never a full track.
-    let margin: u16 = 1;
+    // The frame: page boxed with box-drawing borders. body.x sits flush at
+    // the screen's left edge (no margin column). The telomere / cursor
+    // markers live in their own column INSIDE the left border, padded from
+    // the text; the right border carries the scrollbar thumb only.
     let body = Rect::new(
-        area.x + margin,
+        area.x,
         area.y + 1,
-        area.width.saturating_sub(1),
+        area.width,
         area.height.saturating_sub(2),
     );
     // Layout (inside the box): border │, telomere column, pad, text, pad,
@@ -1999,28 +2005,26 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let gutter_x = body.x + 1; // telomere / `>` / comment column
     let bar_x = body.x + body.width.saturating_sub(2); // thumb column
     let text = Rect::new(
-        body.x + 3,
+        body.x + 2,
         body.y + 1,
-        body.width.saturating_sub(5),
+        body.width.saturating_sub(4),
         body.height.saturating_sub(2),
     );
 
-    // The frame HUGS THE CONTENT: its top rule rides the content's first
-    // row and its bottom rule rides the content's last row, so scrolling
-    // carries the rules off-screen with the page (akapen's frame is fixed
-    // to the viewport; we deliberately differ). Short content gets a
-    // tight box; the rules clip to the visible band between the header and
-    // the status line.
+    // The frame HUGS THE CONTENT: the whole frame (top rule, content rows,
+    // bottom rule) moves together as `-scroll`. Content row n sits at
+    // text.y + n - scroll; the rules sit one above the first row and one
+    // below the last. Rules scroll off-screen with the page; the visible
+    // band is body.y .. area.y+area.height-2. Everything uses the SAME
+    // coordinate system, so the thumb, cursor-follow and the rules agree.
     let total_h = app.total_height() as i32;
     let top_rule = text.y as i32 - 1 - app.scroll as i32;
+    // The last content row is at text.y + (total_h - 1) - scroll; the
+    // bottom rule sits one below it.
     let bot_rule = text.y as i32 + total_h - app.scroll as i32;
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
-    // Where the content's first VISIBLE row is drawn. While the top rule
-    // is on screen, content sits one row below it (band_top + 1); once the
-    // rule scrolls off, the content rises to band_top so the vacated row
-    // is not wasted.
-    let origin = (top_rule + 1).max(band_top);
+    let band_h = (band_bot - band_top + 1).max(1) as u16; // visible rows
     {
         let buf = f.buffer_mut();
         let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
@@ -2068,22 +2072,24 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         // Width changed: re-wrap, keeping the cursor line on its screen row
         // (the resize equivalent of akapen's cursor_fraction handoff — the
         // cursor is a source line, so only the viewport needs adjusting).
-        app.relayout_preserving_screen_row(body.width, text.height);
+        app.relayout_preserving_screen_row(body.width, band_h);
     }
-    if app.view_h != text.height {
+    if app.view_h != band_h {
         // Height changed: the old offset may now overshoot the end, and the
         // cursor may have fallen off the bottom.
-        app.view_h = text.height;
-        app.scroll = app.scroll.min(app.max_scroll(text.height));
+        app.view_h = band_h;
+        app.scroll = app.scroll.min(app.max_scroll(band_h));
         app.follow = true;
     }
     if app.follow {
-        app.follow_cursor(text.height);
+        app.follow_cursor(band_h);
         app.follow = false;
     }
 
     let view_top = app.scroll as i32;
-    let view_bottom = view_top + (band_bot - band_top + 1);
+    // The visible band holds band_h rows; the content plus rules scroll
+    // through it. Rows are tested against `text.y + n - scroll` below.
+    let view_bottom = view_top + band_h as i32;
     let sel_range = app.selection.map(|s| s.range());
     // Gutter cells to paint after the rows: (screen row, glyph, style).
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
@@ -2122,23 +2128,26 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
 
         // The gutter marker for each on-screen row of this Row (an image
-        // occupies several).
+        // occupies several). Uses the same screen row as the text: `text.y`
+        // anchors content, rows flow with `-scroll` (top is the row's
+        // content offset, view_top = scroll).
         if row.src().is_some() {
             for k in 0..h {
                 let sy = screen_y + k;
-                if sy >= 0 && sy <= band_bot - origin {
+                let y = text.y as i32 + sy;
+                if y >= band_top && y <= band_bot {
                     let (glyph, mut style) = gutter_cell(is_cursor, has_comment, age, ctx.light);
                     if let Some(bg) = base.bg {
                         style = style.bg(bg);
                     }
-                    gutter.push(((origin + sy) as u16, glyph, style));
+                    gutter.push((y as u16, glyph, style));
                 }
             }
         }
 
         let one_row = |screen_y: i32| -> Option<Rect> {
-            let y = origin + screen_y;
-            if screen_y >= 0 && y <= band_bot {
+            let y = text.y as i32 + screen_y;
+            if y >= band_top && y <= band_bot {
                 Some(Rect::new(text.x, y as u16, text.width, 1))
             } else {
                 None
@@ -2180,18 +2189,18 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 // stays visible for its in-view portion (no all-or-nothing).
                 // The cursor band cannot paint over image pixels, so on an
                 // image line only the gutter marker shows the cursor (akapen
-                // behaves the same). Position the slice relative to ORIGIN
-                // (the content's top), matching how text rows moved.
+                // behaves the same). Position the slice relative to text.y
+                // (the content anchor), matching how text rows move.
                 if let Some(info) = app.images.get(url) {
                     let pos = SignedPosition { x: 1, y: screen_y as i16 };
                     // SlicedImage draws relative to the area's top-left; give
-                    // it the band (origin .. band_bot) so y = screen_y lands
-                    // on the same row the text uses.
+                    // it the full band so y = screen_y lands on the same row
+                    // the text uses.
                     let img_area = Rect::new(
                         text.x,
-                        origin as u16,
+                        text.y,
                         text.width,
-                        (band_bot - origin + 1) as u16,
+                        (band_bot - text.y as i32 + 1) as u16,
                     );
                     f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
                 }
@@ -2215,17 +2224,24 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // is, never a double line). The thumb tracks the VIEWPORT offset (wheel
     // scroll moves the viewport only); when the content fits, nothing is
     // drawn and the border stays clean.
+    // Scrollbar: ONLY the thumb is drawn, in its own column just inside the
+    // frame's right border. The scrollable extent is the whole frame
+    // (content + 2 rule rows), and the thumb tracks the offset over a track
+    // of `band_h` rows (the visible band), so at max scroll the thumb sits
+    // at the band's bottom exactly where the bottom rule appears.
     let thumb = Style::default().fg(cosense::theme::scrollbar_thumb(ctx.light));
     if let Some((start, len)) = cosense::theme::scroll_thumb(
-        app.total_height() as usize,
-        text.height as usize,
+        (app.total_height() + 2) as usize,
+        band_h as usize,
         app.scroll as usize,
     ) {
-        for i in start..start + len {
-            if let Some(c) = buf.cell_mut((bar_x, band_top as u16 + i as u16)) {
+        let mut i = start as u16;
+        for _ in start..start + len {
+            if let Some(c) = buf.cell_mut((bar_x, band_top as u16 + i)) {
                 c.set_symbol("▐");
                 c.set_style(thumb);
             }
+            i += 1;
         }
     }
 
@@ -2674,7 +2690,7 @@ mod tests {
         assert_eq!(app.cursor, 2, "the cursor keeps its line");
         assert!(!app.follow, "the next frame must not yank the viewport back");
         app.wheel_scroll(1000, 10);
-        assert_eq!(app.scroll, 20, "clamped to the last full viewport");
+        assert_eq!(app.scroll, 22, "clamped to max (content+2 rules - viewport)");
         app.wheel_scroll(-1000, 10);
         assert_eq!(app.scroll, 0);
     }
