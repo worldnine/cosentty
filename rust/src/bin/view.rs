@@ -632,9 +632,10 @@ impl App {
     /// right; source mode also spends the line-number label.
     fn text_width(mode: Mode, width: u16) -> usize {
         let w = width as usize;
+        // Frame: 2 border cols + 1 gutter pad + 1 scrollbar pad too.
         match mode {
-            Mode::View => w.saturating_sub(2).max(1),
-            Mode::Source => w.saturating_sub(2 + SOURCE_NUM_W).max(1),
+            Mode::View => w.saturating_sub(4).max(1),
+            Mode::Source => w.saturating_sub(4 + SOURCE_NUM_W).max(1),
         }
     }
 
@@ -1995,15 +1996,17 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     f.render_widget(frame, body);
 
     // The frame's border columns carry the markers: the LEFT border cell of
-    // each row is the gutter (telomere / cursor `>` / comment marker), the
-    // RIGHT border cell is the scrollbar (akapen exactly). The text area is
-    // the frame's interior.
+    // each row is the gutter (telomere / cursor `>` / comment marker). The
+    // RIGHT border cell stays a clean `│`; the scrollbar is its OWN column
+    // just inside it (akapen: `…▐│` — the frame never breaks). Text gets
+    // one column of breathing room from the gutter, and one from the
+    // scrollbar, matching akapen's padded text column.
     let gutter_x = body.x; // left border column
-    let bar_x = body.x + body.width.saturating_sub(1); // right border column
+    let bar_x = body.x + body.width.saturating_sub(2); // scrollbar column
     let text = Rect::new(
-        body.x + 1,
+        body.x + 2,
         body.y + 1,
-        body.width.saturating_sub(2),
+        body.width.saturating_sub(4),
         body.height.saturating_sub(2),
     );
     app.text_rect = text;
@@ -2142,18 +2145,26 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             c.set_style(style);
         }
     }
-    // Scrollbar on the right column: the thumb tracks the VIEWPORT offset
-    // (wheel scroll moves the viewport only), so it always reflects what is
-    // on screen; when the content fits, no thumb is drawn.
+    // Scrollbar in its own column just inside the frame's right border
+    // (akapen: `▐│`): the track is the border-gray `│` on every row, the
+    // thumb is `▐` over the rows the viewport currently occupies. The border
+    // column itself stays clean, so the frame never reads as broken.
+    let track = Style::default().fg(cosense::theme::border_color(ctx.light));
+    let thumb = Style::default().fg(cosense::theme::scrollbar_thumb(ctx.light));
+    for i in 0..text.height {
+        if let Some(c) = buf.cell_mut((bar_x, text.y + i)) {
+            c.set_symbol("│");
+            c.set_style(track);
+        }
+    }
     if let Some((start, len)) = cosense::theme::scroll_thumb(
         app.total_height() as usize,
         text.height as usize,
         app.scroll as usize,
     ) {
-        let thumb = Style::default().fg(cosense::theme::scrollbar_thumb(ctx.light));
         for i in start..start + len {
             if let Some(c) = buf.cell_mut((bar_x, text.y + i as u16)) {
-                c.set_symbol("█");
+                c.set_symbol("▐");
                 c.set_style(thumb);
             }
         }
