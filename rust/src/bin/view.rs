@@ -1994,17 +1994,6 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         area.width.saturating_sub(1),
         area.height.saturating_sub(2),
     );
-    // Box-drawing frame (option B): the border is the standard centered
-    // `┌│┐` family, so corners and edges join cleanly in any font. The
-    // telomere / cursor markers live in their OWN column INSIDE the frame,
-    // one step in from the border, padded from the text — akapen's look,
-    // where markers are gutter cells, not the frame itself.
-    let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
-    let frame = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(frame_style);
-    f.render_widget(frame, body);
-
     // Layout (inside the box): border │, telomere column, pad, text, pad,
     // thumb column, border │.
     let gutter_x = body.x + 1; // telomere / `>` / comment column
@@ -2015,6 +2004,58 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         body.width.saturating_sub(5),
         body.height.saturating_sub(2),
     );
+
+    // The frame HUGS THE CONTENT: its top rule rides the content's first
+    // row and its bottom rule rides the content's last row, so scrolling
+    // carries the rules off-screen with the page (akapen's frame is fixed
+    // to the viewport; we deliberately differ). Short content gets a
+    // tight box; the rules clip to the visible band between the header and
+    // the status line.
+    let total_h = app.total_height() as i32;
+    let top_rule = text.y as i32 - 1 - app.scroll as i32;
+    let bot_rule = text.y as i32 + total_h - app.scroll as i32;
+    let band_top = body.y as i32;
+    let band_bot = (area.y + area.height - 2) as i32; // one above status
+    {
+        let buf = f.buffer_mut();
+        let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
+        let right_x = body.x + body.width.saturating_sub(1);
+        let set = |buf: &mut ratatui::buffer::Buffer, x: u16, y: i32, s: &str| {
+            if y < band_top || y > band_bot {
+                return;
+            }
+            if let Some(c) = buf.cell_mut((x, y as u16)) {
+                c.set_symbol(s);
+                c.set_style(frame_style);
+            }
+        };
+        // top rule ┌─…─┐
+        if top_rule >= band_top && top_rule <= band_bot {
+            set(buf, body.x, top_rule, "┌");
+            for x in (body.x + 1)..right_x {
+                set(buf, x, top_rule, "─");
+            }
+            set(buf, right_x, top_rule, "┐");
+        }
+        // bottom rule └─…─┘
+        if bot_rule >= band_top && bot_rule <= band_bot {
+            set(buf, body.x, bot_rule, "└");
+            for x in (body.x + 1)..right_x {
+                set(buf, x, bot_rule, "─");
+            }
+            set(buf, right_x, bot_rule, "┘");
+        }
+        // vertical sides: strictly between the content's rule rows, so the
+        // sides scroll off with the page (ratatui clips rows off-screen;
+        // we only limit writes to the band so we never paint over the
+        // header/status strips).
+        let v_top = (top_rule + 1).max(band_top);
+        let v_bot = (bot_rule - 1).min(band_bot);
+        for y in v_top..=v_bot {
+            set(buf, body.x, y, "│");
+            set(buf, right_x, y, "│");
+        }
+    }
     app.text_rect = text;
     app.bar_x = bar_x;
 
