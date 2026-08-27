@@ -1,0 +1,33 @@
+[package]
+name = "cosense-tui"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.30"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
+crossterm = "0.29"
+image = "0.25"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-width = "0.2"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+libc = "0.2"
+
+[lib]
+name = "cosense"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spike"
+path = "src/spike.rs"
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
+name = "view"
+path = "src/bin/view.rs"
