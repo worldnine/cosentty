@@ -632,11 +632,10 @@ impl App {
     /// right; source mode also spends the line-number label.
     fn text_width(mode: Mode, width: u16) -> usize {
         let w = width as usize;
-        // Frame: left border doubles as the marker (1 col) + 1 pad, right
-        // thumb col + 1 border.
+        // Left: border(1) + telomere(1) + pad(1). Right: thumb(1) + border(1).
         match mode {
-            Mode::View => w.saturating_sub(4).max(1),
-            Mode::Source => w.saturating_sub(4 + SOURCE_NUM_W).max(1),
+            Mode::View => w.saturating_sub(5).max(1),
+            Mode::Source => w.saturating_sub(5 + SOURCE_NUM_W).max(1),
         }
     }
 
@@ -1984,10 +1983,10 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
 
     // akapen-style frame: the page is boxed. The frame floats ONE column
     // off the terminal's left edge (akapen's `margin = 1`) so the markers
-    // riding the border — the telomere (or cursor `>`) REPLACES the `│`
+    // riding the border — the telomere (or cursor `>`) REPLACES the block
     // border glyph there — never touch the screen edge. The text column
     // then sits one more column in (`▊ text`), and the right border carries
-    // the scrollbar thumb only (`…▐│`), never a full track.
+    // the scrollbar thumb only, never a full track.
     let margin: u16 = 1;
     let body = Rect::new(
         area.x + margin,
@@ -1995,22 +1994,25 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         area.width.saturating_sub(1),
         area.height.saturating_sub(2),
     );
+    // Box-drawing frame (option B): the border is the standard centered
+    // `┌│┐` family, so corners and edges join cleanly in any font. The
+    // telomere / cursor markers live in their OWN column INSIDE the frame,
+    // one step in from the border, padded from the text — akapen's look,
+    // where markers are gutter cells, not the frame itself.
     let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
     let frame = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_style(frame_style);
     f.render_widget(frame, body);
 
-    // Layout: the marker column IS the frame's left border column (body.x),
-    // so a line reads as `▊ text` with the bar as the edge and the frame
-    // margin (area.x, empty) as the space before it. The scrollbar column
-    // sits one inside the right border.
-    let gutter_x = body.x; // left border column: telomere replaces `│`
+    // Layout (inside the box): border │, telomere column, pad, text, pad,
+    // thumb column, border │.
+    let gutter_x = body.x + 1; // telomere / `>` / comment column
     let bar_x = body.x + body.width.saturating_sub(2); // thumb column
     let text = Rect::new(
-        body.x + 2,
+        body.x + 3,
         body.y + 1,
-        body.width.saturating_sub(4),
+        body.width.saturating_sub(5),
         body.height.saturating_sub(2),
     );
     app.text_rect = text;
