@@ -632,10 +632,11 @@ impl App {
     /// right; source mode also spends the line-number label.
     fn text_width(mode: Mode, width: u16) -> usize {
         let w = width as usize;
-        // Frame: 2 border cols + 1 marker pad + 1 text pad + 1 scrollbar pad.
+        // Frame: left border doubles as the marker (1 col) + 1 pad, right
+        // thumb col + 1 border.
         match mode {
-            Mode::View => w.saturating_sub(5).max(1),
-            Mode::Source => w.saturating_sub(5 + SOURCE_NUM_W).max(1),
+            Mode::View => w.saturating_sub(4).max(1),
+            Mode::Source => w.saturating_sub(4 + SOURCE_NUM_W).max(1),
         }
     }
 
@@ -1981,32 +1982,35 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 
-    let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(2));
-
-    // akapen-style frame (view mode): the page is boxed. The frame's LEFT
-    // border column carries the gutter (telomere / cursor `>` / comment
-    // marker), and its RIGHT border column carries the scrollbar. Both are
-    // painted over the border cells afterwards, so the frame reads as one
-    // continuous box while the edge still carries the per-line markers and
-    // the thumb. Source mode shares the same frame for consistency.
+    // akapen-style frame: the page is boxed. The frame floats ONE column
+    // off the terminal's left edge (akapen's `margin = 1`) so the markers
+    // riding the border — the telomere (or cursor `>`) REPLACES the `│`
+    // border glyph there — never touch the screen edge. The text column
+    // then sits one more column in (`▊ text`), and the right border carries
+    // the scrollbar thumb only (`…▐│`), never a full track.
+    let margin: u16 = 1;
+    let body = Rect::new(
+        area.x + margin,
+        area.y + 1,
+        area.width.saturating_sub(1),
+        area.height.saturating_sub(2),
+    );
     let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
     let frame = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
         .border_style(frame_style);
     f.render_widget(frame, body);
 
-    // The frame's left border stays a clean `│`; the telomere / cursor /
-    // comment marker column sits ONE column inside it, so a line of text
-    // reads as `│ ▏ text` — space, bar, space (the marker floats free of
-    // both the frame and the text). The scrollbar is its own column just
-    // inside the right border (`…▐│`), so the frame never breaks. Text gets
-    // one column of breathing room from the marker, one from the scrollbar.
-    let gutter_x = body.x + 1; // marker column (border stays at body.x)
-    let bar_x = body.x + body.width.saturating_sub(2); // scrollbar column
+    // Layout: the marker column IS the frame's left border column (body.x),
+    // so a line reads as `▊ text` with the bar as the edge and the frame
+    // margin (area.x, empty) as the space before it. The scrollbar column
+    // sits one inside the right border.
+    let gutter_x = body.x; // left border column: telomere replaces `│`
+    let bar_x = body.x + body.width.saturating_sub(2); // thumb column
     let text = Rect::new(
-        body.x + 3,
+        body.x + 2,
         body.y + 1,
-        body.width.saturating_sub(5),
+        body.width.saturating_sub(4),
         body.height.saturating_sub(2),
     );
     app.text_rect = text;
@@ -2145,18 +2149,13 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             c.set_style(style);
         }
     }
-    // Scrollbar in its own column just inside the frame's right border
-    // (akapen: `▐│`): the track is the border-gray `│` on every row, the
-    // thumb is `▐` over the rows the viewport currently occupies. The border
-    // column itself stays clean, so the frame never reads as broken.
-    let track = Style::default().fg(cosense::theme::border_color(ctx.light));
+    // Scrollbar: ONLY the thumb is drawn, in its own column just inside the
+    // frame's right border — there is no always-on track, so non-thumb rows
+    // show just the clean `│` border (akapen: `…▐│` only where the thumb
+    // is, never a double line). The thumb tracks the VIEWPORT offset (wheel
+    // scroll moves the viewport only); when the content fits, nothing is
+    // drawn and the border stays clean.
     let thumb = Style::default().fg(cosense::theme::scrollbar_thumb(ctx.light));
-    for i in 0..text.height {
-        if let Some(c) = buf.cell_mut((bar_x, text.y + i)) {
-            c.set_symbol("│");
-            c.set_style(track);
-        }
-    }
     if let Some((start, len)) = cosense::theme::scroll_thumb(
         app.total_height() as usize,
         text.height as usize,
