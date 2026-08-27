@@ -632,10 +632,10 @@ impl App {
     /// right; source mode also spends the line-number label.
     fn text_width(mode: Mode, width: u16) -> usize {
         let w = width as usize;
-        // Frame: 2 border cols + 1 gutter pad + 1 scrollbar pad too.
+        // Frame: 2 border cols + 1 marker pad + 1 text pad + 1 scrollbar pad.
         match mode {
-            Mode::View => w.saturating_sub(4).max(1),
-            Mode::Source => w.saturating_sub(4 + SOURCE_NUM_W).max(1),
+            Mode::View => w.saturating_sub(5).max(1),
+            Mode::Source => w.saturating_sub(5 + SOURCE_NUM_W).max(1),
         }
     }
 
@@ -1995,18 +1995,18 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         .border_style(frame_style);
     f.render_widget(frame, body);
 
-    // The frame's border columns carry the markers: the LEFT border cell of
-    // each row is the gutter (telomere / cursor `>` / comment marker). The
-    // RIGHT border cell stays a clean `│`; the scrollbar is its OWN column
-    // just inside it (akapen: `…▐│` — the frame never breaks). Text gets
-    // one column of breathing room from the gutter, and one from the
-    // scrollbar, matching akapen's padded text column.
-    let gutter_x = body.x; // left border column
+    // The frame's left border stays a clean `│`; the telomere / cursor /
+    // comment marker column sits ONE column inside it, so a line of text
+    // reads as `│ ▏ text` — space, bar, space (the marker floats free of
+    // both the frame and the text). The scrollbar is its own column just
+    // inside the right border (`…▐│`), so the frame never breaks. Text gets
+    // one column of breathing room from the marker, one from the scrollbar.
+    let gutter_x = body.x + 1; // marker column (border stays at body.x)
     let bar_x = body.x + body.width.saturating_sub(2); // scrollbar column
     let text = Rect::new(
-        body.x + 2,
+        body.x + 3,
         body.y + 1,
-        body.width.saturating_sub(4),
+        body.width.saturating_sub(5),
         body.height.saturating_sub(2),
     );
     app.text_rect = text;
