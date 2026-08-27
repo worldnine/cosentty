@@ -2016,6 +2016,11 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let bot_rule = text.y as i32 + total_h - app.scroll as i32;
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
+    // Where the content's first VISIBLE row is drawn. While the top rule
+    // is on screen, content sits one row below it (band_top + 1); once the
+    // rule scrolls off, the content rises to band_top so the vacated row
+    // is not wasted.
+    let origin = (top_rule + 1).max(band_top);
     {
         let buf = f.buffer_mut();
         let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
@@ -2078,7 +2083,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
 
     let view_top = app.scroll as i32;
-    let view_bottom = view_top + text.height as i32;
+    let view_bottom = view_top + (band_bot - band_top + 1);
     let sel_range = app.selection.map(|s| s.range());
     // Gutter cells to paint after the rows: (screen row, glyph, style).
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
@@ -2121,19 +2126,20 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         if row.src().is_some() {
             for k in 0..h {
                 let sy = screen_y + k;
-                if sy >= 0 && sy < text.height as i32 {
+                if sy >= 0 && sy <= band_bot - origin {
                     let (glyph, mut style) = gutter_cell(is_cursor, has_comment, age, ctx.light);
                     if let Some(bg) = base.bg {
                         style = style.bg(bg);
                     }
-                    gutter.push((sy as u16, glyph, style));
+                    gutter.push(((origin + sy) as u16, glyph, style));
                 }
             }
         }
 
         let one_row = |screen_y: i32| -> Option<Rect> {
-            if screen_y >= 0 && screen_y < text.height as i32 {
-                Some(Rect::new(text.x, text.y + screen_y as u16, text.width, 1))
+            let y = origin + screen_y;
+            if screen_y >= 0 && y <= band_bot {
+                Some(Rect::new(text.x, y as u16, text.width, 1))
             } else {
                 None
             }
@@ -2174,20 +2180,31 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 // stays visible for its in-view portion (no all-or-nothing).
                 // The cursor band cannot paint over image pixels, so on an
                 // image line only the gutter marker shows the cursor (akapen
-                // behaves the same).
+                // behaves the same). Position the slice relative to ORIGIN
+                // (the content's top), matching how text rows moved.
                 if let Some(info) = app.images.get(url) {
                     let pos = SignedPosition { x: 1, y: screen_y as i16 };
-                    f.render_widget(SlicedImage::new(&info.sliced, pos), text);
+                    // SlicedImage draws relative to the area's top-left; give
+                    // it the band (origin .. band_bot) so y = screen_y lands
+                    // on the same row the text uses.
+                    let img_area = Rect::new(
+                        text.x,
+                        origin as u16,
+                        text.width,
+                        (band_bot - origin + 1) as u16,
+                    );
+                    f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
                 }
             }
         }
     }
 
     // Gutter column: painted after the rows. Rows without a source line
-    // (cards, past the end) leave it blank.
+    // (cards, past the end) leave it blank. (`sy` is already the absolute
+    // screen row.)
     let buf = f.buffer_mut();
     for (sy, glyph, style) in gutter {
-        if let Some(c) = buf.cell_mut((gutter_x, text.y + sy)) {
+        if let Some(c) = buf.cell_mut((gutter_x, sy)) {
             c.set_symbol(glyph);
             c.set_style(style);
         }
@@ -2205,7 +2222,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         app.scroll as usize,
     ) {
         for i in start..start + len {
-            if let Some(c) = buf.cell_mut((bar_x, text.y + i as u16)) {
+            if let Some(c) = buf.cell_mut((bar_x, band_top as u16 + i as u16)) {
                 c.set_symbol("▐");
                 c.set_style(thumb);
             }
