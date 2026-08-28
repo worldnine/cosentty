@@ -2731,9 +2731,36 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
 /// Enter inside the session: split at the caret (at EOL this creates a
 /// fresh line). The new line inherits the indent; the caret lands after
 /// it; the session CONTINUES there — keep typing.
+///
+/// Exception — the standard list-escape: Enter on an EMPTY bullet (a
+/// whitespace-only line) does not chain another empty bullet. The empty
+/// bullet dissolves into a true blank line (its spaces are removed) and
+/// the fresh line starts flush, with no indent.
 fn session_split(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
+    if !buf.is_empty() && buf.chars().all(char::is_whitespace) {
+        let id = app.lines[line].id.clone();
+        let anchor = app
+            .lines
+            .get(line + 1)
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| "_end".into());
+        let ops = vec![
+            EditOp::Replace { id, text: String::new() },
+            EditOp::Insert { anchor, lines: vec![(new_line_id(), String::new())] },
+        ];
+        do_edit(app, ctx, "new line", ops);
+        if let Some(s) = app.session.as_mut() {
+            s.line = line + 1;
+            s.input = Input { buf: String::new(), cur: 0 };
+            s.orig = String::new();
+            s.want_col = None;
+        }
+        app.cursor = line + 1;
+        app.follow = true;
+        return;
+    }
     let head = buf[..caret].to_string();
     let indent = indent_of(&buf);
     let indent = if caret < indent.len() { &buf[..caret] } else { indent };
@@ -4472,6 +4499,32 @@ mod tests {
         let s = app.session.as_ref().unwrap();
         assert_eq!(s.line, 2);
         assert_eq!(s.input.cur, 1, "caret sits after the inherited indent");
+    }
+
+    #[test]
+    fn enter_on_empty_bullet_escapes_the_list() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", " item", "  ", "after"]);
+        app.rebuild(40);
+        // caret on the empty bullet (whitespace-only, level 2)
+        enter_session(&mut app, &ctx, 2, 2);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        // the empty bullet dissolved into a true blank…
+        assert_eq!(app.lines[2].text, "", "spaces removed from the empty bullet");
+        // …and the fresh line is flush, no inherited indent
+        assert_eq!(app.lines[3].text, "");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 3);
+        assert_eq!(s.input.cur, 0);
+        assert_eq!(app.lines[4].text, "after");
+        let jobs = drain_jobs(&mut app);
+        assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text.is_empty()));
+        assert!(matches!(&jobs[0].1[1], EditOp::Insert { lines, .. } if lines[0].1.is_empty()));
+        // a NON-empty bullet still inherits its indent on Enter
+        handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
+        enter_session(&mut app, &ctx, 1, " item".len());
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " ", "normal path unchanged");
     }
 
     #[test]
