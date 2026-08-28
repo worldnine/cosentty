@@ -4338,12 +4338,11 @@ fn gutter_cell(
     if is_cursor {
         return (">", Style::default().fg(CURSOR_FG).add_modifier(Modifier::BOLD));
     }
-    // Related rows deliberately have only TWO states, not age buckets:
-    // thick+blue = unread, thin+neutral = read.
+    // Related rows deliberately have no age encoding: read and unread use
+    // the SAME thin mark; color alone carries the read state.
     if let Some(unread) = related_unread {
         let (_, color) = cosense::theme::telomere(0, unread, light);
-        let glyph = if unread { "▊" } else { "▏" };
-        return (glyph, Style::default().fg(color));
+        return ("▏", Style::default().fg(color));
     }
     match age {
         Some((a, unread)) => {
@@ -4492,8 +4491,8 @@ mod tests {
 
         let (ug, us) = gutter_cell(false, false, None, Some(true), false);
         let (rg, rs) = gutter_cell(false, false, None, Some(false), false);
-        assert_eq!((ug, rg), ("▊", "▏"));
-        assert_ne!(us.fg, rs.fg);
+        assert_eq!((ug, rg), ("▏", "▏"), "read state must not encode thickness");
+        assert_ne!(us.fg, rs.fg, "read state is color-only");
     }
 
     /// A related section for tests: two 1-hop pages and one external.
