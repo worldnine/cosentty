@@ -118,6 +118,9 @@ struct RelEntry {
     desc: String,
     /// `updated` epoch seconds (0 = unknown, no age shown).
     age: i64,
+    /// Two-state telomere for related rows. RelatedPages has no per-user
+    /// lastAccessed, so this is based on this TUI's persisted visit record.
+    unread: bool,
 }
 
 /// A laid-out visual row. Content rows carry their source line; card rows
@@ -233,6 +236,10 @@ struct App {
     /// Some while the reader is viewing a historical snapshot (←/→).
     /// The page is read-only in that state.
     time: Option<TimeMachine>,
+    /// Whether the current credential may edit THIS project. Public pages
+    /// remain readable with a PAT for another project, but must not enter
+    /// EDIT unless that user is actually a member.
+    editable: bool,
     /// Session input-source control: command mode runs in ASCII, the
     /// original source is restored when the app drops (Japanese-first
     /// model, see `cosense::ime`).
@@ -571,6 +578,7 @@ impl App {
             read_at: None,
             members: HashMap::new(),
             time: None,
+            editable: false,
             session_ime: cosense::ime::SessionIme::new(cosense::ime::ImeMode::Off),
             ime_ready: false,
             ime_guard: None,
@@ -600,6 +608,17 @@ impl App {
             + if self.mode == Mode::View { self.virtual_items.len() } else { 0 }
     }
 
+    /// Read state for a cursor-addressable related row. The flattening order
+    /// is exactly the same as `virtual_items`.
+    fn related_unread(&self, src: usize) -> Option<bool> {
+        let index = src.checked_sub(self.lines.len())?;
+        self.related
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .nth(index)
+            .map(|entry| entry.unread)
+    }
+
     /// Install a freshly loaded page, resetting view state (keeps comments).
     /// Install a freshly loaded page and immediately kick off its image
     /// downloads. Loading is folded in here so no navigation path can forget
@@ -618,6 +637,7 @@ impl App {
         self.blocks = l.blocks;
         self.srcs = l.srcs;
         self.read_at = l.read_at;
+        self.editable = l.editable;
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
         }
@@ -1691,7 +1711,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let palette = cosense::theme::Palette::from_theme(&hl, light);
     let picker = Picker::from_query_stdio()?;
 
-    let ctx = Ctx { client, hl, palette, picker, fetcher, light, ime_mode };
+    let ctx = Ctx {
+        client,
+        hl,
+        palette,
+        picker,
+        fetcher,
+        light,
+        ime_mode,
+        editability: std::sync::Mutex::new(HashMap::new()),
+    };
     let loaded = load_page(&ctx, &project, &title)?;
 
     let mut app = App::new(project.clone());
@@ -1713,7 +1742,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
     app.status = match ctx.client.credential_for(&project) {
-        Some(c) => format!("auth: {} · ? help", c.kind()),
+        Some(c) if app.editable => format!("auth: {} · edit enabled · ? help", c.kind()),
+        Some(c) => format!("auth: {} · read-only (not a project member) · ? help", c.kind()),
         None => "no auth — public read-only (`cosense login` to enable edits)".into(),
     };
     // `#<lineId>` from the URL: start on that line (the first frame's layout
@@ -1751,6 +1781,35 @@ struct Ctx {
     light: bool,
     /// Input-source policy around the composer (`--ime`, default jp).
     ime_mode: cosense::ime::ImeMode,
+    /// Per-project edit permission. Membership changes are rare; navigation
+    /// should not refetch `/users/me` + the member table on every page.
+    editability: std::sync::Mutex<HashMap<String, bool>>,
+}
+
+impl Ctx {
+    fn can_edit_in(&self, project: &str) -> bool {
+        if let Ok(cache) = self.editability.lock() {
+            if let Some(&editable) = cache.get(project) {
+                return editable;
+            }
+        }
+        let probed: Result<bool, Box<dyn Error>> = match self.client.credential_for(project) {
+            None => Ok(false),
+            // A project-scoped service account exists specifically to act in
+            // that project; unlike a user it has no `/users/me` membership.
+            Some(cosense::api::Credential::ServiceAccount(_)) => Ok(true),
+            Some(_) => self.client.get_me().and_then(|me| {
+                self.client
+                    .list_members_in(project)
+                    .map(|members| members.iter().any(|m| m.id == me))
+            }),
+        };
+        let Ok(editable) = probed else { return false };
+        if let Ok(mut cache) = self.editability.lock() {
+            cache.insert(project.to_string(), editable);
+        }
+        editable
+    }
 }
 
 /// Everything produced by loading one page.
@@ -1764,6 +1823,8 @@ struct Loaded {
     srcs: Vec<usize>,
     /// See `App::read_at`.
     read_at: Option<i64>,
+    /// Whether this credential may edit the loaded project.
+    editable: bool,
     /// Related-pages sections (see `build_related`).
     related: Vec<RelSection>,
 }
@@ -1780,9 +1841,24 @@ struct Loaded {
 ///                      auto-linked wiki hang together.
 ///   External links   — outgoing `[/project/title]` links (the API exposes
 ///                      no incoming cross-project list).
-fn build_related(page: &cosense::api::Page) -> Vec<RelSection> {
+fn related_is_unread(
+    visits: &HashMap<String, i64>,
+    project: &str,
+    title: &str,
+    updated: i64,
+) -> bool {
+    visits
+        .get(&format!("{project}/{title}"))
+        .map_or(true, |&seen_at| updated > 0 && updated > seen_at)
+}
+
+fn build_related(page: &cosense::api::Page, project: &str) -> Vec<RelSection> {
     let mut secs: Vec<RelSection> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let visits = load_visits();
+    let unread = |p: &str, title: &str, updated: i64| {
+        related_is_unread(&visits, p, title, updated)
+    };
     let key_of = |p: &cosense::api::RelatedPage| {
         if p.title_lc.is_empty() { p.title.to_lowercase() } else { p.title_lc.clone() }
     };
@@ -1791,6 +1867,7 @@ fn build_related(page: &cosense::api::Page) -> Vec<RelSection> {
         title: p.title.clone(),
         desc: p.descriptions.first().cloned().unwrap_or_default(),
         age: p.updated,
+        unread: unread(project, &p.title, p.updated),
     };
     if let Some(rel) = &page.related {
         if !rel.links1hop.is_empty() {
@@ -1851,6 +1928,7 @@ fn build_related(page: &cosense::api::Page) -> Vec<RelSection> {
                     title: pl.clone(),
                     desc: String::new(),
                     age: 0,
+                    unread: unread(project, title, 0),
                 })
             })
             .collect();
@@ -1922,7 +2000,8 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     };
-    let related = build_related(&page);
+    let related = build_related(&page, project);
+    let editable = ctx.can_edit_in(project);
     Ok(Loaded {
         project: project.to_string(),
         title: title.to_string(),
@@ -1931,6 +2010,7 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         blocks: rendered.blocks,
         srcs: rendered.srcs,
         read_at,
+        editable,
         related,
     })
 }
@@ -2456,6 +2536,9 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('e'), true) => {
             // Whole-page edit in $EDITOR (the “big edit” path: multi-line,
             // IME-free — the editor is the user's own environment).
+            if !ensure_editable(app) {
+                return Action::Continue;
+            }
             if app.time.is_some() {
                 app.status = "viewing history — read-only (Esc → NOW)".into();
                 return Action::Continue;
@@ -2608,10 +2691,19 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     app.start_image_loads(ctx);
 }
 
+fn ensure_editable(app: &mut App) -> bool {
+    if app.editable {
+        true
+    } else {
+        app.status = "このプロジェクトでは編集権限がありません".into();
+        false
+    }
+}
+
 /// Apply `ops` locally, push their inverse onto the undo stack, and queue
 /// the background commit. The single write path for every edit.
 fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
-    if ops.is_empty() {
+    if !ensure_editable(app) || ops.is_empty() {
         return;
     }
     let inverse = invert_ops(&app.lines, &ops);
@@ -2644,6 +2736,9 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
 /// `u`: revert the newest commit (locally at once, on the server via the
 /// queue). Ids of replaced lines survive; re-inserted lines get fresh ids.
 fn undo(app: &mut App, ctx: &Ctx) {
+    if !ensure_editable(app) {
+        return;
+    }
     let Some((label, ops)) = app.undo_stack.pop() else {
         app.status = "nothing to undo".into();
         return;
@@ -2658,6 +2753,9 @@ fn undo(app: &mut App, ctx: &Ctx) {
 
 /// `^r`: re-apply the newest undone commit.
 fn redo(app: &mut App, ctx: &Ctx) {
+    if !ensure_editable(app) {
+        return;
+    }
     let Some((label, ops)) = app.redo_stack.pop() else {
         app.status = "nothing to redo".into();
         return;
@@ -2676,6 +2774,9 @@ fn redo(app: &mut App, ctx: &Ctx) {
 
 /// Open the session on body line `line` with the caret at byte `caret`.
 fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
+    if !ensure_editable(app) {
+        return;
+    }
     if app.time.is_some() {
         app.status = "viewing history — read-only (Esc → NOW)".into();
         return;
@@ -2886,6 +2987,9 @@ fn session_indent(app: &mut App, delta: i32) {
 /// inherited) and open the session on it. On a related row (or an empty
 /// spot) `o` appends at the page end.
 fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
+    if !ensure_editable(app) {
+        return;
+    }
     if app.time.is_some() {
         app.status = "viewing history — read-only (Esc → NOW)".into();
         return;
@@ -3144,7 +3248,7 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
         .and_then(|s| app.lines.get(s.line))
         .map(|l| l.id.clone());
 
-    app.related = build_related(&polled.page);
+    app.related = build_related(&polled.page, &app.project);
     app.virtual_items = app
         .related
         .iter()
@@ -3686,11 +3790,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let header_bg = if app.time.is_some() { Color::Yellow } else { Color::Cyan };
     f.render_widget(
         Paragraph::new(Line::from(format!(
-            " {}/{}{}{}  ({} comment(s)){}{} ",
+            " {}/{}{}{}{}  ({} comment(s)){}{} ",
             app.project,
             app.title,
             time_badge,
             if app.mode == Mode::Source { "  [source]" } else { "" },
+            if app.editable { "" } else { "  [read-only]" },
             app.comments.len(),
             unread,
             sel_info
@@ -3738,8 +3843,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .collect();
         format!("Enter/f open → {}", listed.join("  "))
     } else if app.status.is_empty() {
-        "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
-            .to_string()
+        if app.editable {
+            "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
+                .to_string()
+        } else {
+            "j/k move  Enter link  w browser  ? help  q quit  · read-only".to_string()
+        }
     } else {
         app.status.clone()
     };
@@ -3881,6 +3990,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .src()
             .and_then(|s| app.lines.get(s))
             .map(|l| ((now_secs() - l.updated).max(0), app.line_unread(l)));
+        let related_unread = row.src().and_then(|src| app.related_unread(src));
         let mut base = Style::default();
         if in_sel {
             base = base.bg(SEL_BG);
@@ -3898,7 +4008,8 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 let sy = screen_y + k;
                 let y = text.y as i32 + sy;
                 if y >= band_top && y <= band_bot {
-                    let (glyph, mut style) = gutter_cell(is_cursor, has_comment, age, ctx.light);
+                    let (glyph, mut style) =
+                        gutter_cell(is_cursor, has_comment, age, related_unread, ctx.light);
                     if let Some(bg) = base.bg {
                         style = style.bg(bg);
                     }
@@ -4124,18 +4235,25 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
             };
             ("line detail".into(), items, usize::MAX)
         }
-        Some(Overlay::Help) => (
-            "keys".into(),
-            vec![
+        Some(Overlay::Help) => {
+            let mut keys: Vec<String> = vec![
                 "move      j/k · g/G · ^u/^d · PgUp/PgDn".into(),
                 "link      Enter/f open: page · 📎 file → ~/Downloads · ↗ URL → browser".into(),
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
                 "pages     ^o recent pages (type to filter)".into(),
-                "edit      e line end · i line start · o/O new line · double-click — modeless session".into(),
-                "          in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done".into(),
-                "          x delete line/selection · ^e whole page in $EDITOR · commits are automatic".into(),
-                "undo      u undo · ^r redo (every commit is reversible)".into(),
+            ];
+            if app.editable {
+                keys.extend([
+                    "edit      e line end · i line start · o/O new line · double-click — modeless session".into(),
+                    "          in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done".into(),
+                    "          x delete line/selection · ^e whole page in $EDITOR · commits are automatic".into(),
+                    "undo      u undo · ^r redo (every commit is reversible)".into(),
+                ]);
+            } else {
+                keys.push("edit      unavailable — this account is not a project member".into());
+            }
+            keys.extend([
                 "browser   w open page at cursor line".into(),
                 "time      ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
                 "comment   v select · c add · d delete · ^n/^p jump".into(),
@@ -4143,9 +4261,9 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "output    y copy all comments".into(),
                 "list      l comments · ? help".into(),
                 "quit      q  (Esc cancels; comments print to stdout)".into(),
-            ],
-            usize::MAX,
-        ),
+            ]);
+            ("keys".into(), keys, usize::MAX)
+        }
         None => return,
     };
 
@@ -4214,18 +4332,25 @@ fn gutter_cell(
     is_cursor: bool,
     _has_comment: bool,
     age: Option<(i64, bool)>,
+    related_unread: Option<bool>,
     light: bool,
 ) -> (&'static str, Style) {
     if is_cursor {
-        (">", Style::default().fg(CURSOR_FG).add_modifier(Modifier::BOLD))
-    } else {
-        match age {
-            Some((a, unread)) => {
-                let (glyph, color) = cosense::theme::telomere(a, unread, light);
-                (glyph, Style::default().fg(color))
-            }
-            None => (" ", Style::default()),
+        return (">", Style::default().fg(CURSOR_FG).add_modifier(Modifier::BOLD));
+    }
+    // Related rows deliberately have only TWO states, not age buckets:
+    // thick+blue = unread, thin+neutral = read.
+    if let Some(unread) = related_unread {
+        let (_, color) = cosense::theme::telomere(0, unread, light);
+        let glyph = if unread { "▊" } else { "▏" };
+        return (glyph, Style::default().fg(color));
+    }
+    match age {
+        Some((a, unread)) => {
+            let (glyph, color) = cosense::theme::telomere(a, unread, light);
+            (glyph, Style::default().fg(color))
         }
+        None => (" ", Style::default()),
     }
 }
 
@@ -4246,16 +4371,18 @@ mod tests {
             client: Client::new(cfg).unwrap(),
             hl: Highlighter::new(None, false),
             palette: cosense::theme::Palette::for_light(false),
-            picker: Picker::from_fontsize((8, 16).into()),
+            picker: Picker::halfblocks(),
             fetcher: Arc::new(ImageFetcher::new(None, None).unwrap()),
             light: false,
             ime_mode: cosense::ime::ImeMode::Off,
+            editability: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
     fn page(texts: &[&str]) -> App {
         let mut app = App::new("proj".into());
         app.title = "t".into();
+        app.editable = true;
         app.lines = texts
             .iter()
             .enumerate()
@@ -4352,6 +4479,23 @@ mod tests {
         assert_eq!(app.last_src(), Some(2));
     }
 
+    #[test]
+    fn related_telomere_has_only_read_and_unread_states() {
+        let mut visits = HashMap::new();
+        assert!(related_is_unread(&visits, "proj", "Page", 100));
+        visits.insert("proj/Page".into(), 80);
+        assert!(related_is_unread(&visits, "proj", "Page", 100));
+        visits.insert("proj/Page".into(), 120);
+        assert!(!related_is_unread(&visits, "proj", "Page", 100));
+        // No timestamp (external project link): a recorded visit is enough.
+        assert!(!related_is_unread(&visits, "proj", "Page", 0));
+
+        let (ug, us) = gutter_cell(false, false, None, Some(true), false);
+        let (rg, rs) = gutter_cell(false, false, None, Some(false), false);
+        assert_eq!((ug, rg), ("▊", "▏"));
+        assert_ne!(us.fg, rs.fg);
+    }
+
     /// A related section for tests: two 1-hop pages and one external.
     fn test_related() -> Vec<RelSection> {
         vec![
@@ -4363,12 +4507,14 @@ mod tests {
                         title: "Alpha".into(),
                         desc: "first line".into(),
                         age: 0,
+                        unread: true,
                     },
                     RelEntry {
                         item: LinkItem::Page("Beta".into()),
                         title: "Beta".into(),
                         desc: String::new(),
                         age: 0,
+                        unread: false,
                     },
                 ],
             },
@@ -4379,6 +4525,7 @@ mod tests {
                     title: "/other/Page".into(),
                     desc: String::new(),
                     age: 0,
+                    unread: true,
                 }],
             },
         ]
@@ -4470,7 +4617,7 @@ mod tests {
             lines_count: 0,
             last_accessed: None,
         };
-        let secs = build_related(&page);
+        let secs = build_related(&page, "proj");
         let heads: Vec<&str> = secs.iter().map(|s| s.heading.as_str()).collect();
         assert_eq!(
             heads,
@@ -4504,6 +4651,32 @@ mod tests {
             out.push((j.label, j.ops));
         }
         out
+    }
+
+    #[test]
+    fn read_only_project_never_enters_or_applies_editing() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "body"]);
+        app.rebuild(40);
+        app.editable = false;
+
+        enter_session(&mut app, &ctx, 1, 4);
+        assert!(app.session.is_none());
+        assert!(app.status.contains("編集権限"));
+
+        let before: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        open_line(&mut app, &ctx, false);
+        do_edit(
+            &mut app,
+            &ctx,
+            "forbidden",
+            vec![EditOp::Replace { id: "id1".into(), text: "changed".into() }],
+        );
+        assert_eq!(app.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>(), before);
+        assert!(drain_jobs(&mut app).is_empty());
+
+        let ctrl_e = event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert!(matches!(handle_key(&mut app, &ctx, ctrl_e), Action::Continue));
     }
 
     #[test]
