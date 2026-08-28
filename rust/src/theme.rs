@@ -261,7 +261,19 @@ pub fn scrollbar_thumb(light: bool) -> Color {
 /// content`), and the start maps the offset range onto the track so the
 /// thumb sits at the bottom at max offset. Ported from akapen's theme.rs.
 pub fn scroll_thumb(content_len: usize, viewport: usize, position: usize) -> Option<(usize, usize)> {
-    let (max_pos, thumb_len, thumb_max) = scroll_geometry(content_len, viewport)?;
+    scroll_thumb_in_track(content_len, viewport, viewport, position)
+}
+
+/// The scrollbar thumb when its painted track is shorter than the viewport.
+/// This lets a framed view reserve its top-rule row without changing the
+/// viewport's actual scroll range.
+pub fn scroll_thumb_in_track(
+    content_len: usize,
+    viewport: usize,
+    track_len: usize,
+    position: usize,
+) -> Option<(usize, usize)> {
+    let (max_pos, thumb_len, thumb_max) = scroll_geometry(content_len, viewport, track_len)?;
     let pos = position.min(max_pos);
     let start = if thumb_max == 0 { 0 } else { (pos * thumb_max / max_pos).min(thumb_max) };
     Some((start, thumb_len))
@@ -271,13 +283,17 @@ pub fn scroll_thumb(content_len: usize, viewport: usize, position: usize) -> Opt
 /// `(max_pos, thumb_len, thumb_max)` — the last scrollable offset, the
 /// thumb length in track rows, and the last track row the thumb can start
 /// on. `None` when the content fits.
-fn scroll_geometry(content_len: usize, viewport: usize) -> Option<(usize, usize, usize)> {
-    if content_len <= viewport || viewport == 0 {
+fn scroll_geometry(
+    content_len: usize,
+    viewport: usize,
+    track_len: usize,
+) -> Option<(usize, usize, usize)> {
+    if content_len <= viewport || viewport == 0 || track_len == 0 {
         return None;
     }
     let max_pos = content_len - viewport;
-    let thumb_len = (viewport * viewport / content_len).clamp(1, viewport);
-    let thumb_max = viewport - thumb_len;
+    let thumb_len = (viewport * track_len / content_len).clamp(1, track_len);
+    let thumb_max = track_len - thumb_len;
     Some((max_pos, thumb_len, thumb_max))
 }
 
@@ -285,7 +301,18 @@ fn scroll_geometry(content_len: usize, viewport: usize) -> Option<(usize, usize,
 /// the clicked row (clamped so the thumb stays on the track). `None` when
 /// the content fits. Ported from akapen.
 pub fn scroll_offset_at(content_len: usize, viewport: usize, track_row: usize) -> Option<usize> {
-    let (max_pos, _, thumb_max) = scroll_geometry(content_len, viewport)?;
+    scroll_offset_at_in_track(content_len, viewport, viewport, track_row)
+}
+
+/// Variant of [`scroll_offset_at`] for a painted track whose height differs
+/// from the viewport height.
+pub fn scroll_offset_at_in_track(
+    content_len: usize,
+    viewport: usize,
+    track_len: usize,
+    track_row: usize,
+) -> Option<usize> {
+    let (max_pos, _, thumb_max) = scroll_geometry(content_len, viewport, track_len)?;
     if thumb_max == 0 {
         return Some(0);
     }
@@ -303,7 +330,27 @@ pub fn scroll_offset_drag(
     start_offset: usize,
     track_row: usize,
 ) -> Option<usize> {
-    let (max_pos, _, thumb_max) = scroll_geometry(content_len, viewport)?;
+    scroll_offset_drag_in_track(
+        content_len,
+        viewport,
+        viewport,
+        start_track_row,
+        start_offset,
+        track_row,
+    )
+}
+
+/// Variant of [`scroll_offset_drag`] for a painted track whose height differs
+/// from the viewport height.
+pub fn scroll_offset_drag_in_track(
+    content_len: usize,
+    viewport: usize,
+    track_len: usize,
+    start_track_row: usize,
+    start_offset: usize,
+    track_row: usize,
+) -> Option<usize> {
+    let (max_pos, _, thumb_max) = scroll_geometry(content_len, viewport, track_len)?;
     if thumb_max == 0 {
         return Some(0);
     }
@@ -508,6 +555,10 @@ mod tests {
         assert_eq!(scroll_thumb(100, 20, 0), Some((0, 4)));
         assert_eq!(scroll_thumb(100, 20, 80), Some((16, 4)));
         assert_eq!(scroll_thumb(100, 20, 999), Some((16, 4)));
+        // A framed 20-row viewport may reserve its top-rule cell and paint
+        // on a 19-row track without changing the 0..80 scroll range.
+        assert_eq!(scroll_thumb_in_track(100, 20, 19, 0), Some((0, 3)));
+        assert_eq!(scroll_thumb_in_track(100, 20, 19, 80), Some((16, 3)));
         // a middle offset lands in the middle of the track
         let (start, _) = scroll_thumb(100, 20, 40).unwrap();
         assert!(start > 0 && start < 16);
@@ -526,6 +577,10 @@ mod tests {
         // dragging above the track pins to the top
         assert_eq!(scroll_offset_drag(100, 20, 4, 20, 0), Some(0));
         assert_eq!(scroll_offset_drag(100, 20, 4, 20, 999), Some(80));
+        // The explicit shorter track has the same endpoint offsets.
+        assert_eq!(scroll_offset_at_in_track(100, 20, 19, 0), Some(0));
+        assert_eq!(scroll_offset_at_in_track(100, 20, 19, 16), Some(80));
+        assert_eq!(scroll_offset_drag_in_track(100, 20, 19, 4, 20, 8), Some(40));
     }
 
     #[test]

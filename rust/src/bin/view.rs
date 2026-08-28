@@ -50,13 +50,20 @@ use ratatui::Frame;
 use ratatui_image::picker::Picker;
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 
-const SEL_BG: Color = Color::Rgb(60, 60, 90);
+const SEL_BG: Color = Color::DarkGray;
 /// Source mode's line-number gutter: `"  12 "` (4 digits + space).
 const SOURCE_NUM_W: usize = 5;
-/// Cursor marker in the left gutter column (akapen's `>`).
-const CURSOR_FG: Color = Color::Rgb(130, 170, 255);
-const CURSOR_BG: Color = Color::Rgb(80, 80, 120);
-const CARD_BG: Color = Color::Rgb(38, 42, 54);
+/// Cursor-row highlight inside the page body.
+const CURSOR_BG: Color = Color::DarkGray;
+const CARD_BG: Color = Color::Black;
+
+// Non-content chrome uses ANSI palette entries, never fixed RGB. Terminal
+// themes own the actual values behind these role colors.
+const CHROME_ACCENT: Color = Color::Cyan;
+const CHROME_ACTIVE: Color = Color::Green;
+const CHROME_CARET: Color = Color::LightBlue;
+const CHROME_DIM: Color = Color::DarkGray;
+const CHROME_SCROLL: Color = Color::Gray;
 
 struct ImageInfo {
     /// Sliced protocol: renders row-by-row so partial vertical scroll clips
@@ -195,9 +202,9 @@ struct App {
     /// it to keep the cursor in view without waiting for the next draw.
     view_h: u16,
     /// Screen geometry as of the last frame, for mouse hit-testing: the
-    /// text area and the scrollbar column.
+    /// text area and the scrollbar track.
     text_rect: Rect,
-    bar_x: u16,
+    bar_rect: Rect,
     /// Source line where a left-button drag started (selection anchor).
     drag_anchor: Option<usize>,
     /// Scrollbar thumb grab: (track row, scroll offset) at the press.
@@ -590,7 +597,7 @@ impl App {
             laid_width: 0,
             view_h: 0,
             text_rect: Rect::default(),
-            bar_x: 0,
+            bar_rect: Rect::default(),
             drag_anchor: None,
             scrollbar_drag: None,
             scroll: 0,
@@ -999,14 +1006,14 @@ impl App {
     }
 
     /// Columns available to the text for a `width`-wide body in `mode`:
-    /// a 1-column gutter on the left and a 1-column scrollbar track on the
-    /// right; source mode also spends the line-number label.
+    /// frame/caret + telomere + one blank column on the left, and a blank,
+    /// scrollbar, and frame column on the right. Source mode also spends
+    /// the line-number label.
     fn text_width(mode: Mode, width: u16) -> usize {
         let w = width as usize;
-        // Left: border(1) + telomere(1) + pad(1). Right: thumb(1) + border(1).
         match mode {
-            Mode::View => w.saturating_sub(5).max(1),
-            Mode::Source => w.saturating_sub(5 + SOURCE_NUM_W).max(1),
+            Mode::View => w.saturating_sub(6).max(1),
+            Mode::Source => w.saturating_sub(6 + SOURCE_NUM_W).max(1),
         }
     }
 
@@ -1096,9 +1103,8 @@ impl App {
         if self.related.is_empty() {
             return Vec::new();
         }
-        let pal = cosense::theme::Palette::for_light(self.light);
-        let dim = Style::default().fg(Color::DarkGray);
-        let link_style = Style::default().fg(pal.link);
+        let dim = Style::default().fg(CHROME_DIM);
+        let link_style = Style::default().fg(CHROME_CARET);
         let mut vsrc = self.lines.len();
         let mut rows = vec![Row::Card { line: Line::from("") }];
         for sec in &self.related {
@@ -1599,7 +1605,7 @@ fn truncate_width(s: &str, w: usize) -> String {
 /// color, the rest dim, truncated to the pane width (related rows do not
 /// wrap: they are a scannable list, not body text).
 fn related_row(e: &RelEntry, text_w: usize, link_style: Style) -> Line<'static> {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(CHROME_DIM);
     let title = truncate_width(&e.title, text_w);
     let mut spans = vec![Span::styled(title.clone(), link_style)];
     let mut used = str_width(&title);
@@ -1621,8 +1627,8 @@ fn related_row(e: &RelEntry, text_w: usize, link_style: Style) -> Line<'static> 
 fn card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
     let inner = width.saturating_sub(4).max(10);
     let bar = "─".repeat(inner);
-    let cs = Style::default().bg(CARD_BG).fg(Color::Rgb(180, 190, 210));
-    let accent = Style::default().bg(CARD_BG).fg(Color::Rgb(130, 170, 255));
+    let cs = Style::default().bg(CARD_BG).fg(Color::Gray);
+    let accent = Style::default().bg(CARD_BG).fg(Color::LightBlue);
     let mut out = Vec::new();
     out.push(Line::from(Span::styled(format!("  ╭{bar}╮"), accent)));
     let head = format!("  💬 lines {}", c.range_label());
@@ -3723,7 +3729,7 @@ fn click_caret(app: &App, line: usize, col: usize) -> usize {
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
 /// scrollbar. Uses the geometry the last frame recorded in
-/// `App::text_rect` / `App::bar_x`.
+/// `App::text_rect` / `App::bar_rect`.
 fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollDown => {
@@ -3743,34 +3749,54 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     }
 
     let text = app.text_rect;
+    let bar = app.bar_rect;
     let in_rows = m.row >= text.y && m.row < text.y + text.height;
     let screen_row = m.row.saturating_sub(text.y);
-    // the pointer may leave the rows while dragging: clamp it back in
-    let clamped_row = m.row.clamp(text.y, (text.y + text.height).saturating_sub(1)) - text.y;
-    // Same extent as the painted scrollbar: external top rule + rows
-    // (FrameEnd already lives inside rows).
+    let clamped_row =
+        m.row.clamp(text.y, (text.y + text.height).saturating_sub(1)) - text.y;
+    let in_track = m.row >= bar.y && m.row < bar.y + bar.height;
+    let track_row = m.row.saturating_sub(bar.y);
+    // The pointer may leave the scrollbar while dragging: clamp it back.
+    let clamped_track_row =
+        m.row.clamp(bar.y, (bar.y + bar.height).saturating_sub(1)) - bar.y;
+    // The scrollable extent includes the external top rule; FrameEnd is
+    // already part of the rows. The track deliberately starts below the
+    // frame's top rule, so the top-position thumb cannot overwrite it.
     let total = app.total_height().saturating_add(1) as usize;
-    let view_h = text.height as usize;
-    let on_track = m.column == app.bar_x
-        && in_rows
-        && cosense::theme::scroll_thumb(total, view_h, app.scroll as usize).is_some();
+    let viewport = app.view_h as usize;
+    let track_len = bar.height as usize;
+    let on_track = m.column == bar.x
+        && in_track
+        && cosense::theme::scroll_thumb_in_track(
+            total,
+            viewport,
+            track_len,
+            app.scroll as usize,
+        )
+        .is_some();
 
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) if on_track => {
-            if let Some(off) = cosense::theme::scroll_offset_at(total, view_h, screen_row as usize) {
+            if let Some(off) = cosense::theme::scroll_offset_at_in_track(
+                total,
+                viewport,
+                track_len,
+                track_row as usize,
+            ) {
                 app.scroll = off as u16;
                 app.follow = false;
-                app.scrollbar_drag = Some((screen_row, off as u16));
+                app.scrollbar_drag = Some((track_row, off as u16));
             }
         }
         MouseEventKind::Drag(MouseButton::Left) if app.scrollbar_drag.is_some() => {
             let (start_row, start_off) = app.scrollbar_drag.unwrap();
-            if let Some(off) = cosense::theme::scroll_offset_drag(
+            if let Some(off) = cosense::theme::scroll_offset_drag_in_track(
                 total,
-                view_h,
+                viewport,
+                track_len,
                 start_row as usize,
                 start_off as usize,
-                clamped_row as usize,
+                clamped_track_row as usize,
             ) {
                 app.scroll = off as u16;
                 app.follow = false;
@@ -3782,7 +3808,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
         MouseEventKind::Down(MouseButton::Left) => {
             // Any column left of the scrollbar counts (gutter included):
             // the row is what selects the line.
-            if in_rows && m.column < app.bar_x {
+            if in_rows && m.column < bar.x {
                 if let Some(src) = app.src_at_screen_row(screen_row) {
                     let col = (m.column.saturating_sub(text.x)) as usize;
                     // Session open: a click just moves the caret (the
@@ -3992,13 +4018,13 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     }
 }
 
-fn page_frame_style(editing: bool, light: bool) -> Style {
-    let color = if editing {
-        cosense::theme::Palette::for_light(light).link
-    } else {
-        cosense::theme::border_color(light)
-    };
-    Style::default().fg(color)
+fn page_frame_visible(editing: bool) -> bool {
+    !editing
+}
+
+/// Page chrome uses an ANSI role color; the terminal theme supplies its RGB.
+fn page_frame_style() -> Style {
+    Style::default().fg(CHROME_DIM)
 }
 
 fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
@@ -4020,8 +4046,8 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         (Some(_), n) => format!("  · {n} new"),
     };
     // `project/title`, the same shape as the page's URL — so a cross-project
-    // hop is visible without any notion of a "home" project. While the time
-    // machine is open the bar turns yellow and shows WHEN you are.
+    // hop is visible without any notion of a "home" project. Header colors
+    // are ANSI palette roles, and therefore follow the terminal theme.
     let time_badge = app
         .time
         .as_ref()
@@ -4035,7 +4061,6 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             )
         })
         .unwrap_or_default();
-    let header_bg = if app.time.is_some() { Color::Yellow } else { Color::Cyan };
     f.render_widget(
         Paragraph::new(Line::from(format!(
             " {}/{}{}{}{}  ({} comment(s)){}{} ",
@@ -4048,7 +4073,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             unread,
             sel_info
         )))
-        .style(Style::default().fg(Color::Black).bg(header_bg)),
+        .style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(if app.time.is_some() { Color::Yellow } else { CHROME_ACCENT })
+                .add_modifier(Modifier::BOLD),
+        ),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
@@ -4102,35 +4132,39 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     };
     f.render_widget(
         Paragraph::new(format!(" {} {} · {}", mode_tag, pos, hint))
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(CHROME_DIM)),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 
-    // akapen-style frame: the page is boxed. The frame floats ONE column
-    // off the terminal's left edge (akapen's `margin = 1`) so the markers
-    // riding the border — the telomere (or cursor `>`) REPLACES the block
-    // border glyph there — never touch the screen edge. The text column
-    // then sits one more column in (`▊ text`), and the right border carries
-    // the scrollbar thumb only, never a full track.
-    // The frame: page boxed with box-drawing borders. body.x sits flush at
-    // the screen's left edge (no margin column). The telomere / cursor
-    // markers live in their own column INSIDE the left border, padded from
-    // the text; the right border carries the scrollbar thumb only.
+    // The page is boxed flush with the terminal edge. The cursor `>` rides
+    // ON the left frame column, while the telomere keeps its own inside
+    // column and therefore remains visible on the cursor line. One blank
+    // column separates that telomere from the text. The right side keeps a
+    // blank, the scrollbar thumb, and the frame column.
     let body = Rect::new(
         area.x,
         area.y + 1,
         area.width,
         area.height.saturating_sub(2),
     );
-    // Layout (inside the box): border │, telomere column, pad, text, pad,
-    // thumb column, border │.
-    let gutter_x = body.x + 1; // telomere / `>` / comment column
-    let bar_x = body.x + body.width.saturating_sub(2); // thumb column
+    // Layout: frame/caret, telomere, blank, text, blank, thumb, frame.
+    let caret_x = body.x;
+    let gutter_x = body.x + 1;
+    let bar_x = body.x + body.width.saturating_sub(2);
     let text = Rect::new(
-        body.x + 2,
+        body.x + 3,
         body.y + 1,
-        body.width.saturating_sub(4),
+        body.width.saturating_sub(5),
         body.height.saturating_sub(2),
+    );
+    // Reserve the screen row carrying the top frame rule. The scrollbar's
+    // top-position thumb starts immediately below it instead of replacing
+    // one of its horizontal cells.
+    let bar = Rect::new(
+        bar_x,
+        body.y.saturating_add(1),
+        1,
+        body.height.saturating_sub(1),
     );
 
     // The page frame hugs PAGE CONTENT ONLY. Its explicit FrameEnd closes
@@ -4141,12 +4175,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
     let band_h = (band_bot - band_top + 1).max(1) as u16; // visible rows
-    {
+    if page_frame_visible(app.session.is_some()) {
         let buf = f.buffer_mut();
-        // The boundary doubles as a mode signal: neutral in READ, adaptive
-        // accent in EDIT. The footer also says EDIT, so color is not the sole
-        // indication.
-        let frame_style = page_frame_style(app.session.is_some(), ctx.light);
+        // READ has a terminal-colored page boundary. EDIT removes that
+        // boundary entirely; the absence is the mode signal and does not
+        // depend on a particular terminal palette.
+        let frame_style = page_frame_style();
         let right_x = body.x + body.width.saturating_sub(1);
         let set = |buf: &mut ratatui::buffer::Buffer, x: u16, y: i32, s: &str| {
             if y < band_top || y > band_bot {
@@ -4185,7 +4219,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
     }
     app.text_rect = text;
-    app.bar_x = bar_x;
+    app.bar_rect = bar;
 
     if app.laid_width != body.width {
         // Width changed: re-wrap, keeping the cursor line on its screen row
@@ -4210,8 +4244,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // through it. Rows are tested against `text.y + n - scroll` below.
     let view_bottom = view_top + band_h as i32;
     let sel_range = app.selection.map(|s| s.range());
-    // Gutter cells to paint after the rows: (screen row, glyph, style).
+    // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
+    let mut carets: Vec<(u16, Style)> = Vec::new();
 
     let mut y = 0i32;
     for row in app.rows.iter() {
@@ -4245,6 +4280,23 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
         if is_cursor {
             base = base.bg(CURSOR_BG);
+            // Paint the WHOLE row between the frame columns before drawing
+            // its content: telomere, the blank after it, text-side padding,
+            // and the scrollbar column must read as one cursor band.
+            let left = body.x.saturating_add(1);
+            let right = body.x.saturating_add(body.width).saturating_sub(1);
+            let buf = f.buffer_mut();
+            for k in 0..h {
+                let sy = screen_y + k;
+                let y = text.y as i32 + sy;
+                if y >= band_top && y <= band_bot {
+                    for x in left..right {
+                        if let Some(c) = buf.cell_mut((x, y as u16)) {
+                            c.set_bg(CURSOR_BG);
+                        }
+                    }
+                }
+            }
         }
 
         // The gutter marker for each on-screen row of this Row (an image
@@ -4257,11 +4309,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 let y = text.y as i32 + sy;
                 if y >= band_top && y <= band_bot {
                     let (glyph, mut style) =
-                        gutter_cell(is_cursor, has_comment, age, related_unread, ctx.light);
+                        gutter_cell(has_comment, age, related_unread, ctx.light);
                     if let Some(bg) = base.bg {
                         style = style.bg(bg);
                     }
                     gutter.push((y as u16, glyph, style));
+                    if is_cursor {
+                        let mut caret_style =
+                            Style::default().fg(CHROME_CARET).add_modifier(Modifier::BOLD);
+                        if let Some(bg) = base.bg {
+                            caret_style = caret_style.bg(bg);
+                        }
+                        carets.push((y as u16, caret_style));
+                    }
                 }
             }
         }
@@ -4331,13 +4391,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
     }
 
-    // Gutter column: painted after the rows. Rows without a source line
-    // (cards, past the end) leave it blank. (`sy` is already the absolute
-    // screen row.)
+    // Marker columns: the telomere remains in the inside gutter, while `>`
+    // replaces the frame glyph at the same screen row. Rows without a
+    // source line leave both blank. (`sy` is already an absolute row.)
     let buf = f.buffer_mut();
     for (sy, glyph, style) in gutter {
         if let Some(c) = buf.cell_mut((gutter_x, sy)) {
             c.set_symbol(glyph);
+            c.set_style(style);
+        }
+    }
+    for (sy, style) in carets {
+        if let Some(c) = buf.cell_mut((caret_x, sy)) {
+            c.set_symbol(">");
             c.set_style(style);
         }
     }
@@ -4347,22 +4413,20 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // is, never a double line). The thumb tracks the VIEWPORT offset (wheel
     // scroll moves the viewport only); when the content fits, nothing is
     // drawn and the border stays clean.
-    // Scrollbar: ONLY the thumb is drawn, in its own column just inside the
-    // frame's right edge. The scrollable extent is top rule + all rows
-    // (including FrameEnd and unboxed related rows).
-    let thumb = Style::default().fg(cosense::theme::scrollbar_thumb(ctx.light));
-    if let Some((start, len)) = cosense::theme::scroll_thumb(
+    // The track starts below the top rule; geometry still uses the full
+    // viewport so its scroll range matches keyboard/wheel scrolling.
+    let thumb = Style::default().fg(CHROME_SCROLL);
+    if let Some((start, len)) = cosense::theme::scroll_thumb_in_track(
         (app.total_height() + 1) as usize,
         band_h as usize,
+        bar.height as usize,
         app.scroll as usize,
     ) {
-        let mut i = start as u16;
-        for _ in start..start + len {
-            if let Some(c) = buf.cell_mut((bar_x, band_top as u16 + i)) {
+        for i in start..start + len {
+            if let Some(c) = buf.cell_mut((bar.x, bar.y + i as u16)) {
                 c.set_symbol("▐");
                 c.set_style(thumb);
             }
-            i += 1;
         }
     }
 
@@ -4400,11 +4464,17 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         let (before, after) = input.parts();
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green))),
+                Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(CHROME_ACTIVE)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 Line::from(format!("> {before}▏{after}")),
                 Line::from(Span::styled(
                     "Enter save · Esc cancel · ←/→ ^a/^e ^w ^u",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(CHROME_DIM),
                 )),
             ]),
             r,
@@ -4533,7 +4603,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!(" {title} "),
-        Style::default().fg(Color::Black).bg(Color::Cyan),
+        Style::default()
+            .fg(Color::Black)
+            .bg(CHROME_ACCENT)
+            .add_modifier(Modifier::BOLD),
     )));
     let visible = (h.saturating_sub(2)) as usize;
     let start = if cursor != usize::MAX && cursor >= visible {
@@ -4544,7 +4617,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     for (i, it) in items.iter().enumerate().skip(start).take(visible) {
         let sel = i == cursor;
         let style = if sel {
-            Style::default().bg(CURSOR_BG).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(CHROME_ACTIVE)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -4558,18 +4634,17 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     };
     lines.push(Line::from(Span::styled(
         footer,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(CHROME_DIM),
     )));
     f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(CARD_BG)),
+        Paragraph::new(lines).style(Style::default().bg(Color::Black)),
         panel,
     );
 }
 
-/// The 1-column gutter cell for a row with a source line: the cursor `>`
-/// wins, otherwise the telomere bar (`age` = seconds since the edit, plus
-/// whether the line is unread — see `theme::telomere`). akapen's
-/// marker-column precedence.
+/// The telomere gutter cell for a row with a source line (`age` = seconds
+/// since the edit, plus whether the line is unread). The cursor does not
+/// compete for this cell: its `>` is painted separately on the frame column.
 ///
 /// A comment marker is deliberately NOT drawn yet: akapen colors comments
 /// yellow (`▌`) and reserves green for changed lines, so guessing a color
@@ -4577,19 +4652,15 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
 /// convention. `has_comment` is kept so the caller can still tint the row
 /// without touching the marker column.
 fn gutter_cell(
-    is_cursor: bool,
     _has_comment: bool,
     age: Option<(i64, bool)>,
     related_unread: Option<bool>,
     light: bool,
 ) -> (&'static str, Style) {
-    if is_cursor {
-        return (">", Style::default().fg(CURSOR_FG).add_modifier(Modifier::BOLD));
-    }
     // Related rows deliberately have no age encoding: read and unread use
     // the SAME thin mark; color alone carries the read state.
     if let Some(unread) = related_unread {
-        let (_, color) = cosense::theme::telomere(0, unread, light);
+        let color = if unread { CHROME_CARET } else { CHROME_DIM };
         return ("▏", Style::default().fg(color));
     }
     match age {
@@ -4695,25 +4766,24 @@ mod tests {
     }
 
     #[test]
-    fn edit_session_changes_only_the_page_frame_accent() {
-        for light in [false, true] {
-            let read = page_frame_style(false, light);
-            let edit = page_frame_style(true, light);
-            assert_eq!(read.fg, Some(cosense::theme::border_color(light)));
-            assert_eq!(edit.fg, Some(cosense::theme::Palette::for_light(light).link));
-            assert_ne!(read.fg, edit.fg);
-        }
+    fn edit_session_removes_the_ansi_colored_page_frame() {
+        assert!(page_frame_visible(false));
+        assert!(!page_frame_visible(true));
+        let style = page_frame_style();
+        assert_eq!(style.fg, Some(Color::DarkGray));
+        assert_eq!(style.bg, None);
+        assert!(!matches!(style.fg, Some(Color::Rgb(..))), "chrome must follow ANSI palette");
     }
 
     #[test]
     fn cursor_is_a_source_line_spanning_all_wrapped_rows() {
         let mut app = page(&["short", &"x".repeat(50), "tail"]);
-        app.rebuild(22); // text width 20 -> the 50-char line wraps to 3 rows
+        app.rebuild(22); // one extra chrome column leaves 16 text columns
         assert_eq!(app.cursor, 0);
         app.move_cursor(true);
         assert_eq!(app.cursor, 1);
         let (first, last) = app.cursor_rows().unwrap();
-        assert_eq!((first, last), (1, 3), "all wrapped rows belong to the line");
+        assert_eq!((first, last), (1, 4), "all wrapped rows belong to the line");
         // one more step leaves from the LAST wrapped row straight to line 2
         app.move_cursor(true);
         assert_eq!(app.cursor, 2);
@@ -4737,10 +4807,11 @@ mod tests {
         // No timestamp (external project link): a recorded visit is enough.
         assert!(!related_is_unread(&visits, "proj", "Page", 0));
 
-        let (ug, us) = gutter_cell(false, false, None, Some(true), false);
-        let (rg, rs) = gutter_cell(false, false, None, Some(false), false);
+        let (ug, us) = gutter_cell(false, None, Some(true), false);
+        let (rg, rs) = gutter_cell(false, None, Some(false), false);
         assert_eq!((ug, rg), ("▏", "▏"), "read state must not encode thickness");
-        assert_ne!(us.fg, rs.fg, "read state is color-only");
+        assert_eq!(us.fg, Some(Color::LightBlue));
+        assert_eq!(rs.fg, Some(Color::DarkGray));
     }
 
     /// A related section for tests: two 1-hop pages and one external.
@@ -5541,12 +5612,12 @@ mod tests {
     #[test]
     fn follow_cursor_uses_last_row_going_down_and_first_going_up() {
         let mut app = page(&["a", "b", "c", &"y".repeat(50), "e"]);
-        app.rebuild(22); // line 3 wraps to 3 rows: rows 3,4,5
+        app.rebuild(22); // line 3 wraps to 4 rows: rows 3,4,5,6
         app.goto_src(3);
         app.follow_cursor(4);
-        // rows 3..=5 inside a 4-row viewport, with one row below for the
-        // bottom rule -> scroll = 6 - 4 + 1
-        assert_eq!(app.scroll, 3);
+        // rows 3..=6 inside a 4-row viewport, with one row below for the
+        // bottom rule -> scroll = 7 - 4 + 1
+        assert_eq!(app.scroll, 4);
         app.goto_src(0);
         app.follow_cursor(4);
         assert_eq!(app.scroll, 0);
@@ -5586,14 +5657,14 @@ mod tests {
     #[test]
     fn screen_row_maps_back_to_the_source_line_under_it() {
         let mut app = page(&["a", &"b".repeat(50), "c"]);
-        app.rebuild(22); // rows: a, b, b, b, c
+        app.rebuild(22); // rows: a, b, b, b, b, c
         assert_eq!(app.src_at_screen_row(0), Some(0));
         assert_eq!(app.src_at_screen_row(2), Some(1), "wrapped continuation -> its line");
-        assert_eq!(app.src_at_screen_row(4), Some(2));
-        assert_eq!(app.src_at_screen_row(5), None, "past the end");
+        assert_eq!(app.src_at_screen_row(5), Some(2));
+        assert_eq!(app.src_at_screen_row(6), None, "past the end");
         app.scroll = 3;
         assert_eq!(app.src_at_screen_row(0), Some(1));
-        assert_eq!(app.src_at_screen_row(1), Some(2));
+        assert_eq!(app.src_at_screen_row(2), Some(2));
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -5608,9 +5679,53 @@ mod tests {
         let mut app = page(&refs);
         app.rebuild(42);
         app.text_rect = Rect::new(1, 1, 40, 10);
-        app.bar_x = 41;
+        app.bar_rect = Rect::new(41, 1, 1, 10);
         app.view_h = 10;
         app
+    }
+
+    #[test]
+    fn page_chrome_separates_caret_telomere_pad_and_top_scrollbar() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let texts: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut app = page(&refs);
+        let ctx = test_ctx();
+        let mut terminal = Terminal::new(TestBackend::new(42, 12)).unwrap();
+        // The first draw establishes wrapped rows; the next is the stable
+        // frame the event loop presents.
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = terminal.backend().buffer();
+            // body starts at y=1; its first content row is y=2.
+            assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Black);
+            assert_eq!(buf.cell((0, 0)).unwrap().bg, Color::Cyan);
+            assert_eq!(buf.cell((0, 2)).unwrap().symbol(), ">");
+            assert_eq!(buf.cell((0, 2)).unwrap().fg, Color::LightBlue);
+            assert_ne!(buf.cell((1, 2)).unwrap().symbol(), " ", "telomere remains visible");
+            assert_eq!(buf.cell((2, 2)).unwrap().symbol(), " ", "one blank after telomere");
+            assert_eq!(buf.cell((3, 2)).unwrap().symbol(), "l", "text starts after the blank");
+            for x in 1..=40 {
+                assert_eq!(
+                    buf.cell((x, 2)).unwrap().bg,
+                    Color::DarkGray,
+                    "cursor band must fill every inside column at x={x}",
+                );
+            }
+            // The thumb starts below the top frame rule instead of overwriting it.
+            assert_eq!(buf.cell((40, 1)).unwrap().symbol(), "─");
+            assert_eq!(buf.cell((40, 1)).unwrap().fg, Color::DarkGray);
+            assert_eq!(buf.cell((40, 2)).unwrap().symbol(), "▐");
+            assert_eq!(buf.cell((40, 2)).unwrap().fg, Color::Gray);
+        }
+
+        enter_session(&mut app, &ctx, 0, 0);
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf.cell((20, 1)).unwrap().symbol(), " ", "EDIT removes the top frame");
+        assert_eq!(buf.cell((41, 3)).unwrap().symbol(), " ", "EDIT removes the side frame");
     }
 
     #[test]
