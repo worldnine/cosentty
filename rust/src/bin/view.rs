@@ -174,10 +174,24 @@ enum Mode {
     Source,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeaderColors {
+    fg: Color,
+    bg: Color,
+}
+
+impl HeaderColors {
+    fn fallback() -> Self {
+        Self { fg: Color::Black, bg: CHROME_ACCENT }
+    }
+}
+
 struct App {
     mode: Mode,
     project: String,
     title: String,
+    /// Cosense project's navbar colors, adapted over the terminal background.
+    header_colors: HeaderColors,
     /// Immutable page id (the edit API and the commit log key on it).
     page_id: String,
     /// Raw page lines with per-line author/time metadata. Note `user_id` is
@@ -582,6 +596,7 @@ impl App {
             mode: Mode::View,
             project,
             title: String::new(),
+            header_colors: HeaderColors::fallback(),
             page_id: String::new(),
             lines: Vec::new(),
             blocks: Vec::new(),
@@ -675,6 +690,7 @@ impl App {
         self.redo_stack.clear();
         self.project = l.project;
         self.title = l.title;
+        self.header_colors = l.header_colors;
         self.page_id = l.page_id;
         self.lines = l.lines;
         self.blocks = l.blocks;
@@ -1752,8 +1768,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Compile the macOS IME helper in the background so the first composer
     // open never blocks on swiftc.
     cosense::ime::start_background_build();
-    // Detect light/dark after entering the alt screen (unless forced).
-    let light = force_light.unwrap_or_else(|| cosense::theme::detect_light().unwrap_or(false));
+    // Detect the terminal's actual background after entering the alt screen.
+    // A forced mode uses a representative base so translucent Cosense navbar
+    // colors still compose predictably without a second OSC query.
+    let detected_bg = if force_light.is_none() {
+        cosense::theme::detect_background()
+    } else {
+        None
+    };
+    let light = force_light.unwrap_or_else(|| {
+        detected_bg
+            .map(cosense::theme::background_is_light)
+            .unwrap_or(false)
+    });
+    let terminal_bg = detected_bg.unwrap_or(if light { (250, 250, 250) } else { (24, 24, 24) });
     let hl = Highlighter::new(theme.as_deref(), light);
     // One color scheme for the whole page: headings, links, quotes and
     // code labels take the theme's markdown colors (akapen parity).
@@ -1767,8 +1795,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         picker,
         fetcher,
         light,
+        terminal_bg,
         ime_mode,
         editability: std::sync::Mutex::new(HashMap::new()),
+        project_themes: std::sync::Mutex::new(HashMap::new()),
     };
     let loaded = load_page(&ctx, &project, &title)?;
 
@@ -1863,14 +1893,33 @@ struct Ctx {
     fetcher: Arc<ImageFetcher>,
     /// Terminal background is light (drives telomere/palette shades).
     light: bool,
+    /// Actual OSC 11 background when available, otherwise a light/dark
+    /// estimate. Cosense's translucent navbar colors are composed over it.
+    terminal_bg: (u8, u8, u8),
     /// Input-source policy around the composer (`--ime`, default jp).
     ime_mode: cosense::ime::ImeMode,
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
     editability: std::sync::Mutex<HashMap<String, bool>>,
+    /// Selected Cosense site-theme id per project. `None` is cached too: a
+    /// PAT-only private project falls back without retrying on every page.
+    project_themes: std::sync::Mutex<HashMap<String, Option<String>>>,
 }
 
 impl Ctx {
+    fn project_theme(&self, project: &str) -> Option<String> {
+        if let Ok(cache) = self.project_themes.lock() {
+            if let Some(theme) = cache.get(project) {
+                return theme.clone();
+            }
+        }
+        let theme = self.client.get_project_theme(project).ok();
+        if let Ok(mut cache) = self.project_themes.lock() {
+            cache.insert(project.to_string(), theme.clone());
+        }
+        theme
+    }
+
     fn can_edit_in(&self, project: &str) -> bool {
         if let Ok(cache) = self.editability.lock() {
             if let Some(&editable) = cache.get(project) {
@@ -1900,6 +1949,8 @@ impl Ctx {
 struct Loaded {
     project: String,
     title: String,
+    /// Site-theme-derived header colors for this project.
+    header_colors: HeaderColors,
     /// Immutable page id (edit API / commit log).
     page_id: String,
     lines: Vec<PageLine>,
@@ -2086,9 +2137,13 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
     };
     let related = build_related(&page, project);
     let editable = ctx.can_edit_in(project);
+    let site_theme = ctx.project_theme(project);
+    let (header_fg, header_bg) =
+        cosense::theme::project_header_colors(site_theme.as_deref(), ctx.terminal_bg);
     Ok(Loaded {
         project: project.to_string(),
         title: title.to_string(),
+        header_colors: HeaderColors { fg: header_fg, bg: header_bg },
         page_id: page.id.clone(),
         lines,
         blocks: rendered.blocks,
@@ -4046,8 +4101,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         (Some(_), n) => format!("  · {n} new"),
     };
     // `project/title`, the same shape as the page's URL — so a cross-project
-    // hop is visible without any notion of a "home" project. Header colors
-    // are ANSI palette roles, and therefore follow the terminal theme.
+    // hop changes both the label and the Cosense-site-derived header color.
     let time_badge = app
         .time
         .as_ref()
@@ -4075,8 +4129,8 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         )))
         .style(
             Style::default()
-                .fg(Color::Black)
-                .bg(if app.time.is_some() { Color::Yellow } else { CHROME_ACCENT })
+                .fg(app.header_colors.fg)
+                .bg(app.header_colors.bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Rect::new(area.x, area.y, area.width, 1),
@@ -4692,8 +4746,10 @@ mod tests {
             picker: Picker::halfblocks(),
             fetcher: Arc::new(ImageFetcher::new(None, None).unwrap()),
             light: false,
+            terminal_bg: (24, 24, 24),
             ime_mode: cosense::ime::ImeMode::Off,
             editability: std::sync::Mutex::new(HashMap::new()),
+            project_themes: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -5691,6 +5747,10 @@ mod tests {
         let texts: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let mut app = page(&refs);
+        app.header_colors = HeaderColors {
+            fg: Color::White,
+            bg: Color::Rgb(80, 102, 184),
+        };
         let ctx = test_ctx();
         let mut terminal = Terminal::new(TestBackend::new(42, 12)).unwrap();
         // The first draw establishes wrapped rows; the next is the stable
@@ -5700,8 +5760,8 @@ mod tests {
         {
             let buf = terminal.backend().buffer();
             // body starts at y=1; its first content row is y=2.
-            assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::Black);
-            assert_eq!(buf.cell((0, 0)).unwrap().bg, Color::Cyan);
+            assert_eq!(buf.cell((0, 0)).unwrap().fg, Color::White);
+            assert_eq!(buf.cell((0, 0)).unwrap().bg, Color::Rgb(80, 102, 184));
             assert_eq!(buf.cell((0, 2)).unwrap().symbol(), ">");
             assert_eq!(buf.cell((0, 2)).unwrap().fg, Color::LightBlue);
             assert_ne!(buf.cell((1, 2)).unwrap().symbol(), " ", "telomere remains visible");

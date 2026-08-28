@@ -360,6 +360,65 @@ pub fn scroll_offset_drag_in_track(
     Some(thumb * max_pos / thumb_max)
 }
 
+/// Header foreground/background derived from a Cosense project's selected
+/// site theme. Known themes use Cosense's `--navbar-bg`; unknown or
+/// unavailable themes retain an ANSI fallback owned by the terminal theme.
+///
+/// Source for the standard navbar values (checked 2026-08-28):
+/// https://scrapbox.io/terfno/Scrapbox_%E3%81%AE_theme_%E3%81%94%E3%81%A8%E3%81%AE_CSS
+pub fn project_header_colors(
+    theme: Option<&str>,
+    terminal_bg: (u8, u8, u8),
+) -> (Color, Color) {
+    let Some((r, g, b, alpha)) = theme.and_then(cosense_navbar_rgba) else {
+        return (Color::Black, Color::Cyan);
+    };
+    let blend = |site: u8, terminal: u8| -> u8 {
+        let a = alpha as u16;
+        ((site as u16 * a + terminal as u16 * (255 - a) + 127) / 255) as u8
+    };
+    let bg = (blend(r, terminal_bg.0), blend(g, terminal_bg.1), blend(b, terminal_bg.2));
+    let fg = if relative_luminance(bg) > 0.179 { Color::Black } else { Color::White };
+    (fg, Color::Rgb(bg.0, bg.1, bg.2))
+}
+
+/// `(red, green, blue, alpha)` for Cosense's standard `--navbar-bg`.
+fn cosense_navbar_rgba(theme: &str) -> Option<(u8, u8, u8, u8)> {
+    Some(match theme {
+        "default" => (196, 197, 202, 179),
+        "default-dark" => (55, 59, 68, 128),
+        "default-minimal" => (249, 249, 251, 255),
+        "paper-light" => (157, 155, 141, 77),
+        "paper-dark" | "paper-dark-dark" => (35, 61, 77, 204),
+        "blue" => (94, 122, 224, 204),
+        "green" => (91, 165, 111, 204),
+        "purple" => (148, 113, 192, 204),
+        "orange" => (219, 169, 39, 204),
+        "red" => (207, 85, 77, 204),
+        "hacker1" => (64, 69, 81, 77),
+        "hacker2" => (40, 62, 57, 77),
+        "spring" => (2, 167, 137, 128),
+        "summer" => (242, 196, 13, 128),
+        "autumn" => (72, 61, 56, 128),
+        "winter" => (115, 123, 138, 128),
+        "tropical" => (35, 161, 138, 128),
+        "kyoto" => (71, 37, 65, 204),
+        "paris" => (102, 192, 157, 204),
+        "newyork" => (18, 34, 59, 77),
+        "mred" => (235, 51, 56, 204),
+        "lgreen" => (74, 187, 12, 204),
+        _ => return None,
+    })
+}
+
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
+    let linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
 /// Format an epoch-seconds timestamp as local `YYYY-MM-DD HH:MM`.
 /// Uses libc's localtime_r so the user's timezone is respected without
 /// pulling in a date crate.
@@ -390,10 +449,10 @@ pub fn format_local(_epoch: i64) -> String {
 const OSC11_QUERY: &[u8] = b"\x1b]11;?\x1b\\";
 const OSC11_HEADER: &[u8] = b"\x1b]11;";
 
-/// Ask the terminal for its background color and decide light/dark. `None` =
-/// unknown (no tty, no answer). Call after entering raw mode / alt screen.
+/// Ask the terminal for its actual background RGB. `None` means unknown
+/// (no tty or no OSC 11 answer). Call after entering raw mode / alt screen.
 #[cfg(unix)]
-pub fn detect_light() -> Option<bool> {
+pub fn detect_background() -> Option<(u8, u8, u8)> {
     if !std::io::stdin().is_terminal() {
         return None;
     }
@@ -430,12 +489,23 @@ pub fn detect_light() -> Option<bool> {
             break;
         }
     }
-    Some(is_light_rgb(parse_osc11(&resp)?))
+    parse_osc11(&resp)
 }
 
 #[cfg(not(unix))]
-pub fn detect_light() -> Option<bool> {
+pub fn detect_background() -> Option<(u8, u8, u8)> {
     None
+}
+
+/// Ask the terminal for its background and classify it as light/dark.
+pub fn detect_light() -> Option<bool> {
+    detect_background().map(is_light_rgb)
+}
+
+/// Classify a known terminal background. Exposed so callers that need both
+/// the RGB and light/dark state only issue one OSC 11 query.
+pub fn background_is_light(rgb: (u8, u8, u8)) -> bool {
+    is_light_rgb(rgb)
 }
 
 fn response_complete(resp: &[u8]) -> bool {
@@ -581,6 +651,27 @@ mod tests {
         assert_eq!(scroll_offset_at_in_track(100, 20, 19, 0), Some(0));
         assert_eq!(scroll_offset_at_in_track(100, 20, 19, 16), Some(80));
         assert_eq!(scroll_offset_drag_in_track(100, 20, 19, 4, 20, 8), Some(40));
+    }
+
+    #[test]
+    fn project_header_uses_site_theme_and_terminal_background() {
+        let light = project_header_colors(Some("blue"), (250, 250, 250));
+        let dark = project_header_colors(Some("blue"), (24, 24, 24));
+        assert_eq!(light, (Color::Black, Color::Rgb(125, 148, 229)));
+        assert_eq!(dark, (Color::White, Color::Rgb(80, 102, 184)));
+        assert_ne!(light.1, dark.1, "translucent navbar adapts to terminal background");
+
+        // Opaque site themes are independent of the terminal base.
+        assert_eq!(
+            project_header_colors(Some("default-minimal"), (0, 0, 0)),
+            (Color::Black, Color::Rgb(249, 249, 251)),
+        );
+        // Missing/private-without-SID and future theme ids stay terminal-themed.
+        assert_eq!(project_header_colors(None, (24, 24, 24)), (Color::Black, Color::Cyan));
+        assert_eq!(
+            project_header_colors(Some("future-theme"), (250, 250, 250)),
+            (Color::Black, Color::Cyan),
+        );
     }
 
     #[test]

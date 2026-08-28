@@ -522,6 +522,42 @@ impl Client {
         self.cfg.auth.sid()
     }
 
+    /// The project's selected Cosense site theme (`blue`, `paper-dark`, …).
+    /// `/api/projects/<name>` is public for public projects but refuses PAT
+    /// on private ones; when available, its browser `connect.sid` is therefore
+    /// used only for this cosmetic lookup. REST page/edit calls keep their
+    /// normal PAT / service-account precedence.
+    pub fn get_project_theme(&self, project: &str) -> Result<String, Box<dyn Error>> {
+        let url = format!("{}/projects/{}", self.cfg.base(), urlencoding(project));
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        let mut authenticated = false;
+        if let Some(sid) = self.sid() {
+            req = req.header("Cookie", format!("connect.sid={sid}"));
+            authenticated = true;
+        } else if let Some(cred @ Credential::ServiceAccount(_)) =
+            self.cfg.auth.resolve(&self.cfg.origin(), project)
+        {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+            authenticated = true;
+        }
+        let mut res = req.send()?;
+        // A stale sid must not hide a public project's appearance: retry the
+        // public endpoint without credentials before falling back in the UI.
+        if !res.status().is_success() && authenticated {
+            res = self.http.get(&url).header("Accept", "application/json").send()?;
+        }
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        let value: serde_json::Value = res.json()?;
+        value
+            .get("theme")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "projects/<name>: no theme in response".into())
+    }
+
     /// The project's immutable id, for the websocket room (the page API's
     /// `projectId`). Read from `/api/projects/<name>/users` — the same
     /// endpoint the CLI uses, because `/api/projects/<name>` itself refuses
