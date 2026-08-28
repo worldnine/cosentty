@@ -25,6 +25,9 @@ use tungstenite::{ClientRequestBuilder, WebSocket};
 /// this is far shorter than any real traffic gap — and short enough that a
 /// gap-driven resync request is served within ~a quarter second.
 const READ_TICK: Duration = Duration::from_millis(250);
+/// How long individual reads may block during the TLS/HTTP handshake
+/// (round trips); tightened to [`READ_TICK`] once the socket is up.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// No traffic at all for this long means the socket is dead even though no
 /// error surfaced (server pings every 25 s — 60 s of silence is fatal).
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
@@ -344,21 +347,42 @@ impl RoomLink {
             .with_header("User-Agent", "cosense-tui");
         let stream = TcpStream::connect((api_domain, 443)).map_err(|e| format!("tcp: {e}"))?;
         stream.set_nodelay(true).ok();
+        // The TLS + HTTP handshake needs time for its round trips — a short
+        // read timeout here would abort it with WouldBlock. Use a generous
+        // one for the handshake and switch to the fast tick AFTER it.
         stream
-            .set_read_timeout(Some(READ_TICK))
+            .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
             .map_err(|e| format!("set_read_timeout: {e}"))?;
         let (mut ws, _) = tungstenite::client_tls_with_config(request, stream, None, None)
             .map_err(|e| format!("ws handshake: {e}"))?;
-        // engine.io open
-        match RoomLink::read_once(&mut ws) {
-            Ok(Some(Message::Text(t))) if t.starts_with('0') => {}
-            Ok(Some(Message::Text(t))) => return Err(format!("unexpected open frame: {t}")),
-            other => return Err(format!("no engine.io open: {other:?}")),
+        // From here on, reads return within READ_TICK so navigation and
+        // resync requests are noticed promptly.
+        set_inner_read_timeout(&mut ws, Some(READ_TICK));
+        // engine.io open (`0{…}`), within a deadline; tick timeouts just
+        // keep the wait going rather than aborting the connection.
+        let deadline = Instant::now() + JOIN_ACK_TIMEOUT;
+        loop {
+            if Instant::now() >= deadline {
+                return Err("no engine.io open frame".into());
+            }
+            match RoomLink::read_once(&mut ws) {
+                Ok(Some(Message::Text(t))) if t.starts_with('0') => break,
+                Ok(Some(Message::Text(t))) => {
+                    return Err(format!("unexpected open frame: {t}"));
+                }
+                Ok(Some(Message::Close(_))) => return Err("closed before open".into()),
+                Err(e) => return Err(format!("no engine.io open: {e}")),
+                _ => {} // tick / non-text — keep waiting
+            }
         }
         // socket.io namespace connect
         ws.send(Message::Text(frame_connect().into()))
             .map_err(|e| format!("send 40: {e}"))?;
+        let deadline = Instant::now() + JOIN_ACK_TIMEOUT;
         loop {
+            if Instant::now() >= deadline {
+                return Err("no connect ack".into());
+            }
             match RoomLink::read_once(&mut ws) {
                 Ok(Some(Message::Text(t))) => {
                     match parse_packet(t.as_str()) {
@@ -373,7 +397,7 @@ impl RoomLink {
                 Ok(Some(Message::Close(_))) | Err(_) => {
                     return Err("namespace connect lost".into());
                 }
-                Ok(_) => {}
+                _ => {} // tick — keep waiting
             }
         }
         Ok(RoomLink { ws, last_rx: Instant::now() })
@@ -445,6 +469,23 @@ impl RoomLink {
             }
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+/// Reach through rustls/tungstenite to the underlying [`TcpStream`] (its
+/// `sock` field is public) and set the read timeout — the recv loop ticks
+/// at [`READ_TICK`] while the handshake got to keep [`HANDSHAKE_TIMEOUT`].
+fn set_inner_read_timeout(
+    ws: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    timeout: Option<Duration>,
+) {
+    let tcp = match ws.get_mut() {
+        MaybeTlsStream::Plain(tcp) => Some(tcp),
+        MaybeTlsStream::Rustls(stream) => Some(&mut stream.sock),
+        _ => None,
+    };
+    if let Some(tcp) = tcp {
+        let _ = tcp.set_read_timeout(timeout);
     }
 }
 
