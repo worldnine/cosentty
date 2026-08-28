@@ -232,7 +232,10 @@ fn push_tags(spans: &mut Vec<Span<'static>>, text: &str, links: &mut Vec<String>
                     spans.push(Span::raw(rest[..pos].to_string()));
                 }
                 links.push(tag.clone());
-                spans.push(Span::styled(format!("#{tag}"), Style::default().fg(pal.hashtag)));
+                spans.push(Span::styled(
+                    format!("#{tag}"),
+                    Style::default().fg(pal.hashtag).add_modifier(Modifier::UNDERLINED),
+                ));
                 let consumed = pos + 1 + tag.len();
                 rest = &rest[consumed..];
                 continue;
@@ -305,7 +308,10 @@ fn decorate_bracket(
         if url.contains("gyazo.com") {
             find_gyazo(url, images);
             let label = if title.is_empty() { "[gyazo]" } else { title };
-            spans.push(Span::styled(format!("🖼 {label}"), Style::default().fg(Color::Magenta)));
+            spans.push(Span::styled(
+                format!("🖼 {label}"),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::UNDERLINED),
+            ));
         } else if is_scrapbox_file_url(url) {
             // Uploaded file: a paper-clip so it reads as "download", not
             // "open in browser". Enter/f in the viewer saves and opens it.
@@ -339,11 +345,15 @@ fn strip_deco_prefix(inner: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// One display column per indent char: the bullet sits at column
-/// `level-1`, exactly where the edit session draws it — entering EDIT
-/// never shifts the line horizontally.
+/// Two display columns per nesting step. Level 1 is flush left, level 2
+/// starts at column 2, level 3 at column 4, and so on. Source data still
+/// stores one leading whitespace character per logical level.
+pub fn bullet_indent_width(level: usize) -> usize {
+    level.saturating_sub(1) * 2
+}
+
 fn indent_str(level: usize) -> String {
-    " ".repeat(level.saturating_sub(1))
+    " ".repeat(bullet_indent_width(level))
 }
 
 /// File extensions rendered as images (what the `image` crate can decode).
@@ -764,7 +774,7 @@ mod tests {
             &pal,
         );
         assert_eq!(plain(&out.blocks[1]), "• one");
-        assert_eq!(plain(&out.blocks[2]), "  • three");
+        assert_eq!(plain(&out.blocks[2]), "    • three");
 
         for (block, stars) in [(&out.blocks[1], 1), (&out.blocks[2], 3)] {
             let Block::Text(line) = block else { panic!("expected text") };
@@ -848,12 +858,11 @@ mod tests {
         ];
         let out = render_lines(&lines);
         let got: Vec<String> = out.blocks.iter().map(plain).collect();
-        // POSITIONAL nesting: one column per whitespace char (tab and 　
-        // included) — the bullet sits at column n-1, matching the edit
-        // session's display exactly. 4 tabs → col 3; +　 → col 4;
-        // +　+4 spaces → col 8.
-        assert_eq!(got[1], "   • 本文");
-        assert_eq!(got[2], "    • 見出し");
-        assert_eq!(got[3], "        • 基本は見出しH2で作成");
+        // One source whitespace char remains one logical level, but each
+        // nesting step is two terminal columns. 4 tabs → col 6; +　 →
+        // col 8; +　+4 spaces → col 16.
+        assert_eq!(got[1], "      • 本文");
+        assert_eq!(got[2], "        • 見出し");
+        assert_eq!(got[3], "                • 基本は見出しH2で作成");
     }
 }

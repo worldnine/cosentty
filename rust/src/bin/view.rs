@@ -12,7 +12,8 @@
 //             (📎) is saved to ~/Downloads and opened, an http(s) URL (↗)
 //             opens in the browser (a gyazo image → its gyazo page)
 //   wheel     scroll the viewport only (the cursor keeps its line)
-//   click     move the cursor to that line   drag  select a range
+//   click     open a link under the pointer, otherwise move the cursor
+//   drag      select a range
 //   scrollbar click the track to jump, drag the thumb to scrub
 //
 // The cursor addresses SOURCE lines (akapen's ViewState model: `cursor` is a
@@ -34,7 +35,10 @@ use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
 use cosense::highlight::Highlighter;
-use cosense::render::{file_name_of_url, gyazo_permalink, is_scrapbox_file_url, render_lines_with, Block};
+use cosense::render::{
+    bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
+    render_lines_with, Block,
+};
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_continued};
 
 use ratatui::crossterm::event::{
@@ -107,6 +111,20 @@ impl LinkItem {
             LinkItem::ProjectPage { project, title } => format!("/{project}/{title}"),
             LinkItem::File { label, .. } => format!("📎 {label}"),
             LinkItem::Url { label, .. } => format!("↗ {label}"),
+        }
+    }
+
+    /// Labels this target can have in the rendered page. The link picker
+    /// adds `↗`, while the page itself does not; hashtags and Gyazo add
+    /// their own visible marker.
+    fn rendered_labels(&self) -> Vec<String> {
+        match self {
+            LinkItem::Page(t) => vec![t.clone(), format!("#{t}")],
+            LinkItem::ProjectPage { project, title } => vec![format!("/{project}/{title}")],
+            LinkItem::File { label, .. } => vec![format!("📎 {label}")],
+            LinkItem::Url { label, .. } => {
+                vec![label.clone(), format!("🖼 {label}"), format!("🖼 [{label}]")]
+            }
         }
     }
 }
@@ -323,6 +341,9 @@ struct App {
     ws_head: Option<String>,
     /// Last left-click (for double-click detection): time, column, row.
     last_click: Option<(Instant, u16, u16)>,
+    /// Link pressed with the left button. Activation waits for button-up on
+    /// the same target, so dragging can still select text/lines.
+    pressed_link: Option<(usize, LinkItem)>,
     /// Related-pages sections below the body (view mode only).
     related: Vec<RelSection>,
     /// Flattened related entries in render order. Entry `i` renders with
@@ -653,6 +674,7 @@ impl App {
             ws_pending: std::collections::VecDeque::new(),
             ws_head: None,
             last_click: None,
+            pressed_link: None,
             related: Vec::new(),
             virtual_items: Vec::new(),
             light: false,
@@ -779,35 +801,46 @@ impl App {
         changed
     }
 
-    /// Everything Enter/f can follow on the cursor's line: internal page
-    /// links first, then uploaded files, then external URLs. On a related
-    /// row (virtual line below the body) it is that entry's single link.
-    fn cursor_line_links(&self) -> Vec<LinkItem> {
-        if self.cursor >= self.lines.len() {
+    /// Everything Enter/f or a mouse click can follow at one source index.
+    /// On a related row (virtual line below the body) this is its one target.
+    fn links_at_src(&self, src: usize) -> Vec<LinkItem> {
+        if src >= self.lines.len() {
             if self.mode == Mode::View {
-                if let Some(item) = self.virtual_items.get(self.cursor - self.lines.len()) {
+                if let Some(item) = self.virtual_items.get(src - self.lines.len()) {
                     return vec![item.clone()];
                 }
             }
             return Vec::new();
         }
-        let Some(text) = self.cursor_src().and_then(|s| self.lines.get(s)).map(|l| l.text.as_str()) else {
+        let Some(text) = self.lines.get(src).map(|l| l.text.as_str()) else {
             return Vec::new();
         };
         let mut items: Vec<LinkItem> = links_on_line(text);
-        for (label, url) in labelled_urls(text) {
-            items.push(if is_scrapbox_file_url(&url) {
-                LinkItem::File { label, url }
-            } else if let Some(page) = gyazo_permalink(&url) {
-                // An inline image: jump to its gyazo page (comments, the
-                // original, the Teams org), not the raw pixels.
-                let label = if label == url { "gyazo".to_string() } else { label };
-                LinkItem::Url { label, url: page }
-            } else {
-                LinkItem::Url { label, url }
-            });
-        }
+        items.extend(labelled_urls(text).into_iter().map(|(label, url)| {
+            link_item_for_url(label, url)
+        }));
         items
+    }
+
+    /// Mouse targets in rendered left-to-right order. Keyboard activation
+    /// intentionally keeps its historic page-first ordering above.
+    fn mouse_links_at_src(&self, src: usize) -> Vec<LinkItem> {
+        if src >= self.lines.len() {
+            return self.links_at_src(src);
+        }
+        let text = &self.lines[src].text;
+        let mut positioned = positioned_links_on_line(text);
+        positioned.extend(
+            positioned_labelled_urls(text)
+                .into_iter()
+                .map(|(pos, label, url)| (pos, link_item_for_url(label, url))),
+        );
+        positioned.sort_by_key(|(pos, _)| *pos);
+        positioned.into_iter().map(|(_, item)| item).collect()
+    }
+
+    fn cursor_line_links(&self) -> Vec<LinkItem> {
+        self.links_at_src(self.cursor)
     }
 
     /// Save an uploaded file to ~/Downloads in the background; the result
@@ -1120,7 +1153,9 @@ impl App {
             return Vec::new();
         }
         let dim = Style::default().fg(CHROME_DIM);
-        let link_style = Style::default().fg(CHROME_CARET);
+        let link_style = Style::default()
+            .fg(CHROME_CARET)
+            .add_modifier(Modifier::UNDERLINED);
         let mut vsrc = self.lines.len();
         let mut rows = vec![Row::Card { line: Line::from("") }];
         for sec in &self.related {
@@ -1299,20 +1334,120 @@ impl App {
         self.after_cursor_move();
     }
 
-    /// The source line rendered at `screen_row` (0-based inside the text
-    /// area) under the current scroll — `None` on a card row or past the
-    /// end. Mouse clicks map through here.
-    fn src_at_screen_row(&self, screen_row: u16) -> Option<usize> {
+    /// Visual row at `screen_row` (0-based inside the text area), accounting
+    /// for scrolling and multi-row images.
+    fn row_at_screen_row(&self, screen_row: u16) -> Option<&Row> {
         let want = self.scroll as u32 + screen_row as u32;
         let mut y = 0u32;
         for row in &self.rows {
             let h = row.height() as u32;
             if want < y + h {
-                return row.src();
+                return Some(row);
             }
             y += h;
         }
         None
+    }
+
+    /// The source line rendered at `screen_row`; `None` on a card row or
+    /// past the end.
+    fn src_at_screen_row(&self, screen_row: u16) -> Option<usize> {
+        self.row_at_screen_row(screen_row).and_then(Row::src)
+    }
+
+    /// Link under a mouse cell in VIEW mode. Rendered links are underlined,
+    /// so decoration-hidden source syntax and wrapped CJK labels do not need
+    /// to be reverse-mapped to raw byte offsets.
+    fn link_at_screen_position(
+        &self,
+        screen_row: u16,
+        col: usize,
+        pal: &cosense::theme::Palette,
+    ) -> Option<(usize, LinkItem)> {
+        if self.mode != Mode::View || self.session.is_some() {
+            return None;
+        }
+        let Row::Line { line, src } = self.row_at_screen_row(screen_row)? else {
+            return None;
+        };
+        let mut left = 0usize;
+        let clicked = line.spans.iter().find_map(|span| {
+            let width = str_width(span.content.as_ref());
+            let hit = left <= col
+                && col < left + width
+                && span.style.add_modifier.contains(Modifier::UNDERLINED);
+            left += width;
+            hit.then(|| (span.content.trim().to_string(), span.style.fg, left - width))
+                .filter(|(s, _, _)| !s.is_empty())
+        })?;
+        let (clicked, clicked_fg, clicked_left) = clicked;
+        let candidates = self.mouse_links_at_src(*src);
+        // A related-page row has exactly one target; its visible title may
+        // be truncated with `…`, so no label reconstruction is necessary.
+        if *src >= self.lines.len() {
+            return candidates.into_iter().next().map(|item| (*src, item));
+        }
+        let color_matches = |item: &LinkItem| {
+            match item {
+                LinkItem::Page(_) | LinkItem::ProjectPage { .. } => {
+                    clicked_fg == Some(pal.link) || clicked_fg == Some(pal.hashtag)
+                }
+                LinkItem::File { .. } | LinkItem::Url { .. } => {
+                    clicked_fg == Some(pal.url) || clicked_fg == Some(Color::Magenta)
+                }
+            }
+        };
+        // Prefer exact labels. If two targets render with the same label,
+        // count equal underlined spans before this cell and select the same
+        // occurrence from the source-ordered candidates.
+        let exact: Vec<&LinkItem> = candidates
+            .iter()
+            .filter(|item| {
+                color_matches(item)
+                    && item.rendered_labels().iter().any(|label| label == &clicked)
+            })
+            .collect();
+        let matching: Vec<&LinkItem> = if exact.is_empty() {
+            // Wrapping can split one link span; then the clicked fragment is
+            // contained in its full rendered label.
+            candidates
+                .iter()
+                .filter(|item| {
+                    color_matches(item)
+                        && item.rendered_labels().iter().any(|label| label.contains(&clicked))
+                })
+                .collect()
+        } else {
+            exact
+        };
+        let target_y = self.scroll as u32 + screen_row as u32;
+        let mut y = 0u32;
+        let mut occurrence = 0usize;
+        for row in &self.rows {
+            if y > target_y {
+                break;
+            }
+            if let Row::Line { line, src: row_src } = row {
+                if row_src == src {
+                    let mut span_left = 0usize;
+                    for span in &line.spans {
+                        let width = str_width(span.content.as_ref());
+                        let before_clicked = y < target_y || span_left < clicked_left;
+                        if before_clicked
+                            && span.style.add_modifier.contains(Modifier::UNDERLINED)
+                            && span.style.fg == clicked_fg
+                            && span.content.trim() == clicked
+                        {
+                            occurrence += 1;
+                        }
+                        span_left += width;
+                    }
+                }
+            }
+            y += row.height() as u32;
+        }
+        let item = matching.get(occurrence).or_else(|| matching.first())?;
+        Some((*src, (*item).clone()))
     }
 
     /// Put the cursor on source line `src` (clamped / snapped to a rendered
@@ -1544,24 +1679,19 @@ fn indent_of(s: &str) -> &str {
     &s[..end]
 }
 
-/// Display form of the session's raw line: the indent whitespace shows as
-/// `(n-1) spaces + • + space` — exactly the shape the view draws (`• `
-/// with its trailing half-width space) — while the DATA stays whitespace.
-/// Indentation is positional: one column per whitespace char, logical or
-/// not; a whitespace-only line shows just its bullet. The n raw indent
-/// chars map to n+1 display chars (the injected space after the bullet),
-/// and `display_caret`/`raw_caret_from_display` carry that shift, so the
-/// hardware cursor and clicks stay exact.
+/// Display form of the session's raw line. One source whitespace character
+/// remains one logical level, while each step after level 1 occupies two
+/// terminal cells: level 1 `•`, level 2 `  •`, level 3 `    •`.
+/// The DATA stays unchanged and the caret conversion below maps between the
+/// compact source indent and its expanded display form.
 fn session_display(buf: &str) -> String {
     let ind = indent_of(buf);
     let n = ind.chars().count();
     if n == 0 {
         return buf.to_string();
     }
-    let mut out = String::with_capacity(buf.len() + 4);
-    for _ in 0..n - 1 {
-        out.push(' ');
-    }
+    let mut out = String::with_capacity(buf.len() + n + 4);
+    out.push_str(&" ".repeat(bullet_indent_width(n)));
     out.push('•');
     out.push(' ');
     out.push_str(&buf[ind.len()..]);
@@ -1572,28 +1702,39 @@ fn session_display(buf: &str) -> String {
 /// line has no indent).
 fn display_prefix_bytes(buf: &str) -> usize {
     let n = indent_of(buf).chars().count();
-    if n == 0 { 0 } else { (n - 1) + '•'.len_utf8() + 1 }
+    if n == 0 { 0 } else { bullet_indent_width(n) + '•'.len_utf8() + 1 }
 }
 
 /// Byte offset in `session_display(buf)` for byte offset `caret` in `buf`.
-/// Char-index mapping with the +1 shift past the injected bullet space.
 fn display_caret(buf: &str, caret: usize) -> usize {
     let n = indent_of(buf).chars().count();
     let ci = buf[..caret.min(buf.len())].chars().count();
-    let di = if n > 0 && ci >= n { ci + 1 } else { ci };
+    let di = if n == 0 {
+        ci
+    } else if ci < n {
+        ci * 2
+    } else {
+        // The display prefix has 2n chars; the source prefix has n.
+        ci + n
+    };
     let disp = session_display(buf);
     disp.char_indices().nth(di).map(|(b, _)| b).unwrap_or_else(|| disp.len())
 }
 
-/// Inverse: a byte offset in `session_display(buf)` back to `buf`. The
-/// injected space after the bullet snaps to the text start.
+/// Inverse: a byte offset in `session_display(buf)` back to `buf`. A click
+/// in either cell of one visual indent step maps to the nearest logical
+/// source boundary; the injected space after `•` maps to the text start.
 fn raw_caret_from_display(buf: &str, disp_byte: usize) -> usize {
     let n = indent_of(buf).chars().count();
     let disp = session_display(buf);
     let di = disp[..disp_byte.min(disp.len())].chars().count();
-    // Display chars: 0..=n-1 the indent (spaces+bullet), n the injected
-    // space (snaps to the text start), n+1.. the text shifted by one.
-    let ci = if n == 0 || di <= n { di } else { di - 1 };
+    let ci = if n == 0 {
+        di
+    } else if di < n * 2 {
+        (di + 1) / 2
+    } else {
+        di - n
+    };
     buf.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(buf.len())
 }
 
@@ -2182,13 +2323,14 @@ fn build_image(picker: &Picker, dyn_img: image::DynamicImage) -> Result<ImageInf
 /// URL, decoration, or icon) and `#hashtag` in the current project, and
 /// `[/project/PageName]` into another project. A bare `[/project]` (the
 /// project's top page) is skipped: it is not a page.
-fn links_on_line(text: &str) -> Vec<LinkItem> {
+fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
     let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('[') {
-        if let Some(rel) = rest[start + 1..].find(']') {
-            let end = start + 1 + rel;
-            let inner = &rest[start + 1..end];
+    let mut from = 0usize;
+    while let Some(rel_start) = text[from..].find('[') {
+        let start = from + rel_start;
+        if let Some(rel_end) = text[start + 1..].find(']') {
+            let end = start + 1 + rel_end;
+            let inner = &text[start + 1..end];
             let is_deco = inner
                 .find(' ')
                 .map(|sp| inner[..sp].chars().all(|c| matches!(c, '*' | '/' | '_' | '-')))
@@ -2200,40 +2342,48 @@ fn links_on_line(text: &str) -> Vec<LinkItem> {
                 if let Some(rest) = inner.strip_prefix('/') {
                     if let Some((project, title)) = rest.split_once('/') {
                         if !project.is_empty() && !title.is_empty() {
-                            out.push(LinkItem::ProjectPage {
-                                project: project.to_string(),
-                                title: title.to_string(),
-                            });
+                            out.push((
+                                start,
+                                LinkItem::ProjectPage {
+                                    project: project.to_string(),
+                                    title: title.to_string(),
+                                },
+                            ));
                         }
                     }
                 } else {
-                    out.push(LinkItem::Page(inner.to_string()));
+                    out.push((start, LinkItem::Page(inner.to_string())));
                 }
             }
-            rest = &rest[end + 1..];
+            from = end + 1;
         } else {
             break;
         }
     }
     // hashtags
-    let mut hrest = text;
-    while let Some(pos) = hrest.find('#') {
+    let mut from = 0usize;
+    while let Some(rel_pos) = text[from..].find('#') {
+        let pos = from + rel_pos;
         let ok = pos == 0
-            || hrest[..pos].chars().next_back().map(|c| c.is_whitespace()).unwrap_or(false);
-        let tag: String = hrest[pos + 1..].chars().take_while(|c| !c.is_whitespace()).collect();
+            || text[..pos].chars().next_back().map(|c| c.is_whitespace()).unwrap_or(false);
+        let tag: String = text[pos + 1..].chars().take_while(|c| !c.is_whitespace()).collect();
         if ok && !tag.is_empty() {
-            out.push(LinkItem::Page(tag.clone()));
+            out.push((pos, LinkItem::Page(tag)));
         }
-        hrest = &hrest[pos + 1..];
+        from = pos + 1;
     }
     out
+}
+
+fn links_on_line(text: &str) -> Vec<LinkItem> {
+    positioned_links_on_line(text).into_iter().map(|(_, item)| item).collect()
 }
 
 /// Every http(s) URL on a raw Scrapbox line, as `(label, url)`, left to
 /// right. The bracket form `[title https://…]` (either order) labels the
 /// URL with `title`; a bare URL is labelled by its file name for uploads
 /// and by the URL itself otherwise.
-fn labelled_urls(text: &str) -> Vec<(String, String)> {
+fn positioned_labelled_urls(text: &str) -> Vec<(usize, String, String)> {
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(rel) = text[from..].find("http") {
@@ -2261,9 +2411,29 @@ fn labelled_urls(text: &str) -> Vec<(String, String)> {
                     url.to_string()
                 }
             });
-        out.push((label, url.to_string()));
+        out.push((start, label, url.to_string()));
     }
     out
+}
+
+fn labelled_urls(text: &str) -> Vec<(String, String)> {
+    positioned_labelled_urls(text)
+        .into_iter()
+        .map(|(_, label, url)| (label, url))
+        .collect()
+}
+
+fn link_item_for_url(label: String, url: String) -> LinkItem {
+    if is_scrapbox_file_url(&url) {
+        LinkItem::File { label, url }
+    } else if let Some(page) = gyazo_permalink(&url) {
+        // An inline image opens its Gyazo page (comments, original, Teams
+        // org), not the raw pixel URL.
+        let label = if label == url { "gyazo".to_string() } else { label };
+        LinkItem::Url { label, url: page }
+    } else {
+        LinkItem::Url { label, url }
+    }
 }
 
 /// Uploaded-file links on a raw Scrapbox line (see `labelled_urls`).
@@ -3120,7 +3290,8 @@ fn session_join_down(app: &mut App, ctx: &Ctx) {
     }
 }
 
-/// Tab / Shift+Tab: indent or outdent the caret line by one column.
+/// Tab / Shift+Tab: indent or outdent by one logical level (one source
+/// space, rendered as a two-cell nesting step).
 fn session_indent(app: &mut App, delta: i32) {
     let Some(s) = app.session.as_mut() else { return };
     if delta > 0 {
@@ -3746,8 +3917,8 @@ fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
 /// - Wheel: the viewport alone moves, one row per event; the cursor keeps
 ///   its line (scrolling back finds it where it was). Over an overlay the
 ///   wheel moves the overlay's cursor instead.
-/// - Left click on a line: cursor there, selection dropped. Dragging
-///   selects from the pressed line to the line under the pointer.
+/// - Left click on an underlined link: activate it on button-up. Elsewhere,
+///   move the cursor and drop selection. Dragging selects through lines.
 /// - Scrollbar: pressing the track jumps the viewport so the thumb starts
 ///   at that row and grabs it; dragging scrubs (the pointer may leave the
 ///   column). Viewport-only, like the wheel.
@@ -3789,11 +3960,13 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollDown => {
             app.drag_anchor = None;
+            app.pressed_link = None;
             app.wheel_scroll(1, app.view_h);
             return;
         }
         MouseEventKind::ScrollUp => {
             app.drag_anchor = None;
+            app.pressed_link = None;
             app.wheel_scroll(-1, app.view_h);
             return;
         }
@@ -3806,6 +3979,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     let text = app.text_rect;
     let bar = app.bar_rect;
     let in_rows = m.row >= text.y && m.row < text.y + text.height;
+    let in_text_col = m.column >= text.x && m.column < text.x + text.width;
     let screen_row = m.row.saturating_sub(text.y);
     let clamped_row =
         m.row.clamp(text.y, (text.y + text.height).saturating_sub(1)) - text.y;
@@ -3861,8 +4035,10 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             app.scrollbar_drag = None;
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            app.pressed_link = None;
             // Any column left of the scrollbar counts (gutter included):
-            // the row is what selects the line.
+            // the row is what selects the line. Only cells inside the text
+            // column can activate an underlined link.
             if in_rows && m.column < bar.x {
                 if let Some(src) = app.src_at_screen_row(screen_row) {
                     let col = (m.column.saturating_sub(text.x)) as usize;
@@ -3887,6 +4063,20 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                             app.laid_width = 0;
                         }
                         return;
+                    }
+                    // A link activates on button-up over the same target.
+                    // Waiting for release preserves click-drag selection.
+                    if in_text_col {
+                        if let Some((link_src, item)) =
+                            app.link_at_screen_position(screen_row, col, &ctx.palette)
+                        {
+                            app.selection = None;
+                            app.drag_anchor = Some(link_src);
+                            app.goto_src(link_src);
+                            app.pressed_link = Some((link_src, item));
+                            app.last_click = None;
+                            return;
+                        }
                     }
                     // READ: double-click enters the session at the clicked
                     // character (the cosense-web gesture); a single click
@@ -3913,6 +4103,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            app.pressed_link = None;
             if let Some(anchor) = app.drag_anchor {
                 if let Some(end) = app.src_at_screen_row(clamped_row) {
                     app.selection = Some(Selection { anchor, cursor: end });
@@ -3921,6 +4112,25 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if let Some((src, target)) = app.pressed_link.take() {
+                let same_target = in_rows
+                    && in_text_col
+                    && app
+                        .link_at_screen_position(
+                            screen_row,
+                            m.column.saturating_sub(text.x) as usize,
+                            &ctx.palette,
+                        )
+                        .map(|(_, item)| item == target)
+                        .unwrap_or(false);
+                app.drag_anchor = None;
+                if same_target {
+                    app.selection = None;
+                    app.goto_src(src);
+                    activate_link(app, ctx, target);
+                    return;
+                }
+            }
             app.drag_anchor = None;
         }
         _ => {}
@@ -4611,6 +4821,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
             let mut keys: Vec<String> = vec![
                 "move      j/k · g/G · ^u/^d · PgUp/PgDn".into(),
                 "link      Enter/f open: page · 📎 file → ~/Downloads · ↗ URL → browser".into(),
+                "mouse     click link/open · click row/move · drag/select · wheel/scroll".into(),
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
                 "pages     ^o recent pages (type to filter)".into(),
@@ -5574,23 +5785,23 @@ mod tests {
 
     #[test]
     fn session_line_shows_bullets_for_indent() {
-        // display: `(n-1) spaces + • + space` — the view's exact bullet
-        // shape, positional (one column per whitespace char), while the
-        // DATA stays whitespace
+        // Two cells per nesting step after the flush-left level 1; DATA
+        // remains one whitespace character per logical level.
         assert_eq!(session_display(" ab"), "• ab");
-        assert_eq!(session_display("  ab"), " • ab");
-        assert_eq!(session_display(" \t\tab"), "  • ab", "tabs count as levels too");
+        assert_eq!(session_display("  ab"), "  • ab");
+        assert_eq!(session_display(" \t\tab"), "    • ab", "tabs count as levels too");
         assert_eq!(session_display("ab"), "ab", "no indent, no bullet");
-        assert_eq!(session_display("  "), " • ", "a whitespace-only line shows just its bullet");
-        // caret maps through char indices with the +1 bullet-space shift
-        assert_eq!(display_caret("  ab", 2), " • ".len(), "text start lands after '• '");
-        assert_eq!(raw_caret_from_display("  ab", " • ".len()), 2);
+        assert_eq!(session_display("  "), "  • ", "a whitespace-only line shows just its bullet");
+        // Caret mapping expands and contracts the visual indentation.
+        assert_eq!(display_caret("  ab", 1), 2, "one logical step = two cells");
+        assert_eq!(display_caret("  ab", 2), "  • ".len(), "text start lands after '• '");
+        assert_eq!(raw_caret_from_display("  ab", "  • ".len()), 2);
         // clicking ON the injected space snaps to the text start
-        assert_eq!(raw_caret_from_display("  ab", " •".len()), 2);
-        assert_eq!(display_caret("  ab", 4), " • ab".len(), "end maps to end");
-        assert_eq!(raw_caret_from_display("  ab", " • ab".len()), 4);
-        assert_eq!(display_caret("\t\tab", 2), " • ".len());
-        assert_eq!(raw_caret_from_display("\t\tab", " • ".len()), 2);
+        assert_eq!(raw_caret_from_display("  ab", "  •".len()), 2);
+        assert_eq!(display_caret("  ab", 4), "  • ab".len(), "end maps to end");
+        assert_eq!(raw_caret_from_display("  ab", "  • ab".len()), 4);
+        assert_eq!(display_caret("\t\tab", 2), "  • ".len());
+        assert_eq!(raw_caret_from_display("\t\tab", "  • ".len()), 2);
         assert_eq!(display_caret("ab", 1), 1, "no indent → identity");
         // the rendered session row carries the bullet + space
         let ctx = test_ctx();
@@ -5603,7 +5814,7 @@ mod tests {
             Row::Line { line, .. } => line.spans.iter().map(|s| s.content.as_ref()).collect(),
             _ => String::new(),
         };
-        assert_eq!(row_text, " • deep");
+        assert_eq!(row_text, "  • deep");
         // …and typing still edits the RAW text underneath
         type_str(&mut app, &ctx, "!");
         assert_eq!(app.session.as_ref().unwrap().input.buf, "  !deep");
@@ -5810,6 +6021,98 @@ mod tests {
         // a click outside the rows (header) changes nothing
         handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 10, 0));
         assert_eq!(app.cursor, 5);
+    }
+
+    #[test]
+    fn rendered_links_are_mouse_hit_targets() {
+        let mut app = page(&[
+            "t",
+            "see [Target] and [Docs https://example.com] #tag",
+        ]);
+        app.rebuild(80);
+        let pal = cosense::theme::Palette::for_light(false);
+        // Rendered row: `see Target and Docs #tag`.
+        assert_eq!(
+            app.link_at_screen_position(1, 4, &pal),
+            Some((1, LinkItem::Page("Target".into())))
+        );
+        assert_eq!(
+            app.link_at_screen_position(1, 15, &pal),
+            Some((
+                1,
+                LinkItem::Url {
+                    label: "Docs".into(),
+                    url: "https://example.com".into(),
+                },
+            ))
+        );
+        assert_eq!(
+            app.link_at_screen_position(1, 20, &pal),
+            Some((1, LinkItem::Page("tag".into())))
+        );
+        assert_eq!(
+            app.link_at_screen_position(1, 3, &pal),
+            None,
+            "plain text is not clickable"
+        );
+
+        // Identical labels still resolve by their rendered occurrence.
+        let mut dup = page(&[
+            "t",
+            "see [Docs] then [Docs https://example.com]",
+        ]);
+        dup.rebuild(80);
+        assert_eq!(
+            dup.link_at_screen_position(1, 14, &pal),
+            Some((
+                1,
+                LinkItem::Url {
+                    label: "Docs".into(),
+                    url: "https://example.com".into(),
+                },
+            ))
+        );
+
+        let mut wrapped = page(&["t", "[ABCDEFGHIJK]"]);
+        wrapped.rebuild(12); // text width 6: the link occupies rows 1 and 2
+        assert_eq!(
+            wrapped.link_at_screen_position(2, 1, &pal),
+            Some((1, LinkItem::Page("ABCDEFGHIJK".into())))
+        );
+
+        // Related-page labels remain clickable after visual truncation.
+        let related_src = wrapped.lines.len();
+        wrapped.virtual_items = vec![LinkItem::Page("Very long related page".into())];
+        wrapped.rows = vec![Row::Line {
+            line: Line::from(Span::styled(
+                "Very…",
+                Style::default()
+                    .fg(CHROME_CARET)
+                    .add_modifier(Modifier::UNDERLINED),
+            )),
+            src: related_src,
+        }];
+        assert_eq!(
+            wrapped.link_at_screen_position(0, 2, &pal),
+            Some((related_src, LinkItem::Page("Very long related page".into())))
+        );
+
+        // Pressing records the target, but dragging cancels activation and
+        // keeps the existing line-selection gesture available.
+        app.text_rect = Rect::new(2, 1, 74, 8);
+        app.bar_rect = Rect::new(77, 1, 1, 8);
+        handle_mouse_content(
+            &mut app,
+            &test_ctx(),
+            mouse(MouseEventKind::Down(MouseButton::Left), 2 + 4, 1 + 1),
+        );
+        assert_eq!(app.pressed_link, Some((1, LinkItem::Page("Target".into()))));
+        handle_mouse_content(
+            &mut app,
+            &test_ctx(),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 2 + 8, 1 + 1),
+        );
+        assert_eq!(app.pressed_link, None);
     }
 
     #[test]
