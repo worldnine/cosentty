@@ -5,7 +5,7 @@
 //   cargo run --bin probe -- <project>         # list + first page
 //   cargo run --bin probe -- <project> "ページタイトル"   # render that page
 //   COSENSE_SID=s:xxx cargo run --bin probe -- <project> "..."   # private
-use cosense::api::{Client, Config};
+use cosense::api::{AuthStore, Client, Config};
 use cosense::render::{render_lines, Block};
 
 fn block_to_plain(b: &Block) -> String {
@@ -17,7 +17,7 @@ fn block_to_plain(b: &Block) -> String {
             // lay out at a generous width for probing
             t.layout(100)
                 .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page_title = args.get(1).cloned();
     let sid = std::env::var("COSENSE_SID").ok().filter(|s| !s.is_empty());
 
-    let cfg = Config { project: project.clone(), sid, api_domain: "scrapbox.io".into() };
+    let cfg = Config { project: project.clone(), auth: AuthStore::load(sid), api_domain: "scrapbox.io".into() };
     let client = Client::new(cfg)?;
 
     println!("=== project: {project} ===");

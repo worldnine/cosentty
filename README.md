@@ -1,4 +1,33 @@
-# cosense-tui (v0)
+# cosense-tui
+
+Scrapbox / Cosense の TUI ビューア＋編集クライアント。
+
+**現行実装は `rust/`（ratatui）。** 以下の TypeScript 版 (v0) は初期スパイク。
+
+```bash
+cd rust && cargo run --bin view -- <project> [ページタイトル]
+cargo run --bin view -- https://scrapbox.io/help-jp/リンク   # URL 直貼りも可
+```
+
+## rust 版の主な機能
+
+- **認証**: 公式 CLI（`cosense login`）の `~/.cosense/settings.json` を自動で使う
+  （PAT / Service Account。`COSENSE_SID` はフォールバック）。非公開プロジェクト対応
+- **関連ページリスト**: 本体同様にページ末尾へ Links（1-hop）/ リンクごとの 2 hop グループ /
+  External links を描画。j/k で降りて Enter で辿れる（追加リクエストなし）
+- **編集**: 公式 preview→submit API。`o`/`O` 挿入 · `E` 行編集 · `x` 削除 → dry-run 差分を
+  確認して Enter で commit。同時編集は 409 NotFastForward で検出（黙って上書きなし）
+- **タイムマシン**: `←`/`→` で Page history（サーバーサイド snapshot）を行き来できる。
+  過去版でも行単位の blame（`t`）が動く
+- **akapen 互換の読書体験**: 行カーソル / 範囲選択 / インラインコメントカード /
+  view⇄source トグル / テーマ連動 / テロメア（未読ハイライト）/ 画像インライン表示。
+  テーブルは 1行=1ソース行でカーソルが効く
+
+キーマップの詳細は [rust/KEYMAP.md](rust/KEYMAP.md)。
+
+---
+
+# TypeScript 版 (v0)
 
 Scrapbox / Cosense を閲覧するための TUI ビューア。読み取り専用。
 

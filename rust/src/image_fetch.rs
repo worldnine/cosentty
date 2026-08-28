@@ -3,8 +3,10 @@
 //!   1. Gyazo API (Bearer token) -> `url` field (works for Teams/private).
 //!   2. Gyazo oEmbed (no token) -> `url` field (public personal captures).
 //!   3. Fallback: scrape og:image from the public page.
-//! Scrapbox /files/ URLs are downloaded directly (with SID cookie if present).
+//! Scrapbox /files/ URLs are downloaded directly, authenticated with the
+//! user credential (PAT / sid cookie) when one is configured.
 
+use crate::api::Credential;
 use image::DynamicImage;
 use std::error::Error;
 use std::path::PathBuf;
@@ -12,7 +14,9 @@ use std::path::PathBuf;
 pub struct ImageFetcher {
     http: reqwest::blocking::Client,
     gyazo_token: Option<String>,
-    sid: Option<String>,
+    /// User-level credential for scrapbox.io downloads (uploaded files on
+    /// private projects).
+    cred: Option<Credential>,
     cache_dir: PathBuf,
 }
 
@@ -35,13 +39,16 @@ fn parse_gyazo(permalink: &str) -> Option<(Option<String>, String)> {
 }
 
 impl ImageFetcher {
-    pub fn new(gyazo_token: Option<String>, sid: Option<String>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        gyazo_token: Option<String>,
+        cred: Option<Credential>,
+    ) -> Result<Self, Box<dyn Error>> {
         let http = reqwest::blocking::Client::builder()
             .user_agent("cosense-tui")
             .build()?;
         let cache_dir = dirs_cache().join("cosense-tui").join("images");
         std::fs::create_dir_all(&cache_dir).ok();
-        Ok(Self { http, gyazo_token, sid, cache_dir })
+        Ok(Self { http, gyazo_token, cred, cache_dir })
     }
 
     /// Return a decoded image for a permalink, using the on-disk cache.
@@ -130,20 +137,21 @@ impl ImageFetcher {
         og_image_from_html(&html).ok_or_else(|| "og:image not found".into())
     }
 
-    /// Download an arbitrary URL to `dest` (a Scrapbox upload needs the SID
-    /// cookie on private projects, so it is always sent for those).
+    /// Download an arbitrary URL to `dest` (a Scrapbox upload on a private
+    /// project needs credentials, so they are always sent for those).
     pub fn download_to(&self, url: &str, dest: &std::path::Path) -> Result<(), Box<dyn Error>> {
-        let with_sid = url.contains("scrapbox.io/");
-        let bytes = self.get_bytes(url, with_sid)?;
+        let with_auth = url.contains("scrapbox.io/");
+        let bytes = self.get_bytes(url, with_auth)?;
         std::fs::write(dest, bytes)?;
         Ok(())
     }
 
-    fn get_bytes(&self, url: &str, with_sid: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn get_bytes(&self, url: &str, with_auth: bool) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut req = self.http.get(url);
-        if with_sid {
-            if let Some(sid) = &self.sid {
-                req = req.header("Cookie", format!("connect.sid={sid}"));
+        if with_auth {
+            if let Some(cred) = &self.cred {
+                let (name, value) = cred.header();
+                req = req.header(name, value);
             }
         }
         let res = req.send()?.error_for_status()?;

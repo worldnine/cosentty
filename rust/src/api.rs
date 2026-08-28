@@ -1,20 +1,158 @@
-//! Scrapbox / Cosense REST API client (read-only).
-//! Ported from api.ts. Public projects need no auth; private ones use a
-//! connect.sid cookie.
+//! Scrapbox / Cosense REST API client.
+//! Ported from api.ts. Public projects need no auth; private ones use the
+//! official CLI's stored credentials (`cosense login`) or a connect.sid
+//! cookie as a fallback.
 
 use serde::Deserialize;
 use std::error::Error;
 
+/// One way to authenticate a request, and the header that carries it.
+/// PAT / Service Account are what `cosense login` stores; the sid cookie
+/// is the legacy fallback (`--sid` / `COSENSE_SID`).
+#[derive(Clone, Debug)]
+pub enum Credential {
+    Pat(String),
+    ServiceAccount(String),
+    Sid(String),
+}
+
+impl Credential {
+    /// `(header name, header value)` for this credential.
+    pub fn header(&self) -> (&'static str, String) {
+        match self {
+            Credential::Pat(t) => ("x-personal-access-token", t.clone()),
+            Credential::ServiceAccount(k) => ("x-service-account-access-key", k.clone()),
+            Credential::Sid(s) => ("Cookie", format!("connect.sid={s}")),
+        }
+    }
+
+    /// Short human tag for the status line ("pat" / "sa" / "sid").
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Credential::Pat(_) => "pat",
+            Credential::ServiceAccount(_) => "sa",
+            Credential::Sid(_) => "sid",
+        }
+    }
+}
+
+/// Credentials from the official CLI's `~/.cosense/settings.json`, resolved
+/// with the CLI's own precedence (see its `settings.ts`):
+///   1. `COSENSE_PAT` env var
+///   2. `projects[]` service account matching (origin, projectNameLc)
+///   3. `users[]` personal access token matching origin
+///   4. the sid cookie fallback (ours; the CLI has no such concept)
+#[derive(Clone, Debug, Default)]
+pub struct AuthStore {
+    env_pat: Option<String>,
+    /// (origin, projectNameLc, serviceAccount)
+    projects: Vec<(String, String, String)>,
+    /// (origin, token)
+    users: Vec<(String, String)>,
+    sid: Option<String>,
+}
+
+impl AuthStore {
+    /// Load `~/.cosense/settings.json` (missing or malformed → empty store)
+    /// plus the env fallbacks. `sid` comes from the caller (`--sid` /
+    /// `COSENSE_SID`).
+    pub fn load(sid: Option<String>) -> Self {
+        let env_pat = std::env::var("COSENSE_PAT").ok().filter(|s| !s.trim().is_empty());
+        let mut store = AuthStore { env_pat, sid, ..Default::default() };
+        let Some(home) = std::env::var_os("HOME") else { return store };
+        let path = std::path::PathBuf::from(home).join(".cosense").join("settings.json");
+        let Ok(text) = std::fs::read_to_string(path) else { return store };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return store };
+        // origin of an URL string: scheme://host[:port] — lenient, like the
+        // CLI it only needs to match what the CLI itself wrote.
+        fn origin_of(url: &str) -> Option<String> {
+            let (scheme, rest) = url.split_once("://")?;
+            let host = rest.split('/').next()?;
+            if host.is_empty() {
+                return None;
+            }
+            Some(format!("{scheme}://{host}"))
+        }
+        if let Some(projects) = v.get("projects").and_then(|p| p.as_array()) {
+            for p in projects {
+                let (Some(url), Some(sa)) = (
+                    p.get("url").and_then(|s| s.as_str()),
+                    p.get("serviceAccount").and_then(|s| s.as_str()),
+                ) else {
+                    continue;
+                };
+                let Some(origin) = origin_of(url) else { continue };
+                let name = url.split("://").nth(1).and_then(|r| r.split('/').nth(1)).unwrap_or("");
+                if !name.is_empty() && !sa.trim().is_empty() {
+                    store.projects.push((origin, name.to_lowercase(), sa.to_string()));
+                }
+            }
+        }
+        if let Some(users) = v.get("users").and_then(|u| u.as_array()) {
+            for u in users {
+                let (Some(url), Some(token)) = (
+                    u.get("url").and_then(|s| s.as_str()),
+                    u.get("token").and_then(|s| s.as_str()),
+                ) else {
+                    continue;
+                };
+                if let Some(origin) = origin_of(url) {
+                    if !token.trim().is_empty() {
+                        store.users.push((origin, token.to_string()));
+                    }
+                }
+            }
+        }
+        store
+    }
+
+    /// The credential for (origin, project), CLI precedence + sid fallback.
+    pub fn resolve(&self, origin: &str, project: &str) -> Option<Credential> {
+        if let Some(pat) = &self.env_pat {
+            return Some(Credential::Pat(pat.clone()));
+        }
+        let plc = project.to_lowercase();
+        for (o, p, sa) in &self.projects {
+            if o == origin && *p == plc {
+                return Some(Credential::ServiceAccount(sa.clone()));
+            }
+        }
+        for (o, token) in &self.users {
+            if o == origin {
+                return Some(Credential::Pat(token.clone()));
+            }
+        }
+        self.sid.clone().map(Credential::Sid)
+    }
+
+    /// The user-level credential for an origin (no project → no service
+    /// account), for endpoints that are not project-scoped (file downloads).
+    pub fn resolve_user(&self, origin: &str) -> Option<Credential> {
+        if let Some(pat) = &self.env_pat {
+            return Some(Credential::Pat(pat.clone()));
+        }
+        for (o, token) in &self.users {
+            if o == origin {
+                return Some(Credential::Pat(token.clone()));
+            }
+        }
+        self.sid.clone().map(Credential::Sid)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub project: String,
-    pub sid: Option<String>,
+    pub auth: AuthStore,
     pub api_domain: String,
 }
 
 impl Config {
     fn base(&self) -> String {
         format!("https://{}/api", self.api_domain)
+    }
+    fn origin(&self) -> String {
+        format!("https://{}", self.api_domain)
     }
 }
 
@@ -64,6 +202,40 @@ enum MembersResponse {
     Wrapped { users: Vec<Member> },
 }
 
+/// One entry of the related-pages list (1-hop or 2-hop). `links_lc` is the
+/// lowercased links ON that page — for a 2-hop entry it tells which of the
+/// current page's links it shares (the "hub" the browser groups it under).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelatedPage {
+    pub id: String,
+    pub title: String,
+    #[serde(default, rename = "titleLc")]
+    pub title_lc: String,
+    #[serde(default)]
+    pub descriptions: Vec<String>,
+    #[serde(default, rename = "linksLc")]
+    pub links_lc: Vec<String>,
+    #[serde(default)]
+    pub linked: i64,
+    #[serde(default)]
+    pub updated: i64,
+}
+
+/// `relatedPages` of a page response. 1-hop = direct links + backlinks
+/// (existing pages only), 2-hop = pages sharing a link target with this
+/// page. Cross-project ("External links") entries are NOT here: the API's
+/// `projectLinks1hop` is empty in practice, so the viewer builds that
+/// section from the page-level `projectLinks` instead.
+#[derive(Debug, Default, Deserialize)]
+pub struct RelatedPages {
+    #[serde(default)]
+    pub links1hop: Vec<RelatedPage>,
+    #[serde(default)]
+    pub links2hop: Vec<RelatedPage>,
+    #[serde(default, rename = "hasBackLinksOrIcons")]
+    pub has_back_links_or_icons: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Page {
     pub id: String,
@@ -72,6 +244,12 @@ pub struct Page {
     pub lines: Vec<PageLine>,
     #[serde(default)]
     pub links: Vec<String>,
+    /// Outgoing cross-project links (`[/project/title]`), as `/project/title`.
+    #[serde(default, rename = "projectLinks")]
+    pub project_links: Vec<String>,
+    /// Related-pages list as scrapbox.io computes it (see `RelatedPages`).
+    #[serde(default, rename = "relatedPages")]
+    pub related: Option<RelatedPages>,
     #[serde(default)]
     pub updated: i64,
     #[serde(default)]
@@ -110,6 +288,92 @@ struct SearchResponse {
     pages: Vec<SearchResult>,
 }
 
+/// One page edit operation, in the official edit API's vocabulary
+/// (`page-edit-for-ai`). Anchors and targets are LINE IDS — never line
+/// numbers — which is what makes concurrent-edit rebasing tractable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditOp {
+    /// Insert `text` before the line `anchor` (`"_end"` = append to the
+    /// page). Embedded `\n` splits into several inserted lines, in order.
+    Insert { anchor: String, text: String },
+    /// Replace the body of line `id` (single line only).
+    Replace { id: String, text: String },
+    /// Delete line `id`.
+    Delete { id: String },
+}
+
+/// A successful dry-run: what the page will look like, and the one-shot
+/// token that commits it (5-minute expiry, consume-on-submit).
+#[derive(Debug)]
+pub struct EditPreview {
+    pub preview_id: String,
+    pub expire_at: String,
+    pub title: String,
+    /// Whole page after applying the ops.
+    pub lines: Vec<PreviewLine>,
+    /// Ids of lines the ops inserted (generated client-side).
+    pub new_ids: Vec<String>,
+    /// Ids of lines the ops replaced.
+    pub updated_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PreviewLine {
+    pub id: String,
+    pub text: String,
+}
+
+/// What a submit actually did.
+#[derive(Debug)]
+pub struct EditCommit {
+    pub commit_id: String,
+    /// Title as written (the server may auto-suffix on a duplicate).
+    pub title: String,
+}
+
+/// Why an edit failed, separated where the caller reacts differently.
+#[derive(Debug)]
+pub enum EditError {
+    /// 409 NotFastForward: the page changed after the preview — refetch
+    /// and rebuild the ops.
+    NotFastForward,
+    /// 409 DuplicateTitle: another page took the title between preview
+    /// and submit.
+    DuplicateTitle,
+    /// 404 on submit: expired (5 min), already consumed, or not yours.
+    PreviewGone,
+    Other(String),
+}
+
+impl std::fmt::Display for EditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditError::NotFastForward => write!(f, "page changed since preview (NotFastForward)"),
+            EditError::DuplicateTitle => write!(f, "another page took this title (DuplicateTitle)"),
+            EditError::PreviewGone => write!(f, "preview expired or already used"),
+            EditError::Other(s) => write!(f, "{s}"),
+        }
+    }
+}
+impl std::error::Error for EditError {}
+
+/// A fresh 24-hex line id, like the CLI's `randomBytes(12).toString('hex')`.
+fn new_line_id() -> String {
+    let mut bytes = [0u8; 12];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
+        .is_err()
+    {
+        // Fallback: time-derived (uniqueness only matters within one page).
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        bytes[..12].copy_from_slice(&t.to_le_bytes()[..12]);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub struct Client {
     http: reqwest::blocking::Client,
     cfg: Config,
@@ -127,10 +391,23 @@ impl Client {
         &self.cfg
     }
 
-    fn get_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T, Box<dyn Error>> {
+    /// The credential used for requests in `project` (status-line display).
+    pub fn credential_for(&self, project: &str) -> Option<Credential> {
+        self.cfg.auth.resolve(&self.cfg.origin(), project)
+    }
+
+    /// GET `url` as JSON, authenticated for `project` (credentials are
+    /// per-project: a service account is bound to one project, and the
+    /// viewer hops projects via `[/project/title]` links).
+    fn get_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        project: &str,
+    ) -> Result<T, Box<dyn Error>> {
         let mut req = self.http.get(url).header("Accept", "application/json");
-        if let Some(sid) = &self.cfg.sid {
-            req = req.header("Cookie", format!("connect.sid={sid}"));
+        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
         }
         let res = req.send()?;
         if !res.status().is_success() {
@@ -166,7 +443,7 @@ impl Client {
             skip,
             sort
         );
-        let data: ListResponse = self.get_json(&url)?;
+        let data: ListResponse = self.get_json(&url, project)?;
         Ok((data.count, data.pages))
     }
 
@@ -182,7 +459,7 @@ impl Client {
             urlencoding(project),
             urlencoding(title)
         );
-        self.get_json(&url)
+        self.get_json(&url, project)
     }
 
     /// Project members, for resolving line author ids to display names.
@@ -197,7 +474,7 @@ impl Client {
             self.cfg.base(),
             urlencoding(project)
         );
-        let data: MembersResponse = self.get_json(&url)?;
+        let data: MembersResponse = self.get_json(&url, project)?;
         Ok(match data {
             MembersResponse::Bare(v) => v,
             MembersResponse::Wrapped { users } => users,
@@ -214,8 +491,200 @@ impl Client {
             urlencoding(&self.cfg.project),
             urlencoding(query)
         );
-        let data: SearchResponse = self.get_json(&url)?;
+        let project = self.cfg.project.clone();
+        let data: SearchResponse = self.get_json(&url, &project)?;
         Ok((data.count, data.pages))
+    }
+}
+
+/// One point on a page's server-side history: Cosense snapshots pages
+/// periodically while they are edited and keeps ALL of them (Page history).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnapshotStamp {
+    pub id: String,
+    #[serde(default)]
+    pub created: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotListResponse {
+    #[serde(default)]
+    timestamps: Vec<SnapshotStamp>,
+}
+
+/// A full historical version of a page. Lines carry the same per-line
+/// author/time metadata as the live page, so blame works in the past too.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Snapshot {
+    #[serde(default)]
+    pub lines: Vec<PageLine>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub created: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotResponse {
+    snapshot: Snapshot,
+}
+
+impl Client {
+    /// All snapshot timestamps of a page, sorted OLDEST → NEWEST (the API
+    /// returns newest first). Member-only on private projects.
+    pub fn list_snapshots(
+        &self,
+        project: &str,
+        page_id: &str,
+    ) -> Result<Vec<SnapshotStamp>, Box<dyn Error>> {
+        let url = format!(
+            "{}/page-snapshots/{}/{}",
+            self.cfg.base(),
+            urlencoding(project),
+            urlencoding(page_id)
+        );
+        let mut data: SnapshotListResponse = self.get_json(&url, project)?;
+        data.timestamps.sort_by_key(|t| t.created);
+        Ok(data.timestamps)
+    }
+
+    /// One historical version (see `list_snapshots` for the ids).
+    pub fn get_snapshot(
+        &self,
+        project: &str,
+        page_id: &str,
+        timestamp_id: &str,
+    ) -> Result<Snapshot, Box<dyn Error>> {
+        let url = format!(
+            "{}/page-snapshots/{}/{}/{}",
+            self.cfg.base(),
+            urlencoding(project),
+            urlencoding(page_id),
+            urlencoding(timestamp_id)
+        );
+        let data: SnapshotResponse = self.get_json(&url, project)?;
+        Ok(data.snapshot)
+    }
+
+    /// POST JSON with per-project auth, classifying the edit-API errors.
+    fn post_edit_json(
+        &self,
+        project: &str,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, EditError> {
+        let mut req = self.http.post(url).header("Accept", "application/json").json(body);
+        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send().map_err(|e| EditError::Other(e.to_string()))?;
+        let status = res.status();
+        let text = res.text().map_err(|e| EditError::Other(e.to_string()))?;
+        if status.is_success() {
+            return serde_json::from_str(&text).map_err(|e| EditError::Other(e.to_string()));
+        }
+        let code = status.as_u16();
+        let api_err = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str().map(str::to_string)));
+        match (code, api_err.as_deref()) {
+            (409, Some("NotFastForward")) => Err(EditError::NotFastForward),
+            (409, Some("DuplicateTitle")) => Err(EditError::DuplicateTitle),
+            (404, _) if url.ends_with("/submit") => Err(EditError::PreviewGone),
+            _ => Err(EditError::Other(format!("HTTP {code}: {}", text.chars().take(200).collect::<String>()))),
+        }
+    }
+
+    /// Dry-run `ops` against page `page_id` in `project` (both from the
+    /// page API). Nothing is written; the returned preview commits via
+    /// `submit_edit`. A changed page fails with `NotFastForward` here
+    /// already, not only at submit.
+    pub fn preview_edit(
+        &self,
+        project: &str,
+        page_id: &str,
+        ops: &[EditOp],
+    ) -> Result<EditPreview, EditError> {
+        let mut changes: Vec<serde_json::Value> = Vec::new();
+        let mut new_ids: Vec<String> = Vec::new();
+        let mut updated_ids: Vec<String> = Vec::new();
+        for op in ops {
+            match op {
+                EditOp::Insert { anchor, text } => {
+                    for line in text.split('\n') {
+                        let id = new_line_id();
+                        changes.push(serde_json::json!({
+                            "_insert": anchor,
+                            "lines": { "id": id, "text": line },
+                        }));
+                        new_ids.push(id);
+                    }
+                }
+                EditOp::Replace { id, text } => {
+                    changes.push(serde_json::json!({
+                        "_update": id,
+                        "lines": { "text": text },
+                    }));
+                    updated_ids.push(id.clone());
+                }
+                EditOp::Delete { id } => {
+                    changes.push(serde_json::json!({ "_delete": id }));
+                }
+            }
+        }
+        let url = format!(
+            "{}/pages/v2/{}/page-edit-for-ai/preview",
+            self.cfg.base(),
+            urlencoding(project)
+        );
+        let body = serde_json::json!({ "pageId": page_id, "changes": changes });
+        let v = self.post_edit_json(project, &url, &body)?;
+        let preview_id = v
+            .get("previewId")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| EditError::Other("preview response missing previewId".into()))?
+            .to_string();
+        let expire_at = v
+            .get("expireAt")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let page = v.get("pagePreview");
+        let title = page
+            .and_then(|p| p.get("title"))
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let lines: Vec<PreviewLine> = page
+            .and_then(|p| p.get("lines"))
+            .and_then(|l| serde_json::from_value(l.clone()).ok())
+            .unwrap_or_default();
+        Ok(EditPreview { preview_id, expire_at, title, lines, new_ids, updated_ids })
+    }
+
+    /// Commit a preview. One-shot: success or failure, the previewId is
+    /// spent.
+    pub fn submit_edit(&self, project: &str, preview_id: &str) -> Result<EditCommit, EditError> {
+        let url = format!(
+            "{}/pages/v2/{}/page-edit-for-ai/submit",
+            self.cfg.base(),
+            urlencoding(project)
+        );
+        let body = serde_json::json!({ "previewId": preview_id });
+        let v = self.post_edit_json(project, &url, &body)?;
+        let commit_id = v
+            .get("commitId")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let title = v
+            .get("page")
+            .and_then(|p| p.get("title"))
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(EditCommit { commit_id, title })
     }
 }
 

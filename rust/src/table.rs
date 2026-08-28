@@ -19,27 +19,41 @@ const H: char = '─';
 const V: &str = "│";
 
 /// A buffered table: first row is treated as the header (bold).
+///
+/// Every row carries the SOURCE line it came from (a Scrapbox table is one
+/// source line per row), so the viewer's cursor, selection and comments
+/// address table rows individually — akapen's tui-markdown attribution
+/// model ("wrapped cell lines keep the source-line attribution").
 #[derive(Debug, Clone)]
 pub struct Table {
     pub name: String,
-    /// rows[r][col] = the styled spans of one cell.
-    pub rows: Vec<Vec<Vec<Span<'static>>>>,
+    /// Source line of the `table:name` opener.
+    pub name_src: usize,
+    /// rows[r] = (source line, cells); cells[col] = styled spans.
+    pub rows: Vec<(usize, Vec<Vec<Span<'static>>>)>,
 }
 
 impl Table {
     pub fn column_count(&self) -> usize {
-        self.rows.iter().map(|r| r.len()).max().unwrap_or(0)
+        self.rows.iter().map(|(_, r)| r.len()).max().unwrap_or(0)
     }
 
-    /// Lay the table out within `available` display columns.
-    pub fn layout(&self, available: usize) -> Vec<Line<'static>> {
+    /// Lay the table out within `available` display columns. Each output
+    /// line carries the source line it belongs to: the name line and the
+    /// top border to the opener, a separator to the row BELOW it (so a
+    /// row's visual block includes its top rule), the bottom border to the
+    /// last row.
+    pub fn layout(&self, available: usize) -> Vec<(Line<'static>, usize)> {
         let cols = self.column_count();
-        let mut out: Vec<Line<'static>> = Vec::new();
+        let mut out: Vec<(Line<'static>, usize)> = Vec::new();
         if !self.name.is_empty() {
-            out.push(Line::from(Span::styled(
-                format!("▤ {}", self.name),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
+            out.push((
+                Line::from(Span::styled(
+                    format!("▤ {}", self.name),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )),
+                self.name_src,
+            ));
         }
         if cols == 0 {
             return out;
@@ -47,19 +61,19 @@ impl Table {
         let (widths, constrained) = self.column_widths(cols, available);
         let bstyle = Style::default().fg(Color::DarkGray);
 
-        out.push(border(&widths, '┌', '┬', '┐', bstyle));
-        for (ri, row) in self.rows.iter().enumerate() {
-            if constrained && ri > 0 {
-                out.push(border(&widths, '├', '┼', '┤', bstyle));
-            } else if ri == 1 {
-                out.push(border(&widths, '├', '┼', '┤', bstyle));
+        out.push((border(&widths, '┌', '┬', '┐', bstyle), self.name_src));
+        let mut last_src = self.name_src;
+        for (ri, (src, row)) in self.rows.iter().enumerate() {
+            if (constrained && ri > 0) || ri == 1 {
+                out.push((border(&widths, '├', '┼', '┤', bstyle), *src));
             }
             let header = ri == 0;
             for line in render_row(row, &widths, header, bstyle) {
-                out.push(line);
+                out.push((line, *src));
             }
+            last_src = *src;
         }
-        out.push(border(&widths, '└', '┴', '┘', bstyle));
+        out.push((border(&widths, '└', '┴', '┘', bstyle), last_src));
         out
     }
 
@@ -67,7 +81,7 @@ impl Table {
     fn column_widths(&self, cols: usize, available: usize) -> (Vec<usize>, bool) {
         let mut natural = vec![0usize; cols];
         let mut floors = vec![1usize; cols];
-        for row in &self.rows {
+        for (_, row) in &self.rows {
             for (c, cell) in row.iter().enumerate() {
                 natural[c] = natural[c].max(cell_width(cell));
                 floors[c] = floors[c].max(longest_token(cell));
@@ -357,15 +371,19 @@ mod tests {
     fn cell(s: &str) -> Vec<Span<'static>> {
         vec![Span::raw(s.to_string())]
     }
-    fn line_str(l: &Line) -> String {
-        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    fn line_str(l: &(Line, usize)) -> String {
+        l.0.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
     #[test]
     fn natural_width_when_fits() {
         let t = Table {
             name: String::new(),
-            rows: vec![vec![cell("abc"), cell("def")], vec![cell("12345"), cell("6789")]],
+            name_src: 0,
+            rows: vec![
+                (1, vec![cell("abc"), cell("def")]),
+                (2, vec![cell("12345"), cell("6789")]),
+            ],
         };
         let lines: Vec<String> = t.layout(200).iter().map(line_str).collect();
         assert_eq!(lines[0], "┌───────┬──────┐");
@@ -373,10 +391,29 @@ mod tests {
     }
 
     #[test]
+    fn rows_carry_their_source_lines() {
+        let t = Table {
+            name: "t".into(),
+            name_src: 5,
+            rows: vec![
+                (6, vec![cell("h1"), cell("h2")]),
+                (7, vec![cell("a"), cell("b")]),
+                (8, vec![cell("c"), cell("d")]),
+            ],
+        };
+        let out = t.layout(200);
+        // name line + top border → opener; each row (and its separator
+        // above) → that row's line; bottom border → last row
+        let srcs: Vec<usize> = out.iter().map(|(_, s)| *s).collect();
+        assert_eq!(srcs, vec![5, 5, 6, 7, 7, 8, 8]);
+    }
+
+    #[test]
     fn cjk_columns_align() {
         let t = Table {
             name: String::new(),
-            rows: vec![vec![cell("長い長い文字列"), cell("短い文字列")]],
+            name_src: 0,
+            rows: vec![(1, vec![cell("長い長い文字列"), cell("短い文字列")])],
         };
         let lines: Vec<String> = t.layout(200).iter().map(line_str).collect();
         // every rendered line has equal display width
@@ -388,9 +425,10 @@ mod tests {
     fn shrinks_and_wraps_when_narrow() {
         let t = Table {
             name: String::new(),
+            name_src: 0,
             rows: vec![
-                vec![cell("col"), cell("value")],
-                vec![cell("これはとても長い日本語のセルです"), cell("x")],
+                (1, vec![cell("col"), cell("value")]),
+                (2, vec![cell("これはとても長い日本語のセルです"), cell("x")]),
             ],
         };
         let lines: Vec<String> = t.layout(20).iter().map(line_str).collect();

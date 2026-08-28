@@ -28,7 +28,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cosense::api::{Client, Config, PageLine};
+use cosense::api::{AuthStore, Client, Config, EditError, EditOp, EditPreview, PageLine};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
 use cosense::highlight::Highlighter;
@@ -36,8 +36,8 @@ use cosense::render::{file_name_of_url, gyazo_permalink, is_scrapbox_file_url, r
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_continued};
 
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Rect, Size};
@@ -102,6 +102,23 @@ impl LinkItem {
     }
 }
 
+/// One section of the related-pages list rendered below the page body
+/// (scrapbox.io's "Links" / per-hub 2-hop groups / "External links").
+struct RelSection {
+    heading: String,
+    entries: Vec<RelEntry>,
+}
+
+/// One related page: where Enter goes, and what the row shows.
+struct RelEntry {
+    item: LinkItem,
+    title: String,
+    /// First description line (the page's own first body line), dimmed.
+    desc: String,
+    /// `updated` epoch seconds (0 = unknown, no age shown).
+    age: i64,
+}
+
 /// A laid-out visual row. Content rows carry their source line; card rows
 /// are synthesized (not selectable, no source).
 enum Row {
@@ -147,6 +164,8 @@ struct App {
     mode: Mode,
     project: String,
     title: String,
+    /// Immutable page id (the edit API and the commit log key on it).
+    page_id: String,
     /// Raw page lines with per-line author/time metadata. Note `user_id` is
     /// the line's LAST UPDATER (verified against the commit log), not its
     /// original author — the page API does not carry the creator.
@@ -187,7 +206,7 @@ struct App {
     /// navigation; wheel scrolling leaves it clear so the viewport can move
     /// away from the cursor (akapen's herdr-review style).
     follow: bool,
-    composing: Option<String>,
+    composing: Option<Composer>,
     comments: Vec<Comment>,
     status: String,
 
@@ -206,6 +225,27 @@ struct App {
     /// Per-project member tables (userId -> display name) for line blame,
     /// fetched lazily: see `ensure_members` for when they refresh.
     members: HashMap<String, MembersCache>,
+
+    /// Some while the reader is viewing a historical snapshot (←/→).
+    /// The page is read-only in that state.
+    time: Option<TimeMachine>,
+    /// Session input-source control: command mode runs in ASCII, the
+    /// original source is restored when the app drops (Japanese-first
+    /// model, see `cosense::ime`).
+    session_ime: cosense::ime::SessionIme,
+    /// True once the session's force-ascii took hold (the helper may still
+    /// be compiling on first run; retried each tick until then).
+    ime_ready: bool,
+    /// Held while the composer is open: Japanese in, ASCII out.
+    ime_guard: Option<cosense::ime::ImeGuard>,
+    /// Related-pages sections below the body (view mode only).
+    related: Vec<RelSection>,
+    /// Flattened related entries in render order. Entry `i` renders with
+    /// the VIRTUAL source index `lines.len() + i`, so the cursor, Enter and
+    /// mouse clicks address related rows exactly like body lines.
+    virtual_items: Vec<LinkItem>,
+    /// Terminal background is light (for related-row colors; set from Ctx).
+    light: bool,
 }
 
 /// One project's member table and when it was fetched.
@@ -222,6 +262,112 @@ const MEMBERS_TTL: Duration = Duration::from_secs(10 * 60);
 /// will never resolve) cannot make every `t` press hit the API.
 const MEMBERS_MISS_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// Time-machine state: the page's server-side snapshot history, and where
+/// the reader currently stands in it. akapen's document timeline, backed by
+/// Cosense's page-snapshots API instead of Git — the server already keeps
+/// every version, so nothing is captured locally.
+struct TimeMachine {
+    /// Snapshot stamps, oldest → newest.
+    points: Vec<cosense::api::SnapshotStamp>,
+    /// Index into `points` currently shown. Stepping past the newest
+    /// point exits the machine back to NOW (the live page).
+    pos: usize,
+    /// Fetched snapshots, so scrubbing back and forth is instant.
+    cache: HashMap<String, cosense::api::Snapshot>,
+}
+
+/// A single-line text input with a movable cursor (byte index, always on
+/// a char boundary). The composer used to be append-only; Japanese text
+/// especially needs mid-line correction without retyping everything.
+struct Input {
+    buf: String,
+    cur: usize,
+}
+
+impl Input {
+    fn new(buf: String) -> Self {
+        let cur = buf.len();
+        Input { buf, cur }
+    }
+    fn parts(&self) -> (&str, &str) {
+        self.buf.split_at(self.cur)
+    }
+    fn insert_char(&mut self, ch: char) {
+        self.buf.insert(self.cur, ch);
+        self.cur += ch.len_utf8();
+    }
+    fn insert_str(&mut self, s: &str) {
+        self.buf.insert_str(self.cur, s);
+        self.cur += s.len();
+    }
+    fn left(&mut self) {
+        if let Some(ch) = self.buf[..self.cur].chars().next_back() {
+            self.cur -= ch.len_utf8();
+        }
+    }
+    fn right(&mut self) {
+        if let Some(ch) = self.buf[self.cur..].chars().next() {
+            self.cur += ch.len_utf8();
+        }
+    }
+    fn home(&mut self) {
+        self.cur = 0;
+    }
+    fn end(&mut self) {
+        self.cur = self.buf.len();
+    }
+    fn backspace(&mut self) {
+        if let Some(ch) = self.buf[..self.cur].chars().next_back() {
+            self.cur -= ch.len_utf8();
+            self.buf.remove(self.cur);
+        }
+    }
+    fn delete(&mut self) {
+        if self.cur < self.buf.len() {
+            self.buf.remove(self.cur);
+        }
+    }
+    /// ^w: delete the word (or whitespace run) left of the cursor.
+    fn delete_word(&mut self) {
+        let head = &self.buf[..self.cur];
+        let trimmed = head.trim_end();
+        let cut = trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        self.buf.replace_range(cut..self.cur, "");
+        self.cur = cut;
+    }
+    /// ^u: kill to the start of the line.
+    fn kill_to_start(&mut self) {
+        self.buf.replace_range(..self.cur, "");
+        self.cur = 0;
+    }
+}
+
+/// What the bottom-line composer is collecting, and where it goes on
+/// Enter. Comment is akapen's; Insert/Replace feed the official edit API
+/// (preview → submit).
+enum Composer {
+    Comment { input: Input },
+    /// New line(s) before `anchor` (a lineId, or `_end` = append).
+    Insert { anchor: String, label: String, input: Input },
+    /// Replace the body of line `id`.
+    Replace { id: String, label: String, input: Input },
+}
+
+impl Composer {
+    fn input_mut(&mut self) -> &mut Input {
+        match self {
+            Composer::Comment { input }
+            | Composer::Insert { input, .. }
+            | Composer::Replace { input, .. } => input,
+        }
+    }
+}
+
 /// A modal list/panel layered over the page.
 enum Overlay {
     /// All comments across pages; Enter jumps to the page+line.
@@ -234,6 +380,9 @@ enum Overlay {
     /// Details for the cursor's line: who last edited it and when
     /// (akapen's `t` detail slot).
     LineInfo,
+    /// A pending edit: the dry-run result awaiting Enter (commit) or Esc.
+    /// `preview_id` is the one-shot token; `lines` is the human summary.
+    EditPreview { preview_id: String, lines: Vec<String> },
     /// Key reference.
     Help,
 }
@@ -285,6 +434,7 @@ impl App {
             mode: Mode::View,
             project,
             title: String::new(),
+            page_id: String::new(),
             lines: Vec::new(),
             blocks: Vec::new(),
             srcs: Vec::new(),
@@ -314,7 +464,21 @@ impl App {
             overlay: None,
             read_at: None,
             members: HashMap::new(),
+            time: None,
+            session_ime: cosense::ime::SessionIme::new(cosense::ime::ImeMode::Off),
+            ime_ready: false,
+            ime_guard: None,
+            related: Vec::new(),
+            virtual_items: Vec::new(),
+            light: false,
         }
+    }
+
+    /// Number of cursor-addressable source indices: body lines, plus the
+    /// related entries in view mode (virtual lines after the body).
+    fn src_count(&self) -> usize {
+        self.lines.len()
+            + if self.mode == Mode::View { self.virtual_items.len() } else { 0 }
     }
 
     /// Install a freshly loaded page, resetting view state (keeps comments).
@@ -322,12 +486,20 @@ impl App {
     /// downloads. Loading is folded in here so no navigation path can forget
     /// it (back/forward included).
     fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
+        self.time = None; // installing a live page always exits history
         self.project = l.project;
         self.title = l.title;
+        self.page_id = l.page_id;
         self.lines = l.lines;
         self.blocks = l.blocks;
         self.srcs = l.srcs;
         self.read_at = l.read_at;
+        self.related = l.related;
+        self.virtual_items = self
+            .related
+            .iter()
+            .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+            .collect();
         self.images.clear();
         self.image_errors.clear();
         self.pending.clear();
@@ -395,8 +567,17 @@ impl App {
     }
 
     /// Everything Enter/f can follow on the cursor's line: internal page
-    /// links first, then uploaded files, then external URLs.
+    /// links first, then uploaded files, then external URLs. On a related
+    /// row (virtual line below the body) it is that entry's single link.
     fn cursor_line_links(&self) -> Vec<LinkItem> {
+        if self.cursor >= self.lines.len() {
+            if self.mode == Mode::View {
+                if let Some(item) = self.virtual_items.get(self.cursor - self.lines.len()) {
+                    return vec![item.clone()];
+                }
+            }
+            return Vec::new();
+        }
         let Some(text) = self.cursor_src().and_then(|s| self.lines.get(s)).map(|l| l.text.as_str()) else {
             return Vec::new();
         };
@@ -655,8 +836,10 @@ impl App {
                 }
                 Block::Blank => content.push(Row::Blank { src }),
                 Block::Table(t) => {
-                    for line in t.layout(text_w) {
-                        content.push(Row::Line { line, src });
+                    // Table rows carry their OWN source lines (one Scrapbox
+                    // line per row), so the cursor addresses rows directly.
+                    for (line, row_src) in t.layout(text_w) {
+                        content.push(Row::Line { line, src: row_src });
                     }
                 }
                 Block::Image { url } => {
@@ -672,7 +855,36 @@ impl App {
                 }
             }
         }
+        self.append_related(&mut content, text_w);
         content
+    }
+
+    /// Append the related-pages sections (view mode): a dim heading rule per
+    /// section, then one row per entry carrying its VIRTUAL source index so
+    /// the cursor and Enter work on it. Headings and spacers are Card rows
+    /// (not selectable), like comment-card chrome.
+    fn append_related(&self, content: &mut Vec<Row>, text_w: usize) {
+        if self.related.is_empty() {
+            return;
+        }
+        let pal = cosense::theme::Palette::for_light(self.light);
+        let dim = Style::default().fg(Color::DarkGray);
+        let link_style = Style::default().fg(pal.link);
+        let mut vsrc = self.lines.len();
+        content.push(Row::Card { line: Line::from("") });
+        for sec in &self.related {
+            let head = format!("── {} ", sec.heading);
+            let used = str_width(&head);
+            let fill = "─".repeat(text_w.saturating_sub(used));
+            content.push(Row::Card {
+                line: Line::from(Span::styled(format!("{head}{fill}"), dim)),
+            });
+            for e in &sec.entries {
+                content.push(Row::Line { line: related_row(e, text_w, link_style), src: vsrc });
+                vsrc += 1;
+            }
+            content.push(Row::Card { line: Line::from("") });
+        }
     }
 
     /// Source mode: the raw Scrapbox notation, one numbered row per source
@@ -760,16 +972,17 @@ impl App {
     /// line belongs to an earlier source line, then down. akapen's
     /// `max_cursor` clamp, plus that guard.
     fn clamp_cursor(&mut self) {
-        if self.lines.is_empty() || self.rows.is_empty() {
+        let n = self.src_count();
+        if n == 0 || self.rows.is_empty() {
             self.cursor = 0;
             return;
         }
-        self.cursor = self.cursor.min(self.lines.len() - 1);
+        self.cursor = self.cursor.min(n - 1);
         if self.cursor_rows().is_some() {
             return;
         }
         let up = (0..self.cursor).rev().find(|&s| self.src_rows(s).is_some());
-        let down = (self.cursor + 1..self.lines.len()).find(|&s| self.src_rows(s).is_some());
+        let down = (self.cursor + 1..n).find(|&s| self.src_rows(s).is_some());
         if let Some(s) = up.or(down) {
             self.cursor = s;
         }
@@ -963,6 +1176,11 @@ impl App {
         }
         let (a, b) = self.selection.map(|s| s.range()).unwrap_or((self.cursor, self.cursor));
         let last = self.lines.len() - 1;
+        // A related row (virtual line below the body) cannot anchor a
+        // comment; a drag that merely overshoots into that area clamps.
+        if a > last {
+            return None;
+        }
         let (a, b) = (a.min(last), b.min(last));
         let line_texts: Vec<String> = (a..=b).map(|i| self.lines[i].text.clone()).collect();
         let line_ids: Vec<String> = (a..=b).map(|i| self.lines[i].id.clone()).collect();
@@ -976,6 +1194,54 @@ impl App {
             text: body,
         })
     }
+}
+
+/// Display width of a string in terminal columns.
+fn str_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(s)
+}
+
+/// Truncate `s` to at most `w` columns, appending `…` when cut.
+fn truncate_width(s: &str, w: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    if str_width(s) <= w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > w.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// One related-pages row: `title · age  description`, title in the link
+/// color, the rest dim, truncated to the pane width (related rows do not
+/// wrap: they are a scannable list, not body text).
+fn related_row(e: &RelEntry, text_w: usize, link_style: Style) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let title = truncate_width(&e.title, text_w);
+    let mut spans = vec![Span::styled(title.clone(), link_style)];
+    let mut used = str_width(&title);
+    if e.age > 0 {
+        let meta = format!(" · {}", relative_age(e.age));
+        if used + str_width(&meta) <= text_w {
+            used += str_width(&meta);
+            spans.push(Span::styled(meta, dim));
+        }
+    }
+    if !e.desc.is_empty() && used + 2 < text_w {
+        let desc = truncate_width(&e.desc, text_w - used - 2);
+        spans.push(Span::styled(format!("  {desc}"), dim));
+    }
+    Line::from(spans)
 }
 
 /// Render a comment as inline card lines (indented, distinct background).
@@ -1047,12 +1313,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut positional: Vec<String> = Vec::new();
     let mut theme: Option<String> = None;
     let mut force_light: Option<bool> = None;
+    let mut ime_mode = cosense::ime::ImeMode::Jp; // Japanese-first default
     let mut it = raw.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--theme" => theme = it.next(),
             "--light" => force_light = Some(true),
             "--dark" => force_light = Some(false),
+            "--ime" => {
+                ime_mode = cosense::ime::ImeMode::parse(&it.next().unwrap_or_default());
+            }
+            s if s.starts_with("--ime=") => {
+                ime_mode = cosense::ime::ImeMode::parse(&s["--ime=".len()..]);
+            }
             s if s.starts_with("--theme=") => theme = Some(s["--theme=".len()..].to_string()),
             _ => positional.push(a),
         }
@@ -1074,7 +1347,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .or_else(|| std::env::var("GYAZO_ACCESS_TOKEN").ok())
         .filter(|s| !s.is_empty());
 
-    let cfg = Config { project: project.clone(), sid: sid.clone(), api_domain: "scrapbox.io".into() };
+    // Auth: the official CLI's `cosense login` store (PAT / service
+    // account), then the sid cookie fallback — see `AuthStore`.
+    let auth = AuthStore::load(sid);
+    let api_domain = "scrapbox.io".to_string();
+    let user_cred = auth.resolve_user(&format!("https://{api_domain}"));
+    let cfg = Config { project: project.clone(), auth, api_domain };
     let client = Client::new(cfg)?;
 
     let title = match title {
@@ -1085,12 +1363,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let fetcher = Arc::new(ImageFetcher::new(gyazo_token, sid)?);
+    let fetcher = Arc::new(ImageFetcher::new(gyazo_token, user_cred)?);
 
     let mut terminal = ratatui::init();
     // Wheel scrolling moves the viewport (akapen parity); failure to enable
-    // mouse reporting only loses that, so it is not fatal.
-    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    // mouse reporting only loses that, so it is not fatal. Bracketed paste
+    // lets the composer take multi-line pastes as ONE event.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // Compile the macOS IME helper in the background so the first composer
+    // open never blocks on swiftc.
+    cosense::ime::start_background_build();
     // Detect light/dark after entering the alt screen (unless forced).
     let light = force_light.unwrap_or_else(|| cosense::theme::detect_light().unwrap_or(false));
     let hl = Highlighter::new(theme.as_deref(), light);
@@ -1099,11 +1381,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let palette = cosense::theme::Palette::from_theme(&hl, light);
     let picker = Picker::from_query_stdio()?;
 
-    let ctx = Ctx { client, hl, palette, picker, fetcher, light };
+    let ctx = Ctx { client, hl, palette, picker, fetcher, light, ime_mode };
     let loaded = load_page(&ctx, &project, &title)?;
 
-    let mut app = App::new(project);
+    let mut app = App::new(project.clone());
+    app.light = ctx.light;
+    app.session_ime = cosense::ime::SessionIme::new(ime_mode);
     app.set_page(loaded, &ctx);
+    // Say how we are authenticated (or that we are not): edits and private
+    // reads depend on it, and `cosense login` is the fix when missing.
+    app.status = match ctx.client.credential_for(&project) {
+        Some(c) => format!("auth: {} · ? help", c.kind()),
+        None => "no auth — public read-only (`cosense login` to enable edits)".into(),
+    };
     // `#<lineId>` from the URL: start on that line (the first frame's layout
     // clamps it onto a rendered line and scrolls it into view).
     if let Some(id) = line_id {
@@ -1117,8 +1407,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let res = run(&mut terminal, &mut app, &ctx);
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
+    drop(app.ime_guard.take());
 
     if !app.comments.is_empty() {
         println!("{}", format_all(&app.comments));
@@ -1136,17 +1427,119 @@ struct Ctx {
     fetcher: Arc<ImageFetcher>,
     /// Terminal background is light (drives telomere/palette shades).
     light: bool,
+    /// Input-source policy around the composer (`--ime`, default jp).
+    ime_mode: cosense::ime::ImeMode,
 }
 
 /// Everything produced by loading one page.
 struct Loaded {
     project: String,
     title: String,
+    /// Immutable page id (edit API / commit log).
+    page_id: String,
     lines: Vec<PageLine>,
     blocks: Vec<Block>,
     srcs: Vec<usize>,
     /// See `App::read_at`.
     read_at: Option<i64>,
+    /// Related-pages sections (see `build_related`).
+    related: Vec<RelSection>,
+}
+
+/// Build the related-pages sections the way scrapbox.io presents them:
+///
+///   Links            — 1-hop: pages this page links to + pages linking here
+///                      (existing pages only; the API precomputes this).
+///   <hub> (×N)       — 2-hop: pages sharing the link <hub> with this page,
+///                      one group per link of this page, in page order. An
+///                      entry appears only under its first hub. A hub may be
+///                      a page that does not exist — 2-hop links work through
+///                      empty pages, which is exactly what makes a purely
+///                      auto-linked wiki hang together.
+///   External links   — outgoing `[/project/title]` links (the API exposes
+///                      no incoming cross-project list).
+fn build_related(page: &cosense::api::Page) -> Vec<RelSection> {
+    let mut secs: Vec<RelSection> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let key_of = |p: &cosense::api::RelatedPage| {
+        if p.title_lc.is_empty() { p.title.to_lowercase() } else { p.title_lc.clone() }
+    };
+    let entry_of = |p: &cosense::api::RelatedPage| RelEntry {
+        item: LinkItem::Page(p.title.clone()),
+        title: p.title.clone(),
+        desc: p.descriptions.first().cloned().unwrap_or_default(),
+        age: p.updated,
+    };
+    if let Some(rel) = &page.related {
+        if !rel.links1hop.is_empty() {
+            for p in &rel.links1hop {
+                seen.insert(key_of(p));
+            }
+            secs.push(RelSection {
+                heading: format!("Links ({})", rel.links1hop.len()),
+                entries: rel.links1hop.iter().map(&entry_of).collect(),
+            });
+        }
+        // 2-hop groups, one per link of this page (page order). `links_lc`
+        // of an entry lists which links it shares.
+        for hub in &page.links {
+            let hub_lc = hub.to_lowercase();
+            let group: Vec<&cosense::api::RelatedPage> = rel
+                .links2hop
+                .iter()
+                .filter(|p| !seen.contains(&key_of(p)) && p.links_lc.iter().any(|l| *l == hub_lc))
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            for p in &group {
+                seen.insert(key_of(p));
+            }
+            secs.push(RelSection {
+                heading: format!("{hub} ({})", group.len()),
+                entries: group.into_iter().map(&entry_of).collect(),
+            });
+        }
+        // 2-hop entries whose hubs did not match any current link (rename
+        // races and the like) still deserve a place.
+        let rest: Vec<&cosense::api::RelatedPage> =
+            rel.links2hop.iter().filter(|p| !seen.contains(&key_of(p))).collect();
+        if !rest.is_empty() {
+            secs.push(RelSection {
+                heading: format!("2 hop links ({})", rest.len()),
+                entries: rest.into_iter().map(&entry_of).collect(),
+            });
+        }
+    }
+    if !page.project_links.is_empty() {
+        let entries: Vec<RelEntry> = page
+            .project_links
+            .iter()
+            .filter_map(|pl| {
+                let rest = pl.strip_prefix('/')?;
+                let (project, title) = rest.split_once('/')?;
+                if project.is_empty() || title.is_empty() {
+                    return None;
+                }
+                Some(RelEntry {
+                    item: LinkItem::ProjectPage {
+                        project: project.to_string(),
+                        title: title.to_string(),
+                    },
+                    title: pl.clone(),
+                    desc: String::new(),
+                    age: 0,
+                })
+            })
+            .collect();
+        if !entries.is_empty() {
+            secs.push(RelSection {
+                heading: format!("External links ({})", entries.len()),
+                entries,
+            });
+        }
+    }
+    secs
 }
 
 /// A line is unread if it was edited after `read_at`, or the page was never
@@ -1207,13 +1600,16 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     };
+    let related = build_related(&page);
     Ok(Loaded {
         project: project.to_string(),
         title: title.to_string(),
+        page_id: page.id.clone(),
         lines,
         blocks: rendered.blocks,
         srcs: rendered.srcs,
         read_at,
+        related,
     })
 }
 
@@ -1423,8 +1819,21 @@ fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) {
 /// draw (the rest is handled on the next frame). akapen's constant.
 const MAX_EVENTS_PER_FRAME: usize = 64;
 
+/// What one key press asks the event loop to do. `Editor` needs the loop
+/// itself (it suspends the terminal), so it travels up instead of being
+/// handled in place.
+enum Action {
+    Continue,
+    Quit,
+    Editor,
+}
+
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Result<(), Box<dyn Error>> {
     loop {
+        // Keep command mode in ASCII (retried while the IME helper builds).
+        if !app.ime_ready && app.composing.is_none() {
+            app.ime_ready = app.session_ime.force_ascii();
+        }
         // Install any images that finished downloading, then draw.
         if app.drain_images() {
             app.laid_width = 0; // heights changed — rebuild layout
@@ -1445,69 +1854,104 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
             }
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    if handle_key(app, ctx, k) {
-                        return Ok(());
+                    match handle_key(app, ctx, k) {
+                        Action::Quit => return Ok(()),
+                        Action::Editor => {
+                            editor_roundtrip(terminal, app, ctx);
+                            break; // geometry may have changed — redraw first
+                        }
+                        Action::Continue => {}
                     }
                 }
                 Event::Mouse(m) => handle_mouse(app, ctx, m),
+                Event::Paste(data) => handle_paste(app, &data),
                 _ => {}
             }
         }
     }
 }
 
-/// One key press. Returns true to quit.
-fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> bool {
-    // Composer captures all keys.
-    if let Some(buf) = app.composing.as_mut() {
-        match k.code {
-            KeyCode::Esc => {
-                app.composing = None;
-                app.status = "comment cancelled".into();
+/// A bracketed paste: only the composer takes it. Insert keeps embedded
+/// newlines (one op inserts several lines); Replace is single-line by API
+/// contract, so a multi-line paste is refused rather than mangled.
+fn handle_paste(app: &mut App, data: &str) {
+    let Some(comp) = app.composing.as_mut() else { return };
+    let clean = data.replace("\r\n", "\n").replace('\r', "\n");
+    match comp {
+        Composer::Insert { input, .. } | Composer::Comment { input } => {
+            input.insert_str(&clean);
+        }
+        Composer::Replace { input, .. } => {
+            if clean.contains('\n') {
+                app.status = "multi-line paste — use o (insert) or ^e (editor) instead".into();
+            } else {
+                input.insert_str(&clean);
             }
-            KeyCode::Enter => {
-                let body = buf.clone();
-                if body.trim().is_empty() {
-                    app.composing = None;
-                    app.status = "empty comment discarded".into();
-                } else if let Some(c) = app.make_comment(body) {
-                    app.comments.push(c);
-                    app.composing = None;
-                    app.selection = None;
-                    app.status = format!("comment saved ({} total)", app.comments.len());
-                    app.laid_width = 0; // force rebuild to weave the card
-                } else {
-                    app.composing = None;
-                    app.status = "could not anchor comment".into();
+        }
+    }
+}
+
+/// One key press.
+fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
+    // Composer captures all keys. Emacs/readline-style line editing, so a
+    // Japanese sentence can be corrected mid-line without retyping it.
+    if app.composing.is_some() {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match (k.code, ctrl) {
+            (KeyCode::Esc, _) => {
+                app.composing = None;
+                app.ime_guard = None; // back to ASCII for command mode
+                app.status = "cancelled".into();
+            }
+            (KeyCode::Enter, _) => {
+                let comp = app.composing.take().unwrap();
+                app.ime_guard = None; // back to ASCII for command mode
+                finish_composer(app, ctx, comp);
+            }
+            (KeyCode::Backspace, _) => in_input(app, Input::backspace),
+            (KeyCode::Delete, _) | (KeyCode::Char('d'), true) => in_input(app, Input::delete),
+            (KeyCode::Left, _) | (KeyCode::Char('b'), true) => in_input(app, Input::left),
+            (KeyCode::Right, _) | (KeyCode::Char('f'), true) => in_input(app, Input::right),
+            (KeyCode::Home, _) | (KeyCode::Char('a'), true) => in_input(app, Input::home),
+            (KeyCode::End, _) | (KeyCode::Char('e'), true) => in_input(app, Input::end),
+            (KeyCode::Char('w'), true) => in_input(app, Input::delete_word),
+            (KeyCode::Char('u'), true) => in_input(app, Input::kill_to_start),
+            (KeyCode::Char(ch), false) => {
+                if let Some(c) = app.composing.as_mut() {
+                    c.input_mut().insert_char(ch);
                 }
             }
-            KeyCode::Backspace => {
-                buf.pop();
-            }
-            KeyCode::Char(c) => buf.push(c),
             _ => {}
         }
-        return false;
+        return Action::Continue;
     }
 
     // Overlays capture keys while open.
     if app.overlay.is_some() {
         handle_overlay_key(app, ctx, k.code, k.modifiers);
-        return false;
+        return Action::Continue;
     }
 
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     match (k.code, ctrl) {
         // ---- quit ---- (akapen default: q quits, Esc only cancels)
-        (KeyCode::Char('q'), false) => return true,
+        (KeyCode::Char('q'), false) => return Action::Quit,
         (KeyCode::Esc, false) => {
-            if app.selection.is_some() {
+            if app.time.is_some() {
+                app.time = None;
+                reload_page(app, ctx);
+                app.status = "NOW".into();
+            } else if app.selection.is_some() {
                 app.selection = None;
                 app.status = "selection cleared".into();
             } else {
                 app.status.clear();
             }
         }
+
+        // ---- time machine (←/→, akapen's timeline; server snapshots) ----
+        (KeyCode::Left, _) => travel(app, ctx, -1),
+        (KeyCode::Right, _) => travel(app, ctx, 1),
 
         // ---- move (akapen parity) ----
         (KeyCode::Char('j'), false) | (KeyCode::Down, _) => app.move_cursor(true),
@@ -1609,14 +2053,124 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> bool {
             if app.selection.is_some() {
                 app.selection = None;
                 app.status = "selection cleared".into();
+            } else if app.cursor >= app.lines.len() {
+                app.status = "related rows cannot be selected".into();
             } else {
                 app.selection = Some(Selection::new(app.cursor));
                 app.status = "selecting — j/k extend, c comment".into();
             }
         }
         (KeyCode::Char('c'), false) => {
-            app.composing = Some(String::new());
+            if app.time.is_some() {
+                app.status = "viewing history — comments need NOW (Esc)".into();
+                return Action::Continue;
+            }
+            app.composing = Some(Composer::Comment { input: Input::new(String::new()) });
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
             app.status = "type comment, Enter save, Esc cancel".into();
+        }
+
+        // ---- edit (official preview→submit API; conflicts surface as
+        //      NotFastForward, never as silent overwrites) ----
+        (KeyCode::Char('o'), false) => {
+            if app.time.is_some() {
+                app.status = "viewing history — read-only (Esc → NOW)".into();
+                return Action::Continue;
+            }
+            // Insert BELOW the cursor line: anchor is the next body line,
+            // or _end when the cursor sits on the last line (or on a
+            // related row — appending is the only edit that makes sense
+            // there).
+            let anchor = app
+                .cursor_src()
+                .and_then(|s| app.lines.get(s + 1))
+                .map(|l| l.id.clone())
+                .unwrap_or_else(|| "_end".into());
+            let label = match app.cursor_src() {
+                Some(s) if s + 1 < app.lines.len() => format!(" insert below line {} ", s + 1),
+                _ => " append at page end ".to_string(),
+            };
+            app.composing = Some(Composer::Insert { anchor, label, input: Input::new(String::new()) });
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+            app.status = "type new line, Enter preview, Esc cancel".into();
+        }
+        (KeyCode::Char('O'), false) => {
+            if app.time.is_some() {
+                app.status = "viewing history — read-only (Esc → NOW)".into();
+                return Action::Continue;
+            }
+            let Some(line) = app.cursor_src().and_then(|s| app.lines.get(s)) else {
+                app.status = "no line to insert above".into();
+                return Action::Continue;
+            };
+            if line.id.is_empty() {
+                app.status = "line has no id (cannot edit)".into();
+                return Action::Continue;
+            }
+            let label = format!(" insert above line {} ", app.cursor + 1);
+            app.composing =
+                Some(Composer::Insert { anchor: line.id.clone(), label, input: Input::new(String::new()) });
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+            app.status = "type new line, Enter preview, Esc cancel".into();
+        }
+        (KeyCode::Char('E'), false) => {
+            if app.time.is_some() {
+                app.status = "viewing history — read-only (Esc → NOW)".into();
+                return Action::Continue;
+            }
+            let Some(line) = app.cursor_src().and_then(|s| app.lines.get(s)) else {
+                app.status = "no line to edit".into();
+                return Action::Continue;
+            };
+            if line.id.is_empty() {
+                app.status = "line has no id (cannot edit)".into();
+                return Action::Continue;
+            }
+            let label = format!(" edit line {} ", app.cursor + 1);
+            app.composing = Some(Composer::Replace {
+                id: line.id.clone(),
+                label,
+                input: Input::new(line.text.clone()),
+            });
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+            app.status = "edit line, Enter preview, Esc cancel".into();
+        }
+        (KeyCode::Char('e'), true) => {
+            // Whole-page edit in $EDITOR (the “big edit” path: multi-line,
+            // IME-free — the editor is the user's own environment).
+            if app.time.is_some() {
+                app.status = "viewing history — read-only (Esc → NOW)".into();
+                return Action::Continue;
+            }
+            return Action::Editor;
+        }
+        (KeyCode::Char('x'), false) => {
+            if app.time.is_some() {
+                app.status = "viewing history — read-only (Esc → NOW)".into();
+                return Action::Continue;
+            }
+            // Delete the cursor line, or every line of the selection.
+            let (a, b) = app
+                .selection
+                .map(|s| s.range())
+                .unwrap_or((app.cursor, app.cursor));
+            if a >= app.lines.len() {
+                app.status = "related rows cannot be deleted".into();
+                return Action::Continue;
+            }
+            let b = b.min(app.lines.len() - 1);
+            let ops: Vec<EditOp> = (a..=b)
+                .filter_map(|i| {
+                    let id = app.lines[i].id.clone();
+                    if id.is_empty() { None } else { Some(EditOp::Delete { id }) }
+                })
+                .collect();
+            if ops.is_empty() {
+                app.status = "nothing deletable here".into();
+            } else {
+                app.selection = None;
+                run_edit_preview(app, ctx, ops);
+            }
         }
         (KeyCode::Char('d'), false) => {
             if let Some(i) = app.comment_at_cursor() {
@@ -1678,11 +2232,338 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> bool {
         }
         (KeyCode::Char('?'), false) => app.overlay = Some(Overlay::Help),
 
-        // Unbound: show what arrived, so a terminal that rewrites a
-        // shortcut (e.g. a Cmd-key) can be diagnosed from the status bar.
-        _ => app.status = format!("unbound key: {:?} {:?}", k.code, k.modifiers),
+        // Unbound: show what arrived. A NON-ASCII char here almost always
+        // means the IME is on — say so in Japanese instead of a cryptic
+        // "unbound key" (the ime helper normally prevents this state).
+        _ => {
+            if let KeyCode::Char(c) = k.code {
+                if !c.is_ascii() {
+                    app.status =
+                        "IMEがONのようです — 英数に切り替えてください（入力欄では自動で日本語になります）".into();
+                    return Action::Continue;
+                }
+            }
+            app.status = format!("unbound key: {:?} {:?}", k.code, k.modifiers);
+        }
     }
-    false
+    Action::Continue
+}
+
+/// Apply one `Input` editing method to the open composer.
+fn in_input(app: &mut App, f: fn(&mut Input)) {
+    if let Some(c) = app.composing.as_mut() {
+        f(c.input_mut());
+    }
+}
+
+/// Enter in the composer: comments save locally; edits dry-run against
+/// the edit API and open the preview overlay.
+fn finish_composer(app: &mut App, ctx: &Ctx, comp: Composer) {
+    match comp {
+        Composer::Comment { input } => {
+            let buf = input.buf;
+            if buf.trim().is_empty() {
+                app.status = "empty comment discarded".into();
+            } else if let Some(c) = app.make_comment(buf) {
+                app.comments.push(c);
+                app.selection = None;
+                app.status = format!("comment saved ({} total)", app.comments.len());
+                app.laid_width = 0; // force rebuild to weave the card
+            } else {
+                app.status = "could not anchor comment".into();
+            }
+        }
+        Composer::Insert { anchor, input, .. } => {
+            let buf = input.buf;
+            if buf.is_empty() {
+                app.status = "empty insert cancelled".into();
+            } else {
+                run_edit_preview(app, ctx, vec![EditOp::Insert { anchor, text: buf }]);
+            }
+        }
+        Composer::Replace { id, input, .. } => {
+            let buf = input.buf;
+            let unchanged = app
+                .lines
+                .iter()
+                .find(|l| l.id == id)
+                .map(|l| l.text == buf)
+                .unwrap_or(false);
+            if unchanged {
+                app.status = "no change".into();
+            } else {
+                run_edit_preview(app, ctx, vec![EditOp::Replace { id, text: buf }]);
+            }
+        }
+    }
+}
+
+/// `^e`: suspend the TUI, open the WHOLE page in `$EDITOR`, diff the
+/// result into minimal lineId ops (unchanged lines keep their ids), and
+/// drop into the usual preview → commit gate. The editor is the user's own
+/// environment — multi-line editing, their keybindings, their IME
+/// settings — which makes this the most natural way to write a lot.
+fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) {
+    let original: String =
+        app.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    let path = std::env::temp_dir().join(format!(
+        "cosense-{}-{}.txt",
+        std::process::id(),
+        now_secs()
+    ));
+    if let Err(e) = std::fs::write(&path, format!("{original}\n")) {
+        app.status = format!("temp file failed: {e}");
+        return;
+    }
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+
+    // Suspend the TUI for the editor, restore it after — whatever happens.
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    ratatui::restore();
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} '{}'", path.display()))
+        .status();
+    *terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    app.laid_width = 0; // re-lay out on the next frame
+
+    let ok = matches!(status, Ok(s) if s.success());
+    let edited = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    if !ok {
+        app.status = format!("editor aborted ({editor}) — nothing written");
+        return;
+    }
+    let edited = edited.strip_suffix('\n').unwrap_or(&edited).to_string();
+    if edited == original {
+        app.status = "no changes".into();
+        return;
+    }
+    let new_lines: Vec<String> = edited.split('\n').map(str::to_string).collect();
+    if new_lines.iter().all(|l| l.trim().is_empty()) {
+        app.status = "page emptied — refusing (delete pages in the browser)".into();
+        return;
+    }
+    let old: Vec<(String, String)> =
+        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let ops = cosense::editops::diff_to_ops(&old, &new_lines);
+    if ops.is_empty() {
+        app.status = "no changes".into();
+    } else {
+        run_edit_preview(app, ctx, ops);
+    }
+}
+
+/// Dry-run `ops` and open the preview overlay (Enter commits). A page that
+/// changed underneath fails fast-forward HERE, before anything is written:
+/// the viewer reloads and says so — the edit is retyped against fresh
+/// state, never silently rebased onto lines the user has not seen.
+fn run_edit_preview(app: &mut App, ctx: &Ctx, ops: Vec<EditOp>) {
+    match ctx.client.preview_edit(&app.project, &app.page_id, &ops) {
+        Ok(p) => {
+            let lines = preview_summary(app, &ops, &p);
+            app.overlay = Some(Overlay::EditPreview { preview_id: p.preview_id, lines });
+        }
+        Err(EditError::NotFastForward) => {
+            reload_page(app, ctx);
+            app.status = "page changed under you — reloaded, please edit again".into();
+        }
+        Err(e) => app.status = format!("preview failed: {e}"),
+    }
+}
+
+/// Human summary of a pending edit: the ops, then the after-apply lines
+/// around every change (`>` inserted, `*` replaced, `…` gaps).
+fn preview_summary(app: &App, ops: &[EditOp], p: &EditPreview) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let old_text = |id: &str| -> String {
+        app.lines
+            .iter()
+            .find(|l| l.id == id)
+            .map(|l| l.text.clone())
+            .unwrap_or_default()
+    };
+    for op in ops {
+        match op {
+            EditOp::Insert { text, .. } => {
+                for t in text.split('\n') {
+                    out.push(format!("+ {t}"));
+                }
+            }
+            EditOp::Replace { id, text } => {
+                out.push(format!("− {}", old_text(id)));
+                out.push(format!("+ {text}"));
+            }
+            EditOp::Delete { id } => out.push(format!("− {}", old_text(id))),
+        }
+    }
+    out.push(String::new());
+    // After-apply context: rows within 2 of any changed row.
+    let marked: Vec<bool> = p
+        .lines
+        .iter()
+        .map(|l| p.new_ids.contains(&l.id) || p.updated_ids.contains(&l.id))
+        .collect();
+    let show: Vec<bool> = (0..p.lines.len())
+        .map(|i| {
+            let lo = i.saturating_sub(2);
+            let hi = (i + 2).min(p.lines.len().saturating_sub(1));
+            marked[lo..=hi].iter().any(|&m| m)
+        })
+        .collect();
+    if show.iter().any(|&s| s) {
+        out.push("after apply:".into());
+        let mut gap = false;
+        for (i, l) in p.lines.iter().enumerate() {
+            if !show[i] {
+                if !gap {
+                    out.push("  ⋯".into());
+                    gap = true;
+                }
+                continue;
+            }
+            gap = false;
+            let mark = if p.new_ids.contains(&l.id) {
+                "> "
+            } else if p.updated_ids.contains(&l.id) {
+                "* "
+            } else {
+                "  "
+            };
+            out.push(format!("{mark}{}", l.text));
+        }
+    }
+    out
+}
+
+/// Commit the previewed edit, then reload the page (line ids, telomere and
+/// related list all move). A NotFastForward here means someone edited
+/// between preview and Enter — the viewer reloads and reports; nothing was
+/// written.
+fn submit_pending(app: &mut App, ctx: &Ctx, preview_id: String) {
+    match ctx.client.submit_edit(&app.project, &preview_id) {
+        Ok(c) => {
+            // The server may have renamed (title-line edit / auto-suffix).
+            if !c.title.is_empty() {
+                app.title = c.title;
+            }
+            reload_page(app, ctx);
+            let short: String = c.commit_id.chars().take(8).collect();
+            app.status = format!("✓ committed {short}");
+        }
+        Err(EditError::NotFastForward) => {
+            reload_page(app, ctx);
+            app.status = "page changed between preview and commit — reloaded, please edit again".into();
+        }
+        Err(EditError::PreviewGone) => {
+            app.status = "preview expired (5 min) — please edit again".into();
+        }
+        Err(e) => app.status = format!("commit failed: {e}"),
+    }
+}
+
+/// ←/→: travel the page's snapshot history (dir = -1 older, +1 newer).
+/// First ← enters the machine at the newest snapshot; → past the newest
+/// exits back to NOW (live page, refetched). The timeline is fetched once
+/// per visit and snapshots are cached, so scrubbing is instant.
+fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
+    if app.time.is_none() {
+        if dir > 0 {
+            app.status = "already at NOW".into();
+            return;
+        }
+        match ctx.client.list_snapshots(&app.project, &app.page_id) {
+            Ok(points) if !points.is_empty() => {
+                let last = points.len() - 1;
+                app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
+                show_snapshot(app, ctx, last);
+            }
+            Ok(_) => app.status = "no snapshots for this page".into(),
+            Err(e) => app.status = format!("snapshot list failed: {e}"),
+        }
+        return;
+    }
+    let (pos, len) = {
+        let tm = app.time.as_ref().unwrap();
+        (tm.pos, tm.points.len())
+    };
+    if dir < 0 {
+        if pos == 0 {
+            app.status = "oldest snapshot".into();
+        } else {
+            show_snapshot(app, ctx, pos - 1);
+        }
+    } else if pos + 1 >= len {
+        app.time = None;
+        reload_page(app, ctx);
+        app.status = "NOW".into();
+    } else {
+        show_snapshot(app, ctx, pos + 1);
+    }
+}
+
+/// Install snapshot `idx` of the time machine: swap the page body for the
+/// historical lines (rendered normally — the UI always consumes complete
+/// documents, akapen's history model), drop the related list (it describes
+/// the PRESENT graph), and keep the cursor's line number.
+fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
+    let (ts_id, created, len) = {
+        let tm = app.time.as_ref().unwrap();
+        (tm.points[idx].id.clone(), tm.points[idx].created, tm.points.len())
+    };
+    let cached = app.time.as_ref().unwrap().cache.get(&ts_id).cloned();
+    let snap = match cached {
+        Some(s) => s,
+        None => match ctx.client.get_snapshot(&app.project, &app.page_id, &ts_id) {
+            Ok(s) => {
+                app.time.as_mut().unwrap().cache.insert(ts_id.clone(), s.clone());
+                s
+            }
+            Err(e) => {
+                app.status = format!("snapshot fetch failed: {e}");
+                return;
+            }
+        },
+    };
+    let texts: Vec<String> = snap.lines.iter().map(|l| l.text.clone()).collect();
+    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
+    app.lines = snap.lines;
+    app.blocks = rendered.blocks;
+    app.srcs = rendered.srcs;
+    app.related = Vec::new();
+    app.virtual_items = Vec::new();
+    app.images.clear();
+    app.image_errors.clear();
+    app.pending.clear();
+    app.selection = None;
+    app.laid_width = 0; // rebuild (clamps the cursor)
+    app.follow = true;
+    app.start_image_loads(ctx);
+    app.time.as_mut().unwrap().pos = idx;
+    app.status = format!(
+        "⏪ {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
+        idx + 1,
+        len,
+        cosense::theme::format_local(created),
+        relative_age(created),
+    );
+}
+
+/// Refetch the current page in place, keeping the cursor's line number and
+/// following it (used after edits and edit conflicts).
+fn reload_page(app: &mut App, ctx: &Ctx) {
+    let cur = app.cursor;
+    match load_page(ctx, &app.project.clone(), &app.title.clone()) {
+        Ok(l) => {
+            app.set_page(l, ctx);
+            app.cursor = cur; // clamped on the next rebuild
+            app.follow = true;
+        }
+        Err(e) => app.status = format!("reload failed: {e}"),
+    }
 }
 
 /// Mouse handling (akapen parity).
@@ -1834,6 +2715,24 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let is_picker = matches!(app.overlay, Some(Overlay::Pages { .. }));
 
+    // The edit preview is a commit gate, not a list: Enter commits,
+    // y commits (habit from copy — "yes"), anything else closes.
+    if matches!(app.overlay, Some(Overlay::EditPreview { .. })) {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                if let Some(Overlay::EditPreview { preview_id, .. }) = app.overlay.take() {
+                    submit_pending(app, ctx, preview_id);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                app.overlay = None;
+                app.status = "edit cancelled (nothing written)".into();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     let is_line_info = matches!(app.overlay, Some(Overlay::LineInfo));
     let act = match code {
         KeyCode::Esc => Act::Close,
@@ -1956,18 +2855,34 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         (Some(_), n) => format!("  · {n} new"),
     };
     // `project/title`, the same shape as the page's URL — so a cross-project
-    // hop is visible without any notion of a "home" project.
+    // hop is visible without any notion of a "home" project. While the time
+    // machine is open the bar turns yellow and shows WHEN you are.
+    let time_badge = app
+        .time
+        .as_ref()
+        .map(|tm| {
+            let p = &tm.points[tm.pos];
+            format!(
+                "  ⏪ {}/{} · {}",
+                tm.pos + 1,
+                tm.points.len(),
+                cosense::theme::format_local(p.created)
+            )
+        })
+        .unwrap_or_default();
+    let header_bg = if app.time.is_some() { Color::Yellow } else { Color::Cyan };
     f.render_widget(
         Paragraph::new(Line::from(format!(
-            " {}/{}{}  ({} comment(s)){}{} ",
+            " {}/{}{}{}  ({} comment(s)){}{} ",
             app.project,
             app.title,
+            time_badge,
             if app.mode == Mode::Source { "  [source]" } else { "" },
             app.comments.len(),
             unread,
             sel_info
         )))
-        .style(Style::default().fg(Color::Black).bg(Color::Cyan)),
+        .style(Style::default().fg(Color::Black).bg(header_bg)),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
@@ -1977,6 +2892,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let mode_tag = if app.mode == Mode::Source { "SRC" } else { "VIEW" };
     let pos = if app.lines.is_empty() {
         "L-/-".to_string()
+    } else if app.cursor >= app.lines.len() && !app.virtual_items.is_empty() {
+        // Cursor is on a related row below the body.
+        format!("R{}/{}", app.cursor - app.lines.len() + 1, app.virtual_items.len())
     } else {
         let cur = app.cursor_src().map(|s| s + 1).unwrap_or(1).min(app.lines.len());
         format!("L{}/{}", cur, app.lines.len())
@@ -1991,7 +2909,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .collect();
         format!("Enter/f open → {}", listed.join("  "))
     } else if app.status.is_empty() {
-        "j/k move  Enter link  [/] back/fwd  Tab source  e browser  c comment  ? help  q quit"
+        "j/k move  Enter link  o/E/x edit  ^e editor  Tab source  c comment  ? help  q quit"
             .to_string()
     } else {
         app.status.clone()
@@ -2263,22 +3181,41 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
     }
 
-    // Composer overlay at the bottom.
-    if let Some(buf) = &app.composing {
+    // Composer overlay at the bottom. The caret is drawn at the input's
+    // cursor (←/→/^a/^e move it), not glued to the end.
+    if let Some(comp) = &app.composing {
         let h = 3u16;
         let r = Rect::new(area.x, area.y + area.height.saturating_sub(1 + h), area.width, h);
         f.render_widget(Clear, r);
-        let (a, b) = app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor));
-        let label = if a == b {
-            format!(" comment on line {} ", a + 1)
-        } else {
-            format!(" comment on lines {}-{} ", a + 1, b + 1)
+        let (label, input, badge, hint) = match comp {
+            Composer::Comment { input } => {
+                let (a, b) = app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor));
+                let label = if a == b {
+                    format!(" comment on line {} ", a + 1)
+                } else {
+                    format!(" comment on lines {}-{} ", a + 1, b + 1)
+                };
+                (label, input, Color::Green, "Enter save · Esc cancel · ←/→ ^a/^e ^w ^u")
+            }
+            Composer::Insert { label, input, .. } => (
+                label.clone(),
+                input,
+                Color::Yellow,
+                "Enter preview · Esc cancel · ←/→ ^a/^e ^w ^u — nothing written until commit",
+            ),
+            Composer::Replace { label, input, .. } => (
+                label.clone(),
+                input,
+                Color::Yellow,
+                "Enter preview · Esc cancel · ←/→ ^a/^e ^w ^u — nothing written until commit",
+            ),
         };
+        let (before, after) = input.parts();
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green))),
-                Line::from(format!("> {buf}▏")),
-                Line::from(Span::styled("Enter save · Esc cancel", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(label, Style::default().fg(Color::Black).bg(badge))),
+                Line::from(format!("> {before}▏{after}")),
+                Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
             ]),
             r,
         );
@@ -2356,6 +3293,11 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
             };
             ("line detail".into(), items, usize::MAX)
         }
+        Some(Overlay::EditPreview { lines, .. }) => (
+            "edit preview — nothing is written yet".into(),
+            lines.clone(),
+            usize::MAX,
+        ),
         Some(Overlay::Help) => (
             "keys".into(),
             vec![
@@ -2365,6 +3307,9 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "mode      Tab view⇄source".into(),
                 "pages     ^o recent pages (type to filter)".into(),
                 "browser   e open page at cursor line".into(),
+                "edit      o/O insert below/above · E edit line · x delete · ^e whole page in $EDITOR".into(),
+                "          every edit dry-runs first: Enter/y commits, Esc discards".into(),
+                "history   ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
                 "comment   v select · c add · d delete · ^n/^p jump".into(),
                 "detail    t who/when edited this line".into(),
                 "output    y copy all comments".into(),
@@ -2414,6 +3359,8 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
     let footer = if is_picker {
         " type to filter · ↑/↓ or ^n/^p move · Enter open · Esc close "
+    } else if matches!(app.overlay, Some(Overlay::EditPreview { .. })) {
+        " Enter/y commit · Esc cancel "
     } else {
         " ↑/↓ move · Enter open · Esc close "
     };
@@ -2548,6 +3495,130 @@ mod tests {
         assert_eq!(app.last_src(), Some(2));
     }
 
+    /// A related section for tests: two 1-hop pages and one external.
+    fn test_related() -> Vec<RelSection> {
+        vec![
+            RelSection {
+                heading: "Links (2)".into(),
+                entries: vec![
+                    RelEntry {
+                        item: LinkItem::Page("Alpha".into()),
+                        title: "Alpha".into(),
+                        desc: "first line".into(),
+                        age: 0,
+                    },
+                    RelEntry {
+                        item: LinkItem::Page("Beta".into()),
+                        title: "Beta".into(),
+                        desc: String::new(),
+                        age: 0,
+                    },
+                ],
+            },
+            RelSection {
+                heading: "External links (1)".into(),
+                entries: vec![RelEntry {
+                    item: LinkItem::ProjectPage { project: "other".into(), title: "Page".into() },
+                    title: "/other/Page".into(),
+                    desc: String::new(),
+                    age: 0,
+                }],
+            },
+        ]
+    }
+
+    #[test]
+    fn related_rows_are_cursor_addressable_virtual_lines() {
+        let mut app = page(&["title", "body"]);
+        app.related = test_related();
+        app.virtual_items = app
+            .related
+            .iter()
+            .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+            .collect();
+        app.rebuild(60);
+        // body lines 0..=1, then virtual srcs 2..=4
+        assert_eq!(app.src_count(), 5);
+        assert!(app.src_rows(2).is_some(), "first related row renders");
+        assert!(app.src_rows(4).is_some(), "external link row renders");
+        // G lands on the LAST related row, and its link is the entry's
+        app.goto_src(99);
+        assert_eq!(app.cursor, 4);
+        assert_eq!(
+            app.cursor_line_links(),
+            vec![LinkItem::ProjectPage { project: "other".into(), title: "Page".into() }]
+        );
+        // j/k walk body → related → body seamlessly
+        app.goto_src(1);
+        app.move_cursor(true);
+        assert_eq!(app.cursor, 2, "steps over the heading rule onto Alpha");
+        assert_eq!(app.cursor_line_links(), vec![LinkItem::Page("Alpha".into())]);
+        // comments cannot anchor on virtual rows
+        app.goto_src(3);
+        assert!(app.make_comment("x".into()).is_none());
+        // …but a selection overshooting into them clamps to the body
+        app.selection = Some(Selection { anchor: 1, cursor: 3 });
+        let c = app.make_comment("y".into()).unwrap();
+        assert_eq!((c.start, c.end), (1, 1));
+        // source mode hides related rows and clamps the cursor back
+        app.selection = None;
+        app.mode = Mode::Source;
+        app.rebuild(60);
+        assert_eq!(app.src_count(), 2);
+        assert!(app.cursor < 2, "cursor clamped into the body");
+    }
+
+    #[test]
+    fn build_related_groups_2hop_under_hubs_and_dedupes() {
+        use cosense::api::{Page, RelatedPage, RelatedPages};
+        let rp = |title: &str, links: &[&str]| RelatedPage {
+            id: String::new(),
+            title: title.into(),
+            title_lc: title.to_lowercase(),
+            descriptions: vec![],
+            links_lc: links.iter().map(|s| s.to_lowercase()).collect(),
+            linked: 0,
+            updated: 0,
+        };
+        let page = Page {
+            id: String::new(),
+            title: "me".into(),
+            lines: vec![],
+            links: vec!["Hub1".into(), "Hub2".into()],
+            project_links: vec!["/other/Page".into(), "/bare".into()],
+            related: Some(RelatedPages {
+                links1hop: vec![rp("Direct", &[])],
+                links2hop: vec![
+                    rp("Shared12", &["hub1", "hub2"]),
+                    rp("OnlyHub2", &["hub2"]),
+                    rp("Direct", &["hub1"]), // already 1-hop → dropped
+                    rp("Orphan", &["gone"]), // hub no longer on the page
+                ],
+                has_back_links_or_icons: true,
+            }),
+            updated: 0,
+            created: 0,
+            lines_count: 0,
+            last_accessed: None,
+        };
+        let secs = build_related(&page);
+        let heads: Vec<&str> = secs.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(
+            heads,
+            vec![
+                "Links (1)",
+                "Hub1 (1)",
+                "Hub2 (1)",
+                "2 hop links (1)",
+                "External links (1)"
+            ]
+        );
+        assert_eq!(secs[1].entries[0].title, "Shared12", "first hub claims the shared page");
+        assert_eq!(secs[2].entries[0].title, "OnlyHub2");
+        assert_eq!(secs[3].entries[0].title, "Orphan");
+        assert_eq!(secs[4].entries[0].title, "/other/Page", "bare /project is not a page");
+    }
+
     #[test]
     fn movement_skips_comment_cards() {
         let mut app = page(&["a", "b", "c"]);
@@ -2569,12 +3640,23 @@ mod tests {
     }
 
     #[test]
-    fn cursor_on_rowless_table_body_snaps_to_its_header() {
+    fn table_rows_are_individually_addressable() {
         let mut app = page(&["table:t", "\ta\tb", "\tc\td", "after"]);
         app.rebuild(40);
-        assert!(app.src_rows(1).is_none(), "table body lines render into the header's block");
+        // every source line of the table owns display rows now
+        assert!(app.src_rows(0).is_some(), "opener: name line + top border");
+        assert!(app.src_rows(1).is_some(), "header row");
+        assert!(app.src_rows(2).is_some(), "body row");
         app.goto_src(2);
-        assert_eq!(app.cursor, 0, "snaps up to the line that owns the block");
+        assert_eq!(app.cursor, 2, "cursor rests on the row itself");
+        // j/k walk opener → header → row → after
+        app.goto_src(0);
+        app.move_cursor(true);
+        assert_eq!(app.cursor, 1);
+        app.move_cursor(true);
+        assert_eq!(app.cursor, 2);
+        app.move_cursor(true);
+        assert_eq!(app.cursor, 3);
         // the last line is reachable and the clamp respects the end
         app.goto_src(99);
         assert_eq!(app.cursor, 3);

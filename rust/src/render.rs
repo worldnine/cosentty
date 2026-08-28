@@ -472,30 +472,34 @@ pub fn render_lines_with(
         // table block
         if let Some(name) = body.strip_prefix("table:") {
             let name = name.trim().to_string();
-            let mut rows: Vec<Vec<String>> = Vec::new();
+            // (source line, raw cells) — one Scrapbox line per table row.
+            let mut rows: Vec<(usize, Vec<String>)> = Vec::new();
             let mut j = i + 1;
             while j < lines.len() {
                 let (_, rl, rrest) = indent_info(&lines[j]);
                 if rl <= raw_len || lines[j].trim().is_empty() {
                     break;
                 }
-                rows.push(rrest.split('\t').map(|c| c.trim_end().to_string()).collect());
+                rows.push((j, rrest.split('\t').map(|c| c.trim_end().to_string()).collect()));
                 j += 1;
             }
             // decorate cells to styled spans (links stay navigable via extraction)
-            let styled_rows: Vec<Vec<Vec<Span<'static>>>> = rows
+            let styled_rows: Vec<(usize, Vec<Vec<Span<'static>>>)> = rows
                 .iter()
-                .map(|r| {
-                    r.iter()
-                        .map(|c| decorate_inline(c, &mut ex.links, &mut ex.images, pal))
-                        .collect()
+                .map(|(src, r)| {
+                    (
+                        *src,
+                        r.iter()
+                            .map(|c| decorate_inline(c, &mut ex.links, &mut ex.images, pal))
+                            .collect(),
+                    )
                 })
                 .collect();
             // Blank-only leading indent is dropped: Scrapbox tables render
             // flush; nesting is rare and the width-adaptive layout owns
             // horizontal budget. Keep the indent as a note for the future.
             let _ = &indent;
-            emit!(Block::Table(crate::table::Table { name, rows: styled_rows }));
+            emit!(Block::Table(crate::table::Table { name, name_src: i, rows: styled_rows }));
             i = j;
             continue;
         }
