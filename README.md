@@ -13,10 +13,10 @@ cargo run --bin view -- https://scrapbox.io/help-jp/リンク   # URL 直貼り�
 
 - **認証**: 公式 CLI（`cosense login`）の `~/.cosense/settings.json` を自動で使う
   （PAT / Service Account。`COSENSE_SID` はフォールバック）。非公開プロジェクト対応
-- **関連ページリスト**: 本体同様にページ末尾へ Links（1-hop）/ リンクごとの 2 hop グループ /
-  External links を描画。j/k で降りて Enter で辿れる（追加リクエストなし）
+- **関連ページリスト**: 本文枠を閉じた下側へ Links（1-hop）/ リンクごとの 2 hop グループ /
+  External links を描画。`G` は本文枠末尾、そこから j/k → Enter で辿れる（追加リクエストなし）
 - **モードレス編集**: cosense web 同様のビュー内直接編集。`e`/`i`/`o`/ダブルクリックで
-  セッション開始→キャレット行だけ生ソース表示、↑↓で何行でも連続編集、Enter で行追加。
+  セッション開始→本文枠がアクセント色になり、キャレット行だけ生ソース表示、↑↓で何行でも連続編集、Enter で行追加。
   コミットは自動（行離脱時・直列キュー）、確認ゲートなし、安全網は `u`/`^r` の undo/redo。
   同時編集は 409 で検出し自動復旧（書いた文章は失われない）。`^e` で $EDITOR 全文編集
 - **タイムマシン**: `←`/`→` で Page history（サーバーサイド snapshot）を行き来できる。

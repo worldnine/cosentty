@@ -121,7 +121,8 @@ struct RelEntry {
 }
 
 /// A laid-out visual row. Content rows carry their source line; card rows
-/// are synthesized (not selectable, no source).
+/// are synthesized (not selectable, no source). `FrameEnd` is the explicit
+/// boundary between the boxed page body and the unboxed related sections.
 enum Row {
     Line { line: Line<'static>, src: usize },
     Blank { src: usize },
@@ -130,6 +131,7 @@ enum Row {
     ImageLoading { src: usize },
     ImageError { msg: String, src: usize },
     Card { line: Line<'static> },
+    FrameEnd,
 }
 
 impl Row {
@@ -147,7 +149,7 @@ impl Row {
             | Row::Image { src, .. }
             | Row::ImageLoading { src }
             | Row::ImageError { src, .. } => Some(*src),
-            Row::Card { .. } => None,
+            Row::Card { .. } | Row::FrameEnd => None,
         }
     }
 }
@@ -1021,36 +1023,35 @@ impl App {
                 }
             }
         }
-        self.append_related(&mut content, text_w);
         content
     }
 
-    /// Append the related-pages sections (view mode): a dim heading rule per
-    /// section, then one row per entry carrying its VIRTUAL source index so
-    /// the cursor and Enter work on it. Headings and spacers are Card rows
-    /// (not selectable), like comment-card chrome.
-    fn append_related(&self, content: &mut Vec<Row>, text_w: usize) {
+    /// Build the related-pages sections that live BELOW and OUTSIDE the page
+    /// frame. Rows remain cursor-addressable virtual lines; only the visual
+    /// containment changes.
+    fn related_rows(&self, text_w: usize) -> Vec<Row> {
         if self.related.is_empty() {
-            return;
+            return Vec::new();
         }
         let pal = cosense::theme::Palette::for_light(self.light);
         let dim = Style::default().fg(Color::DarkGray);
         let link_style = Style::default().fg(pal.link);
         let mut vsrc = self.lines.len();
-        content.push(Row::Card { line: Line::from("") });
+        let mut rows = vec![Row::Card { line: Line::from("") }];
         for sec in &self.related {
             let head = format!("── {} ", sec.heading);
             let used = str_width(&head);
             let fill = "─".repeat(text_w.saturating_sub(used));
-            content.push(Row::Card {
+            rows.push(Row::Card {
                 line: Line::from(Span::styled(format!("{head}{fill}"), dim)),
             });
             for e in &sec.entries {
-                content.push(Row::Line { line: related_row(e, text_w, link_style), src: vsrc });
+                rows.push(Row::Line { line: related_row(e, text_w, link_style), src: vsrc });
                 vsrc += 1;
             }
-            content.push(Row::Card { line: Line::from("") });
+            rows.push(Row::Card { line: Line::from("") });
         }
+        rows
     }
 
     /// Source mode: the raw Scrapbox notation, one numbered row per source
@@ -1081,10 +1082,14 @@ impl App {
     /// attribution) plus inline comment cards inserted after each comment's
     /// anchor block. Called on resize and whenever comments change.
     fn rebuild(&mut self, width: u16) {
-        // 1. content rows — rendered blocks, or raw numbered source lines.
-        let content: Vec<Row> = match self.mode {
-            Mode::View => self.content_view(width),
-            Mode::Source => self.content_source(width),
+        // 1. Page rows and related rows are separate visual regions. The
+        // page is boxed; related sections are appended after its FrameEnd.
+        let (content, related): (Vec<Row>, Vec<Row>) = match self.mode {
+            Mode::View => {
+                let text_w = Self::text_width(Mode::View, width);
+                (self.content_view(width), self.related_rows(text_w))
+            }
+            Mode::Source => (self.content_source(width), Vec::new()),
         };
 
         // 2. compute each comment's anchor: the last content index whose src
@@ -1125,6 +1130,9 @@ impl App {
                 }
             }
         }
+        // Painted as └───┘ by `ui`; related rows begin after it.
+        rows.push(Row::FrameEnd);
+        rows.extend(related);
         self.rows = rows;
         self.laid_width = width;
         self.clamp_cursor();
@@ -1230,12 +1238,30 @@ impl App {
         self.after_cursor_move();
     }
 
-    /// First / last source line that has display rows (g / G targets).
+    /// First / last cursor-addressable source line. Related rows are source
+    /// lines too for j/k navigation, but `G` deliberately targets the last
+    /// BODY line because the related sections live outside the page frame.
     fn first_src(&self) -> Option<usize> {
         self.rows.iter().find_map(Row::src)
     }
     fn last_src(&self) -> Option<usize> {
         self.rows.iter().rev().find_map(Row::src)
+    }
+    fn last_body_src(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .filter_map(Row::src)
+            .filter(|&src| src < self.lines.len())
+            .last()
+    }
+
+    /// Height offset of the page frame's bottom rule (`FrameEnd`).
+    fn frame_end_top(&self) -> u16 {
+        self.rows
+            .iter()
+            .take_while(|r| !matches!(r, Row::FrameEnd))
+            .map(Row::height)
+            .sum()
     }
 
     fn after_cursor_move(&mut self) {
@@ -1255,12 +1281,17 @@ impl App {
         self.rows.iter().map(Row::height).sum()
     }
 
-    /// Largest scroll offset. The frame (content + 2 rule rows) scrolls as
-    /// a whole; at max scroll the bottom rule sits on the band's last row:
-    /// scroll = text.y + total - (body.y + band_h - 1) = total + 2 - band_h
-    /// (text.y = body.y + 1).
+    /// Largest scroll offset. The top rule is one row above `rows`; the
+    /// bottom page rule is an explicit FrameEnd inside `rows`, followed by
+    /// any unboxed related rows. Thus the whole extent is total + 1.
     fn max_scroll(&self, band_h: u16) -> u16 {
-        self.total_height().saturating_add(2).saturating_sub(band_h)
+        self.total_height().saturating_add(1).saturating_sub(band_h)
+    }
+
+    /// Scroll that pins the PAGE frame's bottom rule to the viewport bottom.
+    /// Unlike max_scroll, this intentionally ignores related rows.
+    fn frame_end_scroll(&self, band_h: u16) -> u16 {
+        self.frame_end_top().saturating_add(2).saturating_sub(band_h)
     }
 
     /// Y offset of the cursor line's first display row, if it has any.
@@ -2287,14 +2318,13 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             }
         }
         (KeyCode::Char('G'), false) => {
-            if let Some(s) = app.last_src() {
+            if let Some(s) = app.last_body_src() {
                 app.goto_src(s);
             }
-            // Pin the viewport at the document end so the bottom rule is
-            // visible: cursor-follow alone stops when the last content row
-            // is on screen, one row short of the frame's bottom rule.
+            // G means "bottom of the boxed page", not the related sections
+            // below it. j/↓ can still continue from there into Links.
             if app.view_h > 0 {
-                app.scroll = app.max_scroll(app.view_h);
+                app.scroll = app.frame_end_scroll(app.view_h);
                 app.follow = false;
             }
         }
@@ -3365,7 +3395,9 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     let screen_row = m.row.saturating_sub(text.y);
     // the pointer may leave the rows while dragging: clamp it back in
     let clamped_row = m.row.clamp(text.y, (text.y + text.height).saturating_sub(1)) - text.y;
-    let total = app.total_height() as usize;
+    // Same extent as the painted scrollbar: external top rule + rows
+    // (FrameEnd already lives inside rows).
+    let total = app.total_height().saturating_add(1) as usize;
     let view_h = text.height as usize;
     let on_track = m.column == app.bar_x
         && in_rows
@@ -3608,6 +3640,15 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     }
 }
 
+fn page_frame_style(editing: bool, light: bool) -> Style {
+    let color = if editing {
+        cosense::theme::Palette::for_light(light).link
+    } else {
+        cosense::theme::border_color(light)
+    };
+    Style::default().fg(color)
+}
+
 fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let area = f.area();
     f.render_widget(Clear, area);
@@ -3735,23 +3776,20 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         body.height.saturating_sub(2),
     );
 
-    // The frame HUGS THE CONTENT: the whole frame (top rule, content rows,
-    // bottom rule) moves together as `-scroll`. Content row n sits at
-    // text.y + n - scroll; the rules sit one above the first row and one
-    // below the last. Rules scroll off-screen with the page; the visible
-    // band is body.y .. area.y+area.height-2. Everything uses the SAME
-    // coordinate system, so the thumb, cursor-follow and the rules agree.
-    let total_h = app.total_height() as i32;
+    // The page frame hugs PAGE CONTENT ONLY. Its explicit FrameEnd closes
+    // the box; related sections continue beneath it without vertical sides.
+    // Everything scrolls in one coordinate system, so j/k crosses naturally.
     let top_rule = text.y as i32 - 1 - app.scroll as i32;
-    // The last content row is at text.y + (total_h - 1) - scroll; the
-    // bottom rule sits one below it.
-    let bot_rule = text.y as i32 + total_h - app.scroll as i32;
+    let bot_rule = text.y as i32 + app.frame_end_top() as i32 - app.scroll as i32;
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
     let band_h = (band_bot - band_top + 1).max(1) as u16; // visible rows
     {
         let buf = f.buffer_mut();
-        let frame_style = Style::default().fg(cosense::theme::border_color(ctx.light));
+        // The boundary doubles as a mode signal: neutral in READ, adaptive
+        // accent in EDIT. The footer also says EDIT, so color is not the sole
+        // indication.
+        let frame_style = page_frame_style(app.session.is_some(), ctx.light);
         let right_x = body.x + body.width.saturating_sub(1);
         let set = |buf: &mut ratatui::buffer::Buffer, x: u16, y: i32, s: &str| {
             if y < band_top || y > band_bot {
@@ -3884,6 +3922,8 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
             }
+            // Already painted as the frame's └───┘ rule above.
+            Row::FrameEnd => {}
             Row::Blank { .. } => {
                 if let Some(r) = one_row(screen_y) {
                     f.render_widget(Paragraph::new("").style(base), r);
@@ -3949,13 +3989,11 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // scroll moves the viewport only); when the content fits, nothing is
     // drawn and the border stays clean.
     // Scrollbar: ONLY the thumb is drawn, in its own column just inside the
-    // frame's right border. The scrollable extent is the whole frame
-    // (content + 2 rule rows), and the thumb tracks the offset over a track
-    // of `band_h` rows (the visible band), so at max scroll the thumb sits
-    // at the band's bottom exactly where the bottom rule appears.
+    // frame's right edge. The scrollable extent is top rule + all rows
+    // (including FrameEnd and unboxed related rows).
     let thumb = Style::default().fg(cosense::theme::scrollbar_thumb(ctx.light));
     if let Some((start, len)) = cosense::theme::scroll_thumb(
-        (app.total_height() + 2) as usize,
+        (app.total_height() + 1) as usize,
         band_h as usize,
         app.scroll as usize,
     ) {
@@ -4283,6 +4321,17 @@ mod tests {
     }
 
     #[test]
+    fn edit_session_changes_only_the_page_frame_accent() {
+        for light in [false, true] {
+            let read = page_frame_style(false, light);
+            let edit = page_frame_style(true, light);
+            assert_eq!(read.fg, Some(cosense::theme::border_color(light)));
+            assert_eq!(edit.fg, Some(cosense::theme::Palette::for_light(light).link));
+            assert_ne!(read.fg, edit.fg);
+        }
+    }
+
+    #[test]
     fn cursor_is_a_source_line_spanning_all_wrapped_rows() {
         let mut app = page(&["short", &"x".repeat(50), "tail"]);
         app.rebuild(22); // text width 20 -> the 50-char line wraps to 3 rows
@@ -4349,7 +4398,7 @@ mod tests {
         assert_eq!(app.src_count(), 5);
         assert!(app.src_rows(2).is_some(), "first related row renders");
         assert!(app.src_rows(4).is_some(), "external link row renders");
-        // G lands on the LAST related row, and its link is the entry's
+        // Direct navigation can still address the LAST related row and link.
         app.goto_src(99);
         assert_eq!(app.cursor, 4);
         assert_eq!(
@@ -4361,6 +4410,18 @@ mod tests {
         app.move_cursor(true);
         assert_eq!(app.cursor, 2, "steps over the heading rule onto Alpha");
         assert_eq!(app.cursor_line_links(), vec![LinkItem::Page("Alpha".into())]);
+        // The frame closes after the body, BEFORE the related section.
+        assert_eq!(app.frame_end_top(), 2);
+        let end = app.rows.iter().position(|r| matches!(r, Row::FrameEnd)).unwrap();
+        assert!(app.rows[end + 1..].iter().any(|r| r.src() == Some(2)));
+        // G is "bottom of page frame", not "last related row".
+        app.view_h = 3;
+        let _ = handle_key(&mut app, &test_ctx(), key(KeyCode::Char('G')));
+        assert_eq!(app.cursor, 1);
+        assert_eq!(app.scroll, app.frame_end_scroll(app.view_h));
+        // j then crosses the boundary into Links normally.
+        app.move_cursor(true);
+        assert_eq!(app.cursor, 2);
         // comments cannot anchor on virtual rows
         app.goto_src(3);
         assert!(app.make_comment("x".into()).is_none());
@@ -4866,13 +4927,15 @@ mod tests {
     fn scrollbar_click_and_drag_scrub_the_viewport_only() {
         let mut app = page_with_screen();
         app.goto_src(3);
-        // 30 rows / 10 viewport: thumb 3 rows, track rows 0..=7, max offset 20
+        // top rule + 30 rows + FrameEnd / 10 viewport: the scrollbar
+        // includes the complete visual extent.
         handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 41, 1 + 7));
-        assert_eq!(app.scroll, 20, "track bottom -> last page");
+        let end = app.max_scroll(app.view_h);
+        assert_eq!(app.scroll, end, "track bottom -> last page");
         assert_eq!(app.cursor, 3, "the cursor keeps its line");
         assert!(!app.follow);
         handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 41, 1 + 3));
-        assert!(app.scroll < 20 && app.scroll > 0);
+        assert!(app.scroll < end && app.scroll > 0);
         handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Up(MouseButton::Left), 41, 1 + 3));
         assert_eq!(app.scrollbar_drag, None);
         // wheel over the body: one row per event, cursor untouched
