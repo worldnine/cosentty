@@ -138,6 +138,16 @@ impl AuthStore {
         }
         self.sid.clone().map(Credential::Sid)
     }
+
+    /// The sid cookie this store knows (`--sid` / `COSENSE_SID`), REGARDLESS
+    /// of which credential actually resolves for a project. REST keeps the
+    /// normal precedence (env PAT → service account → users PAT → sid), but
+    /// the websocket push channel authenticates with the sid even when REST
+    /// uses a PAT — the two transports do not see eye to eye (Note:
+    /// NOTE-websocket-sync.md).
+    pub fn sid(&self) -> Option<&str> {
+        self.sid.as_deref()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -484,25 +494,11 @@ impl Client {
         self.list_members_in(&self.cfg.project)
     }
 
-    /// The requesting user's own id (`/api/users/me`). Websocket sync needs
-    /// it to strip self-echoes: our own commits come back as room events.
-    /// Uses the USER-level credential (sid included), like file downloads.
-    pub fn get_me(&self) -> Result<String, Box<dyn Error>> {
-        let url = format!("{}/users/me", self.cfg.base());
-        let mut req = self.http.get(&url).header("Accept", "application/json");
-        if let Some(cred) = self.cfg.auth.resolve_user(&self.cfg.origin()) {
-            let (name, value) = cred.header();
-            req = req.header(name, value);
-        }
-        let res = req.send()?;
-        if !res.status().is_success() {
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
-        }
-        let v: serde_json::Value = res.json()?;
-        v.get("id")
-            .and_then(|s| s.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "users/me: no id in response".into())
+    /// The sid cookie for the websocket push channel, when the session has
+    /// one (`--sid` / `COSENSE_SID`) — independent of the project credential
+    /// (which may well be a PAT).
+    pub fn sid(&self) -> Option<&str> {
+        self.cfg.auth.sid()
     }
 
     /// The project's immutable id, for the websocket room (the page API's

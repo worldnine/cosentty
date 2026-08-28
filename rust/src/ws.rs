@@ -13,17 +13,18 @@
 use crate::api::{Client, EditOp, PageLine};
 use std::io::ErrorKind;
 use std::net::TcpStream;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tungstenite::protocol::Message;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{ClientRequestBuilder, WebSocket};
 
-/// How often the ws thread wakes while idle: navigation is noticed here,
-/// and kernel read timeouts surface as ticks. The server pings every 25 s,
-/// so this is far shorter than any real traffic gap.
-const READ_TICK: Duration = Duration::from_secs(2);
+/// How often the ws thread wakes while idle: navigation, resync requests
+/// and kernel read timeouts surface here. The server pings every 25 s, so
+/// this is far shorter than any real traffic gap — and short enough that a
+/// gap-driven resync request is served within ~a quarter second.
+const READ_TICK: Duration = Duration::from_millis(250);
 /// No traffic at all for this long means the socket is dead even though no
 /// error surfaced (server pings every 25 s — 60 s of silence is fatal).
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
@@ -256,10 +257,12 @@ fn insert_lines(v: Option<&serde_json::Value>) -> Vec<(String, String)> {
 /// Unlike [`crate::editops::apply_ops`] (which mirrors the server for our
 /// OWN edits and may assume exact application), remote ops must be safe to
 /// re-apply or apply slightly out of order: an insert whose line id is
-/// already present is skipped (a replayed event cannot duplicate a line),
-/// and replaces / deletes for ids we do not have are no-ops (a stale event
-/// cannot resurrect or clobber anything).
-pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp]) {
+/// already present is skipped (a replayed event or our own echo cannot
+/// duplicate a line), and replaces / deletes for ids we do not have are
+/// no-ops (a stale event cannot resurrect or clobber anything). Inserted
+/// and replaced lines are stamped with the COMMITTER's `user_id` so line
+/// blame is right immediately, not only after the next full resync.
+pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp], user_id: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -274,14 +277,14 @@ pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp]) {
                 };
                 for (k, (id, text)) in newl.iter().enumerate() {
                     if lines.iter().any(|l| l.id == *id) {
-                        continue; // already applied (replay) — never duplicate
+                        continue; // already applied (replay / own echo) — never duplicate
                     }
                     lines.insert(
                         at + k,
                         PageLine {
                             id: id.clone(),
                             text: text.clone(),
-                            user_id: String::new(),
+                            user_id: user_id.to_string(),
                             created: now,
                             updated: now,
                         },
@@ -290,8 +293,13 @@ pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp]) {
             }
             EditOp::Replace { id, text } => {
                 if let Some(l) = lines.iter_mut().find(|l| l.id == *id) {
-                    l.text = text.clone();
-                    l.updated = now;
+                    if l.text != *text {
+                        // a same-text replace is an echo / replay — skip it
+                        // outright (nothing to do; keeps blame intact)
+                        l.text = text.clone();
+                        l.user_id = user_id.to_string();
+                        l.updated = now;
+                    }
                 }
             }
             EditOp::Delete { id } => {
@@ -444,30 +452,58 @@ impl RoomLink {
 // The sync thread
 // ---------------------------------------------------------------------------
 
+/// A full-page sync result: the page as fetched, plus the newest commit
+/// the thread had forwarded when the fetch was made — the local model is
+/// then known to be AT `head`, so the next event with `parentId == head`
+/// applies as a contiguous diff (no mistrust-reload after every resync).
+#[derive(Debug)]
+pub struct ResyncPage {
+    pub page: crate::api::Page,
+    /// Newest commit the thread had seen when the page was fetched
+    /// (`None` on a brand-new room: the first event triggers one catch-up).
+    pub head: Option<String>,
+}
+
 /// Messages the websocket thread ships to the event loop.
 pub enum WsEvent {
     /// A page commit is here — apply it through the same gate as polling.
     Commit(RemoteCommit),
-    /// The connection (re)joined a room and the page was re-fetched: the
-    /// event loop should install it as the fresh truth (fills any commits
-    /// missed while away) and reset its remote-head tracking.
-    Resynced { page: crate::api::Page },
+    /// The connection (re)joined a room or a resync was served: install the
+    /// page as the fresh truth (fills any commits missed while away) and
+    /// resume the commit chain at `head`.
+    Resynced(ResyncPage),
     /// One-shot status text (throttled by the thread).
     Status(String),
 }
 
+/// Requests the event loop sends to the sync thread. Only the thread talks
+/// to the network; the app parks a request in this channel and applies the
+/// Resynced result when it comes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WsRequest {
+    /// Refetch the room's page and ship it as a `WsEvent::Resynced`.
+    Resync,
+}
+
 /// Watch `target` (project, title — the same mutex the poller uses), keep a
-/// websocket room joined on it, and forward commit events to `tx`.
+/// websocket room joined on it, forward commit events to `tx`, and serve
+/// `WsRequest::Resync` requests from the event loop.
 pub fn spawn_ws_sync(
     client: Client,
     sid: String,
     target: Arc<Mutex<(String, String)>>,
+    req_rx: mpsc::Receiver<WsRequest>,
     tx: Sender<WsEvent>,
 ) {
     std::thread::spawn(move || {
         let api_domain = client.config().api_domain.clone();
         let mut backoff = Duration::from_secs(1);
         let mut last_status = Instant::now() - STATUS_THROTTLE;
+        // The room we last joined, and the newest commit we forwarded for it.
+        // The head survives reconnects (the room's history does too) and is
+        // cleared when the target moves to a different page.
+        let mut joined: Option<(String, String)> = None;
+        let mut last_commit_id: Option<String> = None;
         loop {
             let (project, title) = match target.lock() {
                 Ok(t) => t.clone(),
@@ -476,6 +512,10 @@ pub fn spawn_ws_sync(
             if project.is_empty() || title.is_empty() {
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
+            }
+            if joined.as_ref().map_or(true, |j| *j != (project.clone(), title.clone())) {
+                joined = Some((project.clone(), title.clone()));
+                last_commit_id = None; // new room: commit lineage is unknown
             }
             // Resolve the room's ids over REST (the page API also needs a
             // full fetch — that IS the rejoin catch-up payload).
@@ -510,7 +550,13 @@ pub fn spawn_ws_sync(
             backoff = Duration::from_secs(1);
             match link.join(&project_id, &page.id) {
                 Ok(()) => {
-                    let _ = tx.send(WsEvent::Resynced { page });
+                    // Catch-up: the pre-join fetch covers everything up to
+                    // the join; head = the newest commit we have forwarded
+                    // for this room (None on a fresh room).
+                    let _ = tx.send(WsEvent::Resynced(ResyncPage {
+                        page,
+                        head: last_commit_id.clone(),
+                    }));
                     throttled_status(&tx, &mut last_status, "ws: 接続済み (push sync)");
                 }
                 Err(e) => {
@@ -523,7 +569,17 @@ pub fn spawn_ws_sync(
 
             // Serve the joined room until it dies or the target moves on.
             let mut last_sync = Instant::now();
-            let changed = room_loop(&mut link, &client, &project, &title, &target, &tx, &mut last_sync);
+            let changed = room_loop(
+                &mut link,
+                &client,
+                &project,
+                &title,
+                &target,
+                &req_rx,
+                &tx,
+                &mut last_commit_id,
+                &mut last_sync,
+            );
             if changed {
                 // Navigation: loop re-reads the target and rejoins there.
             } else {
@@ -536,23 +592,42 @@ pub fn spawn_ws_sync(
 }
 
 /// Serve one joined room until it dies (`false`) or the target moves on
-/// (`true`).
+/// (`true`). Resync requests and navigation are served on ticks; commit
+/// events are forwarded with the newest id tracked as the room head.
 fn room_loop(
     link: &mut RoomLink,
     client: &Client,
     project: &str,
     title: &str,
     target: &Arc<Mutex<(String, String)>>,
+    req_rx: &mpsc::Receiver<WsRequest>,
     tx: &Sender<WsEvent>,
+    last_commit_id: &mut Option<String>,
     last_sync: &mut Instant,
 ) -> bool {
     loop {
         if link.idle() > SILENCE_LIMIT {
             return false; // dead half-open socket
         }
+        // The event loop asked for a full-page resync (commit-chain gap):
+        // fetch on THIS thread — the UI thread never does network I/O.
+        match req_rx.try_recv() {
+            Ok(WsRequest::Resync) => {
+                if let Ok(page) = client.get_page_in(project, title) {
+                    let _ = tx.send(WsEvent::Resynced(ResyncPage {
+                        page,
+                        head: last_commit_id.clone(),
+                    }));
+                    *last_sync = Instant::now();
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => return false,
+        }
         match link.recv() {
             Recv::Packet(IoPacket::Event { name, data }) if name == "commit" => {
                 if let Some(c) = parse_commit(&data) {
+                    *last_commit_id = Some(c.commit_id.clone());
                     let _ = tx.send(WsEvent::Commit(c));
                 }
             }
@@ -570,7 +645,10 @@ fn room_loop(
                 // Periodic full-page resync (the insurance poll).
                 if last_sync.elapsed() >= PERIODIC_SYNC && !moved {
                     if let Ok(page) = client.get_page_in(project, title) {
-                        let _ = tx.send(WsEvent::Resynced { page });
+                        let _ = tx.send(WsEvent::Resynced(ResyncPage {
+                            page,
+                            head: last_commit_id.clone(),
+                        }));
                         *last_sync = Instant::now();
                     }
                 }
@@ -758,9 +836,13 @@ mod tests {
                 EditOp::Replace { id: "a".into(), text: "TITLE".into() },
                 EditOp::Delete { id: "b".into() },
             ],
+            "alice",
         );
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, vec!["TITLE", "mid"]);
+        // remote lines are stamped with the committer (blame is right now)
+        assert_eq!(lines[0].user_id, "alice");
+        assert_eq!(lines[1].user_id, "alice");
         // re-applying the same ops (a reconnect replay) changes nothing
         apply_remote_ops(
             &mut lines,
@@ -769,9 +851,12 @@ mod tests {
                 EditOp::Replace { id: "a".into(), text: "TITLE".into() },
                 EditOp::Delete { id: "b".into() },
             ],
+            "bob",
         );
         let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
         assert_eq!(texts, vec!["TITLE".to_string(), "mid".to_string()]);
+        // …and the echo did not clobber the recorded committer
+        assert_eq!(lines[0].user_id, "alice");
         // stale ops for unknown ids are no-ops
         apply_remote_ops(
             &mut lines,
@@ -780,8 +865,14 @@ mod tests {
                 EditOp::Delete { id: "ghost".into() },
                 EditOp::Insert { anchor: "_end".into(), lines: vec![("y".into(), "end".into())] },
             ],
+            "carol",
         );
         let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
-        assert_eq!(texts, vec!["TITLE".to_string(), "mid".to_string(), "end".to_string()]);
+        assert_eq!(
+            texts,
+            vec!["TITLE".to_string(), "mid".to_string(), "end".to_string()]
+        );
+        // a fresh insert stamps its committer
+        assert_eq!(lines[2].user_id, "carol");
     }
 }
