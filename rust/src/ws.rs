@@ -526,6 +526,62 @@ pub enum WsRequest {
     Resync,
 }
 
+/// Which live-update plan to run: push sync when a `connect.sid` exists,
+/// plus a slow insurance poll so a broken push still surfaces web edits
+/// (worst case = the poll interval, never silence). No sid keeps the
+/// classic 3 s polling as the ONLY channel.
+pub fn sync_plan(sid_available: bool) -> (bool, Duration) {
+    if sid_available {
+        (true, Duration::from_secs(60))
+    } else {
+        (false, Duration::from_secs(3))
+    }
+}
+
+/// An edge-triggered resync request that is served until SUCCESS: a failed
+/// fetch does not consume the request (the gap event's effect would
+/// otherwise vanish until the periodic resync), and retries are spaced by
+/// a capped exponential backoff so a failing endpoint is not hammered.
+struct ResyncRequest {
+    due: bool,
+    next_at: Instant,
+    backoff: Duration,
+}
+
+impl ResyncRequest {
+    fn new() -> Self {
+        Self { due: false, next_at: Instant::now(), backoff: Duration::from_secs(1) }
+    }
+
+    /// (Re)arm the request (arrival of a `WsRequest::Resync`).
+    fn request(&mut self) {
+        self.due = true;
+    }
+
+    /// May a fetch attempt go now? Arms the containment window for the
+    /// next attempt (so a slow/failing server is not hammered per tick).
+    fn attempt(&mut self, now: Instant) -> bool {
+        if self.due && now >= self.next_at {
+            self.next_at = now + self.backoff;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The fetch succeeded: the request is consumed.
+    fn ok(&mut self) {
+        self.due = false;
+        self.next_at = Instant::now();
+        self.backoff = Duration::from_secs(1);
+    }
+
+    /// The fetch failed: the request stays due, the retry gap grows.
+    fn fail(&mut self) {
+        self.backoff = (self.backoff * 2).min(Duration::from_secs(15));
+    }
+}
+
 /// Watch `target` (project, title — the same mutex the poller uses), keep a
 /// websocket room joined on it, forward commit events to `tx`, and serve
 /// `WsRequest::Resync` requests from the event loop.
@@ -558,8 +614,11 @@ pub fn spawn_ws_sync(
                 joined = Some((project.clone(), title.clone()));
                 last_commit_id = None; // new room: commit lineage is unknown
             }
-            // Resolve the room's ids over REST (the page API also needs a
-            // full fetch — that IS the rejoin catch-up payload).
+            // Resolve the room's ids over REST. This pre-join fetch is ONLY
+            // for the page id the join needs — its DATA is never published:
+            // any commit between this fetch and the join would be missing
+            // from it. The catch-up snapshot is fetched AFTER a successful
+            // join, see below.
             let page = match client.get_page_in(&project, &title) {
                 Ok(p) => p,
                 Err(e) => {
@@ -590,10 +649,21 @@ pub fn spawn_ws_sync(
             };
             backoff = Duration::from_secs(1);
             match link.join(&project_id, &page.id) {
-                Ok(()) => {
-                    // Catch-up: the pre-join fetch covers everything up to
-                    // the join; head = the newest commit we have forwarded
-                    // for this room (None on a fresh room).
+                Ok(()) => {}
+                Err(e) => {
+                    throttled_status(&tx, &mut last_status, &format!("ws: join failed ({e})"));
+                    std::thread::sleep(backoff);
+                    backoff = grow(backoff);
+                    continue;
+                }
+            }
+            // POST-JOIN catch-up: refetch the page so the published snapshot
+            // covers everything up to the join — commits between the pre-join
+            // fetch and the join are in neither the room stream we had nor
+            // the old snapshot. A failed catch-up fetch means the join does
+            // NOT count as live: reconnect and retry the whole cycle.
+            match client.get_page_in(&project, &title) {
+                Ok(page) => {
                     let _ = tx.send(WsEvent::Resynced(ResyncPage {
                         page,
                         head: last_commit_id.clone(),
@@ -601,10 +671,14 @@ pub fn spawn_ws_sync(
                     throttled_status(&tx, &mut last_status, "ws: 接続済み (push sync)");
                 }
                 Err(e) => {
-                    throttled_status(&tx, &mut last_status, &format!("ws: join failed ({e})"));
+                    throttled_status(
+                        &tx,
+                        &mut last_status,
+                        &format!("ws: catch-up fetch failed ({e}) — reconnecting"),
+                    );
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
-                    continue;
+                    continue; // re-read the target, reconnect, rejoin, refetch
                 }
             }
 
@@ -646,6 +720,11 @@ fn room_loop(
     last_commit_id: &mut Option<String>,
     last_sync: &mut Instant,
 ) -> bool {
+    // A requested resync is served until it SUCCEEDS: a failed fetch does
+    // not consume the request (the gap event's effect must not vanish until
+    // the periodic resync), and retries are spaced by a capped backoff.
+    let mut resync = ResyncRequest::new();
+    let mut last_resync_status = Instant::now() - STATUS_THROTTLE;
     loop {
         if link.idle() > SILENCE_LIMIT {
             return false; // dead half-open socket
@@ -653,17 +732,29 @@ fn room_loop(
         // The event loop asked for a full-page resync (commit-chain gap):
         // fetch on THIS thread — the UI thread never does network I/O.
         match req_rx.try_recv() {
-            Ok(WsRequest::Resync) => {
-                if let Ok(page) = client.get_page_in(project, title) {
+            Ok(WsRequest::Resync) => resync.request(),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => return false,
+        }
+        if resync.attempt(Instant::now()) {
+            match client.get_page_in(project, title) {
+                Ok(page) => {
                     let _ = tx.send(WsEvent::Resynced(ResyncPage {
                         page,
                         head: last_commit_id.clone(),
                     }));
                     *last_sync = Instant::now();
+                    resync.ok();
+                }
+                Err(e) => {
+                    resync.fail(); // request stays due; retry after backoff
+                    throttled_status(
+                        tx,
+                        &mut last_resync_status,
+                        &format!("ws: 再同期失敗 — 再試行します ({e})"),
+                    );
                 }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => return false,
         }
         match link.recv() {
             Recv::Packet(IoPacket::Event { name, data }) if name == "commit" => {
@@ -726,6 +817,113 @@ mod tests {
 
     fn pl(id: &str, text: &str) -> PageLine {
         PageLine { id: id.into(), text: text.into(), user_id: String::new(), created: 0, updated: 0 }
+    }
+
+    #[test]
+    fn sync_plan_keeps_an_insurance_poll_in_ws_mode() {
+        // sid present: push sync ACTIVE, but a slow insurance poll still
+        // runs so a broken/stale push degrades to polling, never silence.
+        assert_eq!(sync_plan(true), (true, Duration::from_secs(60)));
+        // no sid: classic 3s polling, no push.
+        assert_eq!(sync_plan(false), (false, Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn resync_request_survives_failures_until_success() {
+        let mut r = ResyncRequest::new();
+        let t0 = Instant::now(); // after construction, so the first attempt may run
+        // quietly idle until armed
+        assert!(!r.attempt(t0));
+        r.request();
+        // first attempt is allowed immediately
+        assert!(r.attempt(t0));
+        // …and a FAILED fetch does not consume the request
+        r.fail();
+        assert!(r.due, "a failed attempt must not drop the gap resync");
+        // hammering right after a failure is rejected (bounded cadence)
+        assert!(!r.attempt(t0 + Duration::from_millis(1)));
+        // after the backoff a retry is allowed (exponential, capped)
+        assert!(r.attempt(t0 + Duration::from_secs(2)));
+        r.fail();
+        assert!(r.due);
+        assert!(!r.attempt(t0 + Duration::from_secs(2) + Duration::from_millis(1)));
+        assert!(r.attempt(t0 + Duration::from_secs(4)));
+        r.ok(); // success consumes it
+        assert!(!r.due);
+        assert!(!r.attempt(t0 + Duration::from_secs(5)), "cleared request stays quiet");
+        // …and the backoff reset for the next request
+        r.request();
+        assert!(r.attempt(Instant::now()));
+    }
+
+    #[test]
+    fn resync_backoff_is_capped() {
+        let mut r = ResyncRequest::new();
+        for _ in 0..12 {
+            r.fail();
+        }
+        let t0 = Instant::now();
+        r.request();
+        assert!(r.attempt(t0));
+        assert_eq!(r.backoff, Duration::from_secs(15), "retry gap never exceeds 15s");
+    }
+
+    #[test]
+    fn ws_sync_publishes_a_post_join_catch_up_snapshot() {
+        // Integration against the real server. Runs only where a sid exists
+        // (this dev environment); skips silently otherwise so CI stays
+        // network-free. Verifies the structure: after a successful join the
+        // thread fetches AGAIN and publishes that post-join page as the
+        // catch-up snapshot.
+        let Ok(sid) = std::env::var("COSENSE_SID") else { return };
+        if sid.is_empty() {
+            return;
+        }
+        let project = std::env::var("COSENSE_PROJECT_NAME")
+            .unwrap_or_else(|_| "my-sandbox".into());
+        let cfg = crate::api::Config {
+            project: project.clone(),
+            auth: crate::api::AuthStore::load(Some(sid.clone())),
+            api_domain: "scrapbox.io".into(),
+        };
+        let client = crate::api::Client::new(cfg).expect("client");
+        let (_, pages) = client.list_pages_in(&project, 1, 0, "updated").expect("latest page");
+        let title = pages.first().expect("non-empty project").title.clone();
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let target = Arc::new(Mutex::new((project.clone(), title.clone())));
+        spawn_ws_sync(client.clone(), sid.clone(), target, req_rx, tx);
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut catch_up: Option<crate::api::Page> = None;
+        let mut connected = false;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(WsEvent::Resynced(res)) => {
+                    // the published snapshot is the CURRENT page — as read
+                    // post-join, not some pre-join fetch
+                    let now_page =
+                        client.get_page_in(&project, &title).expect("current page read");
+                    assert_eq!(res.page.id, now_page.id, "catch-up is the live page");
+                    assert_eq!(res.page.title, now_page.title);
+                    catch_up = Some(now_page);
+                }
+                Ok(WsEvent::Status(s)) if s.contains("接続済み") => connected = true,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(e) => panic!("ws channel died: {e}"),
+            }
+            if catch_up.is_some() && connected {
+                break;
+            }
+        }
+        assert!(connected, "the thread reported itself connected");
+        assert!(catch_up.is_some(), "a post-join catch-up snapshot was published");
+        // keep the request half alive so the thread exits its room cycle
+        // cleanly when the channel closes (test process ends next anyway)
+        drop(req_tx);
+        let _ = rx;
     }
 
     #[test]

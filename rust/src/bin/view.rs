@@ -461,9 +461,10 @@ fn spawn_web_poller(
     client: Client,
     target: Arc<std::sync::Mutex<(String, String)>>,
     tx: mpsc::Sender<PolledPage>,
+    interval: Duration,
 ) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(3));
+        std::thread::sleep(interval);
         let (project, title) = match target.lock() {
             Ok(t) => t.clone(),
             Err(_) => return,
@@ -1780,11 +1781,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
-    // PAT while the push channel only accepts the sid), 3 s polling
-    // otherwise. In ws mode the poller is skipped entirely: the ws thread
-    // ships its own periodic full-page resync and gap-driven refetches.
+    // PAT while the push channel only accepts the sid), polling otherwise.
+    // A slow INSURANCE poll keeps running even in ws mode: a stale or
+    // invalid sid (push stuck reconnecting forever) must degrade to
+    // "web edits still land, just at the poll interval" — never silence.
     let sid = ctx.client.sid().map(str::to_string);
-    let ws_active = sid.is_some();
+    let (ws_active, poll_interval) = cosense::ws::sync_plan(sid.is_some());
+    spawn_web_poller(
+        ctx.client.clone(),
+        Arc::clone(&app.poll_target),
+        app.poll_tx.clone(),
+        poll_interval,
+    );
     if let Some(sid) = &sid {
         let ws_req_rx = app
             .ws_req_rx
@@ -1797,8 +1805,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             ws_req_rx,
             app.ws_tx.clone(),
         );
-    } else {
-        spawn_web_poller(ctx.client.clone(), Arc::clone(&app.poll_target), app.poll_tx.clone());
     }
     app.set_page(loaded, &ctx);
     // Say how we are authenticated (or that we are not): edits and private
