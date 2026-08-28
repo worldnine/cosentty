@@ -618,13 +618,20 @@ pub fn render_lines_with(
             continue;
         }
 
-        // section heading: whole line wrapped in [* ...] at level 0
-        if level == 0 {
-            if let Some(spans) = parse_heading(body, pal) {
-                emit!(Block::Text(Line::from(spans)));
-                i += 1;
-                continue;
+        // Section heading: `[* ...]` may ALSO be indented in Cosense.
+        // Markdown would make these competing block types; Cosense composes
+        // them. Keep the positional bullet in the bullet style and apply the
+        // theme's heading style only to the heading text.
+        if let Some(heading) = parse_heading(body, pal) {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if level > 0 {
+                spans.push(Span::raw(indent.clone()));
+                spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
             }
+            spans.extend(heading);
+            emit!(Block::Text(Line::from(spans)));
+            i += 1;
+            continue;
         }
 
         // bullet / plain
@@ -746,6 +753,25 @@ mod tests {
         assert_eq!(style_of(&out.blocks[4]), pal.heading_style_for(4));
         assert_eq!(style_of(&out.blocks[5]), pal.heading_style_for(4), "four+ stars share the top level");
         assert_ne!(style_of(&out.blocks[1]), style_of(&out.blocks[4]));
+    }
+
+    #[test]
+    fn indented_headings_keep_both_bullet_and_theme_heading_styles() {
+        let pal = Palette::for_light(false);
+        let out = render_lines_with(
+            &["title".into(), " [* one]".into(), "   [*** three]".into()],
+            None,
+            &pal,
+        );
+        assert_eq!(plain(&out.blocks[1]), "• one");
+        assert_eq!(plain(&out.blocks[2]), "  • three");
+
+        for (block, stars) in [(&out.blocks[1], 1), (&out.blocks[2], 3)] {
+            let Block::Text(line) = block else { panic!("expected text") };
+            assert_eq!(line.spans[1].content, "• ");
+            assert_eq!(line.spans[1].style.fg, Some(pal.bullet));
+            assert_eq!(line.spans[2].style, pal.heading_style_for(stars));
+        }
     }
 
     #[test]
