@@ -8,3 +8,4 @@ pub mod render;
 pub mod table;
 pub mod theme;
 pub mod wrap;
+pub mod ws;

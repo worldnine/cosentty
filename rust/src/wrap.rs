@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn preserves_span_styles_across_wrap() {
-        use ratatui::style::{Color, Stylize};
+        use ratatui::style::Color;
         let l = Line::from(vec![
             Span::raw("aa"),
             Span::styled("bbbb", Style::default().fg(Color::Red)),

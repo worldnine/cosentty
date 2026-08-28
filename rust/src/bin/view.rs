@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
 use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
+use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
 use cosense::highlight::Highlighter;
@@ -266,6 +267,25 @@ struct App {
     poll_rx: mpsc::Receiver<PolledPage>,
     /// The poller's sender (kept for the spawn call in `main`).
     poll_tx: mpsc::Sender<PolledPage>,
+
+    /// Own user id (`/api/users/me`): commit events from this id are
+    /// self-echoes of our own edits and are skipped (the serial commit
+    /// worker already applied them locally).
+    me_id: String,
+    /// Websocket push events (commit payloads, resyncs, status notes).
+    ws_rx: mpsc::Receiver<ws::WsEvent>,
+    /// The sync thread's sender (kept for the spawn call in `main`).
+    ws_tx: mpsc::Sender<ws::WsEvent>,
+    /// Remote commits that arrived while an apply gate was up; applied in
+    /// order once the gates drop (see `ws_flush_pending`).
+    ws_pending: std::collections::VecDeque<RemoteCommit>,
+    /// Commit id the local page model is known to be at. `None` after a
+    /// full fetch; a commit whose `parentId` does not match it means we
+    /// missed something → full reload (then the chain reconnects).
+    ws_head: Option<String>,
+    /// Last time a discontinuity forced a full reload — rate-limits the
+    /// reconnect-replay burst to one reload.
+    last_ws_reload: Instant,
     /// Last left-click (for double-click detection): time, column, row.
     last_click: Option<(Instant, u16, u16)>,
     /// Related-pages sections below the body (view mode only).
@@ -534,6 +554,7 @@ impl App {
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
         let (poll_tx, poll_rx) = mpsc::channel();
+        let (ws_tx, ws_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -584,6 +605,12 @@ impl App {
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
             poll_rx,
             poll_tx,
+            me_id: String::new(),
+            ws_rx,
+            ws_tx,
+            ws_pending: std::collections::VecDeque::new(),
+            ws_head: None,
+            last_ws_reload: Instant::now(),
             last_click: None,
             related: Vec::new(),
             virtual_items: Vec::new(),
@@ -619,6 +646,11 @@ impl App {
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
         }
+        // A fresh page install severs the websocket commit lineage: the
+        // room re-joins on the new target, and any remote head we tracked
+        // or events buffered for the OLD page are meaningless.
+        self.ws_head = None;
+        self.ws_pending.clear();
         self.related = l.related;
         self.virtual_items = self
             .related
@@ -1677,12 +1709,48 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     // The web poller: edits made in the browser land on screen in ~3 s.
-    spawn_web_poller(ctx.client.clone(), Arc::clone(&app.poll_target), app.poll_tx.clone());
+    // With a `connect.sid` we run websocket push instead (sub-second, diff
+    // applied) and skip the poller entirely — the ws thread ships its own
+    // periodic full-page resync. PAT / service-account sessions keep the
+    // 3 s poller.
+    let sid_ws = matches!(ctx.client.credential_for(&project), Some(cosense::api::Credential::Sid(_)));
+    let me_id = if sid_ws {
+        match ctx.client.get_me() {
+            Ok(id) => Some(id),
+            Err(e) => {
+                eprintln!("ws sync unavailable (users/me: {e}) — falling back to polling");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(me) = &me_id {
+        let sid = std::env::var("COSENSE_SID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default();
+        app.me_id = me.clone();
+        cosense::ws::spawn_ws_sync(
+            ctx.client.clone(),
+            sid,
+            Arc::clone(&app.poll_target),
+            app.ws_tx.clone(),
+        );
+    } else {
+        spawn_web_poller(ctx.client.clone(), Arc::clone(&app.poll_target), app.poll_tx.clone());
+    }
     app.set_page(loaded, &ctx);
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
+    // `sync:` shows which live-update path is active (ws = websocket push,
+    // poll = 3 s polling).
     app.status = match ctx.client.credential_for(&project) {
-        Some(c) => format!("auth: {} · ? help", c.kind()),
+        Some(c) => format!(
+            "auth: {} · sync: {} · ? help",
+            c.kind(),
+            if me_id.is_some() { "ws" } else { "poll" }
+        ),
         None => "no auth — public read-only (`cosense login` to enable edits)".into(),
     };
     // `#<lineId>` from the URL: start on that line (the first frame's layout
@@ -2128,6 +2196,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // Commit outcomes from the serial worker (✓ / conflict recovery).
         while let Ok(outcome) = app.commit_res_rx.try_recv() {
             handle_commit_outcome(app, ctx, outcome);
+        }
+        // Remote commits that were buffered while a gate was up (inflight,
+        // dirty line, composer, history) apply now that it is down.
+        ws_flush_pending(app, ctx);
+        // Websocket push: commit events (sub-second diffs) and resyncs.
+        while let Ok(ev) = app.ws_rx.try_recv() {
+            handle_ws_event(app, ctx, ev);
         }
         // Web-side edits, freshly polled (applied only when safe).
         while let Ok(polled) = app.poll_rx.try_recv() {
@@ -3054,32 +3129,23 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     }
 }
 
-/// Reflect a polled page: WEB EDITS APPEAR ON SCREEN within seconds.
-/// Applied only when nothing local is at stake — the page matches, no
-/// commit is in flight, no line is dirty, no composer is open — so the
-/// local-authoritative model is never overwritten mid-thought. Remote
-/// lines keep their per-line `updated`, so the telomere shows the new
-/// lines as unread, exactly like a browser revisit.
-fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
-    if polled.project != app.project || polled.title != app.title {
-        return;
-    }
-    if app.time.is_some() || app.inflight > 0 || app.composing.is_some() {
-        return;
-    }
-    if app.session.as_ref().map(|s| s.input.buf != s.orig).unwrap_or(false) {
-        return; // a dirty caret line — never yank text out from under it
-    }
-    let same = polled.page.lines.len() == app.lines.len()
-        && polled
-            .page
-            .lines
-            .iter()
-            .zip(&app.lines)
-            .all(|(a, b)| a.id == b.id && a.text == b.text);
-    if same {
-        return;
-    }
+/// The shared apply gate: never install remote state while the local
+/// model is at stake — viewing history, a commit in flight, a composer
+/// open, or a dirty caret line. Polling drops the page when gated (it
+/// refetches soon anyway); websocket commits are BUFFERED instead and
+/// flushed the moment the gate drops (`ws_flush_pending`).
+fn remote_gate_clear(app: &App) -> bool {
+    app.time.is_none()
+        && app.inflight == 0
+        && app.composing.is_none()
+        && !app.session.as_ref().map(|s| s.input.buf != s.orig).unwrap_or(false)
+}
+
+/// Replace the local page model with `page`'s lines, keeping the cursor and
+/// a clean session on THEIR line ids (a vanished line closes the session),
+/// clearing the local undo lineage (its anchors came from the old state),
+/// and re-rendering. Polled pages and websocket resyncs both land here.
+fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, status: &str) {
     let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
     let session_id = app
         .session
@@ -3087,25 +3153,33 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
         .and_then(|s| app.lines.get(s.line))
         .map(|l| l.id.clone());
 
-    app.related = build_related(&polled.page);
+    app.related = build_related(page);
     app.virtual_items = app
         .related
         .iter()
         .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
         .collect();
-    app.lines = polled.page.lines;
+    app.lines = page.lines.clone();
     // Remote lineage: local undo anchors may no longer exist.
     app.undo_stack.clear();
     app.redo_stack.clear();
     rerender(app, ctx);
+    reanchor_cursor_session(app, cursor_id, session_id);
+    app.follow = true;
+    app.status = status.into();
+}
 
+/// Re-anchor the cursor and a clean session onto their line ids after the
+/// page model changed (full install or remote diff); a vanished session
+/// line closes the session.
+fn reanchor_cursor_session(app: &mut App, cursor_id: Option<String>, session_id: Option<String>) {
     // Keep the cursor on ITS line (by id), not its number.
     if let Some(id) = cursor_id {
         if let Some(i) = app.lines.iter().position(|l| l.id == id) {
             app.cursor = i;
         }
     }
-    // Re-anchor a clean session the same way; a vanished line closes it.
+    // Re-anchor the session the same way; a vanished line closes it.
     if let Some(sid) = session_id {
         match app.lines.iter().position(|l| l.id == sid) {
             Some(i) => {
@@ -3126,8 +3200,161 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
             }
         }
     }
-    app.follow = true;
-    app.status = "⟳ web側の編集を反映".into();
+}
+
+/// Reflect a polled page: WEB EDITS APPEAR ON SCREEN within seconds.
+/// Applied only when nothing local is at stake — the page matches, no
+/// commit is in flight, no line is dirty, no composer is open — so the
+/// local-authoritative model is never overwritten mid-thought. Remote
+/// lines keep their per-line `updated`, so the telomere shows the new
+/// lines as unread, exactly like a browser revisit.
+fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
+    if polled.project != app.project || polled.title != app.title {
+        return;
+    }
+    if !remote_gate_clear(app) {
+        return;
+    }
+    let same = polled.page.lines.len() == app.lines.len()
+        && polled
+            .page
+            .lines
+            .iter()
+            .zip(&app.lines)
+            .all(|(a, b)| a.id == b.id && a.text == b.text);
+    if same {
+        return;
+    }
+    install_remote_lines(app, ctx, &polled.page, "⟳ web側の編集を反映");
+}
+
+// -------------------------------------------------------------------------
+// Websocket push sync (NOTE-websocket-sync.md)
+// -------------------------------------------------------------------------
+
+/// One event from the ws thread → the event loop.
+fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
+    match ev {
+        WsEvent::Status(s) => {
+            // Never clobber the session hint (EDIT — …): connection notes
+            // are transient and can wait.
+            if !app.status.starts_with("EDIT") {
+                app.status = s;
+            }
+        }
+        WsEvent::Resynced { page } => ws_resync(app, ctx, page),
+        WsEvent::Commit(c) => ws_on_commit(app, ctx, c),
+    }
+}
+
+/// The ws thread (re)joined the room and re-fetched the page: install it
+/// (fills any commits missed while away), drop the buffered backlog, and
+/// reset the commit head — the next commit's `parentId` reconnects the
+/// chain from here.
+fn ws_resync(app: &mut App, ctx: &Ctx, page: cosense::api::Page) {
+    if page.id != app.page_id || !remote_gate_clear(app) {
+        return;
+    }
+    app.ws_pending.clear();
+    app.ws_head = None;
+    install_remote_lines(app, ctx, &page, "⟳ websocket 再接続 — 全体を同期");
+}
+
+/// A remote commit arrived. Self-echoes (OUR commits — the serial worker
+/// already applied them locally) only advance the head so the next foreign
+/// commit stays contiguous. Foreign commits apply through the same gate as
+/// polling, except they BUFFER while gated instead of being dropped.
+fn ws_on_commit(app: &mut App, ctx: &Ctx, c: RemoteCommit) {
+    if c.page_id != app.page_id {
+        return; // stale room (navigation is one step ahead of the events)
+    }
+    if c.user_id == app.me_id && !app.me_id.is_empty() {
+        ws_track_head(app, &c);
+        return;
+    }
+    if !remote_gate_clear(app) {
+        app.ws_pending.push_back(c);
+        return;
+    }
+    ws_flush_pending(app, ctx);
+    ws_apply_one(app, ctx, c);
+}
+
+/// Apply buffered commits now that the gates are clear, oldest first.
+fn ws_flush_pending(app: &mut App, ctx: &Ctx) {
+    while !app.ws_pending.is_empty() {
+        let next = app.ws_pending.pop_front().expect("non-empty");
+        if !ws_apply_one(app, ctx, next) {
+            break; // a gate came up mid-flush — the rest stay buffered
+        }
+    }
+}
+
+/// Apply ONE remote commit. Returns false if it had to be re-buffered (a
+/// gate is up); true if it was applied, dropped, or replaced state.
+fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
+    if c.page_id != app.page_id {
+        return true; // stale room
+    }
+    if c.user_id == app.me_id && !app.me_id.is_empty() {
+        ws_track_head(app, &c);
+        return true;
+    }
+    if !remote_gate_clear(app) {
+        app.ws_pending.push_front(c);
+        return false;
+    }
+    if app.ws_head.as_deref() == Some(c.parent_id.as_str()) {
+        // Contiguous: this commit extends the state we are known to be at.
+        // Apply its ops as a diff and mark the new head.
+        let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
+        let session_id = app
+            .session
+            .as_ref()
+            .and_then(|s| app.lines.get(s.line))
+            .map(|l| l.id.clone());
+        cosense::ws::apply_remote_ops(&mut app.lines, &c.ops);
+        app.ws_head = Some(c.commit_id.clone());
+        rerender(app, ctx);
+        reanchor_cursor_session(app, cursor_id, session_id);
+        app.follow = true;
+        app.status = "⟳ websocket で更新を反映".into();
+        return true;
+    }
+    // Chain broke (reconnect gap, join replay, meta-only commits in
+    // between): re-fetch the whole page — fills the gap exactly once, and
+    // the replay burst cannot reload repeatedly thanks to the throttle.
+    ws_reload_fallback(app, ctx, &c);
+    true
+}
+
+/// Advance the remote head through a self-echo commit (no application).
+fn ws_track_head(app: &mut App, c: &RemoteCommit) {
+    if app.ws_head.as_deref() == Some(c.parent_id.as_str()) {
+        app.ws_head = Some(c.commit_id.clone());
+    } else {
+        app.ws_head = None; // ambivalent — the next foreign commit resyncs
+    }
+}
+
+/// The commit chain no longer connects to the local model: reload the page
+/// wholesale and treat `c` as the new head. Rate-limited to one reload per
+/// second so a reconnect-replay burst drains without reloading repeatedly.
+fn ws_reload_fallback(app: &mut App, ctx: &Ctx, c: &RemoteCommit) {
+    if app.last_ws_reload.elapsed() < Duration::from_secs(1) {
+        app.status = "⟳ websocket: 差分を追えず 1秒待機中".into();
+        return;
+    }
+    app.last_ws_reload = Instant::now();
+    app.ws_head = None;
+    if reload_page(app, ctx) {
+        // full fetch: set_page clears session + lineage; the reloaded page
+        // already contains `c`'s effect (the event only arrives after the
+        // server applied it), so the head resumes at c.
+        app.ws_head = Some(c.commit_id.clone());
+        app.ime_guard = None;
+        app.status = "⟳ websocket 差分に欠落 — 全体を再取得".into();
+    }
 }
 
 /// 409 NotFastForward: someone else moved the page. Invalidate the queue,
@@ -3258,16 +3485,21 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
 }
 
 /// Refetch the current page in place, keeping the cursor's line number and
-/// following it (used after edits and edit conflicts).
-fn reload_page(app: &mut App, ctx: &Ctx) {
+/// following it (used after edits, edit conflicts, and ws re-sync).
+/// Returns whether the refetch succeeded.
+fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
     let cur = app.cursor;
     match load_page(ctx, &app.project.clone(), &app.title.clone()) {
         Ok(l) => {
             app.set_page(l, ctx);
             app.cursor = cur; // clamped on the next rebuild
             app.follow = true;
+            true
         }
-        Err(e) => app.status = format!("reload failed: {e}"),
+        Err(e) => {
+            app.status = format!("reload failed: {e}");
+            false
+        }
     }
 }
 
@@ -4181,7 +4413,7 @@ mod tests {
             client: Client::new(cfg).unwrap(),
             hl: Highlighter::new(None, false),
             palette: cosense::theme::Palette::for_light(false),
-            picker: Picker::from_fontsize((8, 16).into()),
+            picker: Picker::halfblocks(),
             fetcher: Arc::new(ImageFetcher::new(None, None).unwrap()),
             light: false,
             ime_mode: cosense::ime::ImeMode::Off,
@@ -4615,6 +4847,223 @@ mod tests {
         app.inflight = 1;
         apply_remote(&mut app, &ctx, polled(&[("id0", "t"), ("id1", "REMOTE")]));
         assert_eq!(app.lines[1].text, "one", "own commits must land first");
+    }
+
+    // ---- websocket push (NOTE-websocket-sync.md) ----
+
+    /// One remote commit event, shaped like the ws thread would deliver it.
+    fn commit(id: &str, parent: &str, page: &str, user: &str, ops: Vec<EditOp>) -> RemoteCommit {
+        RemoteCommit {
+            commit_id: id.into(),
+            parent_id: parent.into(),
+            page_id: page.into(),
+            user_id: user.into(),
+            ops,
+        }
+    }
+
+    #[test]
+    fn ws_contiguous_commit_applies_a_diff_and_advances_head() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one", "two"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        app.me_id = "me".into();
+        let pid = app.page_id.clone();
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c1",
+                "c0",
+                &pid,
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "ONE!".into() }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "ONE!", "diff applied in place");
+        assert_eq!(app.ws_head.as_deref(), Some("c1"));
+        assert!(app.status.contains("websocket"));
+    }
+
+    #[test]
+    fn ws_self_echo_is_skipped_but_advances_the_head() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        app.me_id = "me".into();
+        let pid = app.page_id.clone();
+        // our own commit: the serial worker already applied it locally
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c1",
+                "c0",
+                &pid,
+                "me",
+                vec![EditOp::Replace { id: "id1".into(), text: "SELF".into() }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "one", "self-echo never reapplies");
+        assert_eq!(app.ws_head.as_deref(), Some("c1"), "…but the chain continues");
+        // the NEXT foreign commit extends past our echo and still applies
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c2",
+                "c1",
+                &pid,
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "AFTER".into() }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "AFTER");
+        assert_eq!(app.ws_head.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn ws_commits_buffer_while_gated_and_flush_in_order() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one", "two"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        app.me_id = "me".into();
+        app.inflight = 1; // our own commit is landing — gate up
+        let pid = app.page_id.clone();
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c1",
+                "c0",
+                &pid,
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "FIRST".into() }],
+            ),
+        );
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c2",
+                "c1",
+                &pid,
+                "other",
+                vec![EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![("n1".into(), "tail".into())],
+                }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "one", "nothing applied while gated");
+        assert_eq!(app.ws_pending.len(), 2);
+        // the commit lands: gate drops, buffered events apply oldest first
+        app.inflight = 0;
+        ws_flush_pending(&mut app, &ctx);
+        let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(texts, vec!["t", "FIRST", "two", "tail"]);
+        assert_eq!(app.ws_head.as_deref(), Some("c2"));
+        assert!(app.ws_pending.is_empty());
+    }
+
+    #[test]
+    fn ws_dirty_caret_line_buffers_the_commit() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        app.me_id = "me".into();
+        let pid = app.page_id.clone();
+        enter_session(&mut app, &ctx, 1, 3);
+        type_str(&mut app, &ctx, "!"); // dirty caret line — gate up
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c1",
+                "c0",
+                &pid,
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "REMOTE".into() }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "one", "buffered, not applied");
+        assert_eq!(app.ws_pending.len(), 1);
+        // leaving the line commits it and drops the gate; flush applies
+        handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
+        let _ = drain_jobs(&mut app);
+        app.inflight = 0; // the queued commit is "done" in this test harness
+        ws_flush_pending(&mut app, &ctx);
+        assert_eq!(app.lines[1].text, "REMOTE");
+    }
+
+    #[test]
+    fn ws_different_page_events_are_dropped() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c1",
+                "c0",
+                "some-other-page",
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "NOPE".into() }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "one", "stale-room events go nowhere");
+        assert!(app.ws_pending.is_empty());
+    }
+
+    #[test]
+    fn ws_resync_installs_the_page_and_resets_head_and_pending() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.me_id = "me".into();
+        app.ws_head = Some("c9".into());
+        let pid = app.page_id.clone();
+        app.ws_pending.push_back(commit("c8", "c7", &pid, "other", vec![]));
+        let mut p = polled(&[("id0", "t"), ("idX", "fresh!"), ("id1", "one")]).page;
+        p.id = app.page_id.clone();
+        handle_ws_event(&mut app, &ctx, WsEvent::Resynced { page: p });
+        let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(texts, vec!["t", "fresh!", "one"]);
+        assert!(app.ws_head.is_none());
+        assert!(app.ws_pending.is_empty());
+    }
+
+    #[test]
+    fn ws_chain_break_is_throttled_to_one_reload() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        app.me_id = "me".into();
+        app.last_ws_reload = Instant::now(); // a reload just happened
+        let pid = app.page_id.clone();
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c2",
+                "cNOPE",
+                &pid,
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "??".into() }],
+            ),
+        );
+        // within the throttle window no network reload is attempted and the
+        // stray commit is not applied; the head stays so the resync that
+        // follows (or the next flush) reconnects.
+        assert_eq!(app.lines[1].text, "one");
+        assert_eq!(app.ws_head.as_deref(), Some("c0"));
     }
 
     #[test]

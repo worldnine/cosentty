@@ -484,6 +484,49 @@ impl Client {
         self.list_members_in(&self.cfg.project)
     }
 
+    /// The requesting user's own id (`/api/users/me`). Websocket sync needs
+    /// it to strip self-echoes: our own commits come back as room events.
+    /// Uses the USER-level credential (sid included), like file downloads.
+    pub fn get_me(&self) -> Result<String, Box<dyn Error>> {
+        let url = format!("{}/users/me", self.cfg.base());
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(cred) = self.cfg.auth.resolve_user(&self.cfg.origin()) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send()?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        let v: serde_json::Value = res.json()?;
+        v.get("id")
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "users/me: no id in response".into())
+    }
+
+    /// The project's immutable id, for the websocket room (the page API's
+    /// `projectId`). Read from `/api/projects/<name>/users` — the same
+    /// endpoint the CLI uses, because `/api/projects/<name>` itself refuses
+    /// PAT (401, verified).
+    pub fn get_project_id(&self, project: &str) -> Result<String, Box<dyn Error>> {
+        let url = format!("{}/projects/{}/users", self.cfg.base(), urlencoding(project));
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send()?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        let v: serde_json::Value = res.json()?;
+        v.get("projectId")
+            .and_then(|s| s.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "projects/<name>/users: no projectId in response".into())
+    }
+
     /// `list_members` for any project (see `list_pages_in`).
     pub fn list_members_in(&self, project: &str) -> Result<Vec<Member>, Box<dyn Error>> {
         let url = format!(
