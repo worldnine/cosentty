@@ -130,31 +130,22 @@ fn strip_leading_ws(raw: &str, n: usize) -> String {
     raw[idx..].to_string()
 }
 
+/// Indent of a line: EVERY leading whitespace char (space, tab, 　) is
+/// one level — Scrapbox counts characters, it does not collapse runs.
+/// Bullets land wherever the whitespace puts them, logical or not.
 fn indent_info(raw: &str) -> (usize, usize, &str) {
     let mut raw_len = 0usize;
     let mut level = 0usize;
-    let mut chars = raw.char_indices().peekable();
     let mut end_byte = 0usize;
-    while let Some(&(idx, c)) = chars.peek() {
-        if c == ' ' {
+    for (idx, c) in raw.char_indices() {
+        if c == ' ' || c == '\t' || c == '\u{3000}' {
             level += 1;
             raw_len += 1;
-            chars.next();
-            // consume the rest of this run of spaces (same level)
-            while let Some(&(_, ' ')) = chars.peek() {
-                raw_len += 1;
-                chars.next();
-            }
-        } else if c == '\t' || c == '\u{3000}' {
-            level += 1;
-            raw_len += 1;
-            chars.next();
+            end_byte = idx + c.len_utf8();
         } else {
             end_byte = idx;
             break;
         }
-        // track byte offset of remaining text
-        end_byte = chars.peek().map(|&(i, _)| i).unwrap_or(raw.len());
     }
     if level == 0 {
         end_byte = 0;
@@ -348,8 +339,11 @@ fn strip_deco_prefix(inner: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// One display column per indent char: the bullet sits at column
+/// `level-1`, exactly where the edit session draws it — entering EDIT
+/// never shifts the line horizontally.
 fn indent_str(level: usize) -> String {
-    "  ".repeat(level.saturating_sub(1))
+    " ".repeat(level.saturating_sub(1))
 }
 
 /// File extensions rendered as images (what the `image` crate can decode).
@@ -461,10 +455,19 @@ pub fn render_lines_with(
         let (level, raw_len, body) = indent_info(raw);
         let indent = indent_str(level);
 
-        // blank line (preserve). Code blocks are consumed whole below, so no
-        // in-code guard is needed here anymore.
-        if raw.trim().is_empty() {
+        // blank line (preserve). A WHITESPACE-ONLY line is not blank: it
+        // is an empty bullet at its indent depth (cosense shows the dot).
+        // Code blocks are consumed whole below, so no in-code guard is
+        // needed here anymore.
+        if raw.is_empty() {
             emit!(Block::Blank);
+            i += 1;
+            continue;
+        }
+        if body.is_empty() {
+            let mut spans: Vec<Span<'static>> = vec![Span::raw(indent.clone())];
+            spans.push(Span::styled("•".to_string(), Style::default().fg(pal.bullet)));
+            emit!(Block::Text(Line::from(spans)));
             i += 1;
             continue;
         }
@@ -819,9 +822,12 @@ mod tests {
         ];
         let out = render_lines(&lines);
         let got: Vec<String> = out.blocks.iter().map(plain).collect();
-        // relative nesting: 本文 < 見出し < 基本は, each +2 columns
-        assert_eq!(got[1], "      • 本文");
-        assert_eq!(got[2], "        • 見出し");
-        assert_eq!(got[3], "          • 基本は見出しH2で作成");
+        // POSITIONAL nesting: one column per whitespace char (tab and 　
+        // included) — the bullet sits at column n-1, matching the edit
+        // session's display exactly. 4 tabs → col 3; +　 → col 4;
+        // +　+4 spaces → col 8.
+        assert_eq!(got[1], "   • 本文");
+        assert_eq!(got[2], "    • 見出し");
+        assert_eq!(got[3], "        • 基本は見出しH2で作成");
     }
 }

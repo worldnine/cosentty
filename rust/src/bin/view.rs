@@ -259,6 +259,13 @@ struct App {
     inflight: usize,
     /// Conflict generation: bumping it invalidates all queued jobs.
     gen: Arc<std::sync::atomic::AtomicU64>,
+    /// What the web poller should watch (project, title); updated on every
+    /// page install and rename.
+    poll_target: Arc<std::sync::Mutex<(String, String)>>,
+    /// Pages the poller fetched (applied by `apply_remote`).
+    poll_rx: mpsc::Receiver<PolledPage>,
+    /// The poller's sender (kept for the spawn call in `main`).
+    poll_tx: mpsc::Sender<PolledPage>,
     /// Last left-click (for double-click detection): time, column, row.
     last_click: Option<(Instant, u16, u16)>,
     /// Related-pages sections below the body (view mode only).
@@ -404,6 +411,40 @@ enum CommitOutcome {
     Failed { label: String, msg: String },
 }
 
+/// A freshly polled page: how web-side edits reach the screen (~3 s).
+struct PolledPage {
+    project: String,
+    title: String,
+    page: cosense::api::Page,
+}
+
+/// The web-edit poller: refetches the CURRENT page every few seconds on
+/// its own thread and ships it to the event loop, which applies it only
+/// when nothing local is in flight (see `apply_remote`). Cosense proper
+/// uses a websocket; polling one small JSON keeps this dependency-free
+/// and is plenty "live" for a wiki.
+fn spawn_web_poller(
+    client: Client,
+    target: Arc<std::sync::Mutex<(String, String)>>,
+    tx: mpsc::Sender<PolledPage>,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(3));
+        let (project, title) = match target.lock() {
+            Ok(t) => t.clone(),
+            Err(_) => return,
+        };
+        if project.is_empty() || title.is_empty() {
+            continue;
+        }
+        if let Ok(page) = client.get_page_in(&project, &title) {
+            if tx.send(PolledPage { project, title, page }).is_err() {
+                return; // app gone
+            }
+        }
+    });
+}
+
 /// The serial commit worker: one job in flight at a time, in queue order —
 /// ordering is what keeps every op valid against the server's state.
 fn spawn_commit_worker(
@@ -492,6 +533,7 @@ impl App {
         let (file_tx, file_rx) = mpsc::channel();
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
+        let (poll_tx, poll_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -539,6 +581,9 @@ impl App {
             commit_res_tx,
             inflight: 0,
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
+            poll_rx,
+            poll_tx,
             last_click: None,
             related: Vec::new(),
             virtual_items: Vec::new(),
@@ -571,6 +616,9 @@ impl App {
         self.blocks = l.blocks;
         self.srcs = l.srcs;
         self.read_at = l.read_at;
+        if let Ok(mut t) = self.poll_target.lock() {
+            *t = (self.project.clone(), self.title.clone());
+        }
         self.related = l.related;
         self.virtual_items = self
             .related
@@ -1381,43 +1429,55 @@ fn indent_of(s: &str) -> &str {
 }
 
 /// Display form of the session's raw line: the indent whitespace shows as
-/// `(n-1) spaces + •` — the bullet the view draws — while the DATA stays
-/// whitespace. Exactly ONE display char per raw char (tabs included), so
-/// caret and click math map 1:1 through char indices.
+/// `(n-1) spaces + • + space` — exactly the shape the view draws (`• `
+/// with its trailing half-width space) — while the DATA stays whitespace.
+/// Indentation is positional: one column per whitespace char, logical or
+/// not; a whitespace-only line shows just its bullet. The n raw indent
+/// chars map to n+1 display chars (the injected space after the bullet),
+/// and `display_caret`/`raw_caret_from_display` carry that shift, so the
+/// hardware cursor and clicks stay exact.
 fn session_display(buf: &str) -> String {
     let ind = indent_of(buf);
     let n = ind.chars().count();
     if n == 0 {
         return buf.to_string();
     }
-    let mut out = String::with_capacity(buf.len() + 2);
+    let mut out = String::with_capacity(buf.len() + 4);
     for _ in 0..n - 1 {
         out.push(' ');
     }
     out.push('•');
+    out.push(' ');
     out.push_str(&buf[ind.len()..]);
     out
 }
 
-/// Byte length of the bullet prefix in `session_display(buf)` (0 when the
+/// Byte length of the `…• ` prefix in `session_display(buf)` (0 when the
 /// line has no indent).
 fn display_prefix_bytes(buf: &str) -> usize {
     let n = indent_of(buf).chars().count();
-    if n == 0 { 0 } else { (n - 1) + '•'.len_utf8() }
+    if n == 0 { 0 } else { (n - 1) + '•'.len_utf8() + 1 }
 }
 
-/// Byte offset in `session_display(buf)` for byte offset `caret` in `buf`
-/// (chars map 1:1).
+/// Byte offset in `session_display(buf)` for byte offset `caret` in `buf`.
+/// Char-index mapping with the +1 shift past the injected bullet space.
 fn display_caret(buf: &str, caret: usize) -> usize {
+    let n = indent_of(buf).chars().count();
     let ci = buf[..caret.min(buf.len())].chars().count();
+    let di = if n > 0 && ci >= n { ci + 1 } else { ci };
     let disp = session_display(buf);
-    disp.char_indices().nth(ci).map(|(b, _)| b).unwrap_or_else(|| disp.len())
+    disp.char_indices().nth(di).map(|(b, _)| b).unwrap_or_else(|| disp.len())
 }
 
-/// Inverse: a byte offset in `session_display(buf)` back to `buf`.
+/// Inverse: a byte offset in `session_display(buf)` back to `buf`. The
+/// injected space after the bullet snaps to the text start.
 fn raw_caret_from_display(buf: &str, disp_byte: usize) -> usize {
+    let n = indent_of(buf).chars().count();
     let disp = session_display(buf);
-    let ci = disp[..disp_byte.min(disp.len())].chars().count();
+    let di = disp[..disp_byte.min(disp.len())].chars().count();
+    // Display chars: 0..=n-1 the indent (spaces+bullet), n the injected
+    // space (snaps to the text start), n+1.. the text shifted by one.
+    let ci = if n == 0 || di <= n { di } else { di - 1 };
     buf.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(buf.len())
 }
 
@@ -1616,6 +1676,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&app.gen),
         );
     }
+    // The web poller: edits made in the browser land on screen in ~3 s.
+    spawn_web_poller(ctx.client.clone(), Arc::clone(&app.poll_target), app.poll_tx.clone());
     app.set_page(loaded, &ctx);
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
@@ -2066,6 +2128,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // Commit outcomes from the serial worker (✓ / conflict recovery).
         while let Ok(outcome) = app.commit_res_rx.try_recv() {
             handle_commit_outcome(app, ctx, outcome);
+        }
+        // Web-side edits, freshly polled (applied only when safe).
+        while let Ok(polled) = app.poll_rx.try_recv() {
+            apply_remote(app, ctx, polled);
         }
         // Install any images that finished downloading, then draw.
         if app.drain_images() {
@@ -2972,6 +3038,9 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
             // Title-line edits rename the page (auto-suffix included).
             if !title.is_empty() && title != app.title {
                 app.title = title;
+                if let Ok(mut t) = app.poll_target.lock() {
+                    *t = (app.project.clone(), app.title.clone());
+                }
             }
             if app.status.is_empty() || app.status.starts_with('✓') || app.status.starts_with("EDIT") {
                 app.status = format!("✓ {label}");
@@ -2983,6 +3052,82 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
         }
         CommitOutcome::Conflict => recover_conflict(app, ctx),
     }
+}
+
+/// Reflect a polled page: WEB EDITS APPEAR ON SCREEN within seconds.
+/// Applied only when nothing local is at stake — the page matches, no
+/// commit is in flight, no line is dirty, no composer is open — so the
+/// local-authoritative model is never overwritten mid-thought. Remote
+/// lines keep their per-line `updated`, so the telomere shows the new
+/// lines as unread, exactly like a browser revisit.
+fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
+    if polled.project != app.project || polled.title != app.title {
+        return;
+    }
+    if app.time.is_some() || app.inflight > 0 || app.composing.is_some() {
+        return;
+    }
+    if app.session.as_ref().map(|s| s.input.buf != s.orig).unwrap_or(false) {
+        return; // a dirty caret line — never yank text out from under it
+    }
+    let same = polled.page.lines.len() == app.lines.len()
+        && polled
+            .page
+            .lines
+            .iter()
+            .zip(&app.lines)
+            .all(|(a, b)| a.id == b.id && a.text == b.text);
+    if same {
+        return;
+    }
+    let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
+    let session_id = app
+        .session
+        .as_ref()
+        .and_then(|s| app.lines.get(s.line))
+        .map(|l| l.id.clone());
+
+    app.related = build_related(&polled.page);
+    app.virtual_items = app
+        .related
+        .iter()
+        .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+        .collect();
+    app.lines = polled.page.lines;
+    // Remote lineage: local undo anchors may no longer exist.
+    app.undo_stack.clear();
+    app.redo_stack.clear();
+    rerender(app, ctx);
+
+    // Keep the cursor on ITS line (by id), not its number.
+    if let Some(id) = cursor_id {
+        if let Some(i) = app.lines.iter().position(|l| l.id == id) {
+            app.cursor = i;
+        }
+    }
+    // Re-anchor a clean session the same way; a vanished line closes it.
+    if let Some(sid) = session_id {
+        match app.lines.iter().position(|l| l.id == sid) {
+            Some(i) => {
+                let text = app.lines[i].text.clone();
+                if let Some(s) = app.session.as_mut() {
+                    s.line = i;
+                    let cur = s.input.cur.min(text.len());
+                    let cur = (0..=cur).rev().find(|&b| text.is_char_boundary(b)).unwrap_or(0);
+                    s.input = Input { buf: text.clone(), cur };
+                    s.orig = text;
+                    s.want_col = None;
+                }
+                app.cursor = i;
+            }
+            None => {
+                app.session = None;
+                app.ime_guard = None;
+            }
+        }
+    }
+    app.follow = true;
+    app.status = "⟳ web側の編集を反映".into();
 }
 
 /// 409 NotFastForward: someone else moved the page. Invalidate the queue,
@@ -4394,21 +4539,105 @@ mod tests {
         assert_eq!(s.input.cur, 2);
     }
 
+    /// A server page shaped like the poller would deliver it.
+    fn polled(texts: &[(&str, &str)]) -> PolledPage {
+        PolledPage {
+            project: "proj".into(),
+            title: "t".into(),
+            page: cosense::api::Page {
+                id: "pid".into(),
+                title: "t".into(),
+                lines: texts
+                    .iter()
+                    .map(|(id, t)| PageLine {
+                        id: (*id).into(),
+                        text: (*t).into(),
+                        user_id: String::new(),
+                        created: 0,
+                        updated: 0,
+                    })
+                    .collect(),
+                links: vec![],
+                project_links: vec![],
+                related: None,
+                updated: 0,
+                created: 0,
+                lines_count: 0,
+                last_accessed: None,
+            },
+        }
+    }
+
+    #[test]
+    fn remote_edits_apply_when_idle_and_keep_the_cursor_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one", "two"]);
+        app.rebuild(40);
+        app.cursor = 2; // on "two" (id2)
+        // remote inserted a line above and edited "one"
+        apply_remote(
+            &mut app,
+            &ctx,
+            polled(&[("id0", "t"), ("idN", "new!"), ("id1", "ONE"), ("id2", "two")]),
+        );
+        let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["t", "new!", "ONE", "two"]);
+        assert_eq!(app.cursor, 3, "cursor followed its line id, not its number");
+        assert!(app.status.contains("web"));
+    }
+
+    #[test]
+    fn remote_edits_never_touch_a_dirty_caret_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3);
+        type_str(&mut app, &ctx, "!"); // dirty
+        apply_remote(&mut app, &ctx, polled(&[("id0", "t"), ("id1", "REMOTE")]));
+        assert_eq!(app.lines[1].text, "one", "deferred while dirty");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "one!");
+        // …but a CLEAN session re-anchors and picks up the remote text
+        handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
+        let _ = drain_jobs(&mut app);
+        enter_session(&mut app, &ctx, 1, 0);
+        app.inflight = 0;
+        apply_remote(&mut app, &ctx, polled(&[("id0", "t"), ("id1", "REMOTE")]));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "REMOTE");
+        assert_eq!(s.orig, "REMOTE");
+    }
+
+    #[test]
+    fn remote_apply_waits_for_inflight_commits() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.inflight = 1;
+        apply_remote(&mut app, &ctx, polled(&[("id0", "t"), ("id1", "REMOTE")]));
+        assert_eq!(app.lines[1].text, "one", "own commits must land first");
+    }
+
     #[test]
     fn session_line_shows_bullets_for_indent() {
-        // display: one char per raw char — bullet at the indent's depth,
-        // exactly where the view draws it; the DATA stays whitespace
-        assert_eq!(session_display(" ab"), "•ab");
-        assert_eq!(session_display("  ab"), " •ab");
-        assert_eq!(session_display(" \t\tab"), "  •ab", "tabs count as levels too");
+        // display: `(n-1) spaces + • + space` — the view's exact bullet
+        // shape, positional (one column per whitespace char), while the
+        // DATA stays whitespace
+        assert_eq!(session_display(" ab"), "• ab");
+        assert_eq!(session_display("  ab"), " • ab");
+        assert_eq!(session_display(" \t\tab"), "  • ab", "tabs count as levels too");
         assert_eq!(session_display("ab"), "ab", "no indent, no bullet");
-        assert_eq!(session_display("  "), " •", "a fresh indented line shows its level");
-        // caret maps 1:1 through char indices, both directions
-        assert_eq!(display_caret("  ab", 2), " •".len());
+        assert_eq!(session_display("  "), " • ", "a whitespace-only line shows just its bullet");
+        // caret maps through char indices with the +1 bullet-space shift
+        assert_eq!(display_caret("  ab", 2), " • ".len(), "text start lands after '• '");
+        assert_eq!(raw_caret_from_display("  ab", " • ".len()), 2);
+        // clicking ON the injected space snaps to the text start
         assert_eq!(raw_caret_from_display("  ab", " •".len()), 2);
-        assert_eq!(display_caret("\t\tab", 2), " •".len());
-        assert_eq!(raw_caret_from_display("\t\tab", " •".len()), 2);
-        // the rendered session row carries the bullet
+        assert_eq!(display_caret("  ab", 4), " • ab".len(), "end maps to end");
+        assert_eq!(raw_caret_from_display("  ab", " • ab".len()), 4);
+        assert_eq!(display_caret("\t\tab", 2), " • ".len());
+        assert_eq!(raw_caret_from_display("\t\tab", " • ".len()), 2);
+        assert_eq!(display_caret("ab", 1), 1, "no indent → identity");
+        // the rendered session row carries the bullet + space
         let ctx = test_ctx();
         let mut app = page(&["t", "  deep"]);
         app.rebuild(40);
@@ -4419,7 +4648,7 @@ mod tests {
             Row::Line { line, .. } => line.spans.iter().map(|s| s.content.as_ref()).collect(),
             _ => String::new(),
         };
-        assert_eq!(row_text, " •deep");
+        assert_eq!(row_text, " • deep");
         // …and typing still edits the RAW text underneath
         type_str(&mut app, &ctx, "!");
         assert_eq!(app.session.as_ref().unwrap().input.buf, "  !deep");
