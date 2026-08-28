@@ -906,8 +906,23 @@ impl App {
         let edit: Option<(usize, &str)> =
             self.session.as_ref().map(|s| (s.line, s.input.buf.as_str()));
         let raw_rows = |content: &mut Vec<Row>, buf: &str, src: usize| {
-            for seg in wrap_plain_columns(buf, text_w) {
-                content.push(Row::Line { line: Line::from(seg), src });
+            // The indent renders as its bullet (dim) — same shape as the
+            // view — while the underlying data stays whitespace.
+            let disp = session_display(buf);
+            let prefix = display_prefix_bytes(buf);
+            for (k, seg) in wrap_plain_columns(&disp, text_w).into_iter().enumerate() {
+                let line = if k == 0 && prefix > 0 && seg.len() >= prefix {
+                    Line::from(vec![
+                        Span::styled(
+                            seg[..prefix].to_string(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(seg[prefix..].to_string()),
+                    ])
+                } else {
+                    Line::from(seg)
+                };
+                content.push(Row::Line { line, src });
             }
         };
         let mut content: Vec<Row> = Vec::new();
@@ -1363,6 +1378,47 @@ fn byte_at_col(s: &str, col: usize) -> usize {
 fn indent_of(s: &str) -> &str {
     let end = s.find(|c: char| !c.is_whitespace()).unwrap_or(s.len());
     &s[..end]
+}
+
+/// Display form of the session's raw line: the indent whitespace shows as
+/// `(n-1) spaces + •` — the bullet the view draws — while the DATA stays
+/// whitespace. Exactly ONE display char per raw char (tabs included), so
+/// caret and click math map 1:1 through char indices.
+fn session_display(buf: &str) -> String {
+    let ind = indent_of(buf);
+    let n = ind.chars().count();
+    if n == 0 {
+        return buf.to_string();
+    }
+    let mut out = String::with_capacity(buf.len() + 2);
+    for _ in 0..n - 1 {
+        out.push(' ');
+    }
+    out.push('•');
+    out.push_str(&buf[ind.len()..]);
+    out
+}
+
+/// Byte length of the bullet prefix in `session_display(buf)` (0 when the
+/// line has no indent).
+fn display_prefix_bytes(buf: &str) -> usize {
+    let n = indent_of(buf).chars().count();
+    if n == 0 { 0 } else { (n - 1) + '•'.len_utf8() }
+}
+
+/// Byte offset in `session_display(buf)` for byte offset `caret` in `buf`
+/// (chars map 1:1).
+fn display_caret(buf: &str, caret: usize) -> usize {
+    let ci = buf[..caret.min(buf.len())].chars().count();
+    let disp = session_display(buf);
+    disp.char_indices().nth(ci).map(|(b, _)| b).unwrap_or_else(|| disp.len())
+}
+
+/// Inverse: a byte offset in `session_display(buf)` back to `buf`.
+fn raw_caret_from_display(buf: &str, disp_byte: usize) -> usize {
+    let disp = session_display(buf);
+    let ci = disp[..disp_byte.min(disp.len())].chars().count();
+    buf.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(buf.len())
 }
 
 /// Truncate `s` to at most `w` columns, appending `…` when cut.
@@ -3105,7 +3161,10 @@ fn click_caret(app: &App, line: usize, col: usize) -> usize {
         .map(|s| s.input.buf.clone())
         .or_else(|| app.lines.get(line).map(|l| l.text.clone()))
         .unwrap_or_default();
-    byte_at_col(&text, col)
+    // Map through the bullet display: what the eye clicked is the display
+    // column, which the view (bullets at indent) also approximates.
+    let disp = session_display(&text);
+    raw_caret_from_display(&text, byte_at_col(&disp, col))
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
@@ -3746,7 +3805,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if let Some(s) = &app.session {
         if let Some((first, _)) = app.src_rows(s.line) {
             let text_w = App::text_width(app.mode, app.laid_width.max(1));
-            let (crow, ccol) = caret_row_col(&s.input.buf, s.input.cur, text_w);
+            let disp = session_display(&s.input.buf);
+            let dcaret = display_caret(&s.input.buf, s.input.cur);
+            let (crow, ccol) = caret_row_col(&disp, dcaret, text_w);
             let y = text.y as i32 + (app.row_top(first) as i32 + crow as i32) - app.scroll as i32;
             let x = text.x as i32 + (ccol as i32).min(text.width.saturating_sub(1) as i32);
             if y >= band_top && y <= band_bot {
@@ -4331,6 +4392,37 @@ mod tests {
         let s = app.session.as_ref().unwrap();
         assert_eq!(s.line, 2);
         assert_eq!(s.input.cur, 2);
+    }
+
+    #[test]
+    fn session_line_shows_bullets_for_indent() {
+        // display: one char per raw char — bullet at the indent's depth,
+        // exactly where the view draws it; the DATA stays whitespace
+        assert_eq!(session_display(" ab"), "•ab");
+        assert_eq!(session_display("  ab"), " •ab");
+        assert_eq!(session_display(" \t\tab"), "  •ab", "tabs count as levels too");
+        assert_eq!(session_display("ab"), "ab", "no indent, no bullet");
+        assert_eq!(session_display("  "), " •", "a fresh indented line shows its level");
+        // caret maps 1:1 through char indices, both directions
+        assert_eq!(display_caret("  ab", 2), " •".len());
+        assert_eq!(raw_caret_from_display("  ab", " •".len()), 2);
+        assert_eq!(display_caret("\t\tab", 2), " •".len());
+        assert_eq!(raw_caret_from_display("\t\tab", " •".len()), 2);
+        // the rendered session row carries the bullet
+        let ctx = test_ctx();
+        let mut app = page(&["t", "  deep"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 2);
+        app.rebuild(40);
+        let (first, _) = app.src_rows(1).unwrap();
+        let row_text: String = match &app.rows[first] {
+            Row::Line { line, .. } => line.spans.iter().map(|s| s.content.as_ref()).collect(),
+            _ => String::new(),
+        };
+        assert_eq!(row_text, " •deep");
+        // …and typing still edits the RAW text underneath
+        type_str(&mut app, &ctx, "!");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "  !deep");
     }
 
     #[test]
