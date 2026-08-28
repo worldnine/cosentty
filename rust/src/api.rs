@@ -291,15 +291,31 @@ struct SearchResponse {
 /// One page edit operation, in the official edit API's vocabulary
 /// (`page-edit-for-ai`). Anchors and targets are LINE IDS — never line
 /// numbers — which is what makes concurrent-edit rebasing tractable.
+///
+/// Inserted lines carry CLIENT-GENERATED ids (the API accepts them, same
+/// as the official CLI). That makes the ids known the moment an op is
+/// built — the local page model can apply the op immediately and keep
+/// editing without waiting for (or reloading from) the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditOp {
-    /// Insert `text` before the line `anchor` (`"_end"` = append to the
-    /// page). Embedded `\n` splits into several inserted lines, in order.
-    Insert { anchor: String, text: String },
+    /// Insert lines before `anchor` (`"_end"` = append). `lines` are
+    /// `(id, text)` pairs in order; build them with [`EditOp::insert`].
+    Insert { anchor: String, lines: Vec<(String, String)> },
     /// Replace the body of line `id` (single line only).
     Replace { id: String, text: String },
     /// Delete line `id`.
     Delete { id: String },
+}
+
+impl EditOp {
+    /// An Insert op for `text` (embedded `\n` = several lines), with fresh
+    /// client-generated line ids.
+    pub fn insert(anchor: impl Into<String>, text: &str) -> Self {
+        EditOp::Insert {
+            anchor: anchor.into(),
+            lines: text.split('\n').map(|t| (new_line_id(), t.to_string())).collect(),
+        }
+    }
 }
 
 /// A successful dry-run: what the page will look like, and the one-shot
@@ -358,7 +374,7 @@ impl std::fmt::Display for EditError {
 impl std::error::Error for EditError {}
 
 /// A fresh 24-hex line id, like the CLI's `randomBytes(12).toString('hex')`.
-fn new_line_id() -> String {
+pub fn new_line_id() -> String {
     let mut bytes = [0u8; 12];
     if std::fs::File::open("/dev/urandom")
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
@@ -374,6 +390,7 @@ fn new_line_id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::blocking::Client,
     cfg: Config,
@@ -611,14 +628,13 @@ impl Client {
         let mut updated_ids: Vec<String> = Vec::new();
         for op in ops {
             match op {
-                EditOp::Insert { anchor, text } => {
-                    for line in text.split('\n') {
-                        let id = new_line_id();
+                EditOp::Insert { anchor, lines } => {
+                    for (id, line) in lines {
                         changes.push(serde_json::json!({
                             "_insert": anchor,
                             "lines": { "id": id, "text": line },
                         }));
-                        new_ids.push(id);
+                        new_ids.push(id.clone());
                     }
                 }
                 EditOp::Replace { id, text } => {

@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let p1 = client.preview_edit(
         &project,
         &page.id,
-        &[EditOp::Insert { anchor: "_end".into(), text: marker.clone() }],
+        &[EditOp::insert("_end", &marker)],
     )?;
     println!("preview 1: {} (expires {})", p1.preview_id, p1.expire_at);
     let c1 = client.submit_edit(&project, &p1.preview_id)?;
@@ -107,6 +107,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("restore mismatch — page differs from the original!".into());
     }
     println!("verified:  page restored to the original, byte for byte");
-    println!("OK — edit API + editor-diff round-trip works");
+
+    // Phase 3: the edit-session pattern — SEQUENTIAL commits where later
+    // ops reference a line id the CLIENT generated in an earlier commit
+    // (insert → replace it → delete it), without ever reloading between.
+    let base3 = client.get_page_in(&project, &title)?;
+    let new_id = cosense::api::new_line_id();
+    let steps: Vec<(&str, Vec<EditOp>)> = vec![
+        (
+            "insert",
+            vec![EditOp::Insert {
+                anchor: "_end".into(),
+                lines: vec![(new_id.clone(), "session smoke".into())],
+            }],
+        ),
+        ("replace", vec![EditOp::Replace { id: new_id.clone(), text: "session smoke (edited)".into() }]),
+        ("delete", vec![EditOp::Delete { id: new_id.clone() }]),
+    ];
+    for (label, ops) in steps {
+        let p = client.preview_edit(&project, &base3.id, &ops)?;
+        let c = client.submit_edit(&project, &p.preview_id)?;
+        println!("phase 3:   {label} committed ({})", c.commit_id);
+    }
+    // The test page may be edited CONCURRENTLY (it is a live page), so
+    // assert our own traces are gone rather than byte equality.
+    let fin3 = client.get_page_in(&project, &title)?;
+    if fin3.lines.iter().any(|l| l.text.contains("session smoke") || l.id == new_id) {
+        return Err("phase 3: smoke line still present after delete".into());
+    }
+    println!("verified:  client-generated id worked across three sequential commits");
+    println!("OK — edit API + editor-diff + session-pattern round-trips work");
     Ok(())
 }

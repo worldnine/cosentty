@@ -168,7 +168,9 @@ pub struct ImeGuard {
 
 impl ImeGuard {
     pub fn enter(mode: ImeMode) -> Self {
-        suspend_external_ime_guard();
+        if mode != ImeMode::Off {
+            suspend_external_ime_guard();
+        }
         if mode == ImeMode::Jp {
             set_japanese();
         }
@@ -178,8 +180,8 @@ impl ImeGuard {
 
 impl Drop for ImeGuard {
     fn drop(&mut self) {
-        resume_external_ime_guard();
         if self.mode != ImeMode::Off {
+            resume_external_ime_guard();
             set_ascii();
         }
     }

@@ -28,7 +28,8 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cosense::api::{AuthStore, Client, Config, EditError, EditOp, EditPreview, PageLine};
+use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
+use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
 use cosense::highlight::Highlighter;
@@ -206,7 +207,8 @@ struct App {
     /// navigation; wheel scrolling leaves it clear so the viewport can move
     /// away from the cursor (akapen's herdr-review style).
     follow: bool,
-    composing: Option<Composer>,
+    /// Comment composer (the bottom input; `c`).
+    composing: Option<Input>,
     comments: Vec<Comment>,
     status: String,
 
@@ -236,8 +238,29 @@ struct App {
     /// True once the session's force-ascii took hold (the helper may still
     /// be compiling on first run; retried each tick until then).
     ime_ready: bool,
-    /// Held while the composer is open: Japanese in, ASCII out.
+    /// Held while the composer or edit session is open: Japanese in,
+    /// ASCII out.
     ime_guard: Option<cosense::ime::ImeGuard>,
+
+    /// The modeless edit session, when open.
+    session: Option<EditSession>,
+    /// Undo stack: (label, ops that revert the corresponding commit).
+    undo_stack: Vec<(String, Vec<EditOp>)>,
+    redo_stack: Vec<(String, Vec<EditOp>)>,
+    /// Commit queue into the serial worker, and its outcomes back.
+    commit_tx: mpsc::Sender<CommitJob>,
+    commit_res_rx: mpsc::Receiver<CommitOutcome>,
+    /// The worker's job receiver, held until `main` spawns the worker
+    /// (tests keep it here and inspect queued jobs directly).
+    commit_jobs_rx: Option<mpsc::Receiver<CommitJob>>,
+    /// Result sender handed to the worker (kept for the spawn call).
+    commit_res_tx: mpsc::Sender<CommitOutcome>,
+    /// Jobs sent but not yet answered (quit flushes until 0).
+    inflight: usize,
+    /// Conflict generation: bumping it invalidates all queued jobs.
+    gen: Arc<std::sync::atomic::AtomicU64>,
+    /// Last left-click (for double-click detection): time, column, row.
+    last_click: Option<(Instant, u16, u16)>,
     /// Related-pages sections below the body (view mode only).
     related: Vec<RelSection>,
     /// Flattened related entries in render order. Entry `i` renders with
@@ -347,25 +370,65 @@ impl Input {
     }
 }
 
-/// What the bottom-line composer is collecting, and where it goes on
-/// Enter. Comment is akapen's; Insert/Replace feed the official edit API
-/// (preview → submit).
-enum Composer {
-    Comment { input: Input },
-    /// New line(s) before `anchor` (a lineId, or `_end` = append).
-    Insert { anchor: String, label: String, input: Input },
-    /// Replace the body of line `id`.
-    Replace { id: String, label: String, input: Input },
+/// The modeless edit session (SPEC-edit-session.md): the caret line shows
+/// raw source and takes every printable key; ↑/↓ walk lines, Enter splits
+/// or creates lines, BOL-Backspace joins — the session spans any number of
+/// lines. The only dirty state is THIS line's working text; everything
+/// structural commits immediately, text commits when the caret leaves.
+struct EditSession {
+    /// Caret line (index into `app.lines`; mirrored to `app.cursor`).
+    line: usize,
+    /// Working text + caret of the caret line.
+    input: Input,
+    /// Last committed text of this line (`dirty = input.buf != orig`).
+    orig: String,
+    /// Sticky display column for ↑/↓ over lines of differing length.
+    want_col: Option<usize>,
 }
 
-impl Composer {
-    fn input_mut(&mut self) -> &mut Input {
-        match self {
-            Composer::Comment { input }
-            | Composer::Insert { input, .. }
-            | Composer::Replace { input, .. } => input,
+/// One queued commit for the serial background worker. `gen` invalidates
+/// jobs queued before a conflict reload (their base state is gone).
+struct CommitJob {
+    gen: u64,
+    project: String,
+    page_id: String,
+    label: String,
+    ops: Vec<EditOp>,
+}
+
+/// What a commit attempt came back with.
+enum CommitOutcome {
+    Done { label: String, title: String },
+    Conflict,
+    Skipped,
+    Failed { label: String, msg: String },
+}
+
+/// The serial commit worker: one job in flight at a time, in queue order —
+/// ordering is what keeps every op valid against the server's state.
+fn spawn_commit_worker(
+    client: Client,
+    jobs: mpsc::Receiver<CommitJob>,
+    out: mpsc::Sender<CommitOutcome>,
+    gen: Arc<std::sync::atomic::AtomicU64>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(job) = jobs.recv() {
+            if job.gen < gen.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = out.send(CommitOutcome::Skipped);
+                continue;
+            }
+            let res = client
+                .preview_edit(&job.project, &job.page_id, &job.ops)
+                .and_then(|p| client.submit_edit(&job.project, &p.preview_id));
+            let outcome = match res {
+                Ok(c) => CommitOutcome::Done { label: job.label, title: c.title },
+                Err(EditError::NotFastForward) => CommitOutcome::Conflict,
+                Err(e) => CommitOutcome::Failed { label: job.label, msg: e.to_string() },
+            };
+            let _ = out.send(outcome);
         }
-    }
+    });
 }
 
 /// A modal list/panel layered over the page.
@@ -380,9 +443,6 @@ enum Overlay {
     /// Details for the cursor's line: who last edited it and when
     /// (akapen's `t` detail slot).
     LineInfo,
-    /// A pending edit: the dry-run result awaiting Enter (commit) or Esc.
-    /// `preview_id` is the one-shot token; `lines` is the human summary.
-    EditPreview { preview_id: String, lines: Vec<String> },
     /// Key reference.
     Help,
 }
@@ -430,6 +490,8 @@ impl App {
     fn new(project: String) -> Self {
         let (image_tx, image_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
+        let (commit_tx, commit_jobs_rx) = mpsc::channel();
+        let (commit_res_tx, commit_res_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -468,6 +530,16 @@ impl App {
             session_ime: cosense::ime::SessionIme::new(cosense::ime::ImeMode::Off),
             ime_ready: false,
             ime_guard: None,
+            session: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            commit_tx,
+            commit_res_rx,
+            commit_jobs_rx: Some(commit_jobs_rx),
+            commit_res_tx,
+            inflight: 0,
+            gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_click: None,
             related: Vec::new(),
             virtual_items: Vec::new(),
             light: false,
@@ -487,6 +559,11 @@ impl App {
     /// it (back/forward included).
     fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
         self.time = None; // installing a live page always exits history
+        // A page install ends any edit session and cuts the undo lineage:
+        // undo ops reference THIS page's line ids.
+        self.session = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.project = l.project;
         self.title = l.title;
         self.page_id = l.page_id;
@@ -821,11 +898,26 @@ impl App {
     }
 
     /// View mode: rendered blocks wrapped to the pane, each tagged with the
-    /// source line it came from.
+    /// source line it came from. The edit session's caret line renders as
+    /// RAW SOURCE (cosense web: the line with the caret reveals its
+    /// notation; everything else stays rendered).
     fn content_view(&self, width: u16) -> Vec<Row> {
         let text_w = Self::text_width(Mode::View, width);
+        let edit: Option<(usize, &str)> =
+            self.session.as_ref().map(|s| (s.line, s.input.buf.as_str()));
+        let raw_rows = |content: &mut Vec<Row>, buf: &str, src: usize| {
+            for seg in wrap_plain_columns(buf, text_w) {
+                content.push(Row::Line { line: Line::from(seg), src });
+            }
+        };
         let mut content: Vec<Row> = Vec::new();
         for (b, &src) in self.blocks.iter().zip(self.srcs.iter()) {
+            if let Some((eline, ebuf)) = edit {
+                if src == eline && !matches!(b, Block::Table(_)) {
+                    raw_rows(&mut content, ebuf, src);
+                    continue;
+                }
+            }
             match b {
                 Block::Text(line) => {
                     // bullets / code hang their continuation rows under the
@@ -838,7 +930,18 @@ impl App {
                 Block::Table(t) => {
                     // Table rows carry their OWN source lines (one Scrapbox
                     // line per row), so the cursor addresses rows directly.
+                    // The session's caret row swaps to raw source once.
+                    let mut emitted_raw = false;
                     for (line, row_src) in t.layout(text_w) {
+                        if let Some((eline, ebuf)) = edit {
+                            if row_src == eline {
+                                if !emitted_raw {
+                                    raw_rows(&mut content, ebuf, row_src);
+                                    emitted_raw = true;
+                                }
+                                continue;
+                            }
+                        }
                         content.push(Row::Line { line, src: row_src });
                     }
                 }
@@ -1202,6 +1305,66 @@ fn str_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
+/// Hard-wrap `s` into segments of at most `w` display columns, preserving
+/// every char in order (no trimming). Both the session line's display and
+/// its caret math use THIS function, so the hardware cursor can never
+/// disagree with the text it sits on. Always returns ≥ 1 segment.
+fn wrap_plain_columns(s: &str, w: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let w = w.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > w && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push(ch);
+        used += cw;
+    }
+    out.push(cur);
+    out
+}
+
+/// (row, column) of byte offset `caret` within `wrap_plain_columns(s, w)`.
+/// A caret exactly at a segment boundary sits at the START of the next
+/// segment (that is where the next typed char will appear).
+fn caret_row_col(s: &str, caret: usize, w: usize) -> (usize, usize) {
+    let segs = wrap_plain_columns(s, w);
+    let mut off = 0usize;
+    for (i, seg) in segs.iter().enumerate() {
+        let end = off + seg.len();
+        if caret < end || (caret == end && i + 1 == segs.len()) {
+            return (i, str_width(&seg[..caret - off]));
+        }
+        off = end;
+    }
+    (segs.len().saturating_sub(1), str_width(segs.last().map(String::as_str).unwrap_or("")))
+}
+
+/// Byte offset in `s` whose display column is closest to `col` (used by
+/// sticky-column ↑/↓ and by mouse clicks).
+fn byte_at_col(s: &str, col: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut used = 0usize;
+    for (i, ch) in s.char_indices() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > col {
+            return i;
+        }
+        used += cw;
+    }
+    s.len()
+}
+
+/// Leading whitespace (the Scrapbox indent) of a line.
+fn indent_of(s: &str) -> &str {
+    let end = s.find(|c: char| !c.is_whitespace()).unwrap_or(s.len());
+    &s[..end]
+}
+
 /// Truncate `s` to at most `w` columns, appending `…` when cut.
 fn truncate_width(s: &str, w: usize) -> String {
     use unicode_width::UnicodeWidthChar;
@@ -1387,6 +1550,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(project.clone());
     app.light = ctx.light;
     app.session_ime = cosense::ime::SessionIme::new(ime_mode);
+    // The serial commit worker: owns its own Client clone and answers on
+    // the outcome channel drained by the event loop.
+    if let Some(jobs_rx) = app.commit_jobs_rx.take() {
+        spawn_commit_worker(
+            ctx.client.clone(),
+            jobs_rx,
+            app.commit_res_tx.clone(),
+            Arc::clone(&app.gen),
+        );
+    }
     app.set_page(loaded, &ctx);
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
@@ -1831,8 +2004,12 @@ enum Action {
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Result<(), Box<dyn Error>> {
     loop {
         // Keep command mode in ASCII (retried while the IME helper builds).
-        if !app.ime_ready && app.composing.is_none() {
+        if !app.ime_ready && app.composing.is_none() && app.session.is_none() {
             app.ime_ready = app.session_ime.force_ascii();
+        }
+        // Commit outcomes from the serial worker (✓ / conflict recovery).
+        while let Ok(outcome) = app.commit_res_rx.try_recv() {
+            handle_commit_outcome(app, ctx, outcome);
         }
         // Install any images that finished downloading, then draw.
         if app.drain_images() {
@@ -1855,7 +2032,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match handle_key(app, ctx, k) {
-                        Action::Quit => return Ok(()),
+                        Action::Quit => {
+                            flush_commits(terminal, app, ctx);
+                            return Ok(());
+                        }
                         Action::Editor => {
                             editor_roundtrip(terminal, app, ctx);
                             break; // geometry may have changed — redraw first
@@ -1864,37 +2044,54 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
                     }
                 }
                 Event::Mouse(m) => handle_mouse(app, ctx, m),
-                Event::Paste(data) => handle_paste(app, &data),
+                Event::Paste(data) => handle_paste(app, ctx, &data),
                 _ => {}
             }
         }
     }
 }
 
-/// A bracketed paste: only the composer takes it. Insert keeps embedded
-/// newlines (one op inserts several lines); Replace is single-line by API
-/// contract, so a multi-line paste is refused rather than mangled.
-fn handle_paste(app: &mut App, data: &str) {
-    let Some(comp) = app.composing.as_mut() else { return };
+/// Quit: close the session (committing its dirty line) and wait for the
+/// serial worker to drain — nothing typed is left behind. Bounded at 15 s;
+/// a hung network reports instead of trapping the user in a dead TUI.
+fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) {
+    if app.session.is_some() {
+        leave_session(app, ctx);
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while app.inflight > 0 && Instant::now() < deadline {
+        app.status = format!("…flushing {} edit(s)", app.inflight);
+        let _ = terminal.draw(|f| ui(f, app, ctx));
+        match app.commit_res_rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(outcome) => handle_commit_outcome(app, ctx, outcome),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if app.inflight > 0 {
+        // Leave a trace on the real terminal after restore.
+        eprintln!("warning: {} edit(s) may not have reached the server", app.inflight);
+    }
+}
+
+/// A bracketed paste: the comment composer takes it verbatim; the edit
+/// session takes it structurally (a multi-line paste becomes real lines,
+/// see `session_paste`).
+fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
     let clean = data.replace("\r\n", "\n").replace('\r', "\n");
-    match comp {
-        Composer::Insert { input, .. } | Composer::Comment { input } => {
-            input.insert_str(&clean);
-        }
-        Composer::Replace { input, .. } => {
-            if clean.contains('\n') {
-                app.status = "multi-line paste — use o (insert) or ^e (editor) instead".into();
-            } else {
-                input.insert_str(&clean);
-            }
-        }
+    if let Some(input) = app.composing.as_mut() {
+        input.insert_str(&clean);
+        return;
+    }
+    if app.session.is_some() {
+        session_paste(app, ctx, &clean);
     }
 }
 
 /// One key press.
 fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
-    // Composer captures all keys. Emacs/readline-style line editing, so a
-    // Japanese sentence can be corrected mid-line without retyping it.
+    // Comment composer captures all keys. Emacs/readline-style line
+    // editing, so a Japanese sentence can be corrected mid-line.
     if app.composing.is_some() {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match (k.code, ctrl) {
@@ -1904,9 +2101,9 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 app.status = "cancelled".into();
             }
             (KeyCode::Enter, _) => {
-                let comp = app.composing.take().unwrap();
+                let input = app.composing.take().unwrap();
                 app.ime_guard = None; // back to ASCII for command mode
-                finish_composer(app, ctx, comp);
+                finish_composer(app, input);
             }
             (KeyCode::Backspace, _) => in_input(app, Input::backspace),
             (KeyCode::Delete, _) | (KeyCode::Char('d'), true) => in_input(app, Input::delete),
@@ -1918,11 +2115,17 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             (KeyCode::Char('u'), true) => in_input(app, Input::kill_to_start),
             (KeyCode::Char(ch), false) => {
                 if let Some(c) = app.composing.as_mut() {
-                    c.input_mut().insert_char(ch);
+                    c.insert_char(ch);
                 }
             }
             _ => {}
         }
+        return Action::Continue;
+    }
+
+    // The modeless edit session owns everything next (SPEC §3).
+    if app.session.is_some() {
+        handle_session_key(app, ctx, k);
         return Action::Continue;
     }
 
@@ -2038,8 +2241,29 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             };
         }
 
-        // ---- open in browser (akapen's `e edit` slot) ----
+        // ---- edit (akapen's `e edit` slot, back to its true meaning:
+        //      the modeless session, SPEC-edit-session.md) ----
         (KeyCode::Char('e'), false) => {
+            // caret at the END of the cursor line (続きを書く)
+            let caret = app
+                .cursor_src()
+                .and_then(|s| app.lines.get(s))
+                .map(|l| l.text.len())
+                .unwrap_or(0);
+            enter_session(app, ctx, app.cursor, caret);
+        }
+        (KeyCode::Char('i'), false) => {
+            // caret at the start of the text (right after the indent)
+            let caret = app
+                .cursor_src()
+                .and_then(|s| app.lines.get(s))
+                .map(|l| indent_of(&l.text).len())
+                .unwrap_or(0);
+            enter_session(app, ctx, app.cursor, caret);
+        }
+
+        // ---- open in browser (moved from `e`: **w**eb) ----
+        (KeyCode::Char('w'), false) => {
             let url = app.cursor_url();
             app.status = if open_in_browser(&url) {
                 format!("opened {url}")
@@ -2047,6 +2271,10 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 "failed to open browser".into()
             };
         }
+
+        // ---- undo / redo (the safety net; no confirmation gates) ----
+        (KeyCode::Char('u'), false) => undo(app, ctx),
+        (KeyCode::Char('r'), true) => redo(app, ctx),
 
         // ---- comments (akapen parity) ----
         (KeyCode::Char('v'), false) => {
@@ -2065,76 +2293,14 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 app.status = "viewing history — comments need NOW (Esc)".into();
                 return Action::Continue;
             }
-            app.composing = Some(Composer::Comment { input: Input::new(String::new()) });
+            app.composing = Some(Input::new(String::new()));
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
             app.status = "type comment, Enter save, Esc cancel".into();
         }
 
-        // ---- edit (official preview→submit API; conflicts surface as
-        //      NotFastForward, never as silent overwrites) ----
-        (KeyCode::Char('o'), false) => {
-            if app.time.is_some() {
-                app.status = "viewing history — read-only (Esc → NOW)".into();
-                return Action::Continue;
-            }
-            // Insert BELOW the cursor line: anchor is the next body line,
-            // or _end when the cursor sits on the last line (or on a
-            // related row — appending is the only edit that makes sense
-            // there).
-            let anchor = app
-                .cursor_src()
-                .and_then(|s| app.lines.get(s + 1))
-                .map(|l| l.id.clone())
-                .unwrap_or_else(|| "_end".into());
-            let label = match app.cursor_src() {
-                Some(s) if s + 1 < app.lines.len() => format!(" insert below line {} ", s + 1),
-                _ => " append at page end ".to_string(),
-            };
-            app.composing = Some(Composer::Insert { anchor, label, input: Input::new(String::new()) });
-            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-            app.status = "type new line, Enter preview, Esc cancel".into();
-        }
-        (KeyCode::Char('O'), false) => {
-            if app.time.is_some() {
-                app.status = "viewing history — read-only (Esc → NOW)".into();
-                return Action::Continue;
-            }
-            let Some(line) = app.cursor_src().and_then(|s| app.lines.get(s)) else {
-                app.status = "no line to insert above".into();
-                return Action::Continue;
-            };
-            if line.id.is_empty() {
-                app.status = "line has no id (cannot edit)".into();
-                return Action::Continue;
-            }
-            let label = format!(" insert above line {} ", app.cursor + 1);
-            app.composing =
-                Some(Composer::Insert { anchor: line.id.clone(), label, input: Input::new(String::new()) });
-            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-            app.status = "type new line, Enter preview, Esc cancel".into();
-        }
-        (KeyCode::Char('E'), false) => {
-            if app.time.is_some() {
-                app.status = "viewing history — read-only (Esc → NOW)".into();
-                return Action::Continue;
-            }
-            let Some(line) = app.cursor_src().and_then(|s| app.lines.get(s)) else {
-                app.status = "no line to edit".into();
-                return Action::Continue;
-            };
-            if line.id.is_empty() {
-                app.status = "line has no id (cannot edit)".into();
-                return Action::Continue;
-            }
-            let label = format!(" edit line {} ", app.cursor + 1);
-            app.composing = Some(Composer::Replace {
-                id: line.id.clone(),
-                label,
-                input: Input::new(line.text.clone()),
-            });
-            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-            app.status = "edit line, Enter preview, Esc cancel".into();
-        }
+        // ---- new lines (vim's o/O; the session opens on the new line) ----
+        (KeyCode::Char('o'), false) => open_line(app, ctx, false),
+        (KeyCode::Char('O'), false) => open_line(app, ctx, true),
         (KeyCode::Char('e'), true) => {
             // Whole-page edit in $EDITOR (the “big edit” path: multi-line,
             // IME-free — the editor is the user's own environment).
@@ -2168,8 +2334,10 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             if ops.is_empty() {
                 app.status = "nothing deletable here".into();
             } else {
+                let n = ops.len();
                 app.selection = None;
-                run_edit_preview(app, ctx, ops);
+                do_edit(app, ctx, "delete", ops);
+                app.status = format!("✓ deleted {n} line(s) · u to undo");
             }
         }
         (KeyCode::Char('d'), false) => {
@@ -2252,55 +2420,436 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
 /// Apply one `Input` editing method to the open composer.
 fn in_input(app: &mut App, f: fn(&mut Input)) {
     if let Some(c) = app.composing.as_mut() {
-        f(c.input_mut());
+        f(c);
     }
 }
 
-/// Enter in the composer: comments save locally; edits dry-run against
-/// the edit API and open the preview overlay.
-fn finish_composer(app: &mut App, ctx: &Ctx, comp: Composer) {
-    match comp {
-        Composer::Comment { input } => {
-            let buf = input.buf;
-            if buf.trim().is_empty() {
-                app.status = "empty comment discarded".into();
-            } else if let Some(c) = app.make_comment(buf) {
-                app.comments.push(c);
-                app.selection = None;
-                app.status = format!("comment saved ({} total)", app.comments.len());
-                app.laid_width = 0; // force rebuild to weave the card
+/// Enter in the comment composer.
+fn finish_composer(app: &mut App, input: Input) {
+    let buf = input.buf;
+    if buf.trim().is_empty() {
+        app.status = "empty comment discarded".into();
+    } else if let Some(c) = app.make_comment(buf) {
+        app.comments.push(c);
+        app.selection = None;
+        app.status = format!("comment saved ({} total)", app.comments.len());
+        app.laid_width = 0; // force rebuild to weave the card
+    } else {
+        app.status = "could not anchor comment".into();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The edit engine (SPEC-edit-session.md §4–§6): the LOCAL model is
+// authoritative — every edit applies to `app.lines` immediately (insert ids
+// are client-generated, so no reload is ever needed) and a serial worker
+// commits the same ops in order in the background. Undo is the diff back.
+// ---------------------------------------------------------------------------
+
+/// Re-render the page body from the (just mutated) local model.
+fn rerender(app: &mut App, ctx: &Ctx) {
+    let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+    let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
+    app.blocks = r.blocks;
+    app.srcs = r.srcs;
+    app.laid_width = 0;
+    app.start_image_loads(ctx);
+}
+
+/// Apply `ops` locally, push their inverse onto the undo stack, and queue
+/// the background commit. The single write path for every edit.
+fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
+    if ops.is_empty() {
+        return;
+    }
+    let inverse = invert_ops(&app.lines, &ops);
+    apply_ops(&mut app.lines, &ops);
+    app.undo_stack.push((label.to_string(), inverse));
+    if app.undo_stack.len() > 200 {
+        app.undo_stack.remove(0);
+    }
+    app.redo_stack.clear();
+    queue_commit(app, label, ops);
+    rerender(app, ctx);
+}
+
+/// Send one commit job to the serial worker.
+fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
+    let job = CommitJob {
+        gen: app.gen.load(std::sync::atomic::Ordering::SeqCst),
+        project: app.project.clone(),
+        page_id: app.page_id.clone(),
+        label: label.to_string(),
+        ops,
+    };
+    if app.commit_tx.send(job).is_ok() {
+        app.inflight += 1;
+    } else {
+        app.status = "commit worker gone — edits are LOCAL ONLY".into();
+    }
+}
+
+/// `u`: revert the newest commit (locally at once, on the server via the
+/// queue). Ids of replaced lines survive; re-inserted lines get fresh ids.
+fn undo(app: &mut App, ctx: &Ctx) {
+    let Some((label, ops)) = app.undo_stack.pop() else {
+        app.status = "nothing to undo".into();
+        return;
+    };
+    let redo = invert_ops(&app.lines, &ops);
+    apply_ops(&mut app.lines, &ops);
+    app.redo_stack.push((label.clone(), redo));
+    queue_commit(app, &format!("undo {label}"), ops);
+    rerender(app, ctx);
+    app.status = format!("undid {label} ({} more)", app.undo_stack.len());
+}
+
+/// `^r`: re-apply the newest undone commit.
+fn redo(app: &mut App, ctx: &Ctx) {
+    let Some((label, ops)) = app.redo_stack.pop() else {
+        app.status = "nothing to redo".into();
+        return;
+    };
+    let undo_ops = invert_ops(&app.lines, &ops);
+    apply_ops(&mut app.lines, &ops);
+    app.undo_stack.push((label.clone(), undo_ops));
+    queue_commit(app, &format!("redo {label}"), ops);
+    rerender(app, ctx);
+    app.status = format!("redid {label}");
+}
+
+// ---------------------------------------------------------------------------
+// The modeless edit session (SPEC §1–§3).
+// ---------------------------------------------------------------------------
+
+/// Open the session on body line `line` with the caret at byte `caret`.
+fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
+    if app.time.is_some() {
+        app.status = "viewing history — read-only (Esc → NOW)".into();
+        return;
+    }
+    if line >= app.lines.len() {
+        app.status = "related rows cannot be edited (o adds a line at the end)".into();
+        return;
+    }
+    let text = app.lines[line].text.clone();
+    let caret = caret.min(text.len());
+    // snap to a char boundary
+    let caret = (0..=caret).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    app.session = Some(EditSession {
+        line,
+        input: Input { buf: text.clone(), cur: caret },
+        orig: text,
+        want_col: None,
+    });
+    app.cursor = line;
+    app.selection = None;
+    app.follow = true;
+    app.laid_width = 0;
+    app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+    app.status = "EDIT — ↑↓ move · Enter new line · Esc done".into();
+}
+
+/// Commit the caret line's text if it changed (called whenever the caret
+/// leaves the line, and on Esc).
+fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
+    let Some(s) = app.session.as_ref() else { return };
+    if s.input.buf == s.orig {
+        return;
+    }
+    let (line, buf) = (s.line, s.input.buf.clone());
+    let id = app.lines[line].id.clone();
+    let label = format!("line {}", line + 1);
+    do_edit(app, ctx, &label, vec![EditOp::Replace { id, text: buf.clone() }]);
+    if let Some(s) = app.session.as_mut() {
+        s.orig = buf;
+    }
+}
+
+/// Leave the session (Esc): commit the dirty line, back to READ + ASCII.
+fn leave_session(app: &mut App, ctx: &Ctx) {
+    session_commit_dirty(app, ctx);
+    app.session = None;
+    app.ime_guard = None;
+    app.laid_width = 0;
+    app.status = "✓ done".into();
+}
+
+/// ↑/↓ inside the session: commit the dirty line, carry the caret to the
+/// next/previous BODY line, keeping the display column (sticky).
+fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
+    session_commit_dirty(app, ctx);
+    let Some(s) = app.session.as_ref() else { return };
+    let cur = s.line as i32;
+    let last = app.lines.len().saturating_sub(1) as i32;
+    let target = (cur + delta).clamp(0, last);
+    if target == cur {
+        app.status = if delta < 0 { "top of page".into() } else { "end of page — Enter adds a line".into() };
+        return;
+    }
+    let col = {
+        let s = app.session.as_ref().unwrap();
+        s.want_col
+            .unwrap_or_else(|| str_width(&s.input.buf[..s.input.cur]))
+    };
+    let line = target as usize;
+    let text = app.lines[line].text.clone();
+    let caret = byte_at_col(&text, col);
+    if let Some(s) = app.session.as_mut() {
+        s.line = line;
+        s.input = Input { buf: text.clone(), cur: caret };
+        s.orig = text;
+        s.want_col = Some(col);
+    }
+    app.cursor = line;
+    app.follow = true;
+    app.laid_width = 0;
+}
+
+/// Enter inside the session: split at the caret (at EOL this creates a
+/// fresh line). The new line inherits the indent; the caret lands after
+/// it; the session CONTINUES there — keep typing.
+fn session_split(app: &mut App, ctx: &Ctx) {
+    let Some(s) = app.session.as_ref() else { return };
+    let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
+    let head = buf[..caret].to_string();
+    let indent = indent_of(&buf);
+    let indent = if caret < indent.len() { &buf[..caret] } else { indent };
+    let tail = format!("{indent}{}", &buf[caret..]);
+    let caret_new = indent.len();
+    let id = app.lines[line].id.clone();
+    let anchor = app
+        .lines
+        .get(line + 1)
+        .map(|l| l.id.clone())
+        .unwrap_or_else(|| "_end".into());
+    let ops = vec![
+        EditOp::Replace { id, text: head },
+        EditOp::Insert { anchor, lines: vec![(new_line_id(), tail.clone())] },
+    ];
+    do_edit(app, ctx, "new line", ops);
+    if let Some(s) = app.session.as_mut() {
+        s.line = line + 1;
+        s.input = Input { buf: tail.clone(), cur: caret_new };
+        s.orig = tail;
+        s.want_col = None;
+    }
+    app.cursor = line + 1;
+    app.follow = true;
+}
+
+/// Backspace at BOL: join this line into the previous one; the caret
+/// lands on the junction. Joining line 1 into line 0 edits the title.
+fn session_join_up(app: &mut App, ctx: &Ctx) {
+    let Some(s) = app.session.as_ref() else { return };
+    let (line, buf) = (s.line, s.input.buf.clone());
+    if line == 0 {
+        app.status = "top of page".into();
+        return;
+    }
+    let prev_text = app.lines[line - 1].text.clone();
+    let merged = format!("{prev_text}{buf}");
+    let ops = vec![
+        EditOp::Replace { id: app.lines[line - 1].id.clone(), text: merged.clone() },
+        EditOp::Delete { id: app.lines[line].id.clone() },
+    ];
+    do_edit(app, ctx, "join", ops);
+    if let Some(s) = app.session.as_mut() {
+        s.line = line - 1;
+        s.input = Input { buf: merged.clone(), cur: prev_text.len() };
+        s.orig = merged;
+        s.want_col = None;
+    }
+    app.cursor = line - 1;
+    app.follow = true;
+}
+
+/// Delete at EOL: join the NEXT line into this one (forward join).
+fn session_join_down(app: &mut App, ctx: &Ctx) {
+    let Some(s) = app.session.as_ref() else { return };
+    let (line, buf) = (s.line, s.input.buf.clone());
+    if line + 1 >= app.lines.len() {
+        app.status = "end of page".into();
+        return;
+    }
+    let next_text = app.lines[line + 1].text.clone();
+    let merged = format!("{buf}{next_text}");
+    let ops = vec![
+        EditOp::Replace { id: app.lines[line].id.clone(), text: merged.clone() },
+        EditOp::Delete { id: app.lines[line + 1].id.clone() },
+    ];
+    do_edit(app, ctx, "join", ops);
+    if let Some(s) = app.session.as_mut() {
+        s.input = Input { buf: merged.clone(), cur: buf.len() };
+        s.orig = merged;
+        s.want_col = None;
+    }
+}
+
+/// Tab / Shift+Tab: indent or outdent the caret line by one column.
+fn session_indent(app: &mut App, delta: i32) {
+    let Some(s) = app.session.as_mut() else { return };
+    if delta > 0 {
+        s.input.buf.insert(0, ' ');
+        s.input.cur += 1;
+    } else if let Some(first) = s.input.buf.chars().next() {
+        if first.is_whitespace() {
+            let w = first.len_utf8();
+            s.input.buf.replace_range(..w, "");
+            s.input.cur = s.input.cur.saturating_sub(w);
+        }
+    }
+    s.want_col = None;
+    app.laid_width = 0;
+}
+
+/// `o` / `O` in READ: create a fresh line below/above the cursor (indent
+/// inherited) and open the session on it. On a related row (or an empty
+/// spot) `o` appends at the page end.
+fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
+    if app.time.is_some() {
+        app.status = "viewing history — read-only (Esc → NOW)".into();
+        return;
+    }
+    let cur = app.cursor_src();
+    let indent: String = cur
+        .and_then(|s| app.lines.get(s))
+        .map(|l| indent_of(&l.text).to_string())
+        .unwrap_or_default();
+    let anchor = match (cur, above) {
+        (Some(s), true) => app.lines[s].id.clone(),
+        (Some(s), false) => app
+            .lines
+            .get(s + 1)
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| "_end".into()),
+        (None, _) => "_end".into(),
+    };
+    let new_id = new_line_id();
+    let ops = vec![EditOp::Insert { anchor, lines: vec![(new_id.clone(), indent.clone())] }];
+    do_edit(app, ctx, "new line", ops);
+    if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
+        enter_session(app, ctx, idx, indent.len());
+    }
+}
+
+/// One key while the session is open — the modeless core: printable keys
+/// type, arrows move the caret, Enter makes lines, Esc leaves.
+fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    // Any horizontal edit resets the sticky ↑/↓ column.
+    let reset_col = |app: &mut App| {
+        if let Some(s) = app.session.as_mut() {
+            s.want_col = None;
+        }
+    };
+    let edit_input = |app: &mut App, f: fn(&mut Input)| {
+        if let Some(s) = app.session.as_mut() {
+            f(&mut s.input);
+            s.want_col = None;
+        }
+        app.laid_width = 0;
+        app.follow = true;
+    };
+    match (k.code, ctrl) {
+        (KeyCode::Esc, _) => leave_session(app, ctx),
+        (KeyCode::Enter, _) => session_split(app, ctx),
+        (KeyCode::Up, _) => session_move_line(app, ctx, -1),
+        (KeyCode::Down, _) => session_move_line(app, ctx, 1),
+        (KeyCode::Left, _) | (KeyCode::Char('b'), true) => edit_input(app, Input::left),
+        (KeyCode::Right, _) | (KeyCode::Char('f'), true) => edit_input(app, Input::right),
+        (KeyCode::Home, _) | (KeyCode::Char('a'), true) => edit_input(app, Input::home),
+        (KeyCode::End, _) | (KeyCode::Char('e'), true) => edit_input(app, Input::end),
+        (KeyCode::Char('w'), true) => edit_input(app, Input::delete_word),
+        (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
+        (KeyCode::Backspace, _) => {
+            let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
+            if at_bol {
+                session_join_up(app, ctx);
             } else {
-                app.status = "could not anchor comment".into();
+                edit_input(app, Input::backspace);
             }
         }
-        Composer::Insert { anchor, input, .. } => {
-            let buf = input.buf;
-            if buf.is_empty() {
-                app.status = "empty insert cancelled".into();
-            } else {
-                run_edit_preview(app, ctx, vec![EditOp::Insert { anchor, text: buf }]);
-            }
-        }
-        Composer::Replace { id, input, .. } => {
-            let buf = input.buf;
-            let unchanged = app
-                .lines
-                .iter()
-                .find(|l| l.id == id)
-                .map(|l| l.text == buf)
+        (KeyCode::Delete, _) | (KeyCode::Char('d'), true) => {
+            let at_eol = app
+                .session
+                .as_ref()
+                .map(|s| s.input.cur == s.input.buf.len())
                 .unwrap_or(false);
-            if unchanged {
-                app.status = "no change".into();
+            if at_eol {
+                session_join_down(app, ctx);
             } else {
-                run_edit_preview(app, ctx, vec![EditOp::Replace { id, text: buf }]);
+                edit_input(app, Input::delete);
             }
+        }
+        (KeyCode::Tab, _) => session_indent(app, 1),
+        (KeyCode::BackTab, _) => session_indent(app, -1),
+        (KeyCode::Char(ch), false) => {
+            if let Some(s) = app.session.as_mut() {
+                s.input.insert_char(ch);
+                s.want_col = None;
+            }
+            app.laid_width = 0;
+            app.follow = true;
+        }
+        _ => {
+            reset_col(app);
+        }
+    }
+}
+
+/// A multi-line paste while the session is open: the first fragment goes
+/// into the caret line; the rest become real lines (one insert op), and
+/// the caret lands at the end of the last pasted fragment.
+fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
+    if !clean.contains('\n') {
+        if let Some(s) = app.session.as_mut() {
+            s.input.insert_str(clean);
+            s.want_col = None;
+        }
+        app.laid_width = 0;
+        return;
+    }
+    let Some(s) = app.session.as_ref() else { return };
+    let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
+    let mut parts = clean.split('\n');
+    let first = parts.next().unwrap_or("");
+    let rest: Vec<&str> = parts.collect();
+    let head = format!("{}{}", &buf[..caret], first);
+    let tail_of_line = &buf[caret..];
+    let last_part = rest.last().copied().unwrap_or("");
+    let mut inserted: Vec<(String, String)> = Vec::new();
+    for (i, p) in rest.iter().enumerate() {
+        let text = if i + 1 == rest.len() { format!("{p}{tail_of_line}") } else { (*p).to_string() };
+        inserted.push((new_line_id(), text));
+    }
+    let last_id = inserted.last().map(|(id, _)| id.clone());
+    let anchor = app
+        .lines
+        .get(line + 1)
+        .map(|l| l.id.clone())
+        .unwrap_or_else(|| "_end".into());
+    let ops = vec![
+        EditOp::Replace { id: app.lines[line].id.clone(), text: head },
+        EditOp::Insert { anchor, lines: inserted },
+    ];
+    do_edit(app, ctx, "paste", ops);
+    if let (Some(s), Some(last_id)) = (app.session.as_mut(), last_id) {
+        if let Some(idx) = app.lines.iter().position(|l| l.id == last_id) {
+            s.line = idx;
+            let text = app.lines[idx].text.clone();
+            s.input = Input { buf: text.clone(), cur: last_part.len().min(text.len()) };
+            s.orig = text;
+            s.want_col = None;
+            app.cursor = idx;
+            app.follow = true;
         }
     }
 }
 
 /// `^e`: suspend the TUI, open the WHOLE page in `$EDITOR`, diff the
 /// result into minimal lineId ops (unchanged lines keep their ids), and
-/// drop into the usual preview → commit gate. The editor is the user's own
+/// commit — undo (`u`) is the safety net. The editor is the user's own
 /// environment — multi-line editing, their keybindings, their IME
 /// settings — which makes this the most natural way to write a lot.
 fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) {
@@ -2349,119 +2898,74 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
     }
     let old: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
-    let ops = cosense::editops::diff_to_ops(&old, &new_lines);
+    let ops = diff_to_ops(&old, &new_lines);
     if ops.is_empty() {
         app.status = "no changes".into();
     } else {
-        run_edit_preview(app, ctx, ops);
+        let n = ops.len();
+        do_edit(app, ctx, "editor", ops);
+        app.status = format!("✓ editor: {n} op(s) committed · u to undo");
     }
 }
 
-/// Dry-run `ops` and open the preview overlay (Enter commits). A page that
-/// changed underneath fails fast-forward HERE, before anything is written:
-/// the viewer reloads and says so — the edit is retyped against fresh
-/// state, never silently rebased onto lines the user has not seen.
-fn run_edit_preview(app: &mut App, ctx: &Ctx, ops: Vec<EditOp>) {
-    match ctx.client.preview_edit(&app.project, &app.page_id, &ops) {
-        Ok(p) => {
-            let lines = preview_summary(app, &ops, &p);
-            app.overlay = Some(Overlay::EditPreview { preview_id: p.preview_id, lines });
+/// A commit came back from the worker (drained per frame).
+fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
+    app.inflight = app.inflight.saturating_sub(1);
+    match outcome {
+        CommitOutcome::Done { label, title } => {
+            // Title-line edits rename the page (auto-suffix included).
+            if !title.is_empty() && title != app.title {
+                app.title = title;
+            }
+            if app.status.is_empty() || app.status.starts_with('✓') || app.status.starts_with("EDIT") {
+                app.status = format!("✓ {label}");
+            }
         }
-        Err(EditError::NotFastForward) => {
-            reload_page(app, ctx);
-            app.status = "page changed under you — reloaded, please edit again".into();
+        CommitOutcome::Skipped => {}
+        CommitOutcome::Failed { label, msg } => {
+            app.status = format!("commit failed: {label} — {msg}");
         }
-        Err(e) => app.status = format!("preview failed: {e}"),
+        CommitOutcome::Conflict => recover_conflict(app, ctx),
     }
 }
 
-/// Human summary of a pending edit: the ops, then the after-apply lines
-/// around every change (`>` inserted, `*` replaced, `…` gaps).
-fn preview_summary(app: &App, ops: &[EditOp], p: &EditPreview) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let old_text = |id: &str| -> String {
-        app.lines
-            .iter()
-            .find(|l| l.id == id)
-            .map(|l| l.text.clone())
-            .unwrap_or_default()
-    };
-    for op in ops {
-        match op {
-            EditOp::Insert { text, .. } => {
-                for t in text.split('\n') {
-                    out.push(format!("+ {t}"));
-                }
-            }
-            EditOp::Replace { id, text } => {
-                out.push(format!("− {}", old_text(id)));
-                out.push(format!("+ {text}"));
-            }
-            EditOp::Delete { id } => out.push(format!("− {}", old_text(id))),
+/// 409 NotFastForward: someone else moved the page. Invalidate the queue,
+/// reload the server truth, and re-anchor the session by line id — the
+/// caret text is NEVER lost: if its line is gone, it becomes a fresh line
+/// at the end and the session continues there.
+fn recover_conflict(app: &mut App, ctx: &Ctx) {
+    app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let stash = app.session.as_ref().map(|s| {
+        (app.lines.get(s.line).map(|l| l.id.clone()).unwrap_or_default(), s.input.buf.clone(), s.input.cur)
+    });
+    reload_page(app, ctx); // set_page clears session + undo lineage
+    match stash {
+        None => {
+            app.status = "page changed by someone else — reloaded".into();
         }
-    }
-    out.push(String::new());
-    // After-apply context: rows within 2 of any changed row.
-    let marked: Vec<bool> = p
-        .lines
-        .iter()
-        .map(|l| p.new_ids.contains(&l.id) || p.updated_ids.contains(&l.id))
-        .collect();
-    let show: Vec<bool> = (0..p.lines.len())
-        .map(|i| {
-            let lo = i.saturating_sub(2);
-            let hi = (i + 2).min(p.lines.len().saturating_sub(1));
-            marked[lo..=hi].iter().any(|&m| m)
-        })
-        .collect();
-    if show.iter().any(|&s| s) {
-        out.push("after apply:".into());
-        let mut gap = false;
-        for (i, l) in p.lines.iter().enumerate() {
-            if !show[i] {
-                if !gap {
-                    out.push("  ⋯".into());
-                    gap = true;
+        Some((id, buf, caret)) => {
+            if let Some(idx) = app.lines.iter().position(|l| l.id == id) {
+                enter_session(app, ctx, idx, 0);
+                if let Some(s) = app.session.as_mut() {
+                    s.input = Input { buf: buf.clone(), cur: caret.min(buf.len()) };
                 }
-                continue;
-            }
-            gap = false;
-            let mark = if p.new_ids.contains(&l.id) {
-                "> "
-            } else if p.updated_ids.contains(&l.id) {
-                "* "
+                app.status = "page changed by someone else — reloaded, your line kept".into();
+            } else if !buf.trim().is_empty() {
+                // The line is gone: rescue the text as a fresh last line.
+                let new_id = new_line_id();
+                let ops = vec![EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![(new_id.clone(), buf.clone())],
+                }];
+                do_edit(app, ctx, "rescue", ops);
+                if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
+                    enter_session(app, ctx, idx, buf.len());
+                }
+                app.status = "your line was deleted by someone else — text rescued at the end".into();
             } else {
-                "  "
-            };
-            out.push(format!("{mark}{}", l.text));
-        }
-    }
-    out
-}
-
-/// Commit the previewed edit, then reload the page (line ids, telomere and
-/// related list all move). A NotFastForward here means someone edited
-/// between preview and Enter — the viewer reloads and reports; nothing was
-/// written.
-fn submit_pending(app: &mut App, ctx: &Ctx, preview_id: String) {
-    match ctx.client.submit_edit(&app.project, &preview_id) {
-        Ok(c) => {
-            // The server may have renamed (title-line edit / auto-suffix).
-            if !c.title.is_empty() {
-                app.title = c.title;
+                app.status = "page changed by someone else — reloaded".into();
             }
-            reload_page(app, ctx);
-            let short: String = c.commit_id.chars().take(8).collect();
-            app.status = format!("✓ committed {short}");
         }
-        Err(EditError::NotFastForward) => {
-            reload_page(app, ctx);
-            app.status = "page changed between preview and commit — reloaded, please edit again".into();
-        }
-        Err(EditError::PreviewGone) => {
-            app.status = "preview expired (5 min) — please edit again".into();
-        }
-        Err(e) => app.status = format!("commit failed: {e}"),
     }
 }
 
@@ -2587,13 +3091,27 @@ fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
         }
         return;
     }
-    handle_mouse_content(app, m);
+    handle_mouse_content(app, ctx, m);
+}
+
+/// Caret byte for a click at display column `col` of body line `line`:
+/// exact on the session's caret line (it shows raw source), best-effort on
+/// rendered lines (raw and rendered columns differ where notation hides).
+fn click_caret(app: &App, line: usize, col: usize) -> usize {
+    let text = app
+        .session
+        .as_ref()
+        .filter(|s| s.line == line)
+        .map(|s| s.input.buf.clone())
+        .or_else(|| app.lines.get(line).map(|l| l.text.clone()))
+        .unwrap_or_default();
+    byte_at_col(&text, col)
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
 /// scrollbar. Uses the geometry the last frame recorded in
 /// `App::text_rect` / `App::bar_x`.
-fn handle_mouse_content(app: &mut App, m: MouseEvent) {
+fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollDown => {
             app.drag_anchor = None;
@@ -2651,6 +3169,47 @@ fn handle_mouse_content(app: &mut App, m: MouseEvent) {
             // the row is what selects the line.
             if in_rows && m.column < app.bar_x {
                 if let Some(src) = app.src_at_screen_row(screen_row) {
+                    let col = (m.column.saturating_sub(text.x)) as usize;
+                    // Session open: a click just moves the caret (the
+                    // dirty line commits when the caret leaves it).
+                    if app.session.is_some() {
+                        if src < app.lines.len() {
+                            session_commit_dirty(app, ctx);
+                            let caret = click_caret(app, src, col);
+                            if let Some(s) = app.session.as_mut() {
+                                if s.line != src {
+                                    let t = app.lines[src].text.clone();
+                                    s.line = src;
+                                    s.orig = t.clone();
+                                    s.input = Input { buf: t, cur: 0 };
+                                }
+                                s.input.cur = caret.min(s.input.buf.len());
+                                s.want_col = None;
+                            }
+                            app.cursor = src;
+                            app.follow = true;
+                            app.laid_width = 0;
+                        }
+                        return;
+                    }
+                    // READ: double-click enters the session at the clicked
+                    // character (the cosense-web gesture); a single click
+                    // moves the line cursor as before.
+                    let now = Instant::now();
+                    let dbl = app
+                        .last_click
+                        .map(|(t, cx, cy)| {
+                            now.duration_since(t) < Duration::from_millis(450)
+                                && cx.abs_diff(m.column) <= 1
+                                && cy.abs_diff(m.row) <= 1
+                        })
+                        .unwrap_or(false);
+                    app.last_click = Some((now, m.column, m.row));
+                    if dbl && src < app.lines.len() && app.time.is_none() {
+                        let caret = click_caret(app, src, col);
+                        enter_session(app, ctx, src, caret);
+                        return;
+                    }
                     app.selection = None;
                     app.drag_anchor = Some(src);
                     app.goto_src(src);
@@ -2714,24 +3273,6 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     }
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let is_picker = matches!(app.overlay, Some(Overlay::Pages { .. }));
-
-    // The edit preview is a commit gate, not a list: Enter commits,
-    // y commits (habit from copy — "yes"), anything else closes.
-    if matches!(app.overlay, Some(Overlay::EditPreview { .. })) {
-        match code {
-            KeyCode::Enter | KeyCode::Char('y') => {
-                if let Some(Overlay::EditPreview { preview_id, .. }) = app.overlay.take() {
-                    submit_pending(app, ctx, preview_id);
-                }
-            }
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
-                app.overlay = None;
-                app.status = "edit cancelled (nothing written)".into();
-            }
-            _ => {}
-        }
-        return;
-    }
 
     let is_line_info = matches!(app.overlay, Some(Overlay::LineInfo));
     let act = match code {
@@ -2889,7 +3430,13 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // help / status: a leading position readout (akapen's `VIEW L23/118`),
     // then the contextual hint — numbered links when the cursor line has
     // them, else the static key list, else a transient status message.
-    let mode_tag = if app.mode == Mode::Source { "SRC" } else { "VIEW" };
+    let mode_tag = if app.session.is_some() {
+        "EDIT"
+    } else if app.mode == Mode::Source {
+        "SRC"
+    } else {
+        "VIEW"
+    };
     let pos = if app.lines.is_empty() {
         "L-/-".to_string()
     } else if app.cursor >= app.lines.len() && !app.virtual_items.is_empty() {
@@ -2899,8 +3446,18 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         let cur = app.cursor_src().map(|s| s + 1).unwrap_or(1).min(app.lines.len());
         format!("L{}/{}", cur, app.lines.len())
     };
-    let cur_links = app.cursor_line_links();
-    let hint = if !cur_links.is_empty() {
+    let cur_links = if app.session.is_some() { Vec::new() } else { app.cursor_line_links() };
+    let hint = if app.session.is_some() {
+        let dirty = app
+            .session
+            .as_ref()
+            .map(|s| s.input.buf != s.orig)
+            .unwrap_or(false);
+        format!(
+            "{}↑↓ move · Enter new line · ⌫@行頭 join · Tab indent · Esc done",
+            if dirty { "● " } else { "" }
+        )
+    } else if !cur_links.is_empty() {
         let listed: Vec<String> = cur_links
             .iter()
             .take(9)
@@ -2909,7 +3466,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .collect();
         format!("Enter/f open → {}", listed.join("  "))
     } else if app.status.is_empty() {
-        "j/k move  Enter link  o/E/x edit  ^e editor  Tab source  c comment  ? help  q quit"
+        "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
             .to_string()
     } else {
         app.status.clone()
@@ -3181,41 +3738,44 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
     }
 
-    // Composer overlay at the bottom. The caret is drawn at the input's
+    // The edit session's caret: put the HARDWARE cursor on it. Terminal
+    // IMEs anchor their inline composition window to the hardware cursor,
+    // so this is what makes 日本語入力 land visually at the caret (akapen's
+    // composer technique). `wrap_plain_columns` drives both the display
+    // and this math, so they can never disagree.
+    if let Some(s) = &app.session {
+        if let Some((first, _)) = app.src_rows(s.line) {
+            let text_w = App::text_width(app.mode, app.laid_width.max(1));
+            let (crow, ccol) = caret_row_col(&s.input.buf, s.input.cur, text_w);
+            let y = text.y as i32 + (app.row_top(first) as i32 + crow as i32) - app.scroll as i32;
+            let x = text.x as i32 + (ccol as i32).min(text.width.saturating_sub(1) as i32);
+            if y >= band_top && y <= band_bot {
+                f.set_cursor_position(ratatui::layout::Position::new(x as u16, y as u16));
+            }
+        }
+    }
+
+    // Comment composer at the bottom. The caret is drawn at the input's
     // cursor (←/→/^a/^e move it), not glued to the end.
-    if let Some(comp) = &app.composing {
+    if let Some(input) = &app.composing {
         let h = 3u16;
         let r = Rect::new(area.x, area.y + area.height.saturating_sub(1 + h), area.width, h);
         f.render_widget(Clear, r);
-        let (label, input, badge, hint) = match comp {
-            Composer::Comment { input } => {
-                let (a, b) = app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor));
-                let label = if a == b {
-                    format!(" comment on line {} ", a + 1)
-                } else {
-                    format!(" comment on lines {}-{} ", a + 1, b + 1)
-                };
-                (label, input, Color::Green, "Enter save · Esc cancel · ←/→ ^a/^e ^w ^u")
-            }
-            Composer::Insert { label, input, .. } => (
-                label.clone(),
-                input,
-                Color::Yellow,
-                "Enter preview · Esc cancel · ←/→ ^a/^e ^w ^u — nothing written until commit",
-            ),
-            Composer::Replace { label, input, .. } => (
-                label.clone(),
-                input,
-                Color::Yellow,
-                "Enter preview · Esc cancel · ←/→ ^a/^e ^w ^u — nothing written until commit",
-            ),
+        let (a, b) = app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor));
+        let label = if a == b {
+            format!(" comment on line {} ", a + 1)
+        } else {
+            format!(" comment on lines {}-{} ", a + 1, b + 1)
         };
         let (before, after) = input.parts();
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(label, Style::default().fg(Color::Black).bg(badge))),
+                Line::from(Span::styled(label, Style::default().fg(Color::Black).bg(Color::Green))),
                 Line::from(format!("> {before}▏{after}")),
-                Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "Enter save · Esc cancel · ←/→ ^a/^e ^w ^u",
+                    Style::default().fg(Color::DarkGray),
+                )),
             ]),
             r,
         );
@@ -3293,11 +3853,6 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
             };
             ("line detail".into(), items, usize::MAX)
         }
-        Some(Overlay::EditPreview { lines, .. }) => (
-            "edit preview — nothing is written yet".into(),
-            lines.clone(),
-            usize::MAX,
-        ),
         Some(Overlay::Help) => (
             "keys".into(),
             vec![
@@ -3306,10 +3861,12 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
                 "pages     ^o recent pages (type to filter)".into(),
-                "browser   e open page at cursor line".into(),
-                "edit      o/O insert below/above · E edit line · x delete · ^e whole page in $EDITOR".into(),
-                "          every edit dry-runs first: Enter/y commits, Esc discards".into(),
-                "history   ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
+                "edit      e line end · i line start · o/O new line · double-click — modeless session".into(),
+                "          in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done".into(),
+                "          x delete line/selection · ^e whole page in $EDITOR · commits are automatic".into(),
+                "undo      u undo · ^r redo (every commit is reversible)".into(),
+                "browser   w open page at cursor line".into(),
+                "time      ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
                 "comment   v select · c add · d delete · ^n/^p jump".into(),
                 "detail    t who/when edited this line".into(),
                 "output    y copy all comments".into(),
@@ -3359,8 +3916,6 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
     let footer = if is_picker {
         " type to filter · ↑/↓ or ^n/^p move · Enter open · Esc close "
-    } else if matches!(app.overlay, Some(Overlay::EditPreview { .. })) {
-        " Enter/y commit · Esc cancel "
     } else {
         " ↑/↓ move · Enter open · Esc close "
     };
@@ -3406,6 +3961,26 @@ fn gutter_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A network-free Ctx for tests that need one (mouse/session paths).
+    /// The client never gets used: the commit worker is not spawned in
+    /// tests, so jobs pile up in the App's own channel for inspection.
+    fn test_ctx() -> Ctx {
+        let cfg = Config {
+            project: "proj".into(),
+            auth: AuthStore::default(),
+            api_domain: "scrapbox.io".into(),
+        };
+        Ctx {
+            client: Client::new(cfg).unwrap(),
+            hl: Highlighter::new(None, false),
+            palette: cosense::theme::Palette::for_light(false),
+            picker: Picker::from_fontsize((8, 16).into()),
+            fetcher: Arc::new(ImageFetcher::new(None, None).unwrap()),
+            light: false,
+            ime_mode: cosense::ime::ImeMode::Off,
+        }
+    }
 
     fn page(texts: &[&str]) -> App {
         let mut app = App::new("proj".into());
@@ -3619,6 +4194,158 @@ mod tests {
         assert_eq!(secs[4].entries[0].title, "/other/Page", "bare /project is not a page");
     }
 
+    fn key(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn type_str(app: &mut App, ctx: &Ctx, s: &str) {
+        for ch in s.chars() {
+            handle_session_key(app, ctx, key(KeyCode::Char(ch)));
+        }
+    }
+    /// Drain the (unspawned) commit queue: (label, ops) per job.
+    fn drain_jobs(app: &mut App) -> Vec<(String, Vec<EditOp>)> {
+        let rx = app.commit_jobs_rx.as_ref().unwrap();
+        let mut out = Vec::new();
+        while let Ok(j) = rx.try_recv() {
+            out.push((j.label, j.ops));
+        }
+        out
+    }
+
+    #[test]
+    fn session_edits_many_lines_without_leaving() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+
+        // e-style entry on line 1, caret at end; type; ↓ commits and moves
+        let end = app.lines[1].text.len();
+        enter_session(&mut app, &ctx, 1, end);
+        type_str(&mut app, &ctx, "!");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "one!");
+        assert!(drain_jobs(&mut app).is_empty(), "typing alone commits nothing");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Down));
+        assert_eq!(app.lines[1].text, "one!", "leaving the line applied it locally");
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "one!"));
+
+        // session continued on line 2: Enter at EOL creates line 3 and
+        // KEEPS the session going; type there; Esc commits the text
+        assert_eq!(app.session.as_ref().unwrap().line, 2);
+        handle_session_key(&mut app, &ctx, key(KeyCode::End));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines.len(), 4, "a real line exists locally at once");
+        assert_eq!(app.session.as_ref().unwrap().line, 3);
+        type_str(&mut app, &ctx, "three");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.session.is_none());
+        assert_eq!(app.lines[3].text, "three");
+        let jobs = drain_jobs(&mut app);
+        // split (replace+insert) then the final text replace
+        assert_eq!(jobs.len(), 2);
+        assert!(matches!(&jobs[0].1[1], EditOp::Insert { .. }));
+        assert!(matches!(&jobs[1].1[0], EditOp::Replace { text, .. } if text == "three"));
+        // ids: the insert's id is the line's id — client-generated, stable
+        if let EditOp::Insert { lines, .. } = &jobs[0].1[1] {
+            assert_eq!(lines[0].0, app.lines[3].id);
+        }
+    }
+
+    #[test]
+    fn session_split_mid_line_inherits_indent() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " indented line"]);
+        app.rebuild(40);
+        // caret between "indented" and " line"
+        let caret = " indented".len();
+        enter_session(&mut app, &ctx, 1, caret);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[1].text, " indented");
+        assert_eq!(app.lines[2].text, "  line", "tail keeps the indent");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 2);
+        assert_eq!(s.input.cur, 1, "caret sits after the inherited indent");
+    }
+
+    #[test]
+    fn session_join_up_at_bol() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 0);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        assert_eq!(app.lines.len(), 2);
+        assert_eq!(app.lines[1].text, "onetwo");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1);
+        assert_eq!(s.input.cur, 3, "caret on the junction");
+        let jobs = drain_jobs(&mut app);
+        assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "onetwo"));
+        assert!(matches!(&jobs[0].1[1], EditOp::Delete { .. }));
+    }
+
+    #[test]
+    fn undo_redo_roundtrip_with_queue() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        // x-style delete of line 1
+        do_edit(&mut app, &ctx, "delete", vec![EditOp::Delete { id: "id1".into() }]);
+        assert_eq!(app.lines.len(), 2);
+        undo(&mut app, &ctx);
+        assert_eq!(app.lines.len(), 3);
+        assert_eq!(app.lines[1].text, "one", "undo restored the line in place");
+        redo(&mut app, &ctx);
+        assert_eq!(app.lines.len(), 2);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
+        assert!(jobs[1].0.starts_with("undo"));
+        assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    #[test]
+    fn session_paste_multiline_becomes_lines() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "ab"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 1); // caret between a and b
+        session_paste(&mut app, &ctx, "X\nY\nZ");
+        assert_eq!(app.lines[1].text, "aX");
+        assert_eq!(app.lines[2].text, "Y");
+        assert_eq!(app.lines[3].text, "Zb", "line tail follows the last fragment");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 3);
+        assert_eq!(s.input.cur, 1, "caret after the pasted Z");
+    }
+
+    #[test]
+    fn open_line_below_inherits_indent_and_opens_session() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "  bullet", "after"]);
+        app.rebuild(40);
+        app.cursor = 1;
+        open_line(&mut app, &ctx, false);
+        assert_eq!(app.lines.len(), 4);
+        assert_eq!(app.lines[2].text, "  ", "new line inherits the indent");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 2);
+        assert_eq!(s.input.cur, 2);
+    }
+
+    #[test]
+    fn caret_math_matches_the_wrapped_display() {
+        // 10-wide: "あいうえお" is 10 cols → caret after う = row0 col6;
+        // after お = boundary → next row col0 when more text follows.
+        let s = "あいうえおxy";
+        assert_eq!(caret_row_col(s, 9, 10), (0, 6));
+        assert_eq!(caret_row_col(s, 15, 10), (1, 0));
+        assert_eq!(caret_row_col(s, 17, 10), (1, 2));
+        assert_eq!(byte_at_col("あいう", 4), 6, "col 4 → third kana");
+        // segments carry every char: display and math agree
+        assert_eq!(wrap_plain_columns(s, 10).join(""), s);
+    }
+
     #[test]
     fn movement_skips_comment_cards() {
         let mut app = page(&["a", "b", "c"]);
@@ -3742,22 +4469,22 @@ mod tests {
         let mut app = page_with_screen();
         app.scroll = 5;
         // press on screen row 2 -> display row 7 -> line 7
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 10, 3));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 10, 3));
         assert_eq!(app.cursor, 7);
         assert_eq!(app.selection, None, "a click alone selects nothing");
         // drag down to screen row 6 -> line 11: selection 7..=11
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 12, 7));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 12, 7));
         assert_eq!(app.selection.map(|s| s.range()), Some((7, 11)));
         assert_eq!(app.cursor, 11);
         // dragging back above the anchor flips the range
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 12, 1));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 12, 1));
         assert_eq!(app.selection.map(|s| s.range()), Some((5, 7)));
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 12, 1));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Up(MouseButton::Left), 12, 1));
         assert_eq!(app.drag_anchor, None);
         // the selection survives the release (c comments on it)
         assert_eq!(app.selection.map(|s| s.range()), Some((5, 7)));
         // a click outside the rows (header) changes nothing
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 10, 0));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 10, 0));
         assert_eq!(app.cursor, 5);
     }
 
@@ -3766,16 +4493,16 @@ mod tests {
         let mut app = page_with_screen();
         app.goto_src(3);
         // 30 rows / 10 viewport: thumb 3 rows, track rows 0..=7, max offset 20
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Down(MouseButton::Left), 41, 1 + 7));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 41, 1 + 7));
         assert_eq!(app.scroll, 20, "track bottom -> last page");
         assert_eq!(app.cursor, 3, "the cursor keeps its line");
         assert!(!app.follow);
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Drag(MouseButton::Left), 41, 1 + 3));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 41, 1 + 3));
         assert!(app.scroll < 20 && app.scroll > 0);
-        handle_mouse_content(&mut app, mouse(MouseEventKind::Up(MouseButton::Left), 41, 1 + 3));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Up(MouseButton::Left), 41, 1 + 3));
         assert_eq!(app.scrollbar_drag, None);
         // wheel over the body: one row per event, cursor untouched
-        handle_mouse_content(&mut app, mouse(MouseEventKind::ScrollUp, 10, 5));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::ScrollUp, 10, 5));
         assert_eq!(app.cursor, 3);
     }
 
