@@ -173,6 +173,7 @@ enum WebOutcome {
 
 impl WebOutcome {
     /// Did this produce a picture?
+    #[cfg(test)]
     fn is_drawn(&self) -> bool {
         matches!(self, WebOutcome::Drawn(_))
     }
@@ -197,10 +198,20 @@ fn spawn_web_worker(
         // Idle window. The backend keeps a browser warm between batches (a
         // re-render in a warm browser is roughly twice as fast), but a
         // viewer nobody is editing should not hold a browser process.
-        const IDLE: std::time::Duration = std::time::Duration::from_secs(90);
+        // 15 s is short enough that a reader who has finished with a page
+        // is not paying for a resident Chrome, and long enough to cover the
+        // pause between "the diagram appeared" and "I edited it again".
+        let idle = idle_window();
+        let reap_at_once = idle.is_zero();
         let live = |gen: u64| gen == current_gen.load(std::sync::atomic::Ordering::SeqCst);
         loop {
-            let first = match jobs.recv_timeout(IDLE) {
+            let first = match jobs.recv_timeout(if reap_at_once {
+                // A zero window still needs a real block here; the browser
+                // is already gone (reaped below), so waking is free.
+                Duration::from_secs(3600)
+            } else {
+                idle
+            }) {
                 Ok(job) => job,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     backend.idle();
@@ -280,11 +291,27 @@ fn spawn_web_worker(
                     merged_auth,
                 );
             }
+            if reap_at_once {
+                // `COSENSE_WEB_IDLE_SECS=0`: hold no browser between
+                // batches at all. Every page then pays the cold-start cost.
+                backend.idle();
+            }
             if stop {
                 break;
             }
         }
     })
+}
+
+/// How long a browser is kept warm between batches.
+/// `COSENSE_WEB_IDLE_SECS`, clamped to 0..=300; 0 reaps after every batch.
+fn idle_window() -> Duration {
+    let secs = std::env::var("COSENSE_WEB_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s <= 300)
+        .unwrap_or(15);
+    Duration::from_secs(secs)
 }
 
 /// Serve one page's worth of requests: the disk cache first, the browser for
@@ -2879,13 +2906,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // backend that fails every request so diagrams simply stay code blocks.
     // The session's `connect.sid` (never the PAT) is what a browser can use,
     // and it is handed to the backend here and nowhere else.
-    let web_backend: Arc<dyn WebBackend> = match cosense::chrome::ChromeBackend::detect(
-        ctx.client.sid().map(str::to_string),
-    ) {
-        Some(b) => Arc::new(b),
-        None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
+    // `COSENSE_WEB_RENDER=off` means OFF: no backend, no worker thread, and
+    // no cache directory is created or swept. Diagrams are code blocks, and
+    // nothing on disk is touched.
+    let renderer_off = app.render_policy == capability::RenderPolicy::Off;
+    let web_backend: Arc<dyn WebBackend> = if renderer_off {
+        Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser))
+    } else {
+        match cosense::chrome::ChromeBackend::detect(ctx.client.sid().map(str::to_string)) {
+            Some(b) => Arc::new(b),
+            None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
+        }
     };
-    let web_worker = app.web_jobs_rx.take().map(|jobs_rx| {
+    let web_worker = app.web_jobs_rx.take().filter(|_| !renderer_off).map(|jobs_rx| {
         spawn_web_worker(
             jobs_rx,
             app.web_tx.clone(),
@@ -3803,6 +3836,23 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 .map(|l| indent_of(&l.text).len())
                 .unwrap_or(0);
             enter_session(app, ctx, app.cursor, caret);
+        }
+
+        // ---- draw this page's diagrams (**m**ermaid) ----
+        // Rendering is manual by default: a page load only shows diagrams
+        // it already has on disk, because launching a browser is by far the
+        // most expensive thing this viewer does. This is how you ask.
+        (KeyCode::Char('m'), false) => {
+            let before = app.web_pending.len();
+            app.start_web_renders(capability::Trigger::Manual);
+            if app.web_pending.len() == before && app.web_notice.is_none() {
+                app.note_web_failure(match app.render_policy {
+                    capability::RenderPolicy::Off => {
+                        "diagram: レンダラは off です (COSENSE_WEB_RENDER)".into()
+                    }
+                    _ => "diagram: 描画するものはありません".to_string(),
+                });
+            }
         }
 
         // ---- open in browser (moved from `e`: **w**eb) ----
@@ -5862,6 +5912,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "          screenshotted from the real Cosense page by headless Chrome".into(),
                 "          (COSENSE_CHROME to point at it). No browser, a private page".into(),
                 "          without COSENSE_SID, or a Mermaid error → the code block stays.".into(),
+                "          m draws this page's diagrams. Opening a page only shows the".into(),
+                "          ones already cached: a browser is expensive, so it starts".into(),
+                "          when you ask. COSENSE_WEB_RENDER=auto|off changes that;".into(),
+                "          COSENSE_WEB_IDLE_SECS is how long the browser stays warm.".into(),
                 "output    y copy all comments".into(),
                 "list      l comments · ? help".into(),
                 "quit      q  (Esc cancels; comments print to stdout)".into(),
@@ -6428,6 +6482,111 @@ mod tests {
             app.web_tx.send(m).unwrap();
         }
         app.drain_web_renders();
+    }
+
+    // ---------------------------------------------------------------
+    // Render policy: when a browser is allowed to start at all.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn by_default_opening_a_page_shows_cached_diagrams_and_starts_no_browser() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the default page load must never launch a browser"
+        );
+        // Both are misses, and misses are not failures.
+        assert_eq!(app.web_missing.len(), n);
+        assert!(app.web_errors.is_empty());
+        assert!(app.web_pending.is_empty());
+        assert!(app.web_notice.is_none(), "an empty cache is not worth a notice");
+    }
+
+    #[test]
+    fn m_draws_the_diagrams_the_page_load_could_not() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let keys = diagram_keys(&app);
+        settle(&mut app, keys.len());
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // The reader presses `m`.
+        for k in &keys {
+            backend.answer(k, Ok(tiny_png()));
+        }
+        handle_key(&mut app, &test_ctx(), key(KeyCode::Char('m')));
+        settle(&mut app, keys.len());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one batch, not one browser per diagram"
+        );
+        assert!(keys.iter().all(|k| app.images.contains_key(k)));
+        assert!(app.web_missing.is_empty(), "they are no longer missing");
+    }
+
+    #[test]
+    fn a_cache_miss_never_blocks_the_later_m() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        // A miss is recorded...
+        app.web_pending.insert(keys[0].clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: keys[0].clone(),
+                rescale: false,
+                res: WebOutcome::Missing,
+            })
+            .unwrap();
+        app.drain_web_renders();
+        assert!(!app.web_errors.contains_key(&keys[0]), "a miss is not an error");
+        // ...and `m` still asks for it.
+        app.start_web_renders(capability::Trigger::Manual);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
+        assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
+    }
+
+    #[test]
+    fn auto_draws_on_load_and_off_draws_never() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
+        assert_eq!(reqs.len(), 2, "auto renders both on load");
+
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Off;
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        app.start_web_renders(capability::Trigger::Manual);
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "off queues no work at all — not even a cache lookup"
+        );
+        assert!(app.web_pending.is_empty());
+    }
+
+    #[test]
+    fn m_is_an_ordinary_character_while_editing() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        enter_session(&mut app, &ctx, 0, 1);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        let s = app.session.as_ref().expect("still editing");
+        assert!(s.input.buf.contains('m'), "m typed a character, not a render");
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
     }
 
     #[test]
