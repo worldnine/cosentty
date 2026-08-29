@@ -57,6 +57,8 @@ use ratatui_image::picker::Picker;
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 
 const SEL_BG: Color = Color::DarkGray;
+/// The list marker, in the one place both the drawing and its tests read.
+const BULLET: &str = "\u{2022}";
 /// Source mode's line-number gutter: `"  12 "` (4 digits + space).
 const SOURCE_NUM_W: usize = 5;
 /// Cursor-row highlight inside the page body.
@@ -7104,6 +7106,11 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // the band has to run to the frame, and the telomere, the thumb and the
     // padding columns are all drawn after the rows.
     let mut wash_rows: Vec<u16> = Vec::new();
+    // Bullets for image rows. An indented picture is a LIST ITEM whose
+    // content is the picture (cosense web draws the bullet there too), and
+    // the image protocol paints its own area, so the marker is written
+    // beside it in the same pass as the telomeres.
+    let mut image_bullets: Vec<(u16, u16)> = Vec::new();
 
     // Which rows are code: a `code:` block reads as one surface, so its
     // rows carry a wash. Computed once per frame from the text the screen
@@ -7237,7 +7244,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             }
             Row::ImageError { msg, indent, .. } => {
                 if let Some(r) = one_row(screen_y) {
-                    let pad = " ".repeat(*indent);
+                    let pad = bullet_pad(*indent);
                     f.render_widget(
                         Paragraph::new(format!("{pad} {msg}")).style(base.fg(Color::Red)),
                         r,
@@ -7246,7 +7253,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             }
             Row::ImageLoading { indent, .. } => {
                 if let Some(r) = one_row(screen_y) {
-                    let pad = " ".repeat(*indent);
+                    let pad = bullet_pad(*indent);
                     f.render_widget(
                         Paragraph::new(format!("{pad} □ loading image…"))
                             .style(base.fg(Color::DarkGray)),
@@ -7255,6 +7262,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 }
             }
             Row::Image { url, indent, .. } => {
+                if *indent >= 2 {
+                    let y = text.y as i32 + screen_y;
+                    if y >= band_top && y <= band_bot {
+                        image_bullets.push((y as u16, text.x + *indent as u16 - 2));
+                    }
+                }
                 // Render into the full text area with a signed position: when
                 // the image top is scrolled above the viewport, screen_y is
                 // negative and the sliced protocol clips the hidden rows; when
@@ -7300,6 +7313,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         if let Some(c) = buf.cell_mut((gutter_x, sy)) {
             c.set_symbol(glyph);
             c.set_style(style);
+        }
+    }
+    for (sy, x) in image_bullets {
+        if let Some(c) = buf.cell_mut((x, sy)) {
+            c.set_symbol(BULLET);
+            c.set_style(Style::default().fg(ctx.palette.bullet));
         }
     }
     for (sy, style) in carets {
@@ -7403,7 +7422,17 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
 }
 
-/// One row of a block the web renderer is still working on, with the
+/// The lead-in for an indented image placeholder: the bullet where the
+/// picture's own bullet goes, then the space the picture would start at.
+fn bullet_pad(indent: usize) -> String {
+    if indent >= 2 {
+        format!("{}{BULLET} ", " ".repeat(indent - 2))
+    } else {
+        " ".repeat(indent)
+    }
+}
+
+/// One row of a block the web renderer is still working on/// One row of a block the web renderer is still working on, with the
 /// brightness band applied to every span.
 fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: &Ctx) -> Line<'static> {
     let level = cosense::theme::shimmer_level(pos, len, app.web_anim.elapsed().as_secs_f32());
@@ -10291,6 +10320,39 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// An indented picture is a LIST ITEM: cosense web draws the bullet
+    /// beside it, and without one the picture floats free of the item it
+    /// belongs to.
+    #[test]
+    fn an_indented_picture_gets_its_bullet() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let url = "https://example.com/a.png";
+        let mut app = page(&["t", &format!(" [{url}]"), "  after"]);
+        // Pretend the picture has landed.
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap();
+        app.images.insert(url.to_string(), info);
+        app.rebuild(40);
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..40).map(|x| buf.cell((x, y)).unwrap().symbol()).collect()
+        };
+        // The picture is painted by the protocol; its bullet is ours.
+        let bulleted: Vec<String> =
+            (0..12).map(row_text).filter(|r| r.contains(BULLET)).collect();
+        assert!(!bulleted.is_empty(), "a bullet is drawn for the picture");
+        let col = bulleted[0].find(BULLET).unwrap();
+        assert!(col >= 3, "at the item's own indent: {:?}", bulleted[0]);
+
+        // The placeholder shown before it lands wears the same lead-in.
+        assert_eq!(bullet_pad(2), format!("{BULLET} "));
+        assert_eq!(bullet_pad(4), format!("  {BULLET} "));
+        assert_eq!(bullet_pad(0), "", "a flush picture has no bullet");
     }
 
     /// Everything in Cosense is written in brackets, so the closing half
