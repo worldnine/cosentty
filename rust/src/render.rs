@@ -551,7 +551,7 @@ const IMAGE_EXTS: [&str; 8] = [
 
 /// Whether a URL points at a decodable image: by file extension (query and
 /// fragment ignored) or by being a Scrapbox upload.
-fn looks_like_image_url(url: &str) -> bool {
+pub fn looks_like_image_url(url: &str) -> bool {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return false;
     }
@@ -585,12 +585,11 @@ pub fn file_name_of_url(url: &str) -> &str {
 /// Handles gyazo (any host form), Scrapbox uploads, and **any** http(s) URL
 /// with an image extension. Scrapbox's linked-image form `[href imageUrl]`
 /// is supported by scanning the tokens for the image side.
-fn standalone_image(body: &str) -> Option<String> {
-    let inner = body.trim();
-    let inner = inner.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(inner);
+/// The image a single `[...]` embeds, if it is one. Handles the gyazo
+/// permalink forms, a bracketed image URL, and the linked-image form
+/// (`[href imageUrl]` / `[imageUrl href]`).
+fn image_in_bracket(inner: &str) -> Option<String> {
     let inner = inner.trim();
-
-    // gyazo (permalink form, resolved by the image fetcher)
     let mut g = Vec::new();
     find_gyazo(inner, &mut g);
     if let Some(u) = g.into_iter().next() {
@@ -598,29 +597,46 @@ fn standalone_image(body: &str) -> Option<String> {
             return Some(u);
         }
     }
-
-    // Any image URL among the tokens: covers a bare URL, `[imageUrl]`, and
-    // the linked-image form `[href imageUrl]` / `[imageUrl href]`.
     let tokens: Vec<&str> = inner.split_whitespace().collect();
     if tokens.len() <= 2 {
         if let Some(u) = tokens.iter().find(|t| looks_like_image_url(t)) {
             return Some((*u).to_string());
         }
     }
-
-    // legacy explicit branch kept for scrapbox.io/files with extension
-    if (inner.starts_with("https://scrapbox.io/files/")
-        || inner.starts_with("https://") && inner.contains("/files/"))
-        && (inner.ends_with(".png")
-            || inner.ends_with(".jpg")
-            || inner.ends_with(".jpeg")
-            || inner.ends_with(".gif")
-            || inner.ends_with(".webp"))
-    {
-        return Some(inner.to_string());
-    }
     None
 }
+
+/// Every image a line embeds, in the order they are written.
+///
+/// **Only the bracketed form draws a picture.** A bare URL is a link, at
+/// the start of a line as anywhere else — the same rule cosense web
+/// follows. The viewer used to turn any line STARTING with an image URL
+/// into a picture, which silently ate the rest of the line.
+fn line_images(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find('[') {
+        let Some(end_rel) = rest[start + 1..].find(']') else { break };
+        let end = start + 1 + end_rel;
+        if let Some(u) = image_in_bracket(&rest[start + 1..end]) {
+            out.push(u);
+        }
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
+/// The image this line is ENTIRELY made of — one bracket and nothing
+/// else, which is the case that becomes a picture on its own row.
+fn standalone_image(body: &str) -> Option<String> {
+    let inner = body.trim();
+    let inner = inner.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.contains('[') || inner.contains(']') {
+        return None;
+    }
+    image_in_bracket(inner)
+}
+
 
 /// Render with defaults (dark palette, no syntax highlighting).
 pub fn render_lines(lines: &[String]) -> RenderOutput {
@@ -802,10 +818,26 @@ pub fn render_lines_with(
             continue;
         }
 
-        // standalone image line
+        // image line. A line that is ONE bracket and nothing else becomes
+        // the picture. A line that also carries text (or a second image)
+        // keeps its text row and hangs the pictures under it: in a
+        // terminal the text cannot flow around an image, and dropping
+        // either of them is worse than stacking them.
         if let Some(url) = standalone_image(body) {
             ex.images.push(url.clone());
             emit!(Block::Image { url });
+            i += 1;
+            continue;
+        }
+        let embedded = line_images(body);
+        if !embedded.is_empty() {
+            let spans = decorate_inline(body, &mut ex.links, &mut ex.images, pal);
+            let mut line_spans = vec![Span::raw(indent.clone())];
+            line_spans.extend(spans);
+            emit!(Block::Text(Line::from(line_spans)));
+            for url in embedded {
+                emit!(Block::Image { url });
+            }
             i += 1;
             continue;
         }
@@ -928,11 +960,9 @@ mod tests {
 
     #[test]
     fn non_gyazo_image_urls_are_detected() {
-        // bare URL, bracketed URL, and the linked-image form all resolve
-        assert_eq!(
-            standalone_image("https://example.com/a.png"),
-            Some("https://example.com/a.png".into())
-        );
+        // A picture needs the BRACKETED form — the rule cosense web
+        // follows. A bare URL is a link, wherever it sits on the line.
+        assert_eq!(standalone_image("https://example.com/a.png"), None);
         assert_eq!(
             standalone_image("[https://example.com/photo.JPG]"),
             Some("https://example.com/photo.JPG".into())
@@ -944,12 +974,19 @@ mod tests {
         );
         // query strings don't defeat extension detection
         assert_eq!(
-            standalone_image("https://example.com/a.png?w=800"),
+            standalone_image("[https://example.com/a.png?w=800]"),
             Some("https://example.com/a.png?w=800".into())
         );
         // non-image links are not images
         assert_eq!(standalone_image("[https://example.com/page.html]"), None);
         assert_eq!(standalone_image("ただの本文"), None);
+        // …and a line that carries more than the picture is not "standalone",
+        // though the picture is still found by `line_images`.
+        assert_eq!(standalone_image("[https://example.com/a.png] こんな感じ"), None);
+        assert_eq!(
+            line_images("[https://example.com/a.png] こんな感じ"),
+            vec!["https://example.com/a.png".to_string()],
+        );
     }
 
     #[test]
@@ -1259,5 +1296,55 @@ mod tests {
             styled.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
             "and it really is bold",
         );
+    }
+
+    /// The memo's three image complaints, as one test: a bare URL is not a
+    /// picture, the text after a picture survives, and a second picture on
+    /// the same line is not dropped.
+    #[test]
+    fn a_line_keeps_its_text_and_every_picture_on_it() {
+        let pal = Palette::for_light(false);
+        let shape = |src: &str| -> Vec<String> {
+            let out = render_lines_with(&["t".to_string(), src.to_string()], None, &pal);
+            out.blocks
+                .iter()
+                .skip(1) // the title row
+                .map(|b| match b {
+                    Block::Image { url } => format!("image:{url}"),
+                    Block::Text(l) => {
+                        format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                    }
+                    _ => "other".into(),
+                })
+                .collect()
+        };
+
+        // A line that is nothing but the bracket becomes the picture.
+        assert_eq!(
+            shape("[https://example.com/a.png]"),
+            vec!["image:https://example.com/a.png".to_string()],
+        );
+
+        // A bare URL stays a link — even at the start of the line, which is
+        // exactly where the viewer used to turn it into a picture.
+        let bare = shape("https://example.com/a.png こんな感じ");
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert!(bare[0].starts_with("text:"), "{bare:?}");
+        assert!(bare[0].contains("こんな感じ"));
+
+        // Text after a picture is kept, and the picture hangs under it.
+        let after = shape("[https://example.com/a.png]こんな感じに後ろのテキストも表示される");
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(after[0].contains("後ろのテキスト"), "{after:?}");
+        assert_eq!(after[1], "image:https://example.com/a.png");
+
+        // Two pictures on one line: both, in the order written.
+        let two = shape("[https://example.com/a.png] と [https://example.com/b.png]");
+        assert_eq!(
+            &two[1..],
+            &["image:https://example.com/a.png".to_string(), "image:https://example.com/b.png".to_string()],
+            "{two:?}",
+        );
+        assert!(two[0].contains('と'), "the text between them survives: {two:?}");
     }
 }

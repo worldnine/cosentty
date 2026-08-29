@@ -5075,15 +5075,52 @@ fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
     app.cursor = line;
 }
 
-/// Drop the character selection's text from the caret line. Stays local
+/// What a single-line paste should actually insert.
+///
+/// * a URL pasted over a selection → `[selected text URL]`, the link form
+/// * an image URL pasted on its own → `[URL]`, which is what draws it
+/// * anything else → exactly what was pasted
+fn paste_shape(app: &App, pasted: &str) -> String {
+    let url = pasted.trim();
+    let is_url = url.starts_with("http://") || url.starts_with("https://");
+    if !is_url || url.split_whitespace().count() != 1 {
+        return pasted.to_string();
+    }
+    if let Some(s) = app.session.as_ref() {
+        if let Some((a, b)) = s.sel_span() {
+            let label = s.input.buf[a..b].trim();
+            if !label.is_empty() && !label.contains('[') && !label.contains(']') {
+                return format!("[{label} {url}]");
+            }
+        }
+    }
+    let draws = cosense::render::gyazo_permalink(url).is_some()
+        || cosense::render::looks_like_image_url(url);
+    if draws {
+        format!("[{url}]")
+    } else {
+        pasted.to_string()
+    }
+}
+
+/// `session_cut_span` for a session already borrowed mutably.
+fn session_cut_span_in(s: &mut EditSession) {
+    if let Some((a, b)) = s.sel_span() {
+        s.input.buf.replace_range(a..b, "");
+        s.input.cur = a;
+        s.sel_from = None;
+    }
+}
+
+/// Drop the character selection's text from the caret line./// Drop the character selection's text from the caret line. Stays local
 /// (the line is simply dirty afterwards), like any other typing: the line
 /// commits when the caret leaves it.
 fn session_cut_span(app: &mut App) -> bool {
     let Some(s) = app.session.as_mut() else { return false };
-    let Some((a, b)) = s.sel_span() else { return false };
-    s.input.buf.replace_range(a..b, "");
-    s.input.cur = a;
-    s.sel_from = None;
+    if s.sel_span().is_none() {
+        return false;
+    }
+    session_cut_span_in(s);
     s.want_col = None;
     app.laid_width = 0;
     app.follow = true;
@@ -5634,8 +5671,16 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
 /// the caret lands at the end of the last pasted fragment.
 fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
     if !clean.contains('\n') {
+        // A pasted URL usually wants brackets around it — that is what
+        // makes an image a picture, and a selection a labelled link. Doing
+        // it by hand after every paste is the kind of chore cosense web
+        // already spares you.
+        let text = paste_shape(app, clean);
         if let Some(s) = app.session.as_mut() {
-            s.input.insert_str(clean);
+            if s.sel_span().is_some() {
+                session_cut_span_in(s);
+            }
+            s.input.insert_str(&text);
             s.want_col = None;
             s.sel_from = None;
         }
@@ -10113,6 +10158,45 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// A pasted URL usually wants brackets: that is what makes an image a
+    /// picture, and a selection a labelled link. Anything else is pasted
+    /// exactly as it came.
+    #[test]
+    fn a_pasted_url_gets_the_brackets_it_needs() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "see "]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 4);
+
+        // An image URL draws only in brackets — so put it in brackets.
+        handle_paste(&mut app, &ctx, "https://example.com/a.png");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "see [https://example.com/a.png]");
+
+        // A page URL is a link either way: paste it as it came.
+        let mut app = page(&["title", ""]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        handle_paste(&mut app, &ctx, "https://example.com/page.html");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "https://example.com/page.html");
+
+        // Over a selection, the selected text becomes the link's label.
+        let mut app = page(&["title", "cosense"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        for _ in 0..7 {
+            handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        }
+        handle_paste(&mut app, &ctx, "https://scrapbox.io/");
+        assert_eq!(
+            app.session.as_ref().unwrap().input.buf,
+            "[cosense https://scrapbox.io/]",
+        );
+
+        // Ordinary text is never reshaped.
+        handle_paste(&mut app, &ctx, " and more");
+        assert!(app.session.as_ref().unwrap().input.buf.ends_with(" and more"));
     }
 
     /// Paste is the TERMINAL's paste (bracketed paste), so the only
