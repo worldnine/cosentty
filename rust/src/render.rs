@@ -438,13 +438,25 @@ fn decorate_bold(
     // The inside is ordinary notation: `[[[link]]]` is a bold link (still
     // followable), and a bold URL is still a URL. `[[x]]` is Cosense's
     // one-star heading, so it wears the same style `[* x]` does.
-    let heading = pal.heading_style_for(1);
+    let heading = star_style(1, pal);
     for sp in decorate_inline(inner, links, &mut images, pal) {
         spans.push(Span::styled(sp.content, heading.patch(sp.style)));
     }
 }
 
-/// Byte index of the `]` that closes the `[` at `open`, counting nesting.
+/// The look of Cosense's star notation: `[* x]`, `[** x]`, `[[x]]`.
+///
+/// The star count is a LEVEL, and each level borrows the theme's markdown
+/// heading style so the page looks like the rest of the terminal. But in
+/// Cosense the notation is **emphasis** first — `[* x]` is how you bold a
+/// word — so bold is the floor every level stands on. Without it, one
+/// star landed on the smallest heading, whose structural style is italic,
+/// and the most common emphasis in the wiki came out un-bolded.
+fn star_style(stars: usize, pal: &Palette) -> Style {
+    pal.heading_style_for(stars).add_modifier(Modifier::BOLD)
+}
+
+/// Byte index of the `]` that closes the `[` at `open`, counting nesting./// Byte index of the `]` that closes the `[` at `open`, counting nesting.
 ///
 /// Taking the FIRST `]` cuts `[* [改善案]]` at `[改善案`, and the link
 /// inside a decoration is lost — it renders as text with a stray bracket
@@ -491,14 +503,8 @@ fn decorate_bracket(
         // heading style. Rendering them as plain bold threw the level away
         // — `[* x]` and `[*** x]` looked identical.
         let stars = flags.chars().filter(|c| *c == '*').count();
-        let mut style = if stars > 0 {
-            pal.heading_style_for(stars)
-        } else {
-            Style::default()
-        };
-        if stars > 0 && style == Style::default() {
-            style = style.add_modifier(Modifier::BOLD);
-        }
+        let mut style =
+            if stars > 0 { star_style(stars, pal) } else { Style::default() };
         if flags.contains('/') {
             style = style.add_modifier(Modifier::ITALIC);
         }
@@ -994,7 +1000,7 @@ fn parse_heading(
     let text = inner[stars..].strip_prefix(' ')?;
     // A heading is still ordinary notation inside: `[* [page]]` has to
     // stay a followable link, not become the letters of one.
-    let style = pal.heading_style_for(stars);
+    let style = star_style(stars, pal);
     Some(
         decorate_inline(text, links, images, pal)
             .into_iter()
@@ -1095,11 +1101,15 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(style_of(&out.blocks[0]), pal.heading_style_for(4), "title = top level");
-        assert_eq!(style_of(&out.blocks[1]), pal.heading_style_for(1));
-        assert_eq!(style_of(&out.blocks[2]), pal.heading_style_for(2));
-        assert_eq!(style_of(&out.blocks[3]), pal.heading_style_for(3));
-        assert_eq!(style_of(&out.blocks[4]), pal.heading_style_for(4));
-        assert_eq!(style_of(&out.blocks[5]), pal.heading_style_for(4), "four+ stars share the top level");
+        // The star forms carry the level AND bold (see `star_style`).
+        assert_eq!(style_of(&out.blocks[1]), star_style(1, &pal));
+        assert_eq!(style_of(&out.blocks[2]), star_style(2, &pal));
+        assert_eq!(style_of(&out.blocks[3]), star_style(3, &pal));
+        assert_eq!(style_of(&out.blocks[4]), star_style(4, &pal));
+        assert_eq!(style_of(&out.blocks[5]), star_style(4, &pal), "four+ stars share the top level");
+        for b in &out.blocks[1..] {
+            assert!(style_of(b).add_modifier.contains(Modifier::BOLD), "emphasis is the floor");
+        }
         assert_ne!(style_of(&out.blocks[1]), style_of(&out.blocks[4]));
     }
 
@@ -1118,7 +1128,7 @@ mod tests {
             let Block::Text(line) = block else { panic!("expected text") };
             assert_eq!(line.spans[1].content, "• ");
             assert_eq!(line.spans[1].style.fg, Some(pal.bullet));
-            assert_eq!(line.spans[2].style, pal.heading_style_for(stars));
+            assert_eq!(line.spans[2].style, star_style(stars, &pal));
         }
     }
 
@@ -1464,16 +1474,22 @@ mod tests {
         assert_ne!(two, three);
         assert_eq!(
             *one.last().unwrap(),
-            pal.heading_style_for(1),
+            star_style(1, &pal),
             "one star = the level-4 heading style, same as a heading line",
         );
-        assert_eq!(*two.last().unwrap(), pal.heading_style_for(2));
-        assert_eq!(*three.last().unwrap(), pal.heading_style_for(3));
+        assert_eq!(*two.last().unwrap(), star_style(2, &pal));
+        assert_eq!(*three.last().unwrap(), star_style(3, &pal));
+        // Bold is the floor: `[* x]` is how Cosense bolds a word, whatever
+        // the theme does with the level on top of it.
+        for st in [one.last().unwrap(), two.last().unwrap(), three.last().unwrap()] {
+            assert!(st.add_modifier.contains(Modifier::BOLD), "{st:?}");
+        }
 
         // `/` still italicises, on top of the level.
         let slash = *styles("→ [*/ 斜体]").last().unwrap();
         assert!(slash.add_modifier.contains(Modifier::ITALIC));
-        assert_eq!(slash.fg, pal.heading_style_for(1).fg, "and keeps its level");
+        assert!(slash.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(slash.fg, star_style(1, &pal).fg, "and keeps its level");
 
         // A link inside a decoration is REGISTERED as a link (so Enter can
         // follow it) and keeps the link colour.
