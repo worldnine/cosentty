@@ -532,8 +532,19 @@ enum Row {
     Blank { src: usize },
     /// `indent`: display column the picture starts at, so it lines up with
     /// the text of its level. `item`: the picture IS the list item (it gets
-    /// the bullet) rather than hanging under a line of text.
-    Image { url: String, height: u16, src: usize, indent: usize, item: bool },
+    /// the bullet) rather than hanging under a line of text. `side`: the
+    /// rest of the line, already placed — `(row within this block, column,
+    /// text)`. The first piece sits at the picture's LAST row, beside it;
+    /// the rest carry on underneath at full width, which is how the browser
+    /// flows text out of an inline image.
+    Image {
+        url: String,
+        height: u16,
+        src: usize,
+        indent: usize,
+        item: bool,
+        side: Vec<(u16, u16, Line<'static>)>,
+    },
     /// Space reserved for an image still downloading in the background.
     ImageLoading { src: usize, indent: usize, item: bool },
     ImageError { msg: String, src: usize, indent: usize, item: bool },
@@ -2432,6 +2443,7 @@ impl App {
                             src: *last_src,
                             indent: 0,
                             item: false,
+                            side: Vec::new(),
                         });
                         continue;
                     }
@@ -2451,15 +2463,26 @@ impl App {
                         }
                     }
                 }
-                Block::Image { url, indent, item } => {
+                Block::Image { url, indent, item, text } => {
                     let indent = (*indent).min(text_w.saturating_sub(4));
                     if let Some(info) = self.images.get(url) {
+                        let (side, extra) = match text {
+                            Some(line) => place_beside_image(
+                                line,
+                                indent,
+                                info.cells_w,
+                                info.cells_h.max(1),
+                                text_w,
+                            ),
+                            None => (Vec::new(), 0),
+                        };
                         content.push(Row::Image {
                             url: url.clone(),
-                            height: info.cells_h.max(1),
+                            height: info.cells_h.max(1) + extra,
                             src,
                             indent,
                             item: *item,
+                            side,
                         });
                     } else if let Some(msg) = self.image_errors.get(url) {
                         content.push(Row::ImageError {
@@ -7269,7 +7292,20 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     );
                 }
             }
-            Row::Image { url, indent, item, .. } => {
+            Row::Image { url, indent, item, side, .. } => {
+                // The rest of the line, beside and below the picture.
+                for (row_off, col, line) in side {
+                    if let Some(r) = one_row(screen_y + *row_off as i32) {
+                        let x = r.x + *col;
+                        let w = r.width.saturating_sub(*col);
+                        if w > 0 {
+                            f.render_widget(
+                                Paragraph::new(line.clone()).style(base),
+                                Rect::new(x, r.y, w, 1),
+                            );
+                        }
+                    }
+                }
                 if *item && *indent >= 2 {
                     let y = text.y as i32 + screen_y;
                     if y >= band_top && y <= band_bot {
@@ -7432,7 +7468,43 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
 }
 
-/// The lead-in for an indented image placeholder: the bullet where the
+/// Lay a line of text out around a picture, the way a browser flows text
+/// out of an inline image: the first piece rides on the picture's LAST
+/// row, just right of it; anything that does not fit continues underneath
+/// at full width. Returns the placed pieces and how many rows they add
+/// below the picture.
+fn place_beside_image(
+    line: &Line<'static>,
+    indent: usize,
+    img_w: u16,
+    img_h: u16,
+    text_w: usize,
+) -> (Vec<(u16, u16, Line<'static>)>, u16) {
+    let gap = 1usize; // one column of air between picture and text
+    let beside_x = indent + img_w as usize + gap;
+    let beside_w = text_w.saturating_sub(beside_x);
+    let below_w = text_w.saturating_sub(indent);
+    // Too narrow to read beside the picture: put it all underneath.
+    let (first, rest) = if beside_w >= 8 {
+        let mut wrapped = wrap_line(line, beside_w).into_iter();
+        (wrapped.next(), wrapped.collect::<Vec<_>>())
+    } else {
+        (None, wrap_line(line, below_w))
+    };
+    let mut placed = Vec::new();
+    if let Some(first) = first {
+        placed.push((img_h.saturating_sub(1), beside_x as u16, first));
+    }
+    let mut row = img_h;
+    for l in rest {
+        placed.push((row, indent as u16, l));
+        row += 1;
+    }
+    let extra = row.saturating_sub(img_h);
+    (placed, extra)
+}
+
+/// The lead-in for an indented image placeholder/// The lead-in for an indented image placeholder: the bullet where the
 /// picture's own bullet goes, then the space the picture would start at.
 fn bullet_pad(indent: usize, item: bool) -> String {
     if item && indent >= 2 {
@@ -10332,6 +10404,39 @@ mod tests {
         assert!(held.contains("編集中の行"), "{held}");
     }
 
+    /// The browser flows the rest of the line out of an inline image; the
+    /// terminal can do the same, because a picture only owns the cells it
+    /// covers. The text rides on the picture\'s LAST row, then carries on
+    /// underneath — stacking it below instead lost the connection between
+    /// the two.
+    #[test]
+    fn text_after_a_picture_flows_beside_it() {
+        let line = Line::from("こんな感じに後ろのテキストも表示される");
+        // A picture 10 cells wide and 6 tall, in a 60-column pane.
+        let (side, extra) = place_beside_image(&line, 0, 10, 6, 60);
+        assert_eq!(extra, 0, "it fits beside the picture: {side:?}");
+        assert_eq!(side.len(), 1);
+        let (row, col, _) = &side[0];
+        assert_eq!(*row, 5, "on the picture\'s last row, like a baseline");
+        assert_eq!(*col, 11, "just right of it, with a column of air");
+
+        // Long text spills under the picture at full width.
+        let long = Line::from("あ".repeat(80));
+        let (side, extra) = place_beside_image(&long, 0, 10, 3, 40);
+        assert!(extra > 0, "{side:?}");
+        assert_eq!(side[0].0, 2, "the first piece still rides the last row");
+        assert!(side[1..].iter().all(|(r, c, _)| *r >= 3 && *c == 0), "{side:?}");
+
+        // An indented picture puts the overflow at ITS column, not the margin.
+        let (side, _) = place_beside_image(&long, 4, 10, 2, 40);
+        assert!(side[1..].iter().all(|(_, c, _)| *c == 4), "{side:?}");
+
+        // A pane too narrow to read beside the picture: all of it below.
+        let (side, extra) = place_beside_image(&line, 0, 30, 4, 34);
+        assert!(side.iter().all(|(r, _, _)| *r >= 4), "nothing squeezed in: {side:?}");
+        assert!(extra >= 1);
+    }
+
     /// An indented picture is a LIST ITEM: cosense web draws the bullet
     /// beside it, and without one the picture floats free of the item it
     /// belongs to.
@@ -12002,7 +12107,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut app = page(&["image"]);
-        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into(), indent: 0, item: false }];
+        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into(), indent: 0, item: false, text: None }];
         app.srcs = vec![0];
         let ctx = test_ctx();
         let mut terminal = Terminal::new(TestBackend::new(42, 8)).unwrap();

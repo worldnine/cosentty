@@ -20,7 +20,12 @@ pub enum Block {
     /// else) or hangs under one. Cosense hangs pictures off bullets, and a
     /// picture that is its own item wears the bullet; a picture under a
     /// line of text is that line's continuation and wears none.
-    Image { url: String, indent: usize, item: bool },
+    ///
+    /// `text` is the rest of the line when it BEGINS with the picture
+    /// (`[img]続きの文`). The viewer lays it out beside the picture, from
+    /// its last row — the terminal's answer to the browser's inline
+    /// image, where the text carries on from the picture's bottom-right.
+    Image { url: String, indent: usize, item: bool, text: Option<Line<'static>> },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
     /// A code block Cosense draws as a picture in the browser (today: only
@@ -718,7 +723,25 @@ fn line_images(body: &str) -> Vec<String> {
     out
 }
 
-/// The image this line is ENTIRELY made of — one bracket and nothing
+/// A line that opens with a picture and continues in text: the picture and
+/// everything after it. `None` when the line does not start with one, or
+/// when more pictures follow (those keep the stacked form).
+fn image_then_text(body: &str) -> Option<(String, &str)> {
+    let trimmed = body.trim_start();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let lead = body.len() - trimmed.len();
+    let close = matching_bracket(body, lead)?;
+    let url = image_in_bracket(&body[lead + 1..close])?;
+    let rest = &body[close + 1..];
+    if rest.trim().is_empty() || !line_images(rest).is_empty() {
+        return None;
+    }
+    Some((url, rest))
+}
+
+/// The image this line is ENTIRELY made of/// The image this line is ENTIRELY made of — one bracket and nothing
 /// else, which is the case that becomes a picture on its own row.
 fn standalone_image(body: &str) -> Option<String> {
     let inner = body.trim();
@@ -920,7 +943,28 @@ pub fn render_lines_with(
         // either of them is worse than stacking them.
         if let Some(url) = standalone_image(body) {
             ex.images.push(url.clone());
-            emit!(Block::Image { url, indent: text_column(level), item: level > 0 });
+            emit!(Block::Image {
+                url,
+                indent: text_column(level),
+                item: level > 0,
+                text: None,
+            });
+            i += 1;
+            continue;
+        }
+        // A line that BEGINS with a picture and carries on in text: the
+        // text goes beside the picture, the way the browser flows it from
+        // the image's bottom-right. (Text BEFORE a picture keeps the
+        // stacked form — the reading order would otherwise reverse.)
+        if let Some((url, rest)) = image_then_text(body) {
+            ex.images.push(url.clone());
+            let spans = decorate_inline(rest, &mut ex.links, &mut ex.images, pal);
+            emit!(Block::Image {
+                url,
+                indent: text_column(level),
+                item: false,
+                text: Some(Line::from(spans)),
+            });
             i += 1;
             continue;
         }
@@ -933,7 +977,12 @@ pub fn render_lines_with(
             for url in embedded {
                 // The text row above is the item; these pictures belong to
                 // it, so they hang without a bullet of their own.
-                emit!(Block::Image { url, indent: text_column(level), item: false });
+                emit!(Block::Image {
+                    url,
+                    indent: text_column(level),
+                    item: false,
+                    text: None,
+                });
             }
             i += 1;
             continue;
@@ -1429,9 +1478,17 @@ mod tests {
                 .iter()
                 .skip(1) // the title row
                 .map(|b| match b {
-                    Block::Image { url, indent, item } => {
-                        format!("image:{indent}{}:{url}", if *item { "*" } else { "" })
-                    }
+                    Block::Image { url, indent, item, text } => format!(
+                        "image:{indent}{}{}:{url}",
+                        if *item { "*" } else { "" },
+                        match text {
+                            Some(l) => format!(
+                                "+{}",
+                                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                            ),
+                            None => String::new(),
+                        }
+                    ),
                     Block::Text(l) => {
                         format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                     }
@@ -1453,18 +1510,22 @@ mod tests {
         assert!(bare[0].starts_with("text:"), "{bare:?}");
         assert!(bare[0].contains("こんな感じ"));
 
-        // Text after a picture is kept, and the picture hangs under it.
+        // A line that OPENS with a picture keeps its text WITH the picture:
+        // the viewer flows it beside the image, as the browser does. One
+        // block, not a text row and a picture stacked apart.
         let after = shape("[https://example.com/a.png]こんな感じに後ろのテキストも表示される");
-        assert_eq!(after.len(), 2, "{after:?}");
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert!(after[0].starts_with("image:0+"), "{after:?}");
         assert!(after[0].contains("後ろのテキスト"), "{after:?}");
-        assert_eq!(after[1], "image:0:https://example.com/a.png");
 
-        // The text row says a picture is there; it does not spell out the
-        // URL. A one-line note used to wrap into three rows of link.
-        let after = shape("[https://example.com/a.png]こんな感じに後ろのテキストも表示される");
-        assert!(after[0].contains("🖼"), "{after:?}");
-        assert!(after[0].contains("a.png"), "{after:?}");
-        assert!(!after[0].contains("https://"), "the address is not the point: {after:?}");
+        // Text BEFORE a picture keeps the stacked form: flowing it beside
+        // the image would reverse the reading order.
+        let before = shape("先に本文 [https://example.com/a.png]");
+        assert_eq!(before.len(), 2, "{before:?}");
+        assert!(before[0].starts_with("text:"), "{before:?}");
+        assert!(before[0].contains("🖼"), "the text row says a picture is there: {before:?}");
+        assert!(!before[0].contains("https://"), "…without spelling out the address");
+        assert_eq!(before[1], "image:0:https://example.com/a.png");
 
         // Cosense hangs pictures off bullets: an indented image line
         // belongs to the item above it, so it starts where that item's
@@ -1474,11 +1535,13 @@ mod tests {
             vec!["image:2*:https://example.com/a.png".to_string()],
             "one level in = the column after `• `, and the picture IS the item",
         );
-        assert_eq!(
-            shape("  [https://example.com/a.png] と本文")[1],
-            "image:4:https://example.com/a.png",
-            "a picture under text hangs off that line — no bullet of its own",
-        );
+        // Indented, opening with the picture: one block again, carrying
+        // both the indent and the text that flows beside it.
+        let indented = shape("  [https://example.com/a.png] と本文");
+        assert_eq!(indented.len(), 1, "{indented:?}");
+        assert!(indented[0].starts_with("image:4+"), "{indented:?}");
+        assert!(indented[0].contains("と本文"), "{indented:?}");
+        assert!(!indented[0].contains("image:4*"), "text beside it means it is not the item");
 
         // Quoted notation is a line ABOUT the picture, not a picture: a
         // documentation page must be able to show what it is describing.
