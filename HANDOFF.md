@@ -147,7 +147,7 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 | `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). `--twice` exercises the warm-browser path; it also reports Chrome process counts across `idle()`/`shutdown()`. |
 | `rust/src/render.rs` | `mermaid_lang()`; `code:` blocks whose language is Mermaid emit `Block::WebRender` carrying the code plus the unchanged code rows. Everything else is byte-for-byte as before. |
 | `rust/src/theme.rs` | `shimmer_level` / `shimmer_style` — the pure "still rendering" brightness wave, mixing an RGB foreground toward the terminal background (DIM attribute for named colors). |
-| `rust/src/bin/view.rs` | `WebJob` (`Render` / `Rescale`), `WebMsg`, `spawn_web_worker`; App fields (`web_gen`, `web_dark`, `web_pending`, `web_errors`, `web_shimmer`, `web_cols`, `web_rescaling`, `web_status`, channels); `web_request`, `start_web_renders`, `rescale_diagrams`, `drain_web_renders`, `note_web_status` / `expire_web_status`; `diagram_max_cols` + a `max_cols` argument on `build_image`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
+| `rust/src/bin/view.rs` | `WebJob` (`Render` / `Rescale`), `WebMsg`, `spawn_web_worker`; App fields (`web_gen`, `web_dark`, `web_pending`, `web_errors`, `web_shimmer`, `web_cols`, `web_rescaling`, `web_unsynced`, `web_notice`, channels); `web_request`, `start_web_renders`, `rescale_diagrams`, `drain_web_renders`, `note_web_failure` / `expire_web_notice`, `hint_text`, `mark_desynced` / `mark_synced`; `diagram_max_cols` + a `max_cols` argument on `build_image`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
 | `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary. |
 | `rust/src/bin/probe.rs` | prints the new block kind. |
 | `rust/KEYMAP.md` | user-facing section: dependency, auth, fallback, notation, env vars. |
@@ -191,8 +191,9 @@ later, so presence is not readiness — we poll for a `<svg>` child with a non-z
 
 ## 6. Tests and build
 
-* `cargo test`: **157 green** — lib **97** (78 baseline + 19 new) and view **60**
-  (47 baseline + 13 new). No test launches a browser or touches the network.
+* `cargo test`: **174 green** — lib **105** (78 baseline + 27 new) and view **69**
+  (47 baseline + 22 new). No test launches a browser or touches the network, and none
+  of them sleeps: the job channel and the fake backend's gate are the synchronisation.
 * `cargo build --release`: succeeds, **no new warnings**.
 
 New coverage, against the acceptance list:
@@ -201,13 +202,18 @@ New coverage, against the acceptance list:
 | --- | --- |
 | Mermaid filename/language detection | `render::mermaid_is_recognised_by_language_and_by_filename` (`mmd`, `mermaid`, `MMD`, `flow.mmd`, `図.mermaid` vs `js`, `mmdx`, `mermaidjs`, `readme.md`) |
 | block → lineId, multiple blocks | `render::a_mermaid_block_becomes_one_web_render_keyed_on_its_last_line`, `render::several_mermaid_blocks_stay_separate_and_other_languages_are_untouched`, `view::each_mermaid_block_is_requested_against_its_own_cosense_line_id` |
-| stale generation / page rejected | `view::a_result_for_an_older_page_generation_is_dropped`, `webrender::a_new_source_page_or_width_is_a_different_artifact` |
-| an unrelated edit does NOT re-render | `view::an_unrelated_commit_does_not_invalidate_a_diagram_but_its_own_source_does`, `view::typing_never_launches_a_browser` |
+| stale generation / page rejected | `view::a_result_for_an_older_page_generation_is_dropped`, `webrender::a_new_source_or_page_is_a_different_artifact` |
+| an unrelated edit does NOT re-render | `view::only_the_diagrams_own_source_invalidates_it`, `view::typing_never_launches_a_browser` |
 | an open session only blocks its own diagram | `view::an_open_session_only_holds_back_the_block_under_the_caret` |
 | resizing never re-renders | `view::only_the_diagrams_own_source_invalidates_it` (resizes to 60/100/200/37 columns queue nothing), `webrender::resizing_the_pane_is_not_a_new_artifact` |
 | the reader sees the renderer working | `theme::shimmer_*` (4), `view::a_rendering_diagram_pulses_its_code_and_stops_when_it_lands` |
 | a diagram never overflows the pane | `view::a_diagram_is_never_encoded_wider_than_the_pane` (the cap, and the encoder honouring it at 64/35/14/5/1 columns), `view::narrowing_the_pane_re_encodes_the_diagram_from_its_cached_png` (40- and 20-column panes: a `Rescale` job — never a browser render — is queued once, and the installed artifact fits `text_rect`) |
-| a failure note does not eat the key hints | `view::a_diagram_failure_gives_the_key_hints_back`, `view::an_expiring_diagram_note_never_clears_someone_elses_status` |
+| the cache is private, atomic and self-repairing | `webrender::the_cache_is_private_and_repairs_what_it_finds`, `webrender::a_reader_never_sees_a_half_written_artifact`, `webrender::empty_and_expired_entries_are_dropped_rather_than_served`, `webrender::a_corrupt_entry_can_be_dropped_so_it_is_re_rendered`, `webrender::the_ttl_is_configurable_and_bounded`, `webrender::a_schema_bump_orphans_old_artifacts_instead_of_serving_them` |
+| shutdown cannot start a browser | `chrome::a_shut_down_backend_never_starts_another_browser`, `chrome::a_running_backend_reports_the_real_launch_failure` |
+| the worker joins, and always replies | `view::the_worker_joins_on_stop_and_answers_every_accepted_job`, `view::a_rescale_that_cannot_be_served_keeps_the_diagram_it_has`, `view::a_send_to_a_dead_worker_stops_the_pulse_instead_of_hanging_it` |
+| stale work costs nothing and breaks nothing | `view::work_queued_for_a_page_the_reader_left_never_reaches_the_browser`, `view::a_stale_result_never_cancels_the_live_request_for_the_same_key`, `view::set_page_clears_the_state_a_dropped_job_would_have_answered`, `view::several_passes_over_one_page_cost_a_single_browser_batch` |
+| a failed commit keeps diagrams as source | `view::a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_source`, `view::an_edit_that_never_reached_the_commit_worker_also_desyncs` |
+| a failure note does not eat the key hints | `view::a_diagram_failure_gives_the_key_hints_back`, `view::a_diagram_note_never_hides_or_erases_a_commit_or_auth_message` |
 | renderer failure → code fallback | `view::a_renderer_failure_leaves_the_code_block_on_screen`, `webrender::unavailable_backend_fails_every_request_without_a_browser` |
 | UI thread does not block | `view::the_ui_thread_never_waits_for_the_browser` (the fake backend is pinned mid-render; the UI still queues, lays out and reports pending in <200 ms, and the artifact arrives after the gate is released) |
 | selector / artifact correspondence | `webrender::selector_addresses_the_preview_by_line_id`, `webrender::fake_backend_answers_by_key`, `view::an_artifact_replaces_the_code_block_and_edit_puts_it_back` |
@@ -321,31 +327,133 @@ is the shared image path and is deliberately left alone here.
 ## 7d. The status line is also the key-hint bar
 
 The bottom row shows key hints only while `app.status` is empty, so a message parked
-there costs the reader their hints for the rest of the session. A diagram failure now
-holds the line for six seconds and then gives it back (`note_web_status` /
-`expire_web_status`). The hand-back is deliberately narrow: if anything else has written
-to the status line in the meantime, that message is left alone and simply inherits the
-line. No other status message's lifecycle is touched — the general status line has no
-fade, and changing that belongs on `main`, not on this branch.
+there costs the reader their hints for the rest of the session. A diagram failure gets its **own slot** (`App::web_notice`) rather than writing to
+`app.status`, with a fixed priority in `App::hint_text`:
+
+    edit-session keys  >  cursor-line links  >  status  >  diagram notice  >  key hints
+
+Ranking below `status` is the point: a commit failure, an auth error or a resync notice
+must never be overwritten by a picture that did not draw — nor erased when the diagram
+note times out, which is what an earlier version could do. The notice gives its row back
+after six seconds so the hints return. No other status message's lifecycle is touched;
+the general status line still has no fade, and changing that belongs on `main`.
+
+`COSENSE_WEB_DEBUG` is a **file path**, not a flag. The render worker runs while the TUI
+owns the alternate screen, so phase timings are appended to that file and nothing is
+ever written to stdout or stderr. Verified: a run with it set produces zero bytes on
+stderr.
+
+## 7e. The artifact cache is credential-bearing storage
+
+The cached PNGs are renders of the user's own pages, private ones included, and the
+Chrome profile holds the `connect.sid` cookie for as long as the browser runs. Both are
+handled accordingly:
+
+| | |
+| --- | --- |
+| cache directory | `0700`, created and re-asserted on every open |
+| artifacts | `0600`, set at creation via `OpenOptions::mode` — no window at 0644 |
+| repair | opening the cache walks it: anything an earlier version left group/other-readable is tightened, empty and expired files are removed, and temp files older than an hour are cleaned up |
+| writes | `create_new` 0600 temp file **in the same directory**, `write_all`, `sync_all`, then `rename` — a reader (this process, another viewer, the next run after a crash) sees the old bytes or the new ones, never a prefix |
+| corrupt entry | dropped, and the request goes back to the browser — a truncated file must never become a permanently cached failure |
+| Chrome profile | `tempfile`-created unique `0700` directory; a creation failure is an error. Never a predictable `$TMPDIR` name plus `create_dir_all`, which a local attacker could pre-create or aim elsewhere |
+
+Measured on this machine after a live run: `drwx------` on the directory, `-rw-------`
+on every artifact.
+
+### Cache identity: schema and TTL
+
+`ARTIFACT_SCHEMA` (currently **1**) is part of the key. Bump it whenever *our* capture
+pipeline changes the pixels for unchanged source — the viewport width, the capture
+scale, the selector, the readiness condition. A bump orphans old artifacts rather than
+serving them; the sweep reclaims the files.
+
+It cannot cover the other half of the rendering environment: **Cosense's own Mermaid
+version and the project's CSS change without telling us, and nothing in the page
+identifies them**, so a complete identity is not available. Artifacts therefore carry a
+**7-day TTL** (`ARTIFACT_TTL_DAYS`, overridable with `COSENSE_WEB_CACHE_TTL_DAYS`; `0`
+disables reuse, an out-of-range value falls back to the default). Past the TTL an entry
+is a miss and is deleted, so a Cosense-side change works itself out within a week
+without the reader ever knowing there was a cache.
+
+## 7f. Shutdown contract
+
+`spawn_web_worker` returns a `JoinHandle`, and `main` ends the feature in this order:
+
+1. `WebBackend::shutdown()` — refuses further work (checked on entry to `run_batch` and
+   again immediately before a browser is spawned, so a shutdown cannot be raced into
+   starting a Chrome) and SIGKILLs any browser in flight. That kill is also what
+   unblocks the worker: its DevTools socket dies, so a batch mid-navigation errors out
+   promptly instead of waiting out its 25-second budget. `page_target` — the one loop
+   that watched only its deadline — honours the stop flag too.
+2. The terminal is restored, so a slow reap is never a black screen.
+3. `WebJob::Stop`, then `join()`.
+
+After that, "no browser and no worker outlives this process" is a fact rather than a
+hope. The smoke binary asserts it against the pid and profile **it** started
+(`ChromeBackend::last_owned`), not against every Chrome on the machine, and exits
+nonzero if either survives or if any requested diagram failed.
+
+### Generations and replies
+
+`web_gen` is a shared atomic. The worker drains everything queued, drops jobs whose
+generation is not current **before** spending a decode or a navigation on them, and
+merges the remaining same-page renders into one batch — so a page the reader has left
+can no longer make the current page wait through several browser navigations.
+
+Two invariants hold this together:
+
+* **Stale jobs are never accepted and owe no reply.** That is only safe because
+  `set_page` clears `web_pending`/`web_rescaling` for the page being left, pinned by
+  `view::set_page_clears_the_state_a_dropped_job_would_have_answered`.
+* **Every accepted job gets exactly one reply**, cache misses and decode failures
+  included. A reply says whether it answers a `Rescale`: a failed resize keeps the
+  picture already on screen rather than reporting a failed diagram. A send to a dead
+  worker rolls back what it optimistically marked, so the shimmer stops.
+
+A stale result touches **no** state. It used to clear pending by key, which after
+navigating away and back would cancel the live request for the same key and leave the
+diagram pulsing forever.
+
+## 7g. Local/server divergence
+
+`inflight == 0` means nothing is in flight; it does not mean everything landed. After a
+refused commit (`CommitOutcome::Failed`) or an edit that never reached the commit worker
+(`commit_tx.send` failed), the local lines and the server have parted ways — and a
+render would then screenshot the **server's** version of a block and file it under the
+**local** text's hash, quietly attaching the wrong picture to the source the reader is
+looking at.
+
+`App::web_unsynced` blocks all rendering while that is true. It is deliberately sticky:
+a later commit succeeding says nothing about the edit that did not, so only an
+authoritative page install clears it — `set_page`, or `install_remote_lines` on a
+websocket resync. The conflict path already reloads through `set_page`, so it clears
+too, and nothing about the existing "never lose what you typed" contract changes. The
+~3 s poller is deliberately **not** a clear point: its apply gate is conditional, so
+treating it as authoritative would re-open the window this exists to close.
 
 ## 8. Known limits, security, distribution
 
-* **Renders the committed page, never the buffer.** The browser shows what Cosense
-  has, which is why requests are held back until the edit session closes and the commit
-  queue drains. If a commit ultimately *fails*, the local text and the server's diverge
-  and the render would capture the server's version under the local hash; the viewer
-  reloads the page on a conflict, which resets both.
+* **Renders the committed page, never the buffer** — see §7g for what happens when the
+  two are known to disagree.
+* **`tempfile` is the one dependency this feature adds**, for the Chrome profile
+  directory. The browser automation itself still adds none — see §1.
+* **Chrome's sandbox is left on**: this browser holds the live `connect.sid` and loads
+  remote content (ProjectCSS can pull third-party resources). A container that cannot
+  sandbox opts out with `COSENSE_CHROME_NO_SANDBOX=1`; without it Chrome simply exits
+  early there and the code block stays.
 * **Time-machine snapshots are never rendered** (`web_request` returns `None` when
   `app.time` is set): the browser can only show the current page, and a current
   diagram on a historical snapshot would be a lie. Snapshots show code.
 * **Cost.** ~5.8 s for the first uncached page, ~2.6 s for a re-render in a warm
   browser; ~3.5 s of the first is Cosense's own page boot and cannot be removed from
   this design. Results are cached to `~/.cache/cosense-tui/webrender/`, so a revisit is
-  instant and launches nothing. The width is bucketed to 80 CSS px so ordinary resizes
-  do not re-render, and renders never fire while the reader is editing.
+  instant and launches nothing. Resizing never involves the browser at all (§7c), and
+  renders never fire for the block under the edit caret or while the page is desynced.
 * **Process hygiene.** `Session::drop` kills *and waits* the child and removes its
-  profile; it runs when a batch fails, when the worker goes idle (90 s), and on quit.
-  `shutdown()` additionally SIGKILLs a batch still in flight. Verified live — see §7.
+  profile (retried briefly — Chrome's helpers outlive the SIGKILL on their parent and
+  hold files open in there); it runs when a batch fails, when the worker goes idle
+  (90 s), and on quit. See §7f for the full shutdown contract.
 * **Nothing from the browser is executed in-process.** Only PNG bytes cross back; no
   SVG, no HTML, no page script. The credential's only exit is `Network.setCookie`.
 * **Distribution.** Chrome/Chromium/Edge/Brave must be installed. Auto-detected on
