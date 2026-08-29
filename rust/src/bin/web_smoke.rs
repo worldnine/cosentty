@@ -65,7 +65,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             page_id: page.id.clone(),
             line_id,
             code_hash: hash_code(code),
-            width_px: 880,
             dark: true,
         });
     }

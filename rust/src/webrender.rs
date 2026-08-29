@@ -78,9 +78,6 @@ pub struct WebRequest {
     /// edited. A block's own text is exactly as precise as the picture it
     /// produces.
     pub code_hash: u64,
-    /// Render width in CSS pixels, already bucketed by the caller so that a
-    /// one-column terminal resize does not re-render the page.
-    pub width_px: u32,
     /// Terminal background is dark (picks the browser color scheme).
     pub dark: bool,
 }
@@ -116,12 +113,20 @@ impl WebRequest {
             h.write(b"\x1f");
         }
         h.write(&self.code_hash.to_le_bytes());
-        h.write(&self.width_px.to_le_bytes());
         h.write(&[self.dark as u8]);
         // The `web:` prefix keeps these apart from image URLs, which share
         // the viewer's image maps.
         format!("web:{}:{:016x}", self.kind.tag(), h.0)
     }
+
+    /// NOTE on what is deliberately NOT here: the pane width. The viewer
+    /// scales every image to a fixed cell width (`build_image` caps at 64
+    /// columns and never consults the pane), so the browser's viewport
+    /// affects only raster quality — never what the reader sees. Keying on
+    /// it meant a ten-column resize cost a 3–6 second re-render, and
+    /// dragging a window edge queued one batch per width crossed, which the
+    /// worker then ground through serially while the final width waited at
+    /// the back. The backend renders at a fixed viewport instead.
 
     /// Do two requests address the same artifact? Used to drop results that
     /// came back after the reader moved on.
@@ -365,7 +370,6 @@ mod tests {
             page_id: "65695a556db42200239324b9".into(),
             line_id: "65695bc797c2910000c699b2".into(),
             code_hash: hash_code("flowchart LR\nA-->B"),
-            width_px: 800,
             dark: true,
         }
     }
@@ -387,13 +391,12 @@ mod tests {
     }
 
     #[test]
-    fn a_new_source_page_or_width_is_a_different_artifact() {
+    fn a_new_source_or_page_is_a_different_artifact() {
         let base = req();
         for mutate in [
             (|r: &mut WebRequest| r.title = "Other".into()) as fn(&mut WebRequest),
             |r| r.project = "other-project".into(),
             |r| r.page_id = "other-page".into(),
-            |r| r.width_px = 1200,
             |r| r.dark = false,
             |r| r.code_hash = hash_code("flowchart LR\nA-->C"),
         ] {
@@ -403,6 +406,15 @@ mod tests {
         }
         // …and an identical request is the same artifact (cache hits work).
         assert!(base.same_artifact(&req()));
+    }
+
+    #[test]
+    fn resizing_the_pane_is_not_a_new_artifact() {
+        // There is no width in a request at all: the same diagram in a
+        // narrow and a wide pane is one artifact, rendered once.
+        let a = req();
+        let b = req();
+        assert_eq!(a.cache_key(), b.cache_key());
     }
 
     #[test]

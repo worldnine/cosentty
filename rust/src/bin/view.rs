@@ -309,9 +309,6 @@ struct App {
     /// Bumped on every page install. A render that comes back for an older
     /// generation is dropped even if its key were to collide.
     web_gen: u64,
-    /// Render width in CSS pixels, bucketed so a one-column resize does not
-    /// re-render the page. 0 until the first layout.
-    web_width_px: u32,
     /// Terminal background is dark (picks the browser's color scheme).
     web_dark: bool,
     /// Render keys currently in flight.
@@ -754,7 +751,6 @@ impl App {
             forward: Vec::new(),
             overlay: None,
             web_gen: 0,
-            web_width_px: 0,
             web_dark: true,
             web_pending: HashSet::new(),
             web_errors: HashMap::new(),
@@ -866,7 +862,7 @@ impl App {
         self.follow = true;
         self.web_dark = !ctx.light;
         self.start_image_loads(ctx);
-        self.start_web_renders(ctx);
+        self.start_web_renders();
     }
 
     /// Kick off background downloads for every image on the page. Each
@@ -913,7 +909,7 @@ impl App {
         code: &str,
         last_src: usize,
     ) -> Option<WebRequest> {
-        if self.time.is_some() || self.web_width_px == 0 {
+        if self.time.is_some() {
             return None;
         }
         let line_id = self.lines.get(last_src)?.id.clone();
@@ -927,7 +923,6 @@ impl App {
             page_id: self.page_id.clone(),
             line_id,
             code_hash: cosense::webrender::hash_code(code),
-            width_px: self.web_width_px,
             dark: self.web_dark,
         })
     }
@@ -935,26 +930,13 @@ impl App {
     /// Queue every not-yet-rendered diagram on the page as ONE batch. Returns
     /// immediately: the worker owns the browser, and the code block stays on
     /// screen until an artifact arrives.
-    fn start_web_renders(&mut self, ctx: &Ctx) {
-        // Before the first layout the pane width is unknown; rendering at a
-        // guessed width would only be thrown away one frame later.
-        if self.laid_width == 0 {
-            return;
-        }
+    fn start_web_renders(&mut self) {
         // The browser can only ever show what the SERVER has, so nothing is
         // requested while a commit is still on its way there. This is a
         // whole-page gate: any queued commit could be the one that changes
         // a diagram.
         if self.inflight > 0 {
             return;
-        }
-        // Width in CSS pixels, bucketed to 80px: a diagram is re-rendered on
-        // a real resize, not on every column the pane gains.
-        let cells = self.laid_width as u32;
-        let px = (cells * ctx.picker.font_size().width.max(1) as u32).max(320);
-        let bucketed = (px / 80).max(4) * 80;
-        if bucketed != self.web_width_px {
-            self.web_width_px = bucketed;
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
         for b in &self.blocks {
@@ -2918,7 +2900,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         }
         // A resize (or a first layout) changes the render width, and a
         // commit changes the revision: both mean new diagram keys.
-        app.start_web_renders(ctx);
+        app.start_web_renders();
         app.drain_downloads();
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
@@ -3364,7 +3346,7 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     app.srcs = r.srcs;
     app.laid_width = 0;
     app.start_image_loads(ctx);
-    app.start_web_renders(ctx);
+    app.start_web_renders();
 }
 
 fn ensure_editable(app: &mut App) -> bool {
@@ -5426,10 +5408,9 @@ mod tests {
 
     #[test]
     fn each_mermaid_block_is_requested_against_its_own_cosense_line_id() {
-        let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         let rx = app.web_jobs_rx.take().unwrap();
         let job = rx.try_recv().expect("one batch was queued");
         assert_eq!(job.gen, app.web_gen);
@@ -5445,22 +5426,14 @@ mod tests {
         assert_ne!(job.reqs[0].cache_key(), job.reqs[1].cache_key());
         assert!(job.reqs.iter().all(|r| r.page_id == "PAGE"));
         // Asking again while they are in flight queues nothing new.
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
     }
 
     #[test]
-    fn an_unrelated_commit_does_not_invalidate_a_diagram_but_its_own_source_does() {
-        let ctx = test_ctx();
+    fn only_the_diagrams_own_source_invalidates_it() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        // Before the first layout there is no width and so no request at all.
-        let mut fresh = mermaid_page();
-        assert!(fresh
-            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3)
-            .is_none());
-        fresh.rebuild(80);
-        app.start_web_renders(&ctx); // fixes web_width_px
         let key = |a: &App, code: &str| {
             a.web_request(cosense::webrender::WebKind::Mermaid, code, 3).unwrap().cache_key()
         };
@@ -5473,10 +5446,24 @@ mod tests {
         assert_eq!(before, key(&app, "flowchart"), "an unrelated commit changes nothing");
         // Editing the diagram itself does invalidate it.
         assert_ne!(before, key(&app, "flowchart LR"));
-        // A pane resize does too.
+        // A pane resize does NOT. The viewer scales every image to a cell
+        // width of its own, so the browser viewport only decides raster
+        // quality — re-rendering (3-6s) on a window drag bought nothing and
+        // queued one batch per width crossed.
         app.rebuild(140);
-        app.start_web_renders(&ctx);
-        assert_ne!(before, key(&app, "flowchart"));
+        assert_eq!(before, key(&app, "flowchart"));
+        // With the page's diagrams already requested once, resizing queues
+        // no further work at all.
+        app.start_web_renders();
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "the initial batch");
+        for w in [60, 100, 200, 37] {
+            app.rebuild(w);
+            app.start_web_renders();
+            assert!(
+                app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+                "resizing to {w} columns must queue nothing",
+            );
+        }
         // …and a snapshot of an older page is never rendered from the web.
         app.time = Some(TimeMachine { points: vec![], pos: 0, cache: HashMap::new() });
         assert!(app
@@ -5486,7 +5473,6 @@ mod tests {
 
     #[test]
     fn an_open_session_only_holds_back_the_block_under_the_caret() {
-        let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
         let session_on = |app: &mut App, line: usize| {
@@ -5500,7 +5486,7 @@ mod tests {
         // The caret is inside the FIRST diagram (lines 1..=3): that one is
         // still being typed, but the second diagram has nothing to wait for.
         session_on(&mut app, 2);
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes");
         assert_eq!(
             job.reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
@@ -5514,7 +5500,7 @@ mod tests {
         // next request goes out after the frame that rebuilds it.)
         app.rebuild(80);
         session_on(&mut app, 5);
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         let job = app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap();
         assert_eq!(
             job.reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
@@ -5525,18 +5511,17 @@ mod tests {
 
     #[test]
     fn typing_never_launches_a_browser() {
-        let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
         // A commit is still on its way to the server: the browser would see
         // the pre-edit page, so nothing is requested at all.
         app.inflight = 1;
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
         assert!(app.web_pending.is_empty());
         // Settled: one batch goes out, against text the server now has.
         app.inflight = 0;
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok());
     }
 
@@ -5544,7 +5529,6 @@ mod tests {
     fn a_result_for_an_older_page_generation_is_dropped() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.web_width_px = 800;
         let req = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
         let key = req.cache_key();
         app.web_pending.insert(key.clone());
@@ -5561,7 +5545,6 @@ mod tests {
     fn a_renderer_failure_leaves_the_code_block_on_screen() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.web_width_px = 800;
         let key = app
             .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
             .unwrap()
@@ -5591,10 +5574,9 @@ mod tests {
 
     #[test]
     fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
-        let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         let job = app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap();
         let key = job.reqs[0].cache_key();
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png()).unwrap();
@@ -5633,11 +5615,9 @@ mod tests {
 
     #[test]
     fn the_ui_thread_never_waits_for_the_browser() {
-        let ctx = test_ctx();
         let backend = Arc::new(cosense::webrender::FakeBackend::new());
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.web_width_px = 800; // fix the key before the backend is primed
         let key = app
             .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
             .unwrap()
@@ -5654,7 +5634,7 @@ mod tests {
         // this guard is held.
         let held = backend.gate.lock().unwrap();
         let t0 = std::time::Instant::now();
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         // …and the UI thread still lays out and would draw, immediately.
         app.laid_width = 0;
         app.rebuild(80);
@@ -5682,7 +5662,7 @@ mod tests {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders(&ctx);
+        app.start_web_renders();
         app.rebuild(80);
         // Every row of both Mermaid blocks pulses — header and body — and
         // nothing else on the page does.
@@ -7136,4 +7116,5 @@ mod tests {
         assert_eq!(app.cursor_fraction(), 0.5);
     }
 }
+
 

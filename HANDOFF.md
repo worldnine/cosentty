@@ -56,8 +56,7 @@ enum WebKind { Mermaid }                 // future: Tex, Icon, ProjectCss…
     fn selector(&self, line_id) -> String   // "#mermaid-preview-<lineId>"
     fn ready_child(&self) -> &'static str   // "svg" — drawn, not merely present
 
-struct WebRequest { kind, project, title, page_id, line_id,
-                    code_hash, width_px, dark }
+struct WebRequest { kind, project, title, page_id, line_id, code_hash, dark }
     fn page_url(&self) -> String
     fn cache_key(&self) -> String        // "web:mermaid:<16 hex>"  — identity
     fn same_artifact(&self, other) -> bool
@@ -78,7 +77,7 @@ struct ArtifactCache                     // ~/.cache/cosense-tui/webrender/<key>
 `render_batch` takes a **whole page's worth** of requests: one navigation serves every
 diagram on the page.
 
-### Invalidation: `code_hash`, deliberately NOT `commitId`
+### Invalidation: `code_hash`, deliberately NOT `commitId` or the pane width
 
 The brief asked for "`project/page identity + commitId + block lineId + width/theme`
 相当". **The `commitId` half was a trap and is not used.** Cosense commits on every
@@ -91,6 +90,15 @@ The key is instead the block's **own source hash** plus page identity, width and
 A block's text changes exactly when its picture does — strictly more precise than the
 page commit, and it still invalidates on a *remote* edit to the diagram, because the
 websocket apply rewrites `app.lines` and therefore the hash.
+
+**The pane width is not in the key either**, for a similar reason. `build_image` scales
+every image to a fixed cell width (capped at 64 columns) and never consults the pane, so
+the browser's viewport decides raster quality and nothing else. Keying on a bucketed
+pane width meant a ten-column resize cost a 3–6 s re-render — and dragging a window edge
+queued one batch per bucket crossed, which the serial worker then ground through while
+the batch for the width the reader actually ended on waited at the back. That read as
+"resizing re-renders, and sometimes never loads". The backend now renders at a fixed
+`RENDER_WIDTH_PX = 1000`, and resizing queues nothing at all.
 
 Page identity is still guarded, twice over: `project/title/page_id/line_id` are in the
 key, and `web_gen` (bumped on every page install) drops any result that arrives for a
@@ -196,6 +204,7 @@ New coverage, against the acceptance list:
 | stale generation / page rejected | `view::a_result_for_an_older_page_generation_is_dropped`, `webrender::a_new_source_page_or_width_is_a_different_artifact` |
 | an unrelated edit does NOT re-render | `view::an_unrelated_commit_does_not_invalidate_a_diagram_but_its_own_source_does`, `view::typing_never_launches_a_browser` |
 | an open session only blocks its own diagram | `view::an_open_session_only_holds_back_the_block_under_the_caret` |
+| resizing never re-renders | `view::only_the_diagrams_own_source_invalidates_it` (resizes to 60/100/200/37 columns queue nothing), `webrender::resizing_the_pane_is_not_a_new_artifact` |
 | the reader sees the renderer working | `theme::shimmer_*` (4), `view::a_rendering_diagram_pulses_its_code_and_stops_when_it_lands` |
 | renderer failure → code fallback | `view::a_renderer_failure_leaves_the_code_block_on_screen`, `webrender::unavailable_backend_fails_every_request_without_a_browser` |
 | UI thread does not block | `view::the_ui_thread_never_waits_for_the_browser` (the fake backend is pinned mid-render; the UI still queues, lays out and reports pending in <200 ms, and the artifact arrives after the gate is released) |
@@ -314,6 +323,14 @@ code block dims and a band of brightness runs down its rows (`theme::shimmer_lev
   macOS (`/Applications/…`) and via `PATH` on Linux; `COSENSE_CHROME` overrides, and an
   explicit-but-missing setting reports "no browser" rather than silently launching a
   different one. No browser → diagrams simply stay code blocks.
+* **Narrow panes clip an image, diagrams included.** `build_image` caps at 64 columns
+  regardless of the pane, and the draw clips to the pane's text width — verified: in a
+  40-column terminal (35 columns of text) the right-hand side of a 64-column image is
+  simply not drawn. This is pre-existing behaviour for every image, but a clipped
+  diagram loses more meaning than a clipped photo. Fixing it means capping at
+  `min(64, pane)` and rebuilding the protocol from the cached PNG when the pane width
+  changes — cheap (no browser involved), but it touches the shared image path, so it is
+  left out of this change.
 * **DOM coupling.** `#mermaid-preview-<lineId>` is Cosense's markup and can change.
   When it does, the wait times out and the viewer falls back to code — a rename of the
   selector is a one-line change in `WebKind::selector`.

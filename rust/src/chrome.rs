@@ -76,6 +76,14 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Viewport width the page is rendered at, in CSS pixels. Fixed on purpose:
+/// the viewer scales every image to a cell width of its own, so the browser
+/// window size only decides raster quality. Making it follow the pane meant
+/// re-rendering (3–6s) on every modest resize. 1000px is roughly the width
+/// Cosense itself lays a page out at, and at `clip.scale = 2` it yields a
+/// 2000px capture — far more than the ~500px a 64-column image ever needs.
+const RENDER_WIDTH_PX: u32 = 1000;
+
 /// How long one batch (launch → navigate → all captures) may take.
 fn budget() -> Duration {
     let secs = std::env::var("COSENSE_WEB_TIMEOUT")
@@ -136,7 +144,7 @@ impl ChromeBackend {
     }
 
     fn run_batch(&self, reqs: &[WebRequest]) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
-        let width = reqs.iter().map(|r| r.width_px).max().unwrap_or(900).clamp(320, 2400);
+        let width = RENDER_WIDTH_PX;
         let dark = reqs.first().map(|r| r.dark).unwrap_or(true);
 
         let mut held = self.session.lock().unwrap();
