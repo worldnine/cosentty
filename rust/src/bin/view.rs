@@ -823,9 +823,6 @@ struct App {
     ws_head: Option<String>,
     /// Last left-click (for double-click detection): time, column, row.
     last_click: Option<(Instant, u16, u16)>,
-    /// How many clicks that `last_click` is into a run (2 = double,
-    /// 3 = triple). Word- and line-select need to tell them apart.
-    click_run: u8,
     /// Link pressed with the left button. Activation waits for button-up on
     /// the same target, so dragging can still select text/lines.
     pressed_link: Option<(usize, LinkItem)>,
@@ -1294,7 +1291,6 @@ impl App {
             ws_pending: std::collections::VecDeque::new(),
             ws_head: None,
             last_click: None,
-            click_run: 0,
             pressed_link: None,
             related: Vec::new(),
             virtual_items: Vec::new(),
@@ -2270,23 +2266,6 @@ impl App {
             s.sel_from = None;
         }
         true
-    }
-
-    /// How many clicks this one is into a run at the same spot: 1, 2 or 3.
-    /// Rolls back to 1 after a triple, so a fourth click starts over.
-    fn click_run_at(&mut self, column: u16, row: u16) -> u8 {
-        let now = Instant::now();
-        let near = self
-            .last_click
-            .map(|(t, cx, cy)| {
-                now.duration_since(t) < Duration::from_millis(450)
-                    && cx.abs_diff(column) <= 1
-                    && cy.abs_diff(row) <= 1
-            })
-            .unwrap_or(false);
-        self.click_run = if near { (self.click_run % 3) + 1 } else { 1 };
-        self.last_click = Some((now, column, row));
-        self.click_run
     }
 
     /// Convenience for the places that only care whether it is code.
@@ -5101,31 +5080,6 @@ fn session_select_char(app: &mut App, right: bool) {
     app.follow = true;
 }
 
-/// Word bounds around `at` — what a double-click takes. A run of word
-/// characters, or the run of whitespace/punctuation the click landed in.
-fn word_span(buf: &str, at: usize) -> (usize, usize) {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_' || !c.is_ascii();
-    let at = at.min(buf.len());
-    let here = buf[at..].chars().next().or_else(|| buf[..at].chars().next_back());
-    let Some(here) = here else { return (0, 0) };
-    let want = is_word(here);
-    let mut start = at;
-    for (i, c) in buf[..at].char_indices().rev() {
-        if is_word(c) != want {
-            break;
-        }
-        start = i;
-    }
-    let mut end = at;
-    for (i, c) in buf[at..].char_indices() {
-        if is_word(c) != want {
-            break;
-        }
-        end = at + i + c.len_utf8();
-    }
-    (start, end)
-}
-
 /// Shift+↑/↓ inside the session: carry the caret one line and grow the
 /// selection with it (anchored where it started). The caret line commits
 /// on the way, exactly as a plain ↑/↓ does — selecting must never be the
@@ -6262,7 +6216,7 @@ fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
 /// Caret byte for a click at display column `col` of body line `line`:
 /// exact on the session's caret line (it shows raw source), best-effort on
 /// rendered lines (raw and rendered columns differ where notation hides).
-fn click_caret(app: &App, line: usize, col: usize) -> usize {
+fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
     let text = app
         .session
         .as_ref()
@@ -6274,7 +6228,29 @@ fn click_caret(app: &App, line: usize, col: usize) -> usize {
     // column, which the view (bullets at indent) also approximates.
     let code = app.code_span_at_line(line);
     let disp = session_display(&text, code);
-    raw_caret_from_display(&text, byte_at_col(&disp, col), code)
+    // A wrapped line owns SEVERAL display rows. The column alone cannot say
+    // where in the text the click landed — without the row, every
+    // continuation row maps onto the first one, and the caret jumps to the
+    // wrong place (and a drag selects the wrong run).
+    // The width the rows were WRAPPED at. After an edit the layout is
+    // marked stale (`laid_width = 0`) and the next draw redoes it; until
+    // then the last known text rect is the honest answer.
+    let width = if app.laid_width > 0 {
+        App::text_width(app.mode, app.laid_width)
+    } else {
+        (app.text_rect.width as usize).max(1)
+    };
+    let segs = wrap_plain_columns(&disp, width);
+    let seg_index = app
+        .src_rows(line)
+        .map(|(first, _)| {
+            let clicked = (app.scroll as i32 + screen_row).max(0) as usize;
+            clicked.saturating_sub(first).min(segs.len().saturating_sub(1))
+        })
+        .unwrap_or(0);
+    let before: usize = segs.iter().take(seg_index).map(String::len).sum();
+    let in_seg = segs.get(seg_index).map(|s| byte_at_col(s, col)).unwrap_or(0);
+    raw_caret_from_display(&text, before + in_seg, code)
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
@@ -6371,13 +6347,14 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 if let Some(src) = app.src_at_screen_row(screen_row) {
                     let col = (m.column.saturating_sub(text.x)) as usize;
                     // Session open: a click moves the caret and arms a
-                    // selection; a second or third click takes the word or
-                    // the line (the gesture every editor has).
+                    // selection for a drag to grow. (No word/line click
+                    // gestures: copying a whole line already has a key,
+                    // and a click that selects something the user did not
+                    // drag over is a surprise.)
                     if app.session.is_some() {
                         if src < app.lines.len() {
-                            let run = app.click_run_at(m.column, m.row);
                             session_commit_dirty(app, ctx);
-                            let caret = click_caret(app, src, col);
+                            let caret = click_caret(app, src, col, screen_row);
                             app.selection = None;
                             if let Some(s) = app.session.as_mut() {
                                 if s.line != src {
@@ -6388,23 +6365,10 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                                 }
                                 s.input.cur = caret.min(s.input.buf.len());
                                 s.want_col = None;
-                                s.sel_from = match run {
-                                    // Triple: the whole line.
-                                    3 => {
-                                        s.input.cur = s.input.buf.len();
-                                        Some(0)
-                                    }
-                                    // Double: the word under the pointer.
-                                    2 => {
-                                        let (a, b) = word_span(&s.input.buf, s.input.cur);
-                                        s.input.cur = b;
-                                        Some(a)
-                                    }
-                                    // Single: an anchor, in case a drag
-                                    // follows. A click that does not drag
-                                    // selects nothing (see Up).
-                                    _ => Some(s.input.cur),
-                                };
+                                // An anchor, in case a drag follows. A
+                                // click that does not drag selects nothing
+                                // (see the Up arm).
+                                s.sel_from = Some(s.input.cur);
                             }
                             app.drag_anchor = Some(src);
                             app.cursor = src;
@@ -6441,7 +6405,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                         .unwrap_or(false);
                     app.last_click = Some((now, m.column, m.row));
                     if dbl && src < app.lines.len() && app.time.is_none() {
-                        let caret = click_caret(app, src, col);
+                        let caret = click_caret(app, src, col, screen_row);
                         enter_session(app, ctx, src, caret);
                         return;
                     }
@@ -6469,7 +6433,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 if end == anchor && end < app.lines.len() {
                     // Same line: a character range (the anchor was set on
                     // button-down).
-                    let caret = click_caret(app, end, col);
+                    let caret = click_caret(app, end, col, clamped_row);
                     if let Some(s) = app.session.as_mut() {
                         s.input.cur = caret.min(s.input.buf.len());
                         s.want_col = None;
@@ -10122,19 +10086,6 @@ mod tests {
         assert_eq!(app.lines[2].text, "Y", "CRLF is normalised on the way in");
     }
 
-    /// Word bounds for double-click: a run of word characters, or the run
-    /// of separators the pointer landed in.
-    #[test]
-    fn word_span_takes_the_run_under_the_pointer() {
-        assert_eq!(word_span("hello world", 2), (0, 5));
-        assert_eq!(word_span("hello world", 5), (5, 6), "the space between is its own run");
-        assert_eq!(word_span("hello world", 7), (6, 11));
-        assert_eq!(word_span("a-b", 1), (1, 2), "punctuation is a run too");
-        let jp = "日本語 の語";
-        assert_eq!(word_span(jp, 3), (0, "日本語".len()), "CJK counts as word text");
-        assert_eq!(word_span("", 0), (0, 0));
-    }
-
     /// Selecting text with the mouse inside EDIT: drag on one line takes
     /// characters, double-click a word, triple-click the line, and a drag
     /// across lines falls back to the LINE range — the unit an edit across
@@ -10157,14 +10108,11 @@ mod tests {
         assert!(app.selection.is_none(), "one selection at a time");
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello");
 
-        // Double-click picks the word under the pointer.
+        // A click that does not drag selects nothing: the caret just moves.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
-        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
-        assert_eq!(copy_payload(&app, false).unwrap().0, "world");
-
-        // Triple-click takes the whole line.
-        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
-        assert_eq!(copy_payload(&app, false).unwrap().0, "hello world");
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Up(MouseButton::Left), 8, 3));
+        assert!(app.session.as_ref().unwrap().sel_span().is_none());
+        assert_eq!(copy_payload(&app, false).unwrap().0, "hello world", "the line, as before");
 
         // Dragging onto another line hands over to the line range.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 3, 3));
@@ -10172,6 +10120,49 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+    }
+
+    /// A wrapped line owns several display rows. Clicking the second one
+    /// has to land in the second half of the TEXT — with only the column
+    /// to go on, every continuation row mapped onto the first, so the
+    /// caret jumped and a drag selected the wrong run.
+    #[test]
+    fn clicking_a_wrapped_row_lands_where_the_eye_is() {
+        let ctx = test_ctx();
+        // 30 columns of text area → "aaaa…" wraps into three rows.
+        let long = "aaaaaaaaaa bbbbbbbbbb cccccccccc"; // 32 columns
+        let mut app = page(&["title", long]);
+        app.rebuild(26); // text area 20 columns wide → two rows
+        app.text_rect = Rect::new(1, 2, 20, 8);
+        app.bar_rect = Rect::new(24, 1, 1, 10);
+        app.view_h = 10;
+        let (first, last) = app.src_rows(1).expect("the wrapped line");
+        assert!(last > first, "the line really does wrap");
+
+        // Column 2 of the FIRST row is near the start…
+        let head = click_caret(&app, 1, 2, first as i32);
+        assert!(head < 5, "got {head}");
+        // …and column 2 of the SECOND row is a full row further in.
+        let next = click_caret(&app, 1, 2, first as i32 + 1);
+        let row_w = App::text_width(app.mode, app.laid_width);
+        assert_eq!(head, 2, "first row: the column IS the offset");
+        assert_eq!(next, row_w + 2, "second row: one row further into the text");
+
+        // And a drag between them selects exactly that run.
+        enter_session(&mut app, &ctx, 1, 0);
+        handle_mouse_content(
+            &mut app,
+            &ctx,
+            mouse(MouseEventKind::Down(MouseButton::Left), 1 + 2, 2 + first as u16),
+        );
+        handle_mouse_content(
+            &mut app,
+            &ctx,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 1 + 2, 2 + first as u16 + 1),
+        );
+        let (a, b) = app.session.as_ref().unwrap().sel_span().expect("a span");
+        assert_eq!((a, b), (head, next), "the run between the two clicks");
+        assert_eq!(&long[a..b], &long[2..row_w + 2], "…which is what the eye dragged over");
     }
 
     /// A selection you cannot see is not a selection. The caret line is
