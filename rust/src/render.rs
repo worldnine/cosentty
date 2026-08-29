@@ -21,11 +21,13 @@ pub enum Block {
     /// picture that is its own item wears the bullet; a picture under a
     /// line of text is that line's continuation and wears none.
     ///
-    /// `text` is the rest of the line when it BEGINS with the picture
-    /// (`[img]続きの文`). The viewer lays it out beside the picture, from
-    /// its last row — the terminal's answer to the browser's inline
-    /// image, where the text carries on from the picture's bottom-right.
-    Image { url: String, indent: usize, item: bool, text: Option<Line<'static>> },
+    Image { url: String, indent: usize, item: bool },
+    /// A line that mixes text and pictures (`本文 [画像]`, `[画像]本文`,
+    /// `[A] と [B]`). The viewer lays the parts out left to right with each
+    /// picture sitting ON the text line — its bottom edge level with the
+    /// words — which is how a browser draws an inline image. Kept as a
+    /// SEQUENCE rather than special cases so all three read the same way.
+    Inline { indent: usize, parts: Vec<InlinePart> },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
     /// A code block Cosense draws as a picture in the browser (today: only
@@ -46,7 +48,14 @@ pub enum Block {
     },
 }
 
-/// Where a `code:` block sits in the source: its header line and the
+/// One part of a mixed text-and-picture line (see [`Block::Inline`]).
+#[derive(Clone, Debug)]
+pub enum InlinePart {
+    Text(Line<'static>),
+    Image(String),
+}
+
+/// Where a `code:` block sits in the source/// Where a `code:` block sits in the source: its header line and the
 /// indent depth (in raw whitespace characters) of its header.
 ///
 /// The renderer decides what a code block *is* while it walks the page;
@@ -723,25 +732,64 @@ fn line_images(body: &str) -> Vec<String> {
     out
 }
 
-/// A line that opens with a picture and continues in text: the picture and
-/// everything after it. `None` when the line does not start with one, or
-/// when more pictures follow (those keep the stacked form).
-fn image_then_text(body: &str) -> Option<(String, &str)> {
-    let trimmed = body.trim_start();
-    if !trimmed.starts_with('[') {
-        return None;
+/// Split a line into its inline parts: runs of text and the pictures
+/// between them, in the order written. Text runs keep every other piece of
+/// notation (links, decoration, code) intact.
+fn inline_parts(
+    body: &str,
+    links: &mut Vec<String>,
+    images: &mut Vec<String>,
+    pal: &Palette,
+) -> Vec<InlinePart> {
+    let mut parts: Vec<InlinePart> = Vec::new();
+    let mut text_from = 0usize;
+    let mut i = 0usize;
+    // Ranges of plain text, collected first so the borrow checker is not
+    // asked to share `images` between a closure and the loop.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut order: Vec<Result<String, usize>> = Vec::new(); // Ok(url) | Err(run index)
+    while i < body.len() {
+        let Some(rel) = body[i..].find('[') else { break };
+        let open = i + rel;
+        // Quoted notation is text about a picture, not a picture.
+        if body[..open].matches('`').count() % 2 == 1 {
+            i = open + 1;
+            continue;
+        }
+        let Some(close) = matching_bracket(body, open) else { break };
+        if let Some(url) = image_in_bracket(&body[open + 1..close]) {
+            if open > text_from {
+                runs.push((text_from, open));
+                order.push(Err(runs.len() - 1));
+            }
+            order.push(Ok(url));
+            text_from = close + 1;
+        }
+        i = close + 1;
     }
-    let lead = body.len() - trimmed.len();
-    let close = matching_bracket(body, lead)?;
-    let url = image_in_bracket(&body[lead + 1..close])?;
-    let rest = &body[close + 1..];
-    if rest.trim().is_empty() || !line_images(rest).is_empty() {
-        return None;
+    if body.len() > text_from {
+        runs.push((text_from, body.len()));
+        order.push(Err(runs.len() - 1));
     }
-    Some((url, rest))
+    for item in order {
+        match item {
+            Ok(url) => {
+                images.push(url.clone());
+                parts.push(InlinePart::Image(url));
+            }
+            Err(idx) => {
+                let (from, to) = runs[idx];
+                let spans = decorate_inline(&body[from..to], links, images, pal);
+                if !spans.is_empty() {
+                    parts.push(InlinePart::Text(Line::from(spans)));
+                }
+            }
+        }
+    }
+    parts
 }
 
-/// The image this line is ENTIRELY made of/// The image this line is ENTIRELY made of — one bracket and nothing
+/// A line that opens with a picture and continues in text/// The image this line is ENTIRELY made of/// The image this line is ENTIRELY made of — one bracket and nothing
 /// else, which is the case that becomes a picture on its own row.
 fn standalone_image(body: &str) -> Option<String> {
     let inner = body.trim();
@@ -943,47 +991,17 @@ pub fn render_lines_with(
         // either of them is worse than stacking them.
         if let Some(url) = standalone_image(body) {
             ex.images.push(url.clone());
-            emit!(Block::Image {
-                url,
-                indent: text_column(level),
-                item: level > 0,
-                text: None,
-            });
+            emit!(Block::Image { url, indent: text_column(level), item: level > 0 });
             i += 1;
             continue;
         }
-        // A line that BEGINS with a picture and carries on in text: the
-        // text goes beside the picture, the way the browser flows it from
-        // the image's bottom-right. (Text BEFORE a picture keeps the
-        // stacked form — the reading order would otherwise reverse.)
-        if let Some((url, rest)) = image_then_text(body) {
-            ex.images.push(url.clone());
-            let spans = decorate_inline(rest, &mut ex.links, &mut ex.images, pal);
-            emit!(Block::Image {
-                url,
-                indent: text_column(level),
-                item: false,
-                text: Some(Line::from(spans)),
-            });
-            i += 1;
-            continue;
-        }
-        let embedded = line_images(body);
-        if !embedded.is_empty() {
-            let spans = decorate_inline(body, &mut ex.links, &mut ex.images, pal);
-            let mut line_spans = vec![Span::raw(indent.clone())];
-            line_spans.extend(spans);
-            emit!(Block::Text(Line::from(line_spans)));
-            for url in embedded {
-                // The text row above is the item; these pictures belong to
-                // it, so they hang without a bullet of their own.
-                emit!(Block::Image {
-                    url,
-                    indent: text_column(level),
-                    item: false,
-                    text: None,
-                });
-            }
+        // A line that mixes text and pictures: one sequence, laid out like
+        // a browser lays out inline images. Asked FIRST whether there is a
+        // picture at all, because splitting the line also collects its
+        // links — doing that speculatively would count them twice.
+        if !line_images(body).is_empty() {
+            let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal);
+            emit!(Block::Inline { indent: text_column(level), parts });
             i += 1;
             continue;
         }
@@ -1097,6 +1115,16 @@ mod tests {
         match b {
             Block::Blank => "[BLANK]".into(),
             Block::Image { url, .. } => format!("[IMAGE {url}]"),
+            Block::Inline { parts, .. } => parts
+                .iter()
+                .map(|p| match p {
+                    InlinePart::Image(u) => format!("[IMAGE {u}]"),
+                    InlinePart::Text(l) => {
+                        l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(""),
             Block::Text(l) => l.spans.iter().map(|s| s.content.as_ref()).collect(),
             Block::Table(_) => "[TABLE]".into(),
             Block::WebRender { rows, .. } => rows
@@ -1478,17 +1506,22 @@ mod tests {
                 .iter()
                 .skip(1) // the title row
                 .map(|b| match b {
-                    Block::Image { url, indent, item, text } => format!(
-                        "image:{indent}{}{}:{url}",
-                        if *item { "*" } else { "" },
-                        match text {
-                            Some(l) => format!(
-                                "+{}",
-                                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
-                            ),
-                            None => String::new(),
-                        }
-                    ),
+                    Block::Image { url, indent, item } => {
+                        format!("image:{indent}{}:{url}", if *item { "*" } else { "" })
+                    }
+                    Block::Inline { indent, parts } => {
+                        let shape: Vec<String> = parts
+                            .iter()
+                            .map(|p| match p {
+                                InlinePart::Image(u) => format!("img({u})"),
+                                InlinePart::Text(l) => format!(
+                                    "txt({})",
+                                    l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                ),
+                            })
+                            .collect();
+                        format!("inline:{indent}:{}", shape.join("|"))
+                    }
                     Block::Text(l) => {
                         format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                     }
@@ -1510,22 +1543,19 @@ mod tests {
         assert!(bare[0].starts_with("text:"), "{bare:?}");
         assert!(bare[0].contains("こんな感じ"));
 
-        // A line that OPENS with a picture keeps its text WITH the picture:
-        // the viewer flows it beside the image, as the browser does. One
-        // block, not a text row and a picture stacked apart.
+        // A line that mixes text and pictures is ONE block: a sequence of
+        // parts in the order written, which the viewer lays out like a
+        // sentence with inline images.
         let after = shape("[https://example.com/a.png]こんな感じに後ろのテキストも表示される");
-        assert_eq!(after.len(), 1, "{after:?}");
-        assert!(after[0].starts_with("image:0+"), "{after:?}");
-        assert!(after[0].contains("後ろのテキスト"), "{after:?}");
+        assert_eq!(
+            after,
+            vec!["inline:0:img(https://example.com/a.png)|txt(こんな感じに後ろのテキストも表示される)"],
+        );
 
-        // Text BEFORE a picture keeps the stacked form: flowing it beside
-        // the image would reverse the reading order.
+        // Text BEFORE a picture is the same block, in the other order —
+        // and the order is what the reading follows.
         let before = shape("先に本文 [https://example.com/a.png]");
-        assert_eq!(before.len(), 2, "{before:?}");
-        assert!(before[0].starts_with("text:"), "{before:?}");
-        assert!(before[0].contains("🖼"), "the text row says a picture is there: {before:?}");
-        assert!(!before[0].contains("https://"), "…without spelling out the address");
-        assert_eq!(before[1], "image:0:https://example.com/a.png");
+        assert_eq!(before, vec!["inline:0:txt(先に本文 )|img(https://example.com/a.png)"]);
 
         // Cosense hangs pictures off bullets: an indented image line
         // belongs to the item above it, so it starts where that item's
@@ -1535,13 +1565,12 @@ mod tests {
             vec!["image:2*:https://example.com/a.png".to_string()],
             "one level in = the column after `• `, and the picture IS the item",
         );
-        // Indented, opening with the picture: one block again, carrying
-        // both the indent and the text that flows beside it.
+        // Indented, opening with the picture: the same block, carrying the
+        // column its level starts at.
         let indented = shape("  [https://example.com/a.png] と本文");
         assert_eq!(indented.len(), 1, "{indented:?}");
-        assert!(indented[0].starts_with("image:4+"), "{indented:?}");
-        assert!(indented[0].contains("と本文"), "{indented:?}");
-        assert!(!indented[0].contains("image:4*"), "text beside it means it is not the item");
+        assert!(indented[0].starts_with("inline:4:img("), "{indented:?}");
+        assert!(indented[0].contains("txt( と本文)"), "{indented:?}");
 
         // Quoted notation is a line ABOUT the picture, not a picture: a
         // documentation page must be able to show what it is describing.
@@ -1550,14 +1579,13 @@ mod tests {
         assert!(quoted[0].starts_with("text:"), "{quoted:?}");
         assert_eq!(shape("`[https://example.com/a.png]`").len(), 1);
 
-        // Two pictures on one line: both, in the order written.
+        // Two pictures on one line: both, with the words between them kept
+        // between them.
         let two = shape("[https://example.com/a.png] と [https://example.com/b.png]");
         assert_eq!(
-            &two[1..],
-            &["image:0:https://example.com/a.png".to_string(), "image:0:https://example.com/b.png".to_string()],
-            "{two:?}",
+            two,
+            vec!["inline:0:img(https://example.com/a.png)|txt( と )|img(https://example.com/b.png)"],
         );
-        assert!(two[0].contains('と'), "the text between them survives: {two:?}");
     }
 
     /// Star count is a heading LEVEL, mid-line as much as on a line of its
