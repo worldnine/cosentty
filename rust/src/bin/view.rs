@@ -153,6 +153,11 @@ struct WebMsg {
     /// diagram: the artifact already on screen stays, and the reader is
     /// told nothing.
     rescale: bool,
+    /// What this reply was produced with. A refusal has to be attributed to
+    /// a credential state, not guessed from session flags: one browser
+    /// batch refuses EVERY key in it at once, and the whole batch has to be
+    /// judged as the single event it was.
+    attempted: Option<RenderCapability>,
     res: WebOutcome,
 }
 
@@ -260,7 +265,7 @@ fn spawn_web_worker(
                             },
                             None => WebOutcome::Failed("no cached artifact to resize".into()),
                         };
-                        let _ = out.send(WebMsg { gen, key, rescale: true, res });
+                        let _ = out.send(WebMsg { gen, key, rescale: true, attempted: None, res });
                     }
                     WebJob::Render { gen, reqs, max_cols, auth } => {
                         merged_gen = gen;
@@ -335,8 +340,13 @@ fn run_render_batch(
         let key = req.cache_key();
         match cache.get(&key).map(|png| decode_web_png(picker, &png, max_cols)) {
             Some(Ok(info)) => {
-                let _ =
-                    out.send(WebMsg { gen, key, rescale: false, res: WebOutcome::Drawn(info) });
+                let _ = out.send(WebMsg {
+                    gen,
+                    key,
+                    rescale: false,
+                    attempted: None, // served from disk; no credential was used
+                    res: WebOutcome::Drawn(info),
+                });
             }
             // On disk but unreadable: truncated by a crash, or corrupted
             // underneath us. That must not become a permanent failure for
@@ -357,7 +367,13 @@ fn run_render_batch(
         // viewer would pulse those blocks forever.
         for req in &to_render {
             let key = req.cache_key();
-            let _ = out.send(WebMsg { gen, key, rescale: false, res: WebOutcome::Missing });
+            let _ = out.send(WebMsg {
+                gen,
+                key,
+                rescale: false,
+                attempted: None,
+                res: WebOutcome::Missing,
+            });
         }
         return;
     };
@@ -375,7 +391,7 @@ fn run_render_batch(
             Err(WebError::NotAuthorized) => WebOutcome::Denied,
             Err(e) => WebOutcome::Failed(e.to_string()),
         };
-        let _ = out.send(WebMsg { gen, key, rescale: false, res });
+        let _ = out.send(WebMsg { gen, key, rescale: false, attempted: Some(auth), res });
     }
 }
 
@@ -1423,21 +1439,41 @@ impl App {
     /// The browser hit a login wall. This says something about the COOKIE,
     /// never about the PAT that is reading and committing this page — so
     /// nothing here touches `editable`, the credential, or the status.
-    fn note_denied(&mut self, key: String) {
-        match capability::on_not_authorized(&self.caps) {
+    fn note_denied(&mut self, denied: Vec<(String, Option<RenderCapability>)>) {
+        // Every key in the batch goes back to being drawable: whatever we
+        // decide below, none of these is a FAILURE of the diagram.
+        for (key, _) in &denied {
+            self.web_missing.insert(key.clone());
+        }
+        // The batch was one request with one credential state. If any key
+        // in it names the state, that is the state that was refused.
+        let attempted = denied
+            .iter()
+            .find_map(|(_, a)| *a)
+            .unwrap_or(RenderCapability::Anonymous);
+        // A refused cookie is a refused cookie whatever we do next: from
+        // here it counts as absent, so no later pass presents it again.
+        // (Without this, a private page would retry the same dead cookie on
+        // every `m`, forever.)
+        if attempted == RenderCapability::Authenticated {
+            self.caps.cookie_rejected = true;
+        }
+        match capability::on_not_authorized(&self.caps, attempted) {
             // A public page that refused a cookie refused a STALE cookie.
-            // Anonymous is a different request, and usually works.
+            // Anonymous is a different request, and usually works — and it
+            // retries EVERY key the batch lost, in one more batch.
             capability::Denial::RetryAnonymous => {
-                // From here the cookie counts as absent, so the retry that
-                // `start_web_renders` queues is genuinely cookie-free.
-                self.caps.cookie_rejected = true;
-                self.caps.anonymous_spent = true;
-                self.web_missing.insert(key);
+                // `cookie_rejected` above is what makes this retry genuinely
+                // cookie-free, and it retries EVERY key the batch lost in
+                // one more batch.
                 self.start_web_renders(capability::Trigger::Manual);
             }
             capability::Denial::GiveUp => {
-                self.caps.browser_denied = true;
-                self.web_missing.insert(key);
+                // Only an attempt that carried no cookie can prove the
+                // browser has nothing left to offer.
+                if attempted == RenderCapability::Anonymous {
+                    self.caps.browser_denied = true;
+                }
                 if !self.web_notice_shown {
                     self.web_notice_shown = true;
                     let msg = if self.caps.sid {
@@ -1690,11 +1726,13 @@ impl App {
     /// live request and leave the diagram pulsing forever.
     fn drain_web_renders(&mut self) -> bool {
         let mut changed = false;
+        // Refusals from this drain, judged together once the loop ends.
+        let mut denied: Vec<(String, Option<RenderCapability>)> = Vec::new();
         while let Ok(msg) = self.web_rx.try_recv() {
             if msg.gen != self.gen_now() {
                 continue;
             }
-            let WebMsg { key, rescale, res, .. } = msg;
+            let WebMsg { key, rescale, attempted, res, .. } = msg;
             if rescale {
                 // A rescale only ever changes the SIZE of a picture that is
                 // already on screen. If it failed, the reader keeps the
@@ -1717,9 +1755,12 @@ impl App {
                     self.web_missing.insert(key);
                 }
                 // The BROWSER was refused. The REST credential is untouched:
-                // edits and reads carry on exactly as before.
+                // edits and reads carry on exactly as before. Collected
+                // rather than handled here — one batch refuses every key in
+                // it at once, and handling them one at a time made the
+                // second key see the first key's bookkeeping and give up.
                 WebOutcome::Denied => {
-                    self.note_denied(key);
+                    denied.push((key, attempted));
                 }
                 WebOutcome::Failed(e) => {
                     self.note_web_failure(format!("diagram: {e} (showing source)"));
@@ -1727,6 +1768,9 @@ impl App {
                 }
             }
             changed = true;
+        }
+        if !denied.is_empty() {
+            self.note_denied(denied);
         }
         changed
     }
@@ -6393,7 +6437,7 @@ mod tests {
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         // The reader navigated away and back while the browser was busy.
         let stale_gen = app.gen_now().wrapping_sub(1);
-        app.web_tx.send(WebMsg { gen: stale_gen, key: key.clone(), rescale: false, res: WebOutcome::Drawn(info) }).unwrap();
+        app.web_tx.send(WebMsg { gen: stale_gen, key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) }).unwrap();
         assert!(!app.drain_web_renders(), "a stale result changes nothing");
         assert!(!app.images.contains_key(&key), "yesterday's diagram is not installed");
         // …and it touches NO state. The same key can legitimately be
@@ -6414,7 +6458,7 @@ mod tests {
             .cache_key();
         app.web_pending.insert(key.clone());
         app.web_tx
-            .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: WebOutcome::Failed(WebError::NoBrowser.to_string()) })
+            .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Failed(WebError::NoBrowser.to_string()) })
             .unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
@@ -6447,7 +6491,7 @@ mod tests {
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: WebOutcome::Drawn(info) }).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) }).unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
         app.rebuild(80);
@@ -6615,6 +6659,14 @@ mod tests {
             scratch_cache(),
             Arc::clone(&app.web_gen),
         );
+        // The edited artifact's key is known in advance, so the backend is
+        // scripted BEFORE the edit: `rerender` queues the job immediately,
+        // and the worker must not reach the backend first.
+        let edited = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap()
+            .cache_key();
+        backend.answer(&edited, Ok(tiny_png()));
         app.start_web_renders(capability::Trigger::Manual);
         settle(&mut app, first.len());
         assert!(app.images.contains_key(&first[0]), "the diagram is on screen");
@@ -6625,8 +6677,8 @@ mod tests {
         app.lines[3].text = "   A-->C".into();
         rerender(&mut app, &ctx);
         let after = diagram_keys(&app);
+        assert_eq!(after[0], edited);
         assert_ne!(after[0], first[0], "the edit is a different artifact");
-        backend.answer(&after[0], Ok(tiny_png()));
         settle(&mut app, 1);
         assert!(
             app.images.contains_key(&after[0]),
@@ -6745,6 +6797,7 @@ mod tests {
                 gen: app.gen_now(),
                 key: keys[0].clone(),
                 rescale: false,
+                attempted: None,
                 res: WebOutcome::Missing,
             })
             .unwrap();
@@ -6916,14 +6969,15 @@ mod tests {
                 gen: app.gen_now(),
                 key: keys[0].clone(),
                 rescale: false,
+                attempted: Some(RenderCapability::Authenticated),
                 res: WebOutcome::Denied,
             })
             .unwrap();
         app.drain_web_renders();
         // The refusal was about the COOKIE. A second, cookie-free attempt
         // is queued, and the REST credential is not touched.
-        assert!(app.caps.anonymous_spent);
-        assert!(!app.caps.browser_denied);
+        assert!(app.caps.cookie_rejected, "the cookie is what was refused");
+        assert!(!app.caps.browser_denied, "no anonymous attempt has been made yet");
         let job = app.web_jobs_rx.as_ref().unwrap().recv().unwrap();
         let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
         assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
@@ -6932,6 +6986,79 @@ mod tests {
             Some(RenderCapability::Anonymous),
             "retrying with the SAME rejected cookie just fails again"
         );
+    }
+
+    #[test]
+    fn a_whole_refused_batch_is_retried_anonymously_in_one_go() {
+        // Chrome refuses a BATCH, not a key: one navigation, one login
+        // wall, N replies. Handling those one at a time made the first key
+        // start the anonymous retry and the second key — seeing the
+        // bookkeeping the first had just written — declare the browser
+        // dead. Two diagrams is the smallest page that shows it.
+        let mut app = mermaid_page();
+        app.caps = capability::Capabilities {
+            sid: true,
+            visibility: capability::Visibility::Public,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        assert_eq!(keys.len(), 2, "this test needs two diagrams to mean anything");
+        for k in &keys {
+            app.web_pending.insert(k.clone());
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: k.clone(),
+                    rescale: false,
+                    attempted: Some(RenderCapability::Authenticated),
+                    res: WebOutcome::Denied,
+                })
+                .unwrap();
+        }
+        app.drain_web_renders();
+
+        assert!(app.caps.cookie_rejected);
+        assert!(
+            !app.caps.browser_denied,
+            "only an anonymous attempt that was itself refused may end the browser"
+        );
+        // ONE retry batch, cookie-free, carrying BOTH keys.
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the refused batch is retried");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert_eq!(*auth, Some(RenderCapability::Anonymous));
+        let retried: Vec<String> = reqs.iter().map(|r| r.cache_key()).collect();
+        for k in &keys {
+            assert!(retried.contains(k), "every diagram the batch lost is retried");
+        }
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "one retry batch, not one per diagram"
+        );
+
+        // Now the anonymous attempt is refused too. THAT ends it.
+        for k in &keys {
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: k.clone(),
+                    rescale: false,
+                    attempted: Some(RenderCapability::Anonymous),
+                    res: WebOutcome::Denied,
+                })
+                .unwrap();
+        }
+        app.drain_web_renders();
+        assert!(app.caps.browser_denied);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no third attempt");
+        // ...and none of it is a diagram failure.
+        assert!(app.web_errors.is_empty());
     }
 
     #[test]
@@ -6952,12 +7079,13 @@ mod tests {
                 gen: app.gen_now(),
                 key: keys[0].clone(),
                 rescale: false,
+                attempted: Some(RenderCapability::Authenticated),
                 res: WebOutcome::Denied,
             })
             .unwrap();
         app.drain_web_renders();
-        assert!(app.caps.browser_denied, "the RENDERER gives up");
-        assert!(app.editable, "...and nothing else does");
+        assert!(app.caps.cookie_rejected, "the cookie is what was refused");
+        assert!(app.editable, "...and nothing else stops working");
         assert!(!app.web_errors.contains_key(&keys[0]));
         app.rebuild(80);
         assert!(
@@ -7276,6 +7404,7 @@ mod tests {
                 gen: app.gen_now(),
                 key: key.clone(),
                 rescale: true,
+                attempted: None,
                 res: WebOutcome::Failed("no cached artifact to resize".into()),
             })
             .unwrap();
@@ -7301,7 +7430,7 @@ mod tests {
         app.web_rescaling.insert(key.clone());
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         app.web_tx
-            .send(WebMsg { gen: old_gen, key: key.clone(), rescale: false, res: WebOutcome::Drawn(info) })
+            .send(WebMsg { gen: old_gen, key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) })
             .unwrap();
         assert!(!app.drain_web_renders(), "yesterday's answer changes nothing");
         assert!(app.web_pending.contains(&key), "the live request is still in flight");
@@ -7481,7 +7610,7 @@ mod tests {
         let wide = decode_web_png(&Picker::halfblocks(), &wide_png(), app.web_cols).unwrap();
         assert_eq!(app.web_cols, IMAGE_MAX_COLS, "80 columns leaves room for the ceiling");
         app.web_pending.insert(key.clone());
-        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: WebOutcome::Drawn(wide) }).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(wide) }).unwrap();
         assert!(app.drain_web_renders());
 
         // Two narrow panes, well under the 64-column image ceiling.
@@ -7503,7 +7632,7 @@ mod tests {
             // The worker answers; the diagram now fits the pane.
             let info = decode_web_png(&Picker::halfblocks(), &wide_png(), max_cols).unwrap();
             app.web_tx
-                .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: true, res: WebOutcome::Drawn(info) })
+                .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: true, attempted: None, res: WebOutcome::Drawn(info) })
                 .unwrap();
             assert!(app.drain_web_renders());
             let shown_w = app.images[&key].cells_w;
@@ -7532,6 +7661,7 @@ mod tests {
                 gen: app.gen_now(),
                 key,
                 rescale: false,
+                attempted: None,
                 res: WebOutcome::Failed(WebError::NoBrowser.to_string()),
             })
             .unwrap();

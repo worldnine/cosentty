@@ -228,13 +228,21 @@ pub enum Denial {
     GiveUp,
 }
 
-pub fn on_not_authorized(caps: &Capabilities) -> Denial {
-    // A public page that refused a cookie refused the COOKIE, not us: it is
-    // stale. Anonymous is a different request and often works.
-    if caps.sid && caps.visibility == Visibility::Public && !caps.anonymous_spent {
-        Denial::RetryAnonymous
-    } else {
-        Denial::GiveUp
+/// `attempted` is the credential state the refused batch actually used —
+/// not something inferred from session flags. One browser batch refuses
+/// every key in it at once, so the whole batch is one event, and inferring
+/// from flags made the second key in a batch see the first key's
+/// bookkeeping and give up prematurely.
+pub fn on_not_authorized(caps: &Capabilities, attempted: RenderCapability) -> Denial {
+    match attempted {
+        // The cookie was refused. On a public page that says the cookie is
+        // stale, not that we are unwelcome: anonymous is a different
+        // request and usually works.
+        RenderCapability::Authenticated if caps.visibility == Visibility::Public => {
+            Denial::RetryAnonymous
+        }
+        // Refused with NO cookie: there is nothing weaker left to try.
+        _ => Denial::GiveUp,
     }
 }
 
@@ -350,12 +358,27 @@ mod tests {
 
     #[test]
     fn a_stale_cookie_on_a_public_page_is_retried_without_it() {
-        assert_eq!(on_not_authorized(&caps(true, Visibility::Public)), Denial::RetryAnonymous);
+        use RenderCapability::{Anonymous, Authenticated};
+        assert_eq!(
+            on_not_authorized(&caps(true, Visibility::Public), Authenticated),
+            Denial::RetryAnonymous
+        );
         // Private has nothing to retry WITH, so the renderer alone gives up.
-        assert_eq!(on_not_authorized(&caps(true, Visibility::Private)), Denial::GiveUp);
-        assert_eq!(on_not_authorized(&caps(false, Visibility::Public)), Denial::GiveUp);
+        assert_eq!(
+            on_not_authorized(&caps(true, Visibility::Private), Authenticated),
+            Denial::GiveUp
+        );
+        // An anonymous attempt that was itself refused is the end of the
+        // line — and this is the ONLY thing that may set `browser_denied`.
+        assert_eq!(
+            on_not_authorized(&caps(false, Visibility::Public), Anonymous),
+            Denial::GiveUp
+        );
+        // `anonymous_spent` is about the one Unknown-visibility gamble; it
+        // must not make a cookie refusal give up early. Two diagrams in one
+        // batch used to fail exactly here.
         let spent = Capabilities { anonymous_spent: true, ..caps(true, Visibility::Public) };
-        assert_eq!(on_not_authorized(&spent), Denial::GiveUp);
+        assert_eq!(on_not_authorized(&spent, Authenticated), Denial::RetryAnonymous);
     }
 
     #[test]
