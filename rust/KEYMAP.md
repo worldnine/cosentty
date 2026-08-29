@@ -69,7 +69,7 @@ PAT / Service Account のみの環境では従来どおり `sync: poll` の3秒�
 | comment | `v` select · `c` add · `d` delete · `^n`/`^p` jump | 同じ | `v` `c` `d` `^n` `^p` |
 | output | `y` copy · `s` send | `y` copy（`s` は将来） | `y` |
 | list | `l` comments · `?` help | 同じ | `l` `?` |
-| undo | — | **全コミットの逆演算 undo/redo**（確認ゲートの代わりの安全網）。編集セッション中は `u` が印字キーなので `^z` で undo、redo は同じ `^r` | `u` · `^r`（EDIT: `^z` · `^r`） |
+| undo | — | **全コミットの逆演算 undo/redo**（確認ゲートの代わりの安全網）。undo は READ でも EDIT でも `^z` が使える（READ では akapen 互換の `u` も従来どおり。EDIT では `u` が印字キーなので `^z` のみ）。redo はどちらも `^r` | `u` · `^z` · `^r` |
 | browser | — | ブラウザで開く（**w**eb。旧 `e`）カーソル行に deep-link | `w` |
 | time / detail | `t` 詳細 | **行の更新者と更新/作成時刻**をオーバレイ表示（トグル）。更新者名はプロジェクトごとのメンバー表から解決（`t` を押したときに遅延取得、10分で再取得、未知の ID なら60秒のクールダウン付きで即再取得） | `t` |
 | quit | `q` quit · `Esc` cancel | 同じ | `q` · `Esc` |

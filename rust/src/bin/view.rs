@@ -4112,7 +4112,9 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         }
 
         // ---- undo / redo (the safety net; no confirmation gates) ----
-        (KeyCode::Char('u'), false) => undo(app, ctx),
+        // `u` is the akapen/vim seat; `^z` is the same key the session
+        // uses, so the reflex works whichever mode you happen to be in.
+        (KeyCode::Char('u'), false) | (KeyCode::Char('z'), true) => undo(app, ctx),
         (KeyCode::Char('r'), true) => redo(app, ctx),
 
         // ---- comments (akapen parity) ----
@@ -8852,6 +8854,24 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// The undo reflex must not depend on which mode you are in: `^z`
+    /// works in READ as well, next to the akapen `u` seat.
+    #[test]
+    fn read_mode_takes_ctrl_z_as_undo_too() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        do_edit(&mut app, &ctx, "delete", vec![EditOp::Delete { id: "id1".into() }]);
+        assert_eq!(app.lines.len(), 2);
+
+        handle_key(&mut app, &ctx, ctrl('z'));
+        assert_eq!(app.lines.len(), 3, "^z undid the delete from READ");
+        assert_eq!(app.lines[1].text, "one");
+
+        handle_key(&mut app, &ctx, ctrl('r'));
+        assert_eq!(app.lines.len(), 2, "^r still redoes");
     }
 
     /// SPEC §6: the safety net has to be reachable without leaving EDIT.

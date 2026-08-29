@@ -111,6 +111,7 @@ preview API はこの id をそのまま受理することを実測済み）。�
 
 - `u` = undo（LIFO）、`^r` = redo。READ でもセッション中でも効く。
   セッション中は `u` が印字キーなので、undo は `^z`、redo は READ と同じ `^r`。
+  `^z` は READ でも undo になるので、どちらのモードにいても同じ反射で戻せる。
   raw mode では ISIG が切れており `^z` は SIGTSTP にならない。ビューアに自前の
   suspend もないので、この割当で失うものはない。
 - セッション中の undo は、まずキャレット行の dirty をコミットしてから 1 段戻す。
