@@ -3884,14 +3884,130 @@ fn short(url: &str) -> String {
     url.rsplit('/').next().unwrap_or(url).to_string()
 }
 
+/// What `y` copies, and what to call it in the status line.
+///
+/// Always the **Cosense source**: indentation, `[]` links, `code:` blocks,
+/// exactly as the page stores them. That is what survives a round trip
+/// into another Cosense page, an editor, or a commit message. (A rendered
+/// copy would lose the notation and the structure with it.)
+///
+/// The caret line comes from the session buffer, so what you copy is what
+/// you see, not the last version the server heard.
+fn copy_payload(app: &App, whole_page: bool) -> Option<(String, String)> {
+    if app.lines.is_empty() {
+        return None;
+    }
+    let text_of = |i: usize| -> String {
+        match app.session.as_ref() {
+            Some(s) if s.line == i => s.input.buf.clone(),
+            _ => app.lines[i].text.clone(),
+        }
+    };
+    if whole_page {
+        let body: Vec<String> = (0..app.lines.len()).map(text_of).collect();
+        return Some((body.join("\n"), format!("page ({} lines)", body.len())));
+    }
+    let (a, b) = match app.selection {
+        Some(sel) => sel.range(),
+        None => {
+            let line = app.session.as_ref().map(|s| s.line).unwrap_or(app.cursor);
+            (line, line)
+        }
+    };
+    let b = b.min(app.lines.len() - 1);
+    if a > b {
+        return None;
+    }
+    let body: Vec<String> = (a..=b).map(text_of).collect();
+    let label = if body.len() == 1 { "line".into() } else { format!("{} lines", body.len()) };
+    Some((body.join("\n"), label))
+}
+
+/// Copy `payload` and report it on the status line — including the ways it
+/// can fail, which are silent otherwise (no clipboard tool, a terminal
+/// that will not take OSC 52, a copy too large to send that way).
+fn copy_and_report(app: &mut App, payload: Option<(String, String)>) {
+    let Some((text, label)) = payload else {
+        app.status = "nothing to copy".into();
+        return;
+    };
+    app.status = if copy_to_clipboard(&text) {
+        format!("✓ copied {label}")
+    } else {
+        "copy failed — no clipboard tool and the terminal refused OSC 52".into()
+    };
+}
+
 fn copy_to_clipboard(text: &str) -> bool {
-    let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else {
+    // Over SSH, `pbcopy` and friends would write into the clipboard of the
+    // machine the viewer runs on — not the one the hands are on. OSC 52
+    // hands the text to the terminal EMULATOR, which is always local, so
+    // it is the only thing that works remotely.
+    let remote =
+        std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some();
+    if !remote {
+        for (bin, args) in [
+            ("pbcopy", &[][..]),
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ] {
+            if pipe_to(bin, args, text) {
+                return true;
+            }
+        }
+    }
+    osc52_copy(text)
+}
+
+/// Feed `text` to a clipboard helper on stdin. False when it is not
+/// installed or refuses.
+fn pipe_to(bin: &str, args: &[&str], text: &str) -> bool {
+    let Ok(mut child) = Command::new(bin).args(args).stdin(Stdio::piped()).spawn() else {
         return false;
     };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes());
     }
     child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Hand the text to the terminal emulator itself (OSC 52). Works through
+/// SSH, and through tmux when the sequence is wrapped in its passthrough.
+///
+/// Terminals cap what they will take (commonly ~74 KB of base64); a copy
+/// too big to send is refused here rather than silently truncated.
+fn osc52_copy(text: &str) -> bool {
+    const MAX_BYTES: usize = 48 * 1024;
+    if text.len() > MAX_BYTES {
+        return false;
+    }
+    let payload = format!("\x1b]52;c;{}\x07", b64_encode(text.as_bytes()));
+    let seq = if std::env::var_os("TMUX").is_some() {
+        // tmux only forwards what it is told to forward.
+        format!("\x1bPtmux;{}\x1b\\", payload.replace('\x1b', "\x1b\x1b"))
+    } else {
+        payload
+    };
+    let mut out = std::io::stdout();
+    out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok()
+}
+
+/// Standard base64, for OSC 52. (The decoder lives in `chrome`; this is
+/// the only place that needs to encode.)
+fn b64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 /// Load `project/title` and install it, pushing the current page onto
@@ -4338,17 +4454,16 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('p'), true) => jump_comment(app, false),
 
         // ---- output ----
+        // `y` copies what is under the cursor (or the selection); `Y` the
+        // whole page. Copying the COMMENTS moved to the comments overlay
+        // (`l` then `y`), where the comments are.
         (KeyCode::Char('y'), false) => {
-            if app.comments.is_empty() {
-                app.status = "no comments to copy".into();
-            } else {
-                let text = format_all(&app.comments);
-                app.status = if copy_to_clipboard(&text) {
-                    format!("copied {} comment(s)", app.comments.len())
-                } else {
-                    "clipboard copy failed (pbcopy?)".into()
-                };
-            }
+            let payload = copy_payload(app, false);
+            copy_and_report(app, payload);
+        }
+        (KeyCode::Char('Y'), false) => {
+            let payload = copy_payload(app, true);
+            copy_and_report(app, payload);
         }
 
         // ---- lists / help ----
@@ -5174,6 +5289,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
                 | (KeyCode::Backspace, _)
                 | (KeyCode::Delete, _)
                 | (KeyCode::Esc, _)
+                | (KeyCode::Char('y'), _)
         )
     {
         app.selection = None;
@@ -5217,6 +5333,12 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Char('w'), true) => edit_input(app, Input::delete_word),
         (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
         (KeyCode::Char('k'), true) => session_kill(app, ctx),
+        // `y` types a letter in a modeless session, and `^c` belongs to the
+        // terminal, so copying takes `^y`.
+        (KeyCode::Char('y'), true) => {
+            let payload = copy_payload(app, false);
+            copy_and_report(app, payload);
+        }
         // `u` is a printable key in a modeless session, so undo takes the
         // key everyone already presses to undo text: `^z`. Raw mode turns
         // ISIG off, so it never reached the terminal as SIGTSTP anyway,
@@ -6177,6 +6299,18 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         KeyCode::Backspace if is_picker => Act::Backspace,
         // In the picker, plain characters filter; elsewhere j/k/q act.
         KeyCode::Char(c) if is_picker && !ctrl => Act::Type(c),
+        // The comments list is where copying every comment belongs.
+        KeyCode::Char('y') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
+            let text = format_all(&app.comments);
+            app.status = if app.comments.is_empty() {
+                "no comments to copy".into()
+            } else if copy_to_clipboard(&text) {
+                format!("✓ copied {} comment(s)", app.comments.len())
+            } else {
+                "copy failed — no clipboard tool and the terminal refused OSC 52".into()
+            };
+            Act::None
+        }
         KeyCode::Char('q') => Act::Close,
         KeyCode::Char('j') => Act::Down,
         KeyCode::Char('k') => Act::Up,
@@ -9661,6 +9795,54 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// A note app has to be able to hand its text to something else. What
+    /// leaves is the Cosense SOURCE — indentation and notation intact —
+    /// because that is what survives the round trip back into a page.
+    #[test]
+    fn y_copies_the_line_the_selection_or_the_page_as_source() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " [link] one", "  two", "three"]);
+        app.rebuild(40);
+
+        app.cursor = 1;
+        let (text, label) = copy_payload(&app, false).unwrap();
+        assert_eq!(text, " [link] one", "the source, not the rendering");
+        assert_eq!(label, "line");
+
+        app.selection = Some(Selection { anchor: 1, cursor: 2 });
+        let (text, label) = copy_payload(&app, false).unwrap();
+        assert_eq!(text, " [link] one\n  two", "indentation carries the structure");
+        assert_eq!(label, "2 lines");
+
+        let (text, label) = copy_payload(&app, true).unwrap();
+        assert_eq!(text, "title\n [link] one\n  two\nthree", "Y takes the title too");
+        assert_eq!(label, "page (4 lines)");
+
+        // In EDIT the caret line copies what is ON SCREEN, not the last
+        // text the server heard.
+        app.selection = None;
+        enter_session(&mut app, &ctx, 3, 5);
+        type_str(&mut app, &ctx, "!!");
+        let (text, _) = copy_payload(&app, false).unwrap();
+        assert_eq!(text, "three!!", "the working line, uncommitted and all");
+    }
+
+    /// OSC 52 is the only clipboard that reaches the machine the user is
+    /// sitting at when the viewer runs over SSH, so its encoding has to be
+    /// right.
+    #[test]
+    fn base64_for_osc52_matches_the_standard() {
+        assert_eq!(b64_encode(b""), "");
+        assert_eq!(b64_encode(b"f"), "Zg==");
+        assert_eq!(b64_encode(b"fo"), "Zm8=");
+        assert_eq!(b64_encode(b"foo"), "Zm9v");
+        assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(b64_encode("あ".as_bytes()), "44GC");
+        // Round-trips through the decoder the browser side already uses.
+        let round = cosense::chrome::b64_decode(&b64_encode("行 の コピー".as_bytes())).unwrap();
+        assert_eq!(String::from_utf8(round).unwrap(), "行 の コピー");
     }
 
     /// The bug that made a new page look saved and arrive empty: Cosense
