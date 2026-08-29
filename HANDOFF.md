@@ -150,7 +150,7 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 | `rust/src/theme.rs` | `shimmer_level` / `shimmer_style` — the pure "still rendering" brightness wave, mixing an RGB foreground toward the terminal background (DIM attribute for named colors). |
 | `rust/src/bin/view.rs` | `WebJob` (`Render` / `Rescale`), `WebMsg`, `spawn_web_worker`; App fields (`web_gen`, `web_dark`, `web_pending`, `web_errors`, `web_shimmer`, `web_cols`, `web_rescaling`, `web_unsynced`, `web_notice`, `caps`, `render_policy`, `web_missing`, `sync_state`, channels); `web_request`, `start_web_renders(Trigger)`, `rescale_diagrams`, `drain_web_renders`, `note_web_failure` / `expire_web_notice`, `hint_text`, `mark_desynced` / `mark_synced`, `set_sync_state` / `sync_label`, `absorb_interval` (the poller's control channel), `ensure_visibility` / `drain_visibility`, `note_denied`; the `m` key; `diagram_max_cols` + a `max_cols` argument on `build_image`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
 | `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary; `probe_visibility` — an anonymous `GET /api/projects/<name>` that attaches **no** credential. |
-| `rust/src/ws.rs` | `WsEvent::State(SyncState)` emitted unthrottled on every failure edge and once the post-join catch-up lands; `sync_plan` → `initial_plan` (a sid no longer buys the slow poll). |
+| `rust/src/ws.rs` | `WsEvent::State { project, title, state }` emitted unthrottled on every failure edge and once the post-join catch-up lands; `sync_plan` → `initial_plan` (a sid no longer buys the slow poll). |
 | `rust/src/bin/probe.rs` | prints the new block kind. |
 | `rust/KEYMAP.md` | user-facing section: dependency, auth, fallback, notation, env vars. |
 | `rust/Cargo.toml` | registers the `web_smoke` bin. **No new dependencies.** |
@@ -314,6 +314,15 @@ New coverage, against the acceptance list:
 | auto / off | `capability::off_touches_nothing_at_all`, `view::auto_draws_on_load_and_off_draws_never` |
 | an edit redraws a diagram already on screen | `view::editing_a_drawn_diagram_redraws_it_without_asking_again` |
 | `m` types a character while editing | `view::m_is_an_ordinary_character_while_editing` |
+| a refused batch is retried as one | `view::a_whole_refused_batch_is_retried_anonymously_in_one_go` (two diagrams; one anonymous batch carries both, and only an anonymous refusal sets `browser_denied`), `capability::a_stale_cookie_on_a_public_page_is_retried_without_it` |
+| a stale room never holds the new page slow | `view::navigating_away_from_a_live_room_goes_back_to_the_fast_poll`, `view::a_live_from_the_room_the_reader_left_is_ignored`, `view::a_rejoin_that_stalls_leaves_the_reader_on_the_fast_poll` |
+| a late poll never rolls the page back | `view::a_poll_that_started_before_a_websocket_commit_never_rolls_it_back`, `view::a_poll_that_started_before_a_local_commit_never_rolls_it_back`, `view::a_fresh_poll_still_applies_web_edits` |
+| blankness alone is not a refusal | `chrome::a_blank_page_is_only_a_refusal_when_the_api_refuses` |
+| a render whose source moved is discarded | `view::a_render_whose_source_moved_is_never_filed_under_the_old_hash` (gated backend, A→B commit; nothing is written under A's key and B is queued) |
+| a failed reload is not a successful one | `view::a_failed_reload_keeps_the_reader_in_history`, `view::a_failed_reload_at_the_newest_snapshot_also_stays_put`, `view::a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved`, `view::a_snapshot_never_renders_diagrams` |
+| agreement clears the drift, staleness does not | `view::an_undo_that_restores_agreement_lets_diagrams_render_again`, `view::a_stale_equal_poll_does_not_clear_the_drift` |
+| `m` during the cache probe is not lost | `view::m_pressed_while_the_cache_probe_is_out_is_served_when_it_answers` |
+| a diagram keeps the cursor it was edited with | `view::leaving_an_edit_inside_a_diagram_lands_on_the_picture_not_before_it` (header / interior / last), `view::a_cursor_before_a_diagram_is_left_where_it_is`, `view::an_undrawn_diagram_block_keeps_its_source_lines_addressable` |
 
 ## 7. Live smoke results
 
@@ -578,6 +587,75 @@ of §5b reachable in practice rather than theoretical.
 The conservative gate still does the real work: a project known to be `Private` with no
 usable cookie never launches a browser at all. `Unknown` + an explicit `m` is the one
 place a wasted launch is possible, and it costs ~8 s once per project per session.
+
+## 7j. Two epochs, and why they are not one
+
+Both guard against "work started before the world moved", but they guard
+different work and must never be merged — one counter would either throw away
+good poll snapshots on every keystroke, or good renders on every poll.
+
+| | `server_epoch` | `src_epoch` |
+|---|---|---|
+| guards | a poll response already in flight | a render already in flight |
+| stamped by | the poller, immediately before its GET | `start_web_renders`, onto the job |
+| advanced by | commit `Done`, an applied websocket commit, any page install | `rerender()` — i.e. any change to the local source |
+| checked | `apply_remote`, before anything else | the worker, before the browser AND before `cache.put` |
+| on mismatch | drop the snapshot; the next poll carries the newer state | reply `Stale`; free the pending mark, record nothing |
+
+`commitId` is deliberately not used for either: it is not safely ordered from
+the client's side.
+
+`WebOutcome::Stale` is neither a miss nor a failure. It must not enter
+`web_missing` (that would muddy the manual policy's cache-only pass and block
+the re-queue) nor `web_errors` (that is for diagrams that genuinely cannot be
+drawn). The block simply returns to source, and the next pass — which sees the
+new text — asks for the right artifact.
+
+### Where rendering is refused outright
+
+Every one of these means "a screenshot taken now would be filed under a hash it
+does not match":
+
+* `inflight > 0` — a commit is on its way to the server.
+* `web_unsynced` — a commit is known to have failed, or a 409 recovery could not
+  refetch. Cleared only by an authoritative install, or by a **fresh** poll whose
+  lines match the screen exactly (§7g).
+* `time.is_some()` — a historical snapshot is not what the server is showing.
+
+## 7k. A refusal is a property of a batch, not of a key
+
+Chrome refuses a *navigation*: one login wall, N replies. Judging those one at a
+time meant the first key started the anonymous retry and the second key, reading
+the bookkeeping the first had just written, concluded the browser was dead — so
+on a public page with a stale sid and two diagrams, one diagram silently lost
+its retry.
+
+Replies therefore carry `attempted: Option<RenderCapability>` — what the batch
+actually used, not something inferred afterwards — and the drain collects every
+`Denied` and judges them together, once:
+
+| attempted | visibility | outcome |
+|---|---|---|
+| `Authenticated` | Public | `cookie_rejected`, and **one** anonymous batch carrying every key the refusal lost |
+| `Authenticated` | Private / Unknown | `cookie_rejected`, source fallback, one notice |
+| `Anonymous` | any | `browser_denied` — the only thing that sets it |
+
+`cookie_rejected` is set for any refused cookie regardless of branch: without it
+a private page re-presents the same dead cookie on every `m`, forever.
+`anonymous_spent` is now only about the one Unknown-visibility gamble — using it
+to infer refusals was what broke the batch case.
+
+## 7l. Blankness is not evidence
+
+`readyState === 'complete'` with no page body looks identical for a slow SPA, a
+throttled machine and a page we may not read. Calling all three `NotAuthorized`
+was wrong in the two cases that matter to a reader on a bad connection.
+
+When the blank grace expires the browser is asked, **once**, what the page API
+says in its own cookie state (an in-page `fetch` with `credentials: 'include'`).
+Only 401/403 is a refusal; anything else — including no answer at all — falls
+back to the ordinary budget and reports `Timeout`/`NotRendered`. The mapping is
+the pure `chrome::blank_verdict`.
 
 ## 8. Known limits, security, distribution
 
