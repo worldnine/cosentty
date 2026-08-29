@@ -2337,7 +2337,13 @@ impl App {
                         st = st.fg(Color::DarkGray);
                     }
                     if selected {
-                        st = st.bg(SEL_BG);
+                        // REVERSED, not a background colour: the caret line
+                        // is already painted with the cursor band, and
+                        // `SEL_BG` is that same grey — a selection drawn
+                        // with it is invisible exactly where it always is.
+                        // Swapping fg/bg contrasts against any background,
+                        // on any terminal, without inventing a colour.
+                        st = st.add_modifier(Modifier::REVERSED);
                     }
                     spans.push(Span::styled(text.to_string(), st));
                 };
@@ -10166,6 +10172,44 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+    }
+
+    /// A selection you cannot see is not a selection. The caret line is
+    /// painted with the cursor band, so the highlight has to stand out
+    /// against it — which a same-grey background did not.
+    #[test]
+    fn a_character_selection_is_visible_on_the_caret_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "hello world"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        for _ in 0..5 {
+            handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        }
+
+        let rows = app.content_view(40);
+        let line = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Line { line, src } if *src == 1 => Some(line.clone()),
+                _ => None,
+            })
+            .expect("the caret row");
+        let picked: String = line
+            .spans
+            .iter()
+            .filter(|sp| sp.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|sp| sp.content.as_ref())
+            .collect();
+        assert_eq!(picked, "hello", "the selected run is the one that stands out");
+        let rest: String = line
+            .spans
+            .iter()
+            .filter(|sp| !sp.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|sp| sp.content.as_ref())
+            .collect();
+        assert_eq!(rest, " world");
+        assert_ne!(SEL_BG, Color::Reset);
     }
 
     /// A character selection behaves like a selection everywhere else:
