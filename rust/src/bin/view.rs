@@ -1127,6 +1127,14 @@ enum Overlay {
 
 impl Overlay {
     /// Titles matching the current filter (case-insensitive substring).
+    /// Does the picker offer to CREATE what was typed? Only when the name
+    /// is not already a page — an exact match is the page itself, and two
+    /// pages cannot share a title.
+    fn offers_create(all: &[(String, i64)], filter: &str) -> bool {
+        let name = filter.trim();
+        !name.is_empty() && !all.iter().any(|(t, _)| t.eq_ignore_ascii_case(name))
+    }
+
     fn filtered_pages(all: &[(String, i64)], filter: &str) -> Vec<(String, i64)> {
         if filter.is_empty() {
             return all.to_vec();
@@ -4474,6 +4482,12 @@ fn dispatch_create(app: &mut App) {
     if !app.needs_create || !page_is_uncreated(app) || app.inflight > 0 {
         return;
     }
+    // A title and nothing else is not a page yet. Opening a name from the
+    // picker lands you in EDIT on an empty line; walking away from that
+    // must leave no trace, exactly as it does on the web.
+    if !app.lines.iter().skip(1).any(|l| !l.text.trim().is_empty()) {
+        return;
+    }
     app.needs_create = false;
     let lines: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
@@ -5925,6 +5939,7 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         Some(Overlay::Links { items, .. }) => items.len(),
         Some(Overlay::Pages { all, filter, .. }) => {
             Overlay::filtered_pages(all, filter).len()
+                + usize::from(Overlay::offers_create(all, filter))
         }
         _ => 0,
     };
@@ -5975,15 +5990,24 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
                 }
                 return;
             }
+            let mut create = false;
             let target: Option<(String, String, Option<usize>)> = match &app.overlay {
                 Some(Overlay::Comments { cursor }) => app
                     .comments
                     .get(*cursor)
                     .map(|c| (c.project.clone(), c.title.clone(), Some(c.start))),
                 Some(Overlay::Pages { all, filter, cursor }) => {
-                    Overlay::filtered_pages(all, filter)
-                        .get(*cursor)
-                        .map(|(t, _)| (app.project.clone(), t.clone(), None))
+                    let items = Overlay::filtered_pages(all, filter);
+                    match items.get(*cursor) {
+                        Some((t, _)) => Some((app.project.clone(), t.clone(), None)),
+                        // Past the last match sits the create row: open the
+                        // typed name as the page it is not yet.
+                        None if Overlay::offers_create(all, filter) => {
+                            create = true;
+                            Some((app.project.clone(), filter.trim().to_string(), None))
+                        }
+                        None => None,
+                    }
                 }
                 _ => None,
             };
@@ -5991,6 +6015,13 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
             if let Some((project, title, line)) = target {
                 if project != app.project || title != app.title {
                     navigate_to(app, ctx, &project, &title);
+                }
+                if create {
+                    // Land in EDIT on a fresh body line. Nothing is sent
+                    // yet: an empty page is not created until it has
+                    // something in it (see `dispatch_create`).
+                    app.cursor = 0;
+                    open_line(app, ctx, false);
                 }
                 if let Some(src) = line {
                     // The page may have just been loaded and not laid out
@@ -6548,14 +6579,14 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("pages: {filter}_ ({} match)", items.len())
             };
-            (
-                title,
-                items
-                    .iter()
-                    .map(|(t, u)| format!("{:>4}  {}", relative_age(*u), t))
-                    .collect(),
-                *cursor,
-            )
+            let mut rows: Vec<String> = items
+                .iter()
+                .map(|(t, u)| format!("{:>4}  {}", relative_age(*u), t))
+                .collect();
+            if Overlay::offers_create(all, filter) {
+                rows.push(format!("   ＋  「{}」を作成", filter.trim()));
+            }
+            (title, rows, *cursor)
         }
         Some(Overlay::LineInfo) => {
             let src = app.cursor_src();
@@ -9204,6 +9235,39 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// The picker is the other way in: type a name that is not a page and
+    /// the last row offers to create it.
+    #[test]
+    fn the_picker_offers_to_create_a_name_that_is_not_a_page() {
+        let all = vec![("Alpha".to_string(), 0i64), ("Beta".to_string(), 0i64)];
+        assert!(!Overlay::offers_create(&all, ""), "no name, no offer");
+        assert!(!Overlay::offers_create(&all, "alpha"), "an exact match IS that page");
+        assert!(Overlay::offers_create(&all, "Alp"), "a prefix is still a new name");
+        assert!(Overlay::offers_create(&all, "Gamma"));
+        assert!(!Overlay::offers_create(&all, "   "), "whitespace is not a title");
+    }
+
+    /// Opening a name and walking away must leave nothing behind: a title
+    /// with no body is not a page.
+    #[test]
+    fn an_empty_new_page_is_never_created() {
+        let ctx = test_ctx();
+        let mut app = page(&["just a title"]);
+        app.page_id = String::new();
+        app.rebuild(40);
+
+        app.cursor = 0;
+        open_line(&mut app, &ctx, false); // the picker's "create" landing
+        assert!(app.needs_create, "the edit registered…");
+        dispatch_create(&mut app);
+        assert!(drain_jobs(&mut app).is_empty(), "…but an empty page is not sent");
+
+        type_str(&mut app, &ctx, "now it has something");
+        leave_session(&mut app, &ctx);
+        dispatch_create(&mut app);
+        assert_eq!(drain_jobs(&mut app).len(), 1, "content makes it real");
     }
 
     /// A page nobody has written yet: Cosense answers 200 for any title,
