@@ -173,9 +173,22 @@ impl ChromeBackend {
         dark: bool,
         deadline: Instant,
     ) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
+        let t0 = Instant::now();
+        // Phase timings, opt-in only: this thread runs while the TUI owns the
+        // alternate screen, so an unguarded print would corrupt the display.
+        let dbg = std::env::var_os("COSENSE_WEB_DEBUG").is_some();
+        macro_rules! phase {
+            ($label:expr, $t:expr) => {
+                if dbg {
+                    eprintln!("[webrender] {} {:?}", $label, $t.elapsed());
+                }
+            };
+        }
         let port = self.wait_for_port(child, profile, deadline)?;
         let ws_url = page_target(port, deadline)?;
         let mut cdp = Cdp::connect(&ws_url)?;
+        phase!("launch+attach", t0);
+        let t1 = Instant::now();
 
         cdp.call("Page.enable", serde_json::json!({}), deadline)?;
         cdp.call(
@@ -220,8 +233,12 @@ impl ChromeBackend {
         let url = reqs[0].page_url();
         cdp.call("Page.navigate", serde_json::json!({ "url": url }), deadline)?;
 
+        phase!("setup+navigate", t1);
+        let t2 = Instant::now();
         let selectors: Vec<String> = reqs.iter().map(|r| r.selector()).collect();
         let ready = self.wait_for_elements(&mut cdp, reqs, &selectors, deadline)?;
+        phase!("wait-for-draw", t2);
+        let t3 = Instant::now();
 
         // Capturing gets its own allowance: waiting for a slow (or broken)
         // diagram must not eat the time needed to screenshot the ones that
@@ -238,6 +255,7 @@ impl ChromeBackend {
             }
             out.push(capture(&mut cdp, &selectors[i], req, capture_deadline));
         }
+        phase!("capture", t3);
         Ok(out)
     }
 

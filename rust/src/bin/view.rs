@@ -294,9 +294,6 @@ struct App {
     file_rx: mpsc::Receiver<FileMsg>,
 
     // --- web renderer (Mermaid today; see cosense::webrender) -------------
-    /// Page revision the diagrams on screen were rendered against
-    /// (`commitId` at load; the websocket head takes over once it moves).
-    revision: String,
     /// Bumped on every page install. A render that comes back for an older
     /// generation is dropped even if its key were to collide.
     web_gen: u64,
@@ -737,7 +734,6 @@ impl App {
             history: Vec::new(),
             forward: Vec::new(),
             overlay: None,
-            revision: String::new(),
             web_gen: 0,
             web_width_px: 0,
             web_dark: true,
@@ -815,7 +811,6 @@ impl App {
         self.title = l.title;
         self.header_colors = l.header_colors;
         self.page_id = l.page_id;
-        self.revision = l.revision;
         self.web_gen = self.web_gen.wrapping_add(1);
         self.lines = l.lines;
         self.blocks = l.blocks;
@@ -909,9 +904,6 @@ impl App {
             project: self.project.clone(),
             title: self.title.clone(),
             page_id: self.page_id.clone(),
-            // The websocket head is authoritative once it moves; before that
-            // (and without a websocket) the load-time commit stands in.
-            revision: self.ws_head.clone().unwrap_or_else(|| self.revision.clone()),
             line_id,
             code_hash: cosense::webrender::hash_code(code),
             width_px: self.web_width_px,
@@ -926,6 +918,15 @@ impl App {
         // Before the first layout the pane width is unknown; rendering at a
         // guessed width would only be thrown away one frame later.
         if self.laid_width == 0 {
+            return;
+        }
+        // Never render while the reader is editing or a commit is in flight.
+        // The browser can only ever show what the SERVER has, so a render
+        // started mid-edit would either capture the pre-edit diagram or
+        // race the commit. Waiting until the session closes and the queue
+        // drains also means typing never launches a browser: one render
+        // happens at the end, against the text that was actually committed.
+        if self.session.is_some() || self.inflight > 0 {
             return;
         }
         // Width in CSS pixels, bucketed to 80px: a diagram is re-rendered on
@@ -2382,8 +2383,6 @@ struct Loaded {
     editable: bool,
     /// Related-pages sections (see `build_related`).
     related: Vec<RelSection>,
-    /// The page's `commitId` at load time — the web renderer's revision.
-    revision: String,
 }
 
 /// Build the related-pages sections the way scrapbox.io presents them:
@@ -2567,7 +2566,6 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         title: title.to_string(),
         header_colors: HeaderColors { fg: header_fg, bg: header_bg },
         page_id: page.id.clone(),
-        revision: page.commit_id.clone(),
         lines,
         blocks: rendered.blocks,
         srcs: rendered.srcs,
@@ -5326,7 +5324,6 @@ mod tests {
             " pie",        // 7  <- and here
         ]);
         app.page_id = "PAGE".into();
-        app.revision = "COMMIT1".into();
         app
     }
 
@@ -5349,14 +5346,14 @@ mod tests {
             "the selector addresses Cosense's own preview element"
         );
         assert_ne!(job.reqs[0].cache_key(), job.reqs[1].cache_key());
-        assert!(job.reqs.iter().all(|r| r.revision == "COMMIT1" && r.page_id == "PAGE"));
+        assert!(job.reqs.iter().all(|r| r.page_id == "PAGE"));
         // Asking again while they are in flight queues nothing new.
         app.start_web_renders(&ctx);
         assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
     }
 
     #[test]
-    fn a_commit_or_a_resize_makes_a_new_artifact_key() {
+    fn an_unrelated_commit_does_not_invalidate_a_diagram_but_its_own_source_does() {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
@@ -5367,22 +5364,54 @@ mod tests {
             .is_none());
         fresh.rebuild(80);
         app.start_web_renders(&ctx); // fixes web_width_px
-        let at_width = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
-        // A websocket commit moves the revision → a different artifact.
+        let key = |a: &App, code: &str| {
+            a.web_request(cosense::webrender::WebKind::Mermaid, code, 3).unwrap().cache_key()
+        };
+        let before = key(&app, "flowchart");
+        // Someone (or the reader) commits elsewhere on the page: pressing
+        // Enter for a new line does exactly this. The diagram is untouched,
+        // so it must NOT be re-rendered — keying on the page commit used to
+        // re-render every diagram on the page for each such edit.
         app.ws_head = Some("COMMIT2".into());
-        let after_commit =
-            app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
-        assert_ne!(at_width.cache_key(), after_commit.cache_key());
+        assert_eq!(before, key(&app, "flowchart"), "an unrelated commit changes nothing");
+        // Editing the diagram itself does invalidate it.
+        assert_ne!(before, key(&app, "flowchart LR"));
         // A pane resize does too.
         app.rebuild(140);
         app.start_web_renders(&ctx);
-        let wider = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
-        assert_ne!(after_commit.cache_key(), wider.cache_key());
+        assert_ne!(before, key(&app, "flowchart"));
         // …and a snapshot of an older page is never rendered from the web.
         app.time = Some(TimeMachine { points: vec![], pos: 0, cache: HashMap::new() });
         assert!(app
             .web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3)
             .is_none());
+    }
+
+    #[test]
+    fn typing_never_launches_a_browser() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // An open edit session: the browser can only show what the server
+        // has, so nothing is requested until the session closes.
+        app.session = Some(EditSession {
+            line: 2,
+            input: Input::new("  flowchart LR".into()),
+            orig: "  flowchart LR".into(),
+            want_col: None,
+        });
+        app.start_web_renders(&ctx);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        assert!(app.web_pending.is_empty());
+        // Session closed, but a commit is still on its way to the server.
+        app.session = None;
+        app.inflight = 1;
+        app.start_web_renders(&ctx);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        // Everything settled: now one batch goes out, against committed text.
+        app.inflight = 0;
+        app.start_web_renders(&ctx);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok());
     }
 
     #[test]

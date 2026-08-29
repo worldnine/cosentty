@@ -48,7 +48,7 @@ enum WebKind { Mermaid }                 // future: Tex, Icon, ProjectCss…
     fn selector(&self, line_id) -> String   // "#mermaid-preview-<lineId>"
     fn ready_child(&self) -> &'static str   // "svg" — drawn, not merely present
 
-struct WebRequest { kind, project, title, page_id, revision, line_id,
+struct WebRequest { kind, project, title, page_id, line_id,
                     code_hash, width_px, dark }
     fn page_url(&self) -> String
     fn cache_key(&self) -> String        // "web:mermaid:<16 hex>"  — identity
@@ -68,7 +68,30 @@ struct ArtifactCache                     // ~/.cache/cosense-tui/webrender/<key>
 ```
 
 `render_batch` takes a **whole page's worth** of requests: one navigation serves every
-diagram on the page. The credential is **not** in `WebRequest` — it is constructor
+diagram on the page.
+
+### Invalidation: `code_hash`, deliberately NOT `commitId`
+
+The brief asked for "`project/page identity + commitId + block lineId + width/theme`
+相当". **The `commitId` half was a trap and is not used.** Cosense commits on every
+keystroke-level edit — pressing Enter for a new line is a commit — so keying on it made
+*every* diagram on a page re-render whenever *any* line was touched. That is not a
+theoretical concern: the first user to open the viewer hit it within minutes
+("edit モードに入ると一旦また図のレンダリングが始まってしまう").
+
+The key is instead the block's **own source hash** plus page identity, width and theme.
+A block's text changes exactly when its picture does — strictly more precise than the
+page commit, and it still invalidates on a *remote* edit to the diagram, because the
+websocket apply rewrites `app.lines` and therefore the hash.
+
+Page identity is still guarded, twice over: `project/title/page_id/line_id` are in the
+key, and `web_gen` (bumped on every page install) drops any result that arrives for a
+page the reader has already left.
+
+Because the browser can only ever show what the **server** has, renders are deferred
+while `app.session.is_some() || app.inflight > 0`. Typing therefore never launches a
+browser; one render happens after the session closes and the commit queue drains,
+against the text that was actually committed. The credential is **not** in `WebRequest` — it is constructor
 state on the backend, so it cannot reach a key, a log or an error string.
 
 ### `cosense::chrome` — the one implementation
@@ -98,7 +121,7 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 | `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). |
 | `rust/src/render.rs` | `mermaid_lang()`; `code:` blocks whose language is Mermaid emit `Block::WebRender` carrying the code plus the unchanged code rows. Everything else is byte-for-byte as before. |
 | `rust/src/bin/view.rs` | `WebJob`/`WebMsg`/`spawn_web_worker`; App fields (`revision`, `web_gen`, `web_width_px`, `web_dark`, `web_pending`, `web_errors`, channels); `web_request`, `start_web_renders`, `drain_web_renders`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
-| `rust/src/api.rs` | `Page.commit_id` (`commitId`) — the render revision. |
+| `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary. |
 | `rust/src/bin/probe.rs` | prints the new block kind. |
 | `rust/KEYMAP.md` | user-facing section: dependency, auth, fallback, notation, env vars. |
 | `rust/Cargo.toml` | registers the `web_smoke` bin. **No new dependencies.** |
@@ -151,7 +174,8 @@ New coverage, against the acceptance list:
 | --- | --- |
 | Mermaid filename/language detection | `render::mermaid_is_recognised_by_language_and_by_filename` (`mmd`, `mermaid`, `MMD`, `flow.mmd`, `図.mermaid` vs `js`, `mmdx`, `mermaidjs`, `readme.md`) |
 | block → lineId, multiple blocks | `render::a_mermaid_block_becomes_one_web_render_keyed_on_its_last_line`, `render::several_mermaid_blocks_stay_separate_and_other_languages_are_untouched`, `view::each_mermaid_block_is_requested_against_its_own_cosense_line_id` |
-| stale generation / page / revision rejected | `view::a_result_for_an_older_page_generation_is_dropped`, `view::a_commit_or_a_resize_makes_a_new_artifact_key`, `webrender::a_new_revision_page_or_width_is_a_different_artifact` |
+| stale generation / page rejected | `view::a_result_for_an_older_page_generation_is_dropped`, `webrender::a_new_source_page_or_width_is_a_different_artifact` |
+| an unrelated edit does NOT re-render | `view::an_unrelated_commit_does_not_invalidate_a_diagram_but_its_own_source_does`, `view::typing_never_launches_a_browser` |
 | renderer failure → code fallback | `view::a_renderer_failure_leaves_the_code_block_on_screen`, `webrender::unavailable_backend_fails_every_request_without_a_browser` |
 | UI thread does not block | `view::the_ui_thread_never_waits_for_the_browser` (the fake backend is pinned mid-render; the UI still queues, lays out and reports pending in <200 ms, and the artifact arrives after the gate is released) |
 | selector / artifact correspondence | `webrender::selector_addresses_the_preview_by_line_id`, `webrender::fake_backend_answers_by_key`, `view::an_artifact_replaces_the_code_block_and_edit_puts_it_back` |
@@ -219,10 +243,10 @@ Delete them with `cosense previewEdit` + `submitEdit` if the page is wanted clea
 ## 8. Known limits, security, distribution
 
 * **Renders the committed page, never the buffer.** The browser shows what Cosense
-  has. A diagram edited but not yet committed re-renders on the next commit (the
-  revision moves) — until then the *previous* picture stands, and the block's own
-  `code_hash` is in the key so an edited block re-requests rather than silently
-  showing the old image under a matching key.
+  has, which is why requests are held back until the edit session closes and the commit
+  queue drains. If a commit ultimately *fails*, the local text and the server's diverge
+  and the render would capture the server's version under the local hash; the viewer
+  reloads the page on a conflict, which resets both.
 * **Time-machine snapshots are never rendered** (`web_request` returns `None` when
   `app.time` is set): the browser can only show the current page, and a current
   diagram on a historical snapshot would be a lie. Snapshots show code.

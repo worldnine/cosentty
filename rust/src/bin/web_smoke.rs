@@ -49,7 +49,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             project: project.clone(),
             title: title.clone(),
             page_id: page.id.clone(),
-            revision: page.commit_id.clone(),
             line_id,
             code_hash: hash_code(code),
             width_px: 880,
