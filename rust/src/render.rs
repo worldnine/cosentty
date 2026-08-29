@@ -322,12 +322,24 @@ fn decorate_inline(s: &str, links: &mut Vec<String>, images: &mut Vec<String>, p
         }
         // bracket form
         if let Some(start) = rest.find('[') {
-            if let Some(end_rel) = rest[start + 1..].find(']') {
-                let end = start + 1 + end_rel;
+            // `[[text]]` (bold) has to be matched as a PAIR: taking the
+            // first `]` would cut it at `[text`, and the notation would
+            // read as a link to a page whose name starts with a bracket.
+            let doubled = rest[start + 1..].starts_with('[');
+            let found = if doubled {
+                rest[start + 2..].find("]]").map(|i| (start + 2 + i, i + start + 2 + 2))
+            } else {
+                rest[start + 1..].find(']').map(|i| (start + 1 + i, start + 1 + i + 1))
+            };
+            if let Some((end, after)) = found {
                 push_plain(&mut spans, &rest[..start], links, pal);
-                let inner = &rest[start + 1..end];
-                decorate_bracket(inner, &mut spans, links, images, pal);
-                rest = &rest[end + 1..];
+                let inner = if doubled { &rest[start + 2..end] } else { &rest[start + 1..end] };
+                if doubled {
+                    decorate_bold(inner, &mut spans, links, pal);
+                } else {
+                    decorate_bracket(inner, &mut spans, links, images, pal);
+                }
+                rest = &rest[after..];
                 continue;
             }
         }
@@ -412,7 +424,30 @@ fn take_url(s: &str) -> (&str, &str) {
     (&s[..end], &s[end..])
 }
 
-/// Decorate a [...] bracket's inner content.
+/// `[[text]]` — Cosense's other way of writing `[* text]`. Empty double
+/// brackets are text, like empty single ones.
+fn decorate_bold(
+    inner: &str,
+    spans: &mut Vec<Span<'static>>,
+    links: &mut Vec<String>,
+    pal: &Palette,
+) {
+    if inner.trim().is_empty() {
+        spans.push(Span::raw(format!("[[{inner}]]")));
+        return;
+    }
+    let mut sub: Vec<Span<'static>> = Vec::new();
+    let mut images = Vec::new();
+    // The inside is ordinary notation: `[[[link]]]` is a bold link, and a
+    // bold URL is still a URL.
+    sub.extend(decorate_inline(inner, links, &mut images, pal));
+    for sp in sub {
+        let style = sp.style.add_modifier(Modifier::BOLD);
+        spans.push(Span::styled(sp.content, style));
+    }
+}
+
+/// Decorate a `[...]` bracket's inner content.
 fn decorate_bracket(
     inner: &str,
     spans: &mut Vec<Span<'static>>,
@@ -420,6 +455,14 @@ fn decorate_bracket(
     images: &mut Vec<String>,
     pal: &Palette,
 ) {
+    // `[]` and `[   ]` are not notation — an empty link is nothing to
+    // link to, so Cosense shows the brackets as the text they are. The
+    // viewer used to swallow them, and a line written about `[]` lost the
+    // very thing it was about.
+    if inner.trim().is_empty() {
+        spans.push(Span::raw(format!("[{inner}]")));
+        return;
+    }
     // decoration: [* text] [** text] [*/ text] [- strike] [_ underline]
     if let Some(rest) = strip_deco_prefix(inner) {
         let (flags, body) = rest;
@@ -1167,5 +1210,54 @@ mod tests {
         let nested = code_span_at(&refs, 10).unwrap();
         assert_eq!(nested.header, 9);
         assert_eq!(nested.body_indent(), "   ", "deeper header, deeper body");
+    }
+
+    /// `[]` is not notation — an empty link has nothing to link to — so
+    /// Cosense shows the brackets as the text they are. The viewer used to
+    /// swallow them, which made a line ABOUT `[]` lose the thing it was
+    /// about (they only survived inside a code block).
+    #[test]
+    fn empty_brackets_are_text_and_double_brackets_are_bold() {
+        let pal = Palette::for_light(false);
+        let plain = |src: &str| -> String {
+            let out = render_lines_with(&["t".to_string(), src.to_string()], None, &pal);
+            out.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Text(l) => {
+                        Some(l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                    }
+                    _ => None,
+                })
+                .nth(1)
+                .unwrap_or_default()
+        };
+        assert_eq!(plain("[]"), "[]");
+        assert_eq!(plain("a[]b"), "a[]b");
+        assert_eq!(plain("空の [] を書く"), "空の [] を書く");
+        assert_eq!(plain("[ ]"), "[ ]", "whitespace is not a page name either");
+        assert_eq!(plain("[foo"), "[foo", "an unclosed bracket is text");
+
+        // A real link still loses its brackets, as on the web.
+        assert_eq!(plain("[リンク]"), "リンク");
+
+        // `[[text]]` is bold: matched as a PAIR, or the first `]` would cut
+        // it at `[text` and it would read as a link.
+        assert_eq!(plain("[[太字]]"), "太字");
+        assert_eq!(plain("[[]]"), "[[]]", "empty double brackets are text too");
+        let bold = render_lines_with(&["t".into(), "[[太字]]".into()], None, &pal);
+        let styled = bold
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text(l) => Some(l.spans.clone()),
+                _ => None,
+            })
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            styled.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "and it really is bold",
+        );
     }
 }
