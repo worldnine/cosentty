@@ -230,18 +230,20 @@ set for the rest of the session (per project) once the renderer has been refused
 | `off` | — | — | — | `Nothing` (no worker, no cache I/O, always source) |
 | `manual` | Auto | — | — | `CacheOnly` (hit shows, miss stays source, no notice) |
 | `manual` | Manual | — | — | ↓ as `auto` |
-| `auto` | Auto/Manual | yes | any | `Render(Authenticated)` |
+| `auto` | Auto/Manual | yes (accepted) | any | `Render(Authenticated)` |
 | `auto` | Auto/Manual | no | Public | `Render(Anonymous)` |
 | `auto` | Auto/Manual | no | Private | `CacheOnly` + notice「非公開の図を描画するには connect.sid が必要です」(once per page) |
 | `auto` | Auto | no | Unknown | `CacheOnly`, silent — conservative |
 | `auto` | Manual | no | Unknown | `Render(Anonymous)`, one attempt |
+| `auto` | Auto/Manual | yes (**rejected**) | Public | `Render(Anonymous)` — a rejected cookie counts as none |
+| `auto` | Auto/Manual | yes (**rejected**) | Private | `CacheOnly` + notice「connect.sid が失効しています」 |
 | any | — | — | — | `browser_denied` ⇒ `CacheOnly` |
 
 `NotAuthorized` from the browser never touches the REST credential:
 
 | sid | visibility | on `NotAuthorized` |
 |---|---|---|
-| yes | Public | drop the session (Chrome dies with its profile) and retry **once** with no cookie |
+| yes | Public | mark the cookie rejected, drop the session (Chrome dies with its profile), retry **once** with no cookie |
 | yes | Private | `browser_denied` — renderer only; edits keep working |
 | no | any | `browser_denied` |
 

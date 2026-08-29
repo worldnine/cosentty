@@ -1395,6 +1395,9 @@ impl App {
             // A public page that refused a cookie refused a STALE cookie.
             // Anonymous is a different request, and usually works.
             capability::Denial::RetryAnonymous => {
+                // From here the cookie counts as absent, so the retry that
+                // `start_web_renders` queues is genuinely cookie-free.
+                self.caps.cookie_rejected = true;
                 self.caps.anonymous_spent = true;
                 self.web_missing.insert(key);
                 self.start_web_renders(capability::Trigger::Manual);
@@ -1405,7 +1408,7 @@ impl App {
                 if !self.web_notice_shown {
                     self.web_notice_shown = true;
                     let msg = if self.caps.sid {
-                        "diagram: ブラウザのセッションが拒否されました (showing source)"
+                        capability::SID_REJECTED
                     } else {
                         capability::NEEDS_SID
                     };
@@ -6724,8 +6727,14 @@ mod tests {
         // is queued, and the REST credential is not touched.
         assert!(app.caps.anonymous_spent);
         assert!(!app.caps.browser_denied);
-        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
+        let job = app.web_jobs_rx.as_ref().unwrap().recv().unwrap();
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
         assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
+        assert_eq!(
+            *auth,
+            Some(RenderCapability::Anonymous),
+            "retrying with the SAME rejected cookie just fails again"
+        );
     }
 
     #[test]

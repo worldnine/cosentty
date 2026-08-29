@@ -136,6 +136,8 @@ pub enum Decision {
 /// Said once per page when a private diagram cannot be drawn. Names the
 /// cookie, never a value.
 pub const NEEDS_SID: &str = "非公開の図を描画するには connect.sid が必要です";
+/// The same, when a cookie exists but the server has rejected it.
+pub const SID_REJECTED: &str = "connect.sid が失効しています — 非公開の図は描画できません";
 
 /// The session's browser-render standing for one project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +152,11 @@ pub struct Capabilities {
     /// The one anonymous attempt allowed on `Unknown` visibility, or as the
     /// public retry after `NotAuthorized`, has been spent.
     pub anonymous_spent: bool,
+    /// The server has rejected this cookie. A rejected cookie is WORSE than
+    /// no cookie — presenting it again just fails again — so from here on
+    /// the session is treated as having none for render purposes. REST is
+    /// untouched: the cookie is not what REST authenticates with.
+    pub cookie_rejected: bool,
 }
 
 impl Default for Capabilities {
@@ -159,6 +166,7 @@ impl Default for Capabilities {
             visibility: Visibility::Unknown,
             browser_denied: false,
             anonymous_spent: false,
+            cookie_rejected: false,
         }
     }
 }
@@ -184,13 +192,19 @@ pub fn decide(caps: &Capabilities, policy: RenderPolicy, trigger: Trigger) -> De
     if caps.browser_denied {
         return Decision::CacheOnly { notice: None };
     }
-    match (caps.sid, caps.visibility) {
+    // A cookie the server has rejected buys nothing: sending it again is
+    // the failure we just had. This is what makes the anonymous retry
+    // actually anonymous.
+    let usable_sid = caps.sid && !caps.cookie_rejected;
+    match (usable_sid, caps.visibility) {
         // A sid can read a public page too, so it needs no special case.
         (true, _) => Decision::Render(RenderCapability::Authenticated),
         (false, Visibility::Public) => Decision::Render(RenderCapability::Anonymous),
         // Saying "you need a cookie" is only honest when we KNOW it is
         // private; the notice is suppressed for Unknown.
-        (false, Visibility::Private) => Decision::CacheOnly { notice: Some(NEEDS_SID) },
+        (false, Visibility::Private) => Decision::CacheOnly {
+            notice: Some(if caps.sid { SID_REJECTED } else { NEEDS_SID }),
+        },
         // Unknown: automatic passes stay conservative — no browser is spent
         // guessing. An explicit `m` is allowed exactly one anonymous try.
         (false, Visibility::Unknown) => {
@@ -316,6 +330,25 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_cookie_counts_as_no_cookie_at_all() {
+        // This is the whole point of the retry: presenting the SAME
+        // rejected cookie again would just fail again.
+        let c = Capabilities { cookie_rejected: true, ..caps(true, Visibility::Public) };
+        assert_eq!(
+            decide(&c, RenderPolicy::Auto, Trigger::Manual),
+            Decision::Render(RenderCapability::Anonymous)
+        );
+        // On a private project there is nothing anonymous can do, and the
+        // advice differs: the cookie is stale, not absent.
+        let p = Capabilities { cookie_rejected: true, ..caps(true, Visibility::Private) };
+        assert_eq!(
+            decide(&p, RenderPolicy::Auto, Trigger::Manual),
+            Decision::CacheOnly { notice: Some(SID_REJECTED) }
+        );
+        assert!(SID_REJECTED.contains("connect.sid"));
+    }
+
+    #[test]
     fn a_stale_cookie_on_a_public_page_is_retried_without_it() {
         assert_eq!(on_not_authorized(&caps(true, Visibility::Public)), Denial::RetryAnonymous);
         // Private has nothing to retry WITH, so the renderer alone gives up.
@@ -332,11 +365,13 @@ mod tests {
             visibility: Visibility::Private,
             browser_denied: true,
             anonymous_spent: true,
+            cookie_rejected: true,
         };
         let next = c.for_new_project();
         assert!(next.sid);
         assert_eq!(next.visibility, Visibility::Unknown);
         assert!(!next.browser_denied);
         assert!(!next.anonymous_spent);
+        assert!(!next.cookie_rejected, "another project may accept it fine");
     }
 }
