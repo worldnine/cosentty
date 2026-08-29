@@ -710,6 +710,11 @@ struct App {
     /// NOT failures: they stay code blocks, stop shimmering, and `m` can
     /// still draw them.
     web_missing: HashSet<String>,
+    /// `m` was pressed while the page-load cache probe was still out. The
+    /// probe owns those keys until it answers, so the keypress cannot queue
+    /// anything yet — it is remembered here and served the moment the
+    /// misses come back. Cleared per page.
+    web_manual_wanted: bool,
     /// The "you need a cookie" notice has been shown for THIS page already.
     /// Reset by `set_page`, so it is said once per page and not per block.
     web_notice_shown: bool,
@@ -1159,6 +1164,7 @@ impl App {
             vis_asked: None,
             web_missing: HashSet::new(),
             web_drawn_blocks: HashSet::new(),
+            web_manual_wanted: false,
             web_notice_shown: false,
             sync_state: capability::SyncState::Polling,
             ws_attempted: false,
@@ -1248,6 +1254,7 @@ impl App {
         self.web_rescaling.clear();
         self.web_missing.clear();
         self.web_drawn_blocks.clear();
+        self.web_manual_wanted = false;
         // Once per page, not once per diagram.
         self.web_notice_shown = false;
         // A freshly fetched page IS the server's state.
@@ -1327,7 +1334,7 @@ impl App {
     /// Queue every not-yet-rendered diagram on the page as ONE batch. Returns
     /// immediately: the worker owns the browser, and the code block stays on
     /// screen until an artifact arrives.
-    fn start_web_renders(&mut self, trigger: capability::Trigger) {
+    fn start_web_renders(&mut self, trigger: capability::Trigger) -> bool {
         // The browser can only ever show what the SERVER has, so nothing is
         // requested while a commit is still on its way there, or while a
         // commit is known to have failed. Both are whole-page gates: any
@@ -1335,7 +1342,7 @@ impl App {
         // and `inflight == 0` alone only means "nothing in flight", not
         // "everything landed".
         if self.inflight > 0 || self.web_unsynced {
-            return;
+            return false;
         }
         // A block whose picture is already on screen and whose source has
         // just moved is a REFRESH, not a first draw: the reader is watching
@@ -1351,7 +1358,7 @@ impl App {
         // What this session may do, right now, for this project.
         let decision = capability::decide(&self.caps, self.render_policy, trigger);
         let auth = match decision {
-            capability::Decision::Nothing => return,
+            capability::Decision::Nothing => return false,
             capability::Decision::Render(cap) => Some(cap),
             capability::Decision::CacheOnly { notice } => {
                 // Said once per page: repeating it per diagram, per pass,
@@ -1408,8 +1415,9 @@ impl App {
             reqs.push(req);
         }
         if reqs.is_empty() {
-            return;
+            return false;
         }
+        let queued = auth.is_some();
         let keys: Vec<String> = reqs.iter().map(|r| r.cache_key()).collect();
         for k in &keys {
             self.web_pending.insert(k.clone());
@@ -1433,7 +1441,9 @@ impl App {
             for k in &keys {
                 self.web_pending.remove(k);
             }
+            return false;
         }
+        queued
     }
 
     /// The browser hit a login wall. This says something about the COOKIE,
@@ -1771,6 +1781,13 @@ impl App {
         }
         if !denied.is_empty() {
             self.note_denied(denied);
+        }
+        // An `m` that arrived while the cache probe was out: now that the
+        // misses are known, serve it. Once — the flag is cleared whether or
+        // not there turned out to be anything to draw.
+        if self.web_manual_wanted && self.web_pending.is_empty() {
+            self.web_manual_wanted = false;
+            self.start_web_renders(capability::Trigger::Manual);
         }
         changed
     }
@@ -3950,9 +3967,15 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         // it already has on disk, because launching a browser is by far the
         // most expensive thing this viewer does. This is how you ask.
         (KeyCode::Char('m'), false) => {
-            let before = app.web_pending.len();
-            app.start_web_renders(capability::Trigger::Manual);
-            if app.web_pending.len() == before && app.web_notice.is_none() {
+            if app.start_web_renders(capability::Trigger::Manual) {
+                // Drawing; the blocks pulse and say the rest themselves.
+            } else if app.web_pending.iter().any(|k| !app.images.contains_key(k)) {
+                // The page-load cache probe still owns these keys, so the
+                // request cannot be queued yet. Remember it and serve it the
+                // moment the probe reports its misses — pressing `m` twice
+                // should not be part of the interface.
+                app.web_manual_wanted = true;
+            } else if app.web_notice.is_none() {
                 app.note_web_failure(match app.render_policy {
                     capability::RenderPolicy::Off => {
                         "diagram: レンダラは off です (COSENSE_WEB_RENDER)".into()
@@ -6782,6 +6805,57 @@ mod tests {
         let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
         assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
         assert!(auth.is_some());
+    }
+
+    #[test]
+    fn m_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        // The page-load probe is in flight and owns both keys.
+        app.start_web_renders(capability::Trigger::Auto);
+        assert_eq!(app.web_pending.len(), keys.len());
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+
+        // The reader presses `m` now. It cannot queue anything yet, and it
+        // must NOT report "nothing to draw".
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.web_manual_wanted);
+        assert!(app.web_notice.is_none(), "a request in flight is not 'nothing to draw'");
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "no duplicate batch while the probe owns the keys"
+        );
+
+        // The probe reports misses. The remembered `m` is served, once.
+        for k in &keys {
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: k.clone(),
+                    rescale: false,
+                    attempted: None,
+                    res: WebOutcome::Missing,
+                })
+                .unwrap();
+        }
+        app.drain_web_renders();
+        assert!(!app.web_manual_wanted);
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the remembered m is served without a second keypress");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(auth.is_some(), "this one may reach the browser");
+        assert_eq!(reqs.len(), keys.len());
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "exactly one batch, not one per key"
+        );
     }
 
     #[test]
