@@ -823,6 +823,9 @@ struct App {
     ws_head: Option<String>,
     /// Last left-click (for double-click detection): time, column, row.
     last_click: Option<(Instant, u16, u16)>,
+    /// How many clicks that `last_click` is into a run (2 = double,
+    /// 3 = triple). Word- and line-select need to tell them apart.
+    click_run: u8,
     /// Link pressed with the left button. Activation waits for button-up on
     /// the same target, so dragging can still select text/lines.
     pressed_link: Option<(usize, LinkItem)>,
@@ -954,6 +957,22 @@ struct EditSession {
     orig: String,
     /// Sticky display column for ↑/↓ over lines of differing length.
     want_col: Option<usize>,
+    /// Character selection ON THIS LINE: the fixed end of the span, with
+    /// `input.cur` as the moving one. `None` = no selection. A range that
+    /// spans several LINES is `App::selection` instead — the two are
+    /// mutually exclusive, so there is always one answer to "what is
+    /// selected".
+    sel_from: Option<usize>,
+}
+
+impl EditSession {
+    /// The selected byte range on the caret line, normalised. `None` when
+    /// nothing is selected (an anchor equal to the caret selects nothing).
+    fn sel_span(&self) -> Option<(usize, usize)> {
+        let from = self.sel_from?;
+        let (a, b) = (from.min(self.input.cur), from.max(self.input.cur));
+        (a != b).then_some((a, b))
+    }
 }
 
 /// One queued commit for the serial background worker. `gen` invalidates
@@ -1275,6 +1294,7 @@ impl App {
             ws_pending: std::collections::VecDeque::new(),
             ws_head: None,
             last_click: None,
+            click_run: 0,
             pressed_link: None,
             related: Vec::new(),
             virtual_items: Vec::new(),
@@ -2247,8 +2267,26 @@ impl App {
             s.input = Input { buf: text.clone(), cur: caret.min(text.len()) };
             s.orig = text;
             s.want_col = None;
+            s.sel_from = None;
         }
         true
+    }
+
+    /// How many clicks this one is into a run at the same spot: 1, 2 or 3.
+    /// Rolls back to 1 after a triple, so a fourth click starts over.
+    fn click_run_at(&mut self, column: u16, row: u16) -> u8 {
+        let now = Instant::now();
+        let near = self
+            .last_click
+            .map(|(t, cx, cy)| {
+                now.duration_since(t) < Duration::from_millis(450)
+                    && cx.abs_diff(column) <= 1
+                    && cy.abs_diff(row) <= 1
+            })
+            .unwrap_or(false);
+        self.click_run = if near { (self.click_run % 3) + 1 } else { 1 };
+        self.last_click = Some((now, column, row));
+        self.click_run
     }
 
     /// Convenience for the places that only care whether it is code.
@@ -2270,24 +2308,62 @@ impl App {
         // a bullet. Judged on the WORKING text, so typing `code:` turns
         // the bullets off as you type it, not one commit later.
         let edit_code = edit.and_then(|(line, _)| self.code_span_at_line(line));
+        // The character selection, in DISPLAY byte offsets — the caret line
+        // is drawn through `session_display`, so the span has to be mapped
+        // the same way the caret is.
+        let sel_disp: Option<(usize, usize)> = self.session.as_ref().and_then(|s| {
+            let (a, b) = s.sel_span()?;
+            Some((
+                display_caret(&s.input.buf, a, edit_code),
+                display_caret(&s.input.buf, b, edit_code),
+            ))
+        });
         let raw_rows = |content: &mut Vec<Row>, buf: &str, src: usize| {
             // The indent renders as its bullet (dim) — same shape as the
             // view — while the underlying data stays whitespace.
             let disp = session_display(buf, edit_code);
             let prefix = if edit_code.is_some() { 0 } else { display_prefix_bytes(buf) };
+            let mut at = 0usize; // byte offset of this segment within `disp`
             for (k, seg) in wrap_plain_columns(&disp, text_w).into_iter().enumerate() {
-                let line = if k == 0 && prefix > 0 && seg.len() >= prefix {
-                    Line::from(vec![
-                        Span::styled(
-                            seg[..prefix].to_string(),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::raw(seg[prefix..].to_string()),
-                    ])
-                } else {
-                    Line::from(seg)
+                let seg_start = at;
+                at += seg.len();
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut push = |text: &str, selected: bool, dim: bool| {
+                    if text.is_empty() {
+                        return;
+                    }
+                    let mut st = Style::default();
+                    if dim {
+                        st = st.fg(Color::DarkGray);
+                    }
+                    if selected {
+                        st = st.bg(SEL_BG);
+                    }
+                    spans.push(Span::styled(text.to_string(), st));
                 };
-                content.push(Row::Line { line, src });
+                // Cut this segment into [before | selected | after], with
+                // the bullet prefix (first row only) staying dim.
+                let (lo, hi) = match sel_disp {
+                    Some((a, b)) => (
+                        a.saturating_sub(seg_start).min(seg.len()),
+                        b.saturating_sub(seg_start).min(seg.len()),
+                    ),
+                    None => (seg.len(), seg.len()),
+                };
+                let (lo, hi) = (floor_boundary(&seg, lo), floor_boundary(&seg, hi));
+                let dim_to = if k == 0 { prefix.min(seg.len()) } else { 0 };
+                for (from, to, selected) in
+                    [(0, lo, false), (lo, hi, true), (hi, seg.len(), false)]
+                {
+                    if from >= to {
+                        continue;
+                    }
+                    // The dim prefix may end inside this piece.
+                    let cut = dim_to.clamp(from, to);
+                    push(&seg[from..cut], selected, true);
+                    push(&seg[cut..to], selected, false);
+                }
+                content.push(Row::Line { line: Line::from(spans), src });
             }
         };
         let mut content: Vec<Row> = Vec::new();
@@ -2909,6 +2985,16 @@ fn str_width(s: &str) -> usize {
 /// every char in order (no trimming). Both the session line's display and
 /// its caret math use THIS function, so the hardware cursor can never
 /// disagree with the text it sits on. Always returns ≥ 1 segment.
+/// The nearest char boundary at or below `i` — slicing a display segment
+/// at a byte that lands mid-character would panic.
+fn floor_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 fn wrap_plain_columns(s: &str, w: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthChar;
     let w = w.max(1);
@@ -3907,6 +3993,11 @@ fn copy_payload(app: &App, whole_page: bool) -> Option<(String, String)> {
         let body: Vec<String> = (0..app.lines.len()).map(text_of).collect();
         return Some((body.join("\n"), format!("page ({} lines)", body.len())));
     }
+    if let Some(s) = app.session.as_ref() {
+        if let Some((a, b)) = s.sel_span() {
+            return Some((s.input.buf[a..b].to_string(), "selection".into()));
+        }
+    }
     let (a, b) = match app.selection {
         Some(sel) => sel.range(),
         None => {
@@ -4855,6 +4946,7 @@ fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
         input: Input { buf: text.clone(), cur: caret },
         orig: text,
         want_col: None,
+        sel_from: None,
     });
     app.cursor = line;
     app.selection = None;
@@ -4947,6 +5039,87 @@ fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
     app.laid_width = 0;
 }
 
+/// Move the session's caret to `line`, committing the line it leaves —
+/// what ↑/↓ do, addressed by line number instead of by direction.
+fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
+    let Some(s) = app.session.as_ref() else { return };
+    if s.line == line || line >= app.lines.len() {
+        return;
+    }
+    session_commit_dirty(app, ctx);
+    let text = app.lines[line].text.clone();
+    if let Some(s) = app.session.as_mut() {
+        s.line = line;
+        s.input = Input { buf: text.clone(), cur: text.len() };
+        s.orig = text;
+        s.want_col = None;
+        s.sel_from = None;
+    }
+    app.cursor = line;
+}
+
+/// Drop the character selection's text from the caret line. Stays local
+/// (the line is simply dirty afterwards), like any other typing: the line
+/// commits when the caret leaves it.
+fn session_cut_span(app: &mut App) -> bool {
+    let Some(s) = app.session.as_mut() else { return false };
+    let Some((a, b)) = s.sel_span() else { return false };
+    s.input.buf.replace_range(a..b, "");
+    s.input.cur = a;
+    s.sel_from = None;
+    s.want_col = None;
+    app.laid_width = 0;
+    app.follow = true;
+    true
+}
+
+/// Shift+←/→: grow (or start) the character selection as the caret moves.
+fn session_select_char(app: &mut App, right: bool) {
+    if let Some(s) = app.session.as_mut() {
+        if s.sel_from.is_none() {
+            s.sel_from = Some(s.input.cur);
+        }
+        if right {
+            s.input.right();
+        } else {
+            s.input.left();
+        }
+        s.want_col = None;
+        // A selection collapsed back onto its anchor is no selection.
+        if s.sel_from == Some(s.input.cur) {
+            s.sel_from = None;
+        }
+    }
+    app.selection = None;
+    app.laid_width = 0;
+    app.follow = true;
+}
+
+/// Word bounds around `at` — what a double-click takes. A run of word
+/// characters, or the run of whitespace/punctuation the click landed in.
+fn word_span(buf: &str, at: usize) -> (usize, usize) {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || !c.is_ascii();
+    let at = at.min(buf.len());
+    let here = buf[at..].chars().next().or_else(|| buf[..at].chars().next_back());
+    let Some(here) = here else { return (0, 0) };
+    let want = is_word(here);
+    let mut start = at;
+    for (i, c) in buf[..at].char_indices().rev() {
+        if is_word(c) != want {
+            break;
+        }
+        start = i;
+    }
+    let mut end = at;
+    for (i, c) in buf[at..].char_indices() {
+        if is_word(c) != want {
+            break;
+        }
+        end = at + i + c.len_utf8();
+    }
+    (start, end)
+}
+
 /// Shift+↑/↓ inside the session: carry the caret one line and grow the
 /// selection with it (anchored where it started). The caret line commits
 /// on the way, exactly as a plain ↑/↓ does — selecting must never be the
@@ -5019,6 +5192,7 @@ fn session_kill(app: &mut App, ctx: &Ctx) {
         if let Some(s) = app.session.as_mut() {
             s.input.kill_to_end();
             s.want_col = None;
+            s.sel_from = None;
         }
         app.laid_width = 0;
         app.follow = true;
@@ -5129,6 +5303,7 @@ fn session_split(app: &mut App, ctx: &Ctx) {
             s.input = Input { buf: String::new(), cur: 0 };
             s.orig = String::new();
             s.want_col = None;
+            s.sel_from = None;
         }
         app.cursor = line + 1;
         app.follow = true;
@@ -5297,6 +5472,19 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     // Anything that is not extending or acting on the selection drops it:
     // a range that outlives the keystroke it was made for is a trap.
+    let keeps_span = matches!(
+        (k.code, shift, ctrl),
+        (KeyCode::Left, true, _)
+            | (KeyCode::Right, true, _)
+            | (KeyCode::Char('y'), _, true)
+            | (KeyCode::Backspace, _, _)
+            | (KeyCode::Delete, _, _)
+    ) || matches!(k.code, KeyCode::Char(_)) && !ctrl;
+    if !keeps_span {
+        if let Some(s) = app.session.as_mut() {
+            s.sel_from = None;
+        }
+    }
     if app.selection.is_some()
         && !matches!(
             (k.code, shift),
@@ -5314,12 +5502,14 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
     let reset_col = |app: &mut App| {
         if let Some(s) = app.session.as_mut() {
             s.want_col = None;
+            s.sel_from = None;
         }
     };
     let edit_input = |app: &mut App, f: fn(&mut Input)| {
         if let Some(s) = app.session.as_mut() {
             f(&mut s.input);
             s.want_col = None;
+            s.sel_from = None;
         }
         app.laid_width = 0;
         app.follow = true;
@@ -5342,6 +5532,8 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Down, _) if shift => session_select_line(app, ctx, 1),
         (KeyCode::Up, _) => session_move_line(app, ctx, -1),
         (KeyCode::Down, _) => session_move_line(app, ctx, 1),
+        (KeyCode::Left, _) if shift => session_select_char(app, false),
+        (KeyCode::Right, _) if shift => session_select_char(app, true),
         (KeyCode::Left, _) | (KeyCode::Char('b'), true) => edit_input(app, Input::left),
         (KeyCode::Right, _) | (KeyCode::Char('f'), true) => edit_input(app, Input::right),
         (KeyCode::Home, _) | (KeyCode::Char('a'), true) => edit_input(app, Input::home),
@@ -5361,6 +5553,11 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         // and this viewer has no suspend of its own to lose.
         (KeyCode::Char('z'), true) => session_history(app, ctx, true),
         (KeyCode::Char('r'), true) => session_history(app, ctx, false),
+        (KeyCode::Backspace, _) | (KeyCode::Delete, _)
+            if app.session.as_ref().and_then(|s| s.sel_span()).is_some() =>
+        {
+            session_cut_span(app);
+        }
         (KeyCode::Backspace, _) if app.selection.is_some() => session_delete_selection(app, ctx),
         (KeyCode::Delete, _) if app.selection.is_some() => session_delete_selection(app, ctx),
         (KeyCode::Backspace, _) => {
@@ -5386,6 +5583,8 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Tab, _) => session_indent(app, 1),
         (KeyCode::BackTab, _) => session_indent(app, -1),
         (KeyCode::Char(ch), false) => {
+            // Typing over a selection replaces it, as everywhere else.
+            session_cut_span(app);
             if let Some(s) = app.session.as_mut() {
                 s.input.insert_char(ch);
                 s.want_col = None;
@@ -5407,6 +5606,7 @@ fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
         if let Some(s) = app.session.as_mut() {
             s.input.insert_str(clean);
             s.want_col = None;
+            s.sel_from = None;
         }
         app.laid_width = 0;
         return;
@@ -6164,12 +6364,15 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             if in_rows && m.column < bar.x {
                 if let Some(src) = app.src_at_screen_row(screen_row) {
                     let col = (m.column.saturating_sub(text.x)) as usize;
-                    // Session open: a click just moves the caret (the
-                    // dirty line commits when the caret leaves it).
+                    // Session open: a click moves the caret and arms a
+                    // selection; a second or third click takes the word or
+                    // the line (the gesture every editor has).
                     if app.session.is_some() {
                         if src < app.lines.len() {
+                            let run = app.click_run_at(m.column, m.row);
                             session_commit_dirty(app, ctx);
                             let caret = click_caret(app, src, col);
+                            app.selection = None;
                             if let Some(s) = app.session.as_mut() {
                                 if s.line != src {
                                     let t = app.lines[src].text.clone();
@@ -6179,7 +6382,25 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                                 }
                                 s.input.cur = caret.min(s.input.buf.len());
                                 s.want_col = None;
+                                s.sel_from = match run {
+                                    // Triple: the whole line.
+                                    3 => {
+                                        s.input.cur = s.input.buf.len();
+                                        Some(0)
+                                    }
+                                    // Double: the word under the pointer.
+                                    2 => {
+                                        let (a, b) = word_span(&s.input.buf, s.input.cur);
+                                        s.input.cur = b;
+                                        Some(a)
+                                    }
+                                    // Single: an anchor, in case a drag
+                                    // follows. A click that does not drag
+                                    // selects nothing (see Up).
+                                    _ => Some(s.input.cur),
+                                };
                             }
+                            app.drag_anchor = Some(src);
                             app.cursor = src;
                             app.follow = true;
                             app.laid_width = 0;
@@ -6226,12 +6447,43 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             app.pressed_link = None;
-            if let Some(anchor) = app.drag_anchor {
-                if let Some(end) = app.src_at_screen_row(clamped_row) {
-                    app.selection = Some(Selection { anchor, cursor: end });
-                    app.goto_src(end);
+            // Dragging past the edge scrolls, so a selection can reach
+            // beyond one screenful.
+            if in_rows {
+                if m.row <= viewport_top {
+                    app.wheel_scroll(-1, app.view_h);
+                } else if m.row >= viewport_bottom {
+                    app.wheel_scroll(1, app.view_h);
                 }
             }
+            let Some(anchor) = app.drag_anchor else { return };
+            let Some(end) = app.src_at_screen_row(clamped_row) else { return };
+            if app.session.is_some() {
+                let col = m.column.saturating_sub(text.x) as usize;
+                if end == anchor && end < app.lines.len() {
+                    // Same line: a character range (the anchor was set on
+                    // button-down).
+                    let caret = click_caret(app, end, col);
+                    if let Some(s) = app.session.as_mut() {
+                        s.input.cur = caret.min(s.input.buf.len());
+                        s.want_col = None;
+                    }
+                    app.selection = None;
+                } else {
+                    // Crossing lines: hand over to the LINE range, which is
+                    // the unit an edit across lines works in.
+                    if let Some(s) = app.session.as_mut() {
+                        s.sel_from = None;
+                    }
+                    session_move_to_line(app, ctx, end);
+                    app.selection = Some(Selection { anchor, cursor: end });
+                }
+                app.laid_width = 0;
+                app.follow = true;
+                return;
+            }
+            app.selection = Some(Selection { anchor, cursor: end });
+            app.goto_src(end);
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if let Some((src, target)) = app.pressed_link.take() {
@@ -6254,6 +6506,12 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 }
             }
             app.drag_anchor = None;
+            // A plain click arms an anchor but selects nothing.
+            if let Some(s) = app.session.as_mut() {
+                if s.sel_from == Some(s.input.cur) {
+                    s.sel_from = None;
+                }
+            }
         }
         _ => {}
     }
@@ -7781,6 +8039,7 @@ mod tests {
                 input: Input::new(app.lines[line].text.clone()),
                 orig: app.lines[line].text.clone(),
                 want_col: None,
+                sel_from: None,
             });
         };
         // The caret is inside the FIRST diagram (lines 1..=3): that one is
@@ -7916,6 +8175,7 @@ mod tests {
             input: Input::new("  flowchart LR".into()),
             orig: "  flowchart LR".into(),
             want_col: None,
+            sel_from: None,
         });
         app.laid_width = 0;
         app.rebuild(80);
@@ -9844,6 +10104,93 @@ mod tests {
         handle_paste(&mut app, &ctx, "X\r\nY");
         assert_eq!(app.lines[1].text, "oneX");
         assert_eq!(app.lines[2].text, "Y", "CRLF is normalised on the way in");
+    }
+
+    /// Word bounds for double-click: a run of word characters, or the run
+    /// of separators the pointer landed in.
+    #[test]
+    fn word_span_takes_the_run_under_the_pointer() {
+        assert_eq!(word_span("hello world", 2), (0, 5));
+        assert_eq!(word_span("hello world", 5), (5, 6), "the space between is its own run");
+        assert_eq!(word_span("hello world", 7), (6, 11));
+        assert_eq!(word_span("a-b", 1), (1, 2), "punctuation is a run too");
+        let jp = "日本語 の語";
+        assert_eq!(word_span(jp, 3), (0, "日本語".len()), "CJK counts as word text");
+        assert_eq!(word_span("", 0), (0, 0));
+    }
+
+    /// Selecting text with the mouse inside EDIT: drag on one line takes
+    /// characters, double-click a word, triple-click the line, and a drag
+    /// across lines falls back to the LINE range — the unit an edit across
+    /// lines works in.
+    #[test]
+    fn the_mouse_selects_characters_on_a_line_and_lines_across_them() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "hello world", "second line", "third"]);
+        app.rebuild(42);
+        app.text_rect = Rect::new(1, 2, 40, 8);
+        app.bar_rect = Rect::new(41, 1, 1, 10);
+        app.view_h = 10;
+        enter_session(&mut app, &ctx, 1, 0);
+
+        // Drag across "hello" on its own line → characters.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 1, 3));
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 6, 3));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.sel_span(), Some((0, 5)));
+        assert!(app.selection.is_none(), "one selection at a time");
+        assert_eq!(copy_payload(&app, false).unwrap().0, "hello");
+
+        // Double-click picks the word under the pointer.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
+        assert_eq!(copy_payload(&app, false).unwrap().0, "world");
+
+        // Triple-click takes the whole line.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
+        assert_eq!(copy_payload(&app, false).unwrap().0, "hello world");
+
+        // Dragging onto another line hands over to the line range.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 3, 3));
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 3, 5));
+        assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
+        assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+    }
+
+    /// A character selection behaves like a selection everywhere else:
+    /// Shift+arrows grow it, typing replaces it, ⌫ removes it.
+    #[test]
+    fn shift_arrows_type_and_backspace_act_on_a_character_selection() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "abcdef"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+
+        for _ in 0..3 {
+            handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        }
+        assert_eq!(app.session.as_ref().unwrap().sel_span(), Some((0, 3)));
+
+        // Typing replaces the selection.
+        type_str(&mut app, &ctx, "X");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "Xdef");
+        assert_eq!(s.input.cur, 1);
+        assert!(s.sel_span().is_none());
+
+        // ⌫ removes a selection instead of one character.
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "Xf");
+        assert_eq!(app.lines[1].text, "abcdef", "still uncommitted — it is just typing");
+
+        // Moving without shift drops it.
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Left));
+        assert!(app.session.as_ref().unwrap().sel_span().is_some());
+        handle_session_key(&mut app, &ctx, key(KeyCode::Left));
+        assert!(app.session.as_ref().unwrap().sel_span().is_none());
     }
 
     /// A note app has to be able to hand its text to something else. What
