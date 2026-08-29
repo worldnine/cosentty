@@ -58,10 +58,11 @@ impl WebKind {
     }
 }
 
-/// One "draw this for me" order. Everything that can change the pixels is a
-/// field, so `cache_key` is also the staleness guard: a different page,
-/// commit, line, width or theme is a different key and can never be shown
-/// for the current one.
+/// One "draw this for me" order. Everything that can change the picture is a
+/// field, so `cache_key` is also the staleness guard: a different page, line,
+/// block source or theme is a different key and can never be shown for the
+/// current one. Note what is deliberately absent — the page's commit id and
+/// the pane width; see `cache_key`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebRequest {
     pub kind: WebKind,
@@ -190,9 +191,9 @@ impl fmt::Debug for WebArtifact {
 /// Implementations block, and are only ever called from the render worker
 /// thread — never from the UI thread.
 pub trait WebBackend: Send + Sync {
-    /// Render one batch of requests that all target the SAME page and
-    /// revision, so a single navigation serves them all. Results are
-    /// returned per request, in the same order.
+    /// Render one batch of requests that all target the SAME page, so a
+    /// single navigation serves them all. Results are returned per request,
+    /// in the same order.
     fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>>;
 
     /// No work has arrived for a while. A backend that keeps a browser warm

@@ -86,19 +86,19 @@ keystroke-level edit — pressing Enter for a new line is a commit — so keying
 theoretical concern: the first user to open the viewer hit it within minutes
 ("edit モードに入ると一旦また図のレンダリングが始まってしまう").
 
-The key is instead the block's **own source hash** plus page identity, width and theme.
+The key is instead the block's **own source hash** plus page identity and theme.
 A block's text changes exactly when its picture does — strictly more precise than the
 page commit, and it still invalidates on a *remote* edit to the diagram, because the
 websocket apply rewrites `app.lines` and therefore the hash.
 
-**The pane width is not in the key either**, for a similar reason. `build_image` scales
-every image to a fixed cell width (capped at 64 columns) and never consults the pane, so
-the browser's viewport decides raster quality and nothing else. Keying on a bucketed
-pane width meant a ten-column resize cost a 3–6 s re-render — and dragging a window edge
-queued one batch per bucket crossed, which the serial worker then ground through while
-the batch for the width the reader actually ended on waited at the back. That read as
-"resizing re-renders, and sometimes never loads". The backend now renders at a fixed
-`RENDER_WIDTH_PX = 1000`, and resizing queues nothing at all.
+**The pane width is not in the key either.** The browser's viewport decides raster
+quality and nothing else — what the reader sees is set by the cell size the artifact is
+*encoded* at, which is a local decision (see §7c). Keying on a bucketed pane width meant
+a ten-column resize cost a 3–6 s re-render, and dragging a window edge queued one batch
+per bucket crossed, which the serial worker then ground through while the batch for the
+width the reader actually ended on waited at the back. That read as "resizing
+re-renders, and sometimes never loads". The backend now renders at a fixed
+`RENDER_WIDTH_PX = 1000`, and resizing never involves the browser.
 
 Page identity is still guarded, twice over: `project/title/page_id/line_id` are in the
 key, and `web_gen` (bumped on every page install) drops any result that arrives for a
@@ -147,7 +147,7 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 | `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). `--twice` exercises the warm-browser path; it also reports Chrome process counts across `idle()`/`shutdown()`. |
 | `rust/src/render.rs` | `mermaid_lang()`; `code:` blocks whose language is Mermaid emit `Block::WebRender` carrying the code plus the unchanged code rows. Everything else is byte-for-byte as before. |
 | `rust/src/theme.rs` | `shimmer_level` / `shimmer_style` — the pure "still rendering" brightness wave, mixing an RGB foreground toward the terminal background (DIM attribute for named colors). |
-| `rust/src/bin/view.rs` | `WebJob`/`WebMsg`/`spawn_web_worker`; App fields (`revision`, `web_gen`, `web_width_px`, `web_dark`, `web_pending`, `web_errors`, channels); `web_request`, `start_web_renders`, `drain_web_renders`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
+| `rust/src/bin/view.rs` | `WebJob` (`Render` / `Rescale`), `WebMsg`, `spawn_web_worker`; App fields (`web_gen`, `web_dark`, `web_pending`, `web_errors`, `web_shimmer`, `web_cols`, `web_rescaling`, `web_status`, channels); `web_request`, `start_web_renders`, `rescale_diagrams`, `drain_web_renders`, `note_web_status` / `expire_web_status`; `diagram_max_cols` + a `max_cols` argument on `build_image`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
 | `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary. |
 | `rust/src/bin/probe.rs` | prints the new block kind. |
 | `rust/KEYMAP.md` | user-facing section: dependency, auth, fallback, notation, env vars. |
@@ -191,8 +191,8 @@ later, so presence is not readiness — we poll for a `<svg>` child with a non-z
 
 ## 6. Tests and build
 
-* `cargo test`: **145 green** — lib **92** (78 baseline + 14 new) and view **53**
-  (47 baseline + 6 new). No test launches a browser or touches the network.
+* `cargo test`: **157 green** — lib **97** (78 baseline + 19 new) and view **60**
+  (47 baseline + 13 new). No test launches a browser or touches the network.
 * `cargo build --release`: succeeds, **no new warnings**.
 
 New coverage, against the acceptance list:
@@ -206,6 +206,8 @@ New coverage, against the acceptance list:
 | an open session only blocks its own diagram | `view::an_open_session_only_holds_back_the_block_under_the_caret` |
 | resizing never re-renders | `view::only_the_diagrams_own_source_invalidates_it` (resizes to 60/100/200/37 columns queue nothing), `webrender::resizing_the_pane_is_not_a_new_artifact` |
 | the reader sees the renderer working | `theme::shimmer_*` (4), `view::a_rendering_diagram_pulses_its_code_and_stops_when_it_lands` |
+| a diagram never overflows the pane | `view::a_diagram_is_never_encoded_wider_than_the_pane` (the cap, and the encoder honouring it at 64/35/14/5/1 columns), `view::narrowing_the_pane_re_encodes_the_diagram_from_its_cached_png` (40- and 20-column panes: a `Rescale` job — never a browser render — is queued once, and the installed artifact fits `text_rect`) |
+| a failure note does not eat the key hints | `view::a_diagram_failure_gives_the_key_hints_back`, `view::an_expiring_diagram_note_never_clears_someone_elses_status` |
 | renderer failure → code fallback | `view::a_renderer_failure_leaves_the_code_block_on_screen`, `webrender::unavailable_backend_fails_every_request_without_a_browser` |
 | UI thread does not block | `view::the_ui_thread_never_waits_for_the_browser` (the fake backend is pinned mid-render; the UI still queues, lays out and reports pending in <200 ms, and the artifact arrives after the gate is released) |
 | selector / artifact correspondence | `webrender::selector_addresses_the_preview_by_line_id`, `webrender::fake_backend_answers_by_key`, `view::an_artifact_replaces_the_code_block_and_edit_puts_it_back` |
@@ -299,6 +301,33 @@ code block dims and a band of brightness runs down its rows (`theme::shimmer_lev
   event loop's input tick tightens from 120 ms to 60 ms only while it is not.
 * Source mode (`Tab`) never pulses — there is no picture there for it to be about.
 
+## 7c. Fitting the pane
+
+The draw clips an image to the pane's text column, so an artifact encoded wider than the
+pane silently loses its right-hand side — a clipped photo is still a photo, a clipped
+flowchart has lost half its meaning. Diagrams are therefore encoded at
+`diagram_max_cols(text_w) = min(text_w, 64)`.
+
+When the pane crosses that cap, `rescale_diagrams` queues a `WebJob::Rescale` for each
+affected key. The worker re-reads the artifact's PNG **from the disk cache** and
+re-encodes it — a decode plus a resize, no browser, no network. The old (wrongly sized)
+picture stays on screen until the new encoding lands, which reads better than flickering
+back to source, and the draw clips it in the meantime. Duplicate work is prevented by
+`web_rescaling`; if the PNG is not in the cache the diagram simply keeps the size it has.
+
+Ordinary images keep their long-standing fixed 64-column cap and are not rescaled — that
+is the shared image path and is deliberately left alone here.
+
+## 7d. The status line is also the key-hint bar
+
+The bottom row shows key hints only while `app.status` is empty, so a message parked
+there costs the reader their hints for the rest of the session. A diagram failure now
+holds the line for six seconds and then gives it back (`note_web_status` /
+`expire_web_status`). The hand-back is deliberately narrow: if anything else has written
+to the status line in the meantime, that message is left alone and simply inherits the
+line. No other status message's lifecycle is touched — the general status line has no
+fade, and changing that belongs on `main`, not on this branch.
+
 ## 8. Known limits, security, distribution
 
 * **Renders the committed page, never the buffer.** The browser shows what Cosense
@@ -323,14 +352,13 @@ code block dims and a band of brightness runs down its rows (`theme::shimmer_lev
   macOS (`/Applications/…`) and via `PATH` on Linux; `COSENSE_CHROME` overrides, and an
   explicit-but-missing setting reports "no browser" rather than silently launching a
   different one. No browser → diagrams simply stay code blocks.
-* **Narrow panes clip an image, diagrams included.** `build_image` caps at 64 columns
-  regardless of the pane, and the draw clips to the pane's text width — verified: in a
-  40-column terminal (35 columns of text) the right-hand side of a 64-column image is
-  simply not drawn. This is pre-existing behaviour for every image, but a clipped
-  diagram loses more meaning than a clipped photo. Fixing it means capping at
-  `min(64, pane)` and rebuilding the protocol from the cached PNG when the pane width
-  changes — cheap (no browser involved), but it touches the shared image path, so it is
-  left out of this change.
+* **Narrow panes still clip ordinary images.** Diagrams are fitted to the pane (§7c);
+  gyazo and other inline images keep the pre-existing fixed 64-column cap and are clipped
+  in a pane narrower than that. Giving them the same treatment means touching the shared
+  image path, which is out of scope for this branch.
+* **A rescale needs the PNG on disk.** If the artifact cache entry is missing (cache
+  cleared mid-session, or the write failed), the diagram keeps whatever size it has
+  rather than re-rendering in a browser.
 * **DOM coupling.** `#mermaid-preview-<lineId>` is Cosense's markup and can change.
   When it does, the wait times out and the viewer falls back to code — a rename of the
   selector is a one-line change in `WebKind::selector`.
@@ -356,5 +384,5 @@ The boundary was built for this; adding a kind is four steps and touches no view
    and a matching `render_batch` return. `Cdp::call` already returns arbitrary JSON,
    so `getClientRects()` per link is one more `Runtime.evaluate`.
 
-Batching is per (page, revision), so several kinds on one page still cost one
-navigation as long as they are queued in the same `start_web_renders` pass.
+Batching is per page, so several kinds on one page still cost one navigation as long as
+they are queued in the same `start_web_renders` pass.

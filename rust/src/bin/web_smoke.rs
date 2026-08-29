@@ -20,6 +20,21 @@ fn chrome_procs() -> usize {
         .unwrap_or(0)
 }
 
+/// Same, but give Chrome's helper processes a moment to follow their parent
+/// down. Killing and reaping the browser does not instantly reap the GPU and
+/// renderer children, so an immediate count reports stragglers that are on
+/// their way out and reads like a leak.
+fn chrome_procs_settled() -> usize {
+    for _ in 0..40 {
+        let n = chrome_procs();
+        if n == 0 {
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    chrome_procs()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `--twice` runs the batch a second time through the SAME backend, which
@@ -103,8 +118,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // actually reaps it, and that shutdown leaves nothing behind either.
     println!("chrome alive after the batch: {}", chrome_procs());
     backend.idle();
-    println!("chrome alive after idle():    {}", chrome_procs());
+    println!("chrome alive after idle():    {}", chrome_procs_settled());
     backend.shutdown();
-    println!("chrome alive after shutdown(): {}", chrome_procs());
+    println!("chrome alive after shutdown(): {}", chrome_procs_settled());
     Ok(())
 }

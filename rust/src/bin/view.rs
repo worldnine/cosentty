@@ -76,6 +76,24 @@ struct ImageInfo {
     sliced: SlicedProtocol,
     /// Display height in cells (from the sliced size), used for layout.
     cells_h: u16,
+    /// Display width in cells, and the column cap this was encoded for. A
+    /// diagram is re-encoded from its cached PNG when the pane crosses that
+    /// cap, so it never paints past the text column (the draw clips to the
+    /// pane, so an over-wide image simply loses its right-hand side).
+    cells_w: u16,
+    built_for: u16,
+}
+
+/// Widest an inline image may be drawn, in cells. Images are capped at a
+/// fixed 64 columns regardless of the pane — that is long-standing
+/// behaviour and is left alone. A DIAGRAM additionally has to fit the pane:
+/// a clipped photo is still a photo, a clipped flowchart has lost its right
+/// half.
+const IMAGE_MAX_COLS: u16 = 64;
+
+/// Column cap for a diagram in a pane whose text area is `text_w` wide.
+fn diagram_max_cols(text_w: u16) -> u16 {
+    text_w.min(IMAGE_MAX_COLS).max(1)
 }
 
 /// Rows reserved for an image that is still downloading. The real height
@@ -91,12 +109,17 @@ type ImageMsg = (String, Result<ImageInfo, String>);
 /// where it landed, or why it failed.
 type FileMsg = (String, Result<std::path::PathBuf, String>);
 
-/// One batch of web renders: everything on ONE page at ONE revision, so the
-/// worker can serve them with a single browser navigation. `gen` is the
-/// App's page generation at the time of the request.
-struct WebJob {
-    gen: u64,
-    reqs: Vec<WebRequest>,
+/// One batch of web renders: everything on ONE page, so the worker can serve
+/// them with a single browser navigation. `gen` is the App's page generation
+/// at the time of the request.
+enum WebJob {
+    /// Draw these in a browser (or serve them from the disk cache), encoded
+    /// for a pane whose text area is `max_cols` wide.
+    Render { gen: u64, reqs: Vec<WebRequest>, max_cols: u16 },
+    /// Re-encode an artifact already on disk at a new column cap, because
+    /// the pane was resized. No browser is involved: this is a decode plus
+    /// a resize, done on the worker so the UI thread never stalls on it.
+    Rescale { gen: u64, key: String, max_cols: u16 },
 }
 
 /// A finished web render, already decoded and protocol-encoded on the
@@ -128,12 +151,23 @@ fn spawn_web_worker(
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
+            let (gen, reqs, max_cols) = match job {
+                WebJob::Rescale { gen, key, max_cols } => {
+                    // The PNG the artifact was made from is on disk; if it
+                    // is not, the viewer simply keeps the size it has.
+                    if let Some(png) = cache.get(&key) {
+                        let _ = out.send((gen, key, decode_web_png(&picker, &png, max_cols)));
+                    }
+                    continue;
+                }
+                WebJob::Render { gen, reqs, max_cols } => (gen, reqs, max_cols),
+            };
             let mut to_render: Vec<WebRequest> = Vec::new();
-            for req in job.reqs {
+            for req in reqs {
                 let key = req.cache_key();
                 match cache.get(&key) {
                     Some(png) => {
-                        let _ = out.send((job.gen, key, decode_web_png(&picker, &png)));
+                        let _ = out.send((gen, key, decode_web_png(&picker, &png, max_cols)));
                     }
                     None => to_render.push(req),
                 }
@@ -146,7 +180,7 @@ fn spawn_web_worker(
                 let key = req.cache_key();
                 let msg = match res {
                     Ok(png) => {
-                        let img = decode_web_png(&picker, &png);
+                        let img = decode_web_png(&picker, &png, max_cols);
                         if img.is_ok() {
                             cache.put(&key, &png);
                         }
@@ -154,7 +188,7 @@ fn spawn_web_worker(
                     }
                     Err(e) => Err(e.to_string()),
                 };
-                let _ = out.send((job.gen, key, msg));
+                let _ = out.send((gen, key, msg));
             }
         }
     });
@@ -162,9 +196,9 @@ fn spawn_web_worker(
 
 /// PNG bytes -> terminal image. Only image decoding happens here: no SVG or
 /// HTML from the browser is ever interpreted in this process.
-fn decode_web_png(picker: &Picker, png: &[u8]) -> Result<ImageInfo, String> {
+fn decode_web_png(picker: &Picker, png: &[u8], max_cols: u16) -> Result<ImageInfo, String> {
     let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
-    build_image(picker, img)
+    build_image(picker, img, max_cols)
 }
 
 /// Something Enter/f can act on from the cursor line.
@@ -322,6 +356,18 @@ struct App {
     web_shimmer: HashMap<usize, (u16, u16)>,
     /// Clock the shimmer animates against.
     web_anim: std::time::Instant,
+    /// Column cap the on-screen diagrams are encoded for — `text_w` capped
+    /// at `IMAGE_MAX_COLS`. Updated by the layout; a change re-encodes the
+    /// artifacts from their cached PNGs (no browser).
+    web_cols: u16,
+    /// Rescales in flight, so a resize does not queue the same key twice.
+    web_rescaling: HashSet<String>,
+    /// A diagram-failure note and when it stops being worth the status line.
+    /// The status line doubles as the key-hint bar, so a message left there
+    /// forever costs the reader their hints; a render failure is worth a
+    /// few seconds, not the rest of the session. Scoped to THIS feature's
+    /// messages — see `expire_web_status`.
+    web_status: Option<(String, std::time::Instant)>,
     /// Jobs into the render worker, results back. Artifacts land in
     /// `images` (they are images), so drawing needs no special case.
     web_job_tx: mpsc::Sender<WebJob>,
@@ -756,6 +802,9 @@ impl App {
             web_errors: HashMap::new(),
             web_shimmer: HashMap::new(),
             web_anim: std::time::Instant::now(),
+            web_cols: IMAGE_MAX_COLS,
+            web_rescaling: HashSet::new(),
+            web_status: None,
             web_job_tx,
             web_jobs_rx: Some(web_jobs_rx),
             web_tx,
@@ -855,6 +904,7 @@ impl App {
         self.pending.clear();
         self.web_pending.clear();
         self.web_errors.clear();
+        self.web_rescaling.clear();
         self.laid_width = 0; // force rebuild
         self.scroll = 0;
         self.cursor = 0;
@@ -893,7 +943,7 @@ impl App {
                 let res = fetcher
                     .fetch(&url)
                     .map_err(|e| e.to_string())
-                    .and_then(|img| build_image(&picker, img));
+                    .and_then(|img| build_image(&picker, img, IMAGE_MAX_COLS));
                 let _ = tx.send((url, res));
             });
         }
@@ -968,7 +1018,11 @@ impl App {
         // Those blocks now shimmer; the map is rebuilt with the layout.
         self.laid_width = 0;
         self.web_anim = std::time::Instant::now();
-        let _ = self.web_job_tx.send(WebJob { gen: self.web_gen, reqs });
+        let _ = self.web_job_tx.send(WebJob::Render {
+            gen: self.web_gen,
+            reqs,
+            max_cols: self.web_cols,
+        });
     }
 
     /// Is the edit session's caret on one of these source lines? Such a
@@ -1005,6 +1059,58 @@ impl App {
         out
     }
 
+    /// Re-encode any diagram that was built for a different column cap than
+    /// the pane now has. The picture keeps its place on screen — the old,
+    /// wrongly-sized one stays up until the new encoding lands, which beats
+    /// flickering back to source. Costs a PNG decode on the worker; the
+    /// browser is not involved.
+    fn rescale_diagrams(&mut self) {
+        let want = self.web_cols;
+        let mut keys: Vec<String> = Vec::new();
+        for b in &self.blocks {
+            let Block::WebRender { kind, code, last_src, .. } = b else { continue };
+            let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
+            let key = req.cache_key();
+            let Some(info) = self.images.get(&key) else { continue };
+            if info.built_for != want && !self.web_rescaling.contains(&key) {
+                keys.push(key);
+            }
+        }
+        for key in keys {
+            self.web_rescaling.insert(key.clone());
+            let _ = self.web_job_tx.send(WebJob::Rescale {
+                gen: self.web_gen,
+                key,
+                max_cols: want,
+            });
+        }
+    }
+
+    /// Show a diagram note on the status line, and remember to take it back
+    /// down. Nothing else about the status line changes.
+    fn note_web_status(&mut self, msg: String) {
+        const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+        self.status = msg.clone();
+        self.web_status = Some((msg, std::time::Instant::now() + SHOWN_FOR));
+    }
+
+    /// Clear a diagram note once it has had its seconds, so the key hints
+    /// come back. Deliberately narrow: if anything else has since written to
+    /// the status line, that message is left alone and simply inherits the
+    /// line. Returns whether the status changed.
+    fn expire_web_status(&mut self) -> bool {
+        let Some((msg, until)) = self.web_status.as_ref() else { return false };
+        if std::time::Instant::now() < *until {
+            return false;
+        }
+        let ours = self.status == *msg;
+        if ours {
+            self.status.clear();
+        }
+        self.web_status = None;
+        ours
+    }
+
     /// Install finished web renders. A result from an older page generation
     /// is dropped outright — the reader has moved on, and showing it would
     /// put yesterday's diagram on today's page.
@@ -1014,15 +1120,17 @@ impl App {
             if gen != self.web_gen {
                 // Stale generation: forget it ever happened.
                 self.web_pending.remove(&key);
+                self.web_rescaling.remove(&key);
                 continue;
             }
             self.web_pending.remove(&key);
+            self.web_rescaling.remove(&key);
             match res {
                 Ok(info) => {
                     self.images.insert(key, info);
                 }
                 Err(e) => {
-                    self.status = format!("diagram: {e} (showing source)");
+                    self.note_web_status(format!("diagram: {e} (showing source)"));
                     self.web_errors.insert(key, e);
                 }
             }
@@ -1494,6 +1602,11 @@ impl App {
     /// attribution) plus inline comment cards inserted after each comment's
     /// anchor block. Called on resize and whenever comments change.
     fn rebuild(&mut self, width: u16) {
+        // Diagrams must fit the pane: the draw clips to the text column, so
+        // an image encoded wider than the pane loses its right-hand side.
+        // Recorded here (the layout is the only place the width is known)
+        // and acted on by `rescale_diagrams`.
+        self.web_cols = diagram_max_cols(Self::text_width(self.mode, width) as u16);
         // 1. Page rows and related rows are separate visual regions. The
         // page is boxed; related sections are appended after its FrameEnd.
         let (content, related): (Vec<Row>, Vec<Row>) = match self.mode {
@@ -2622,25 +2735,37 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
 }
 
 /// Turn a decoded image into a sliced protocol at a width-capped cell size.
-/// Runs on the image worker thread (`Picker` is a plain clone of the
-/// terminal's capabilities).
-fn build_image(picker: &Picker, dyn_img: image::DynamicImage) -> Result<ImageInfo, String> {
+/// Runs on a worker thread (`Picker` is a plain clone of the terminal's
+/// capabilities), never on the UI thread.
+fn build_image(
+    picker: &Picker,
+    dyn_img: image::DynamicImage,
+    max_cols: u16,
+) -> Result<ImageInfo, String> {
     let font = picker.font_size();
     let (px_w, px_h) = (dyn_img.width(), dyn_img.height());
     let nat_cols = (px_w as f32 / font.width as f32).ceil() as u32;
     let nat_rows = (px_h as f32 / font.height as f32).ceil() as u32;
-    let max_cols = 64u32;
-    let (cw, ch) = if nat_cols > max_cols {
-        let scale = max_cols as f32 / nat_cols as f32;
-        (max_cols, ((nat_rows as f32) * scale).ceil() as u32)
+    let cap = max_cols.max(1) as u32;
+    let (cw, ch) = if nat_cols > cap {
+        let scale = cap as f32 / nat_cols as f32;
+        (cap, ((nat_rows as f32) * scale).ceil() as u32)
     } else {
         (nat_cols.max(1), nat_rows.max(1))
     };
     let size = Size::new(cw as u16, ch as u16);
     SlicedProtocol::new(picker, dyn_img, Some(size))
         .map(|sliced| {
-            let cells_h = sliced.size().height.max(1);
-            ImageInfo { sliced, cells_h }
+            let s = sliced.size();
+            ImageInfo {
+                sliced,
+                cells_h: s.height.max(1),
+                // The protocol may round down; never report more than asked
+                // for, since the cap is what keeps the diagram inside the
+                // pane.
+                cells_w: s.width.min(max_cols.max(1)),
+                built_for: max_cols.max(1),
+            }
         })
         .map_err(|e| e.to_string())
 }
@@ -2898,9 +3023,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         if app.drain_images() | app.drain_web_renders() {
             app.laid_width = 0; // heights changed — rebuild layout
         }
-        // A resize (or a first layout) changes the render width, and a
-        // commit changes the revision: both mean new diagram keys.
+        // Both are no-ops on most frames: a diagram is only requested when
+        // its own source changed, and only re-encoded when the pane crossed
+        // the column cap it was built for.
         app.start_web_renders();
+        app.rescale_diagrams();
+        app.expire_web_status();
         app.drain_downloads();
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
@@ -5002,10 +5130,14 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         x: 1,
                         y: (screen_y + text.y as i32 - band_top) as i16,
                     };
+                    // Never hand the protocol more columns than it has, and
+                    // never more than the pane: a diagram encoded for a
+                    // wider pane (a rescale still in flight) is clipped here
+                    // rather than painting over the frame.
                     let img_area = Rect::new(
                         text.x,
                         band_top as u16,
-                        text.width,
+                        info.cells_w.min(text.width),
                         band_h,
                     );
                     f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
@@ -5390,6 +5522,15 @@ mod tests {
         cosense::webrender::ArtifactCache::at(dir)
     }
 
+    /// The `(gen, reqs)` of a queued render job — tests only ever queue
+    /// render jobs, and a rescale would be a test bug.
+    fn render_job(job: WebJob) -> (u64, Vec<WebRequest>) {
+        match job {
+            WebJob::Render { gen, reqs, .. } => (gen, reqs),
+            WebJob::Rescale { key, .. } => panic!("expected a render job, got a rescale of {key}"),
+        }
+    }
+
     /// A page with two Mermaid blocks and one ordinary code block.
     fn mermaid_page() -> App {
         let mut app = page(&[
@@ -5412,19 +5553,19 @@ mod tests {
         app.rebuild(80);
         app.start_web_renders();
         let rx = app.web_jobs_rx.take().unwrap();
-        let job = rx.try_recv().expect("one batch was queued");
-        assert_eq!(job.gen, app.web_gen);
-        let ids: Vec<&str> = job.reqs.iter().map(|r| r.line_id.as_str()).collect();
+        let (gen, reqs) = render_job(rx.try_recv().expect("one batch was queued"));
+        assert_eq!(gen, app.web_gen);
+        let ids: Vec<&str> = reqs.iter().map(|r| r.line_id.as_str()).collect();
         // The LAST content line of each block — not the `code:` header, and
         // nothing at all for the js block.
         assert_eq!(ids, vec!["id3", "id7"]);
         assert_eq!(
-            job.reqs[0].selector(),
+            reqs[0].selector(),
             "#mermaid-preview-id3",
             "the selector addresses Cosense's own preview element"
         );
-        assert_ne!(job.reqs[0].cache_key(), job.reqs[1].cache_key());
-        assert!(job.reqs.iter().all(|r| r.page_id == "PAGE"));
+        assert_ne!(reqs[0].cache_key(), reqs[1].cache_key());
+        assert!(reqs.iter().all(|r| r.page_id == "PAGE"));
         // Asking again while they are in flight queues nothing new.
         app.start_web_renders();
         assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
@@ -5487,9 +5628,10 @@ mod tests {
         // still being typed, but the second diagram has nothing to wait for.
         session_on(&mut app, 2);
         app.start_web_renders();
-        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes");
+        let (_, reqs) =
+            render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes"));
         assert_eq!(
-            job.reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
+            reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
             vec!["id7"],
             "only the block the caret is NOT in",
         );
@@ -5501,9 +5643,9 @@ mod tests {
         app.rebuild(80);
         session_on(&mut app, 5);
         app.start_web_renders();
-        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap();
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         assert_eq!(
-            job.reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
+            reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
             vec!["id3"],
             "the block the caret just left starts rendering, session still open",
         );
@@ -5532,7 +5674,7 @@ mod tests {
         let req = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
         let key = req.cache_key();
         app.web_pending.insert(key.clone());
-        let info = decode_web_png(&Picker::halfblocks(), &tiny_png()).unwrap();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         // The reader navigated away and back while the browser was busy.
         let stale_gen = app.web_gen.wrapping_sub(1);
         app.web_tx.send((stale_gen, key.clone(), Ok(info))).unwrap();
@@ -5577,9 +5719,9 @@ mod tests {
         let mut app = mermaid_page();
         app.rebuild(80);
         app.start_web_renders();
-        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap();
-        let key = job.reqs[0].cache_key();
-        let info = decode_web_png(&Picker::halfblocks(), &tiny_png()).unwrap();
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         app.web_tx.send((app.web_gen, key.clone(), Ok(info))).unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
@@ -5696,6 +5838,126 @@ mod tests {
         app.rebuild(80);
         assert!(app.web_shimmer.is_empty());
         assert_eq!(dim_cells(&mut app, &ctx), 0, "nothing pulses once nothing is pending");
+    }
+
+    /// A wide PNG, like a real Mermaid capture (they come back ~1500px).
+    fn wide_png() -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(1500, 300, |x, _| {
+            image::Rgb([if x > 1400 { 255 } else { 40 }, 40, 40])
+        }));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn a_diagram_is_never_encoded_wider_than_the_pane() {
+        // The cap itself: the pane wins while it is narrower than the
+        // image ceiling, and never goes to zero.
+        assert_eq!(diagram_max_cols(120), IMAGE_MAX_COLS);
+        assert_eq!(diagram_max_cols(IMAGE_MAX_COLS), IMAGE_MAX_COLS);
+        assert_eq!(diagram_max_cols(35), 35);
+        assert_eq!(diagram_max_cols(14), 14);
+        assert_eq!(diagram_max_cols(0), 1);
+
+        // …and the encoder honours it for an image far wider than any pane.
+        let picker = Picker::halfblocks();
+        for cap in [IMAGE_MAX_COLS, 35, 14, 5, 1] {
+            let info = decode_web_png(&picker, &wide_png(), cap).unwrap();
+            assert!(
+                info.cells_w <= cap,
+                "cap {cap} produced {} cells wide",
+                info.cells_w
+            );
+            assert_eq!(info.built_for, cap);
+            assert!(info.cells_h >= 1);
+        }
+    }
+
+    #[test]
+    fn narrowing_the_pane_re_encodes_the_diagram_from_its_cached_png() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders();
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        // The artifact arrives sized for the wide pane.
+        let wide = decode_web_png(&Picker::halfblocks(), &wide_png(), app.web_cols).unwrap();
+        assert_eq!(app.web_cols, IMAGE_MAX_COLS, "80 columns leaves room for the ceiling");
+        app.web_pending.insert(key.clone());
+        app.web_tx.send((app.web_gen, key.clone(), Ok(wide))).unwrap();
+        assert!(app.drain_web_renders());
+
+        // Two narrow panes, well under the 64-column image ceiling.
+        for (cols, want_cap) in [(40u16, 34u16), (20, 14)] {
+            app.laid_width = 0;
+            app.rebuild(cols);
+            assert_eq!(app.web_cols, want_cap, "text width at {cols} columns");
+            app.rescale_diagrams();
+            // The UI thread only queued work; nothing was decoded here.
+            let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("a rescale was queued");
+            let WebJob::Rescale { key: k, max_cols, gen } = job else {
+                panic!("a resize must never send the browser a render job")
+            };
+            assert_eq!((k.as_str(), max_cols, gen), (key.as_str(), want_cap, app.web_gen));
+            // Asking again while it is in flight queues nothing.
+            app.rescale_diagrams();
+            assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+
+            // The worker answers; the diagram now fits the pane.
+            let info = decode_web_png(&Picker::halfblocks(), &wide_png(), max_cols).unwrap();
+            app.web_tx.send((app.web_gen, key.clone(), Ok(info))).unwrap();
+            assert!(app.drain_web_renders());
+            let shown_w = app.images[&key].cells_w;
+            assert!(shown_w <= want_cap, "{shown_w} cells in a {cols}-column pane");
+
+            // And the frame really does keep it inside the text column.
+            app.laid_width = 0;
+            let mut t = Terminal::new(TestBackend::new(cols, 16)).unwrap();
+            t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+            t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+            assert!(app.text_rect.width >= shown_w, "image fits the text column");
+        }
+    }
+
+    #[test]
+    fn a_diagram_failure_gives_the_key_hints_back() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders();
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        app.web_pending.insert(key.clone());
+        app.web_tx
+            .send((app.web_gen, key, Err(WebError::NoBrowser.to_string())))
+            .unwrap();
+        assert!(app.drain_web_renders());
+        assert!(app.status.contains("showing source"), "the reader is told once");
+        // It holds the line for its few seconds…
+        assert!(!app.expire_web_status());
+        assert!(!app.status.is_empty());
+        // …and then hands the status line — the key-hint bar — back.
+        let (msg, _) = app.web_status.clone().unwrap();
+        app.web_status = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_web_status());
+        assert!(app.status.is_empty(), "hints are visible again");
+        assert!(app.web_status.is_none());
+        assert!(!app.expire_web_status(), "and it stays gone");
+    }
+
+    #[test]
+    fn an_expiring_diagram_note_never_clears_someone_elses_status() {
+        let mut app = mermaid_page();
+        app.note_web_status("diagram: boom".into());
+        // Anything else writing to the status line takes ownership of it.
+        app.status = "✓ done".into();
+        let (msg, _) = app.web_status.clone().unwrap();
+        app.web_status = Some((msg, std::time::Instant::now()));
+        assert!(!app.expire_web_status());
+        assert_eq!(app.status, "✓ done");
+        assert!(app.web_status.is_none(), "but the note stops being tracked");
     }
 
     #[test]
@@ -6757,7 +7019,7 @@ mod tests {
         // The real sliced image uses a different widget path from its text
         // placeholder and must reclaim the same row.
         let pixels = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
-        let info = build_image(&ctx.picker, image::DynamicImage::ImageRgba8(pixels)).unwrap();
+        let info = build_image(&ctx.picker, image::DynamicImage::ImageRgba8(pixels), IMAGE_MAX_COLS).unwrap();
         app.images.insert("https://example.com/a.png".into(), info);
         app.rebuild(42);
         app.scroll = 1;
