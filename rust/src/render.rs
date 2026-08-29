@@ -35,6 +35,72 @@ pub enum Block {
     },
 }
 
+/// Where a `code:` block sits in the source: its header line and the
+/// indent depth (in raw whitespace characters) of its header.
+///
+/// The renderer decides what a code block *is* while it walks the page;
+/// the editor needs the same answer for one line at a time ("is the caret
+/// in code, and how deep does a new line there have to be indented?").
+/// Both must agree, or Enter puts a line where the renderer will not read
+/// it as code — which is exactly how a block ends up impossible to type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CodeSpan {
+    /// Source index of the `code:` header line.
+    pub header: usize,
+    /// Raw whitespace width of the header's own indent.
+    pub header_indent: usize,
+}
+
+impl CodeSpan {
+    /// The indent a line must carry to belong to this block — one step
+    /// deeper than the header, which is what `strip_leading_ws` removes
+    /// again when the block is drawn.
+    pub fn body_indent(&self) -> String {
+        " ".repeat(self.header_indent + 1)
+    }
+}
+
+/// Is `i` inside a `code:` block (header line included)?
+///
+/// Mirrors the scan in [`render_lines_with`]: continuation lines are the
+/// ones indented deeper than the header, blank lines continue a block only
+/// when more code follows, and the header itself counts as being "in" its
+/// own block.
+pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
+    let mut k = 0;
+    while k < lines.len() {
+        let (_, header_indent, body) = indent_info(lines[k]);
+        if !body.starts_with("code:") {
+            k += 1;
+            continue;
+        }
+        // Forward scan, exactly as the renderer's block collector: deeper
+        // lines and blanks continue the block, then trailing blanks are
+        // handed back to the page.
+        let mut end = k + 1; // exclusive
+        let mut j = k + 1;
+        while j < lines.len() {
+            let (_, raw_len, _) = indent_info(lines[j]);
+            if raw_len > header_indent {
+                j += 1;
+                end = j; // a real code row: the block reaches at least here
+            } else if lines[j].trim().is_empty() {
+                j += 1; // may turn out to be trailing — `end` stays put
+            } else {
+                break;
+            }
+        }
+        if i >= k && i < end {
+            return Some(CodeSpan { header: k, header_indent });
+        }
+        if i < k {
+            return None; // headers only come later now
+        }
+        k = j.max(k + 1);
+    }
+    None
+}
+
 /// Does a `code:` block's language name mark a Mermaid diagram?
 ///
 /// Cosense accepts `code:mmd`, `code:mermaid` and `code:<filename>.mmd`
@@ -1020,5 +1086,39 @@ mod tests {
         assert_eq!(got[1], "      • 本文");
         assert_eq!(got[2], "        • 見出し");
         assert_eq!(got[3], "                • 基本は見出しH2で作成");
+    }
+
+    /// The editor asks `code_span_at` where a block is; the renderer
+    /// decides what a block is while it walks the page. If they disagree,
+    /// Enter drops a line where the renderer will not read it as code.
+    #[test]
+    fn code_span_agrees_with_what_the_renderer_collected() {
+        let src = [
+            "title",
+            " before",
+            "code:x.py",
+            " a = 1",
+            "",
+            " b = 2",
+            "",
+            "after",
+            " nested",
+            "  code:y.txt",
+            "   deep",
+            "plain",
+        ];
+        let refs: Vec<&str> = src.to_vec();
+        let inside: Vec<usize> = (0..src.len())
+            .filter(|&i| code_span_at(&refs, i).is_some())
+            .collect();
+        assert_eq!(inside, vec![2, 3, 4, 5, 9, 10], "blank INSIDE stays, trailing blank leaves");
+
+        let top = code_span_at(&refs, 3).unwrap();
+        assert_eq!(top.header, 2);
+        assert_eq!(top.body_indent(), " ", "one step deeper than a flush header");
+
+        let nested = code_span_at(&refs, 10).unwrap();
+        assert_eq!(nested.header, 9);
+        assert_eq!(nested.body_indent(), "   ", "deeper header, deeper body");
     }
 }

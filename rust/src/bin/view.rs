@@ -2162,6 +2162,28 @@ impl App {
         }
     }
 
+    /// The page as the screen sees it: the committed lines, except the
+    /// caret line, which is the session's working text. Structure has to
+    /// be judged on what the eye is reading, not on what the server last
+    /// heard — otherwise typing `code:` only becomes a code block one
+    /// commit later.
+    fn source_texts(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.lines.iter().map(|l| l.text.as_str()).collect();
+        if let Some(s) = self.session.as_ref() {
+            if let Some(slot) = v.get_mut(s.line) {
+                *slot = s.input.buf.as_str();
+            }
+        }
+        v
+    }
+
+    /// Is `line` inside a `code:` block? Bullet display and caret math both
+    /// need this: in code the leading whitespace is content, so it is not
+    /// drawn as a bullet and the caret does not step over one.
+    fn line_in_code(&self, line: usize) -> bool {
+        line < self.lines.len() && cosense::render::code_span_at(&self.source_texts(), line).is_some()
+    }
+
     /// View mode: rendered blocks wrapped to the pane, each tagged with the
     /// source line it came from. The edit session's caret line renders as
     /// RAW SOURCE (cosense web: the line with the caret reveals its
@@ -2170,11 +2192,16 @@ impl App {
         let text_w = Self::text_width(Mode::View, width);
         let edit: Option<(usize, &str)> =
             self.session.as_ref().map(|s| (s.line, s.input.buf.as_str()));
+        // Inside a `code:` block the caret line is code, not an outline
+        // row: its leading whitespace is content and must not be drawn as
+        // a bullet. Judged on the WORKING text, so typing `code:` turns
+        // the bullets off as you type it, not one commit later.
+        let edit_in_code = edit.map(|(line, _)| self.line_in_code(line)).unwrap_or(false);
         let raw_rows = |content: &mut Vec<Row>, buf: &str, src: usize| {
             // The indent renders as its bullet (dim) — same shape as the
             // view — while the underlying data stays whitespace.
-            let disp = session_display(buf);
-            let prefix = display_prefix_bytes(buf);
+            let disp = session_display(buf, edit_in_code);
+            let prefix = if edit_in_code { 0 } else { display_prefix_bytes(buf) };
             for (k, seg) in wrap_plain_columns(&disp, text_w).into_iter().enumerate() {
                 let line = if k == 0 && prefix > 0 && seg.len() >= prefix {
                     Line::from(vec![
@@ -2870,10 +2897,10 @@ fn indent_of(s: &str) -> &str {
 /// terminal cells: level 1 `•`, level 2 `  •`, level 3 `    •`.
 /// The DATA stays unchanged and the caret conversion below maps between the
 /// compact source indent and its expanded display form.
-fn session_display(buf: &str) -> String {
+fn session_display(buf: &str, in_code: bool) -> String {
     let ind = indent_of(buf);
     let n = ind.chars().count();
-    if n == 0 {
+    if n == 0 || in_code {
         return buf.to_string();
     }
     let mut out = String::with_capacity(buf.len() + n + 4);
@@ -2891,9 +2918,10 @@ fn display_prefix_bytes(buf: &str) -> usize {
     if n == 0 { 0 } else { bullet_indent_width(n) + '•'.len_utf8() + 1 }
 }
 
-/// Byte offset in `session_display(buf)` for byte offset `caret` in `buf`.
-fn display_caret(buf: &str, caret: usize) -> usize {
-    let n = indent_of(buf).chars().count();
+/// Byte offset in `session_display(buf, in_code)` for byte offset `caret`.
+
+fn display_caret(buf: &str, caret: usize, in_code: bool) -> usize {
+    let n = if in_code { 0 } else { indent_of(buf).chars().count() };
     let ci = buf[..caret.min(buf.len())].chars().count();
     let di = if n == 0 {
         ci
@@ -2903,16 +2931,16 @@ fn display_caret(buf: &str, caret: usize) -> usize {
         // The display prefix has 2n chars; the source prefix has n.
         ci + n
     };
-    let disp = session_display(buf);
+    let disp = session_display(buf, in_code);
     disp.char_indices().nth(di).map(|(b, _)| b).unwrap_or_else(|| disp.len())
 }
 
 /// Inverse: a byte offset in `session_display(buf)` back to `buf`. A click
 /// in either cell of one visual indent step maps to the nearest logical
 /// source boundary; the injected space after `•` maps to the text start.
-fn raw_caret_from_display(buf: &str, disp_byte: usize) -> usize {
-    let n = indent_of(buf).chars().count();
-    let disp = session_display(buf);
+fn raw_caret_from_display(buf: &str, disp_byte: usize, in_code: bool) -> usize {
+    let n = if in_code { 0 } else { indent_of(buf).chars().count() };
+    let disp = session_display(buf, in_code);
     let di = disp[..disp_byte.min(disp.len())].chars().count();
     let ci = if n == 0 {
         di
@@ -4637,6 +4665,25 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
 fn session_split(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
+    // In a `code:` block the indent is content, not list structure. Enter
+    // on the HEADER opens the block's first body line (without this there
+    // is no way to type a block at all: the new line would start flush and
+    // the renderer would not read it as code), and Enter on a blank line
+    // inside keeps the body indent instead of escaping the list — the
+    // escape would silently drop you out of the block.
+    let code = cosense::render::code_span_at(&app.source_texts(), line);
+    if let Some(span) = code {
+        let indent = span.body_indent();
+        if line == span.header {
+            session_open_below(app, ctx, line, indent, String::new());
+            return;
+        }
+        if buf.chars().all(char::is_whitespace) {
+            let tail = format!("{indent}{}", buf[caret.min(buf.len())..].trim_start());
+            session_open_below(app, ctx, line, indent, tail);
+            return;
+        }
+    }
     if !buf.is_empty() && buf.chars().all(char::is_whitespace) {
         let id = app.lines[line].id.clone();
         let anchor = app
@@ -4683,6 +4730,37 @@ fn session_split(app: &mut App, ctx: &Ctx) {
     }
     app.cursor = line + 1;
     app.follow = true;
+}
+
+/// Add a line right below `line`, seat the session on it with the caret
+/// after `indent`, and leave the current line as it was. Used where Enter
+/// must place a line at a specific indent rather than split the text.
+fn session_open_below(app: &mut App, ctx: &Ctx, line: usize, indent: String, text: String) {
+    let text = if text.is_empty() { indent.clone() } else { text };
+    let anchor = app
+        .lines
+        .get(line + 1)
+        .map(|l| l.id.clone())
+        .unwrap_or_else(|| "_end".into());
+    let mut ops = Vec::new();
+    // The header's own text may still be uncommitted (you just typed
+    // `code:py`); commit it with the same edit that opens the body line.
+    if let Some(s) = app.session.as_ref() {
+        if s.input.buf != s.orig {
+            ops.push(EditOp::Replace { id: app.lines[line].id.clone(), text: s.input.buf.clone() });
+        }
+    }
+    ops.push(EditOp::Insert { anchor, lines: vec![(new_line_id(), text.clone())] });
+    do_edit(app, ctx, "new line", ops);
+    if let Some(s) = app.session.as_mut() {
+        s.line = line + 1;
+        s.input = Input { buf: text.clone(), cur: indent.len().min(text.len()) };
+        s.orig = text;
+        s.want_col = None;
+    }
+    app.cursor = line + 1;
+    app.follow = true;
+    app.laid_width = 0;
 }
 
 /// Backspace at BOL: join this line into the previous one; the caret
@@ -5461,8 +5539,9 @@ fn click_caret(app: &App, line: usize, col: usize) -> usize {
         .unwrap_or_default();
     // Map through the bullet display: what the eye clicked is the display
     // column, which the view (bullets at indent) also approximates.
-    let disp = session_display(&text);
-    raw_caret_from_display(&text, byte_at_col(&disp, col))
+    let in_code = app.line_in_code(line);
+    let disp = session_display(&text, in_code);
+    raw_caret_from_display(&text, byte_at_col(&disp, col), in_code)
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
@@ -6215,8 +6294,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if let Some(s) = &app.session {
         if let Some((first, _)) = app.src_rows(s.line) {
             let text_w = App::text_width(app.mode, app.laid_width.max(1));
-            let disp = session_display(&s.input.buf);
-            let dcaret = display_caret(&s.input.buf, s.input.cur);
+            let in_code = app.line_in_code(s.line);
+            let disp = session_display(&s.input.buf, in_code);
+            let dcaret = display_caret(&s.input.buf, s.input.cur, in_code);
             let (crow, ccol) = caret_row_col(&disp, dcaret, text_w);
             let y = text.y as i32 + (app.row_top(first) as i32 + crow as i32) - app.scroll as i32;
             let x = text.x as i32 + (ccol as i32).min(text.width.saturating_sub(1) as i32);
@@ -8960,6 +9040,84 @@ mod tests {
         assert!(jobs[2].0.starts_with("redo"));
     }
 
+    /// Typing a code block has to be possible at all: Enter on the
+    /// `code:` header opens the block's first body line, indented one step
+    /// deeper — which is what makes the renderer read it as code.
+    #[test]
+    fn enter_on_a_code_header_opens_the_block_body() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", ""]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        type_str(&mut app, &ctx, "code:x.py");
+
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[1].text, "code:x.py", "the header committed with the split");
+        assert_eq!(app.lines[2].text, " ", "the new line is body-indented");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (2, 1), "caret sits after the indent");
+
+        // …and typing there really is inside the block now.
+        type_str(&mut app, &ctx, "print(1)");
+        assert!(app.line_in_code(2), "the renderer would read this as code");
+        assert!(!app.line_in_code(0));
+    }
+
+    /// A blank line inside a block is blank CODE. The list-escape rule
+    /// (empty bullet + Enter → flush line) must not fire there, or two
+    /// Enters silently drop you out of the block.
+    #[test]
+    fn enter_on_a_blank_code_line_stays_in_the_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:x.py", " a = 1", " b = 2"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 6); // end of " a = 1"
+
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[3].text, " ", "the split inherits the code indent");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[3].text, " ", "the blank code line keeps its indent");
+        assert_eq!(app.lines[4].text, " ", "and so does the next one");
+        assert!(app.line_in_code(4), "still inside the block");
+        assert_eq!(app.session.as_ref().unwrap().line, 4);
+    }
+
+    /// Inside a code block the leading whitespace is content: it must not
+    /// be drawn as an outline bullet, and the caret must not step over one
+    /// that is not there.
+    #[test]
+    fn a_code_line_shows_no_bullet_while_editing() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:x.py", "  indented", "  after"]);
+        app.rebuild(40);
+
+        enter_session(&mut app, &ctx, 2, 2);
+        let rows = app.content_view(40);
+        let shown: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, src } if *src == 2 => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, vec!["  indented".to_string()], "raw code, no bullet");
+        assert_eq!(display_caret("  indented", 2, true), 2, "caret maps 1:1 in code");
+
+        // The same line OUTSIDE a block still gets its bullet.
+        let mut plain = page(&["title", "  indented"]);
+        plain.rebuild(40);
+        enter_session(&mut plain, &ctx, 1, 2);
+        let rows = plain.content_view(40);
+        let shown: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, src } if *src == 1 => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown, vec!["  • indented".to_string()]);
+    }
+
     /// Deletion belongs to EDIT: `^k` kills to the end of the line, and
     /// again on an exhausted line kills the line itself — all without
     /// leaving the session.
@@ -9562,22 +9720,22 @@ mod tests {
     fn session_line_shows_bullets_for_indent() {
         // Two cells per nesting step after the flush-left level 1; DATA
         // remains one whitespace character per logical level.
-        assert_eq!(session_display(" ab"), "• ab");
-        assert_eq!(session_display("  ab"), "  • ab");
-        assert_eq!(session_display(" \t\tab"), "    • ab", "tabs count as levels too");
-        assert_eq!(session_display("ab"), "ab", "no indent, no bullet");
-        assert_eq!(session_display("  "), "  • ", "a whitespace-only line shows just its bullet");
+        assert_eq!(session_display(" ab", false), "• ab");
+        assert_eq!(session_display("  ab", false), "  • ab");
+        assert_eq!(session_display(" \t\tab", false), "    • ab", "tabs count as levels too");
+        assert_eq!(session_display("ab", false), "ab", "no indent, no bullet");
+        assert_eq!(session_display("  ", false), "  • ", "a whitespace-only line shows just its bullet");
         // Caret mapping expands and contracts the visual indentation.
-        assert_eq!(display_caret("  ab", 1), 2, "one logical step = two cells");
-        assert_eq!(display_caret("  ab", 2), "  • ".len(), "text start lands after '• '");
-        assert_eq!(raw_caret_from_display("  ab", "  • ".len()), 2);
+        assert_eq!(display_caret("  ab", 1, false), 2, "one logical step = two cells");
+        assert_eq!(display_caret("  ab", 2, false), "  • ".len(), "text start lands after '• '");
+        assert_eq!(raw_caret_from_display("  ab", "  • ".len(), false), 2);
         // clicking ON the injected space snaps to the text start
-        assert_eq!(raw_caret_from_display("  ab", "  •".len()), 2);
-        assert_eq!(display_caret("  ab", 4), "  • ab".len(), "end maps to end");
-        assert_eq!(raw_caret_from_display("  ab", "  • ab".len()), 4);
-        assert_eq!(display_caret("\t\tab", 2), "  • ".len());
-        assert_eq!(raw_caret_from_display("\t\tab", "  • ".len()), 2);
-        assert_eq!(display_caret("ab", 1), 1, "no indent → identity");
+        assert_eq!(raw_caret_from_display("  ab", "  •".len(), false), 2);
+        assert_eq!(display_caret("  ab", 4, false), "  • ab".len(), "end maps to end");
+        assert_eq!(raw_caret_from_display("  ab", "  • ab".len(), false), 4);
+        assert_eq!(display_caret("\t\tab", 2, false), "  • ".len());
+        assert_eq!(raw_caret_from_display("\t\tab", "  • ".len(), false), 2);
+        assert_eq!(display_caret("ab", 1, false), 1, "no indent → identity");
         // the rendered session row carries the bullet + space
         let ctx = test_ctx();
         let mut app = page(&["t", "  deep"]);
