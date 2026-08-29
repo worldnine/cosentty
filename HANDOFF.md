@@ -142,13 +142,15 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 
 | file | change |
 | --- | --- |
+| `rust/src/capability.rs` | **new** — the split capability state (`Visibility`, `SyncState`, `RenderPolicy`, `Capabilities`, `decide`, `on_not_authorized`). Pure: no network, no clock, no I/O. §5b is this file. |
 | `rust/src/webrender.rs` | **new** — the contract above, `cache_key`, `FakeBackend`, `ArtifactCache`. |
 | `rust/src/chrome.rs` | **new** — CDP client, Chrome discovery/launch/reaping, element capture, base64. |
 | `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). `--twice` exercises the warm-browser path; it also reports Chrome process counts across `idle()`/`shutdown()`. |
 | `rust/src/render.rs` | `mermaid_lang()`; `code:` blocks whose language is Mermaid emit `Block::WebRender` carrying the code plus the unchanged code rows. Everything else is byte-for-byte as before. |
 | `rust/src/theme.rs` | `shimmer_level` / `shimmer_style` — the pure "still rendering" brightness wave, mixing an RGB foreground toward the terminal background (DIM attribute for named colors). |
-| `rust/src/bin/view.rs` | `WebJob` (`Render` / `Rescale`), `WebMsg`, `spawn_web_worker`; App fields (`web_gen`, `web_dark`, `web_pending`, `web_errors`, `web_shimmer`, `web_cols`, `web_rescaling`, `web_unsynced`, `web_notice`, channels); `web_request`, `start_web_renders`, `rescale_diagrams`, `drain_web_renders`, `note_web_failure` / `expire_web_notice`, `hint_text`, `mark_desynced` / `mark_synced`; `diagram_max_cols` + a `max_cols` argument on `build_image`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
-| `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary. |
+| `rust/src/bin/view.rs` | `WebJob` (`Render` / `Rescale`), `WebMsg`, `spawn_web_worker`; App fields (`web_gen`, `web_dark`, `web_pending`, `web_errors`, `web_shimmer`, `web_cols`, `web_rescaling`, `web_unsynced`, `web_notice`, `caps`, `render_policy`, `web_missing`, `sync_state`, channels); `web_request`, `start_web_renders(Trigger)`, `rescale_diagrams`, `drain_web_renders`, `note_web_failure` / `expire_web_notice`, `hint_text`, `mark_desynced` / `mark_synced`, `set_sync_state` / `sync_label`, `absorb_interval` (the poller's control channel), `ensure_visibility` / `drain_visibility`, `note_denied`; the `m` key; `diagram_max_cols` + a `max_cols` argument on `build_image`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
+| `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary; `probe_visibility` — an anonymous `GET /api/projects/<name>` that attaches **no** credential. |
+| `rust/src/ws.rs` | `WsEvent::State(SyncState)` emitted unthrottled on every failure edge and once the post-join catch-up lands; `sync_plan` → `initial_plan` (a sid no longer buys the slow poll). |
 | `rust/src/bin/probe.rs` | prints the new block kind. |
 | `rust/KEYMAP.md` | user-facing section: dependency, auth, fallback, notation, env vars. |
 | `rust/Cargo.toml` | registers the `web_smoke` bin. **No new dependencies.** |
@@ -268,8 +270,7 @@ the render worker — never on the UI thread.
 
 ## 6. Tests and build
 
-* `cargo test`: **174 green** — lib **105** (78 baseline + 27 new) and view **69**
-  (47 baseline + 22 new). No test launches a browser or touches the network, and none
+* `cargo test`: **203 green** — lib **116** and view **87**. No test launches a browser or touches the network, and none
   of them sleeps: the job channel and the fake backend's gate are the synchronisation.
 * `cargo build --release`: succeeds, **no new warnings**.
 
@@ -296,6 +297,22 @@ New coverage, against the acceptance list:
 | selector / artifact correspondence | `webrender::selector_addresses_the_preview_by_line_id`, `webrender::fake_backend_answers_by_key`, `view::an_artifact_replaces_the_code_block_and_edit_puts_it_back` |
 | credential never leaks | `webrender::cache_key_never_carries_a_credential` |
 | edit contract preserved | `view::an_artifact_replaces_the_code_block_and_edit_puts_it_back` (second half) |
+| a stale sid never costs 60 s of silence | `capability::a_stale_sid_never_buys_the_slow_poll`, `ws::a_sid_alone_does_not_earn_the_slow_poll`, `view::a_stale_sid_polls_fast_from_the_first_second`, `view::only_a_proven_room_relaxes_the_poll_and_a_drop_tightens_it_again` |
+| the poller retunes mid-sleep | `view::speeding_up_the_poll_fetches_at_once_slowing_down_does_not`, `view::a_pile_of_state_changes_collapses_to_the_last_one`, `view::the_poller_stops_when_the_app_is_gone` |
+| sync state is typed, not parsed | `view::a_session_without_a_sid_is_never_called_reconnecting` (the label comes from `SyncState`; nothing reads the status text) |
+| no sid + public still renders | `capability::no_sid_on_a_public_project_still_renders`, `view::no_sid_on_a_public_project_renders_anonymously_and_leaves_rest_alone` |
+| no sid + private: cache only, REST intact | `capability::no_sid_on_a_private_project_falls_back_to_source_and_says_why`, `view::no_sid_on_a_private_project_serves_the_cache_and_never_launches_a_browser` (backend calls = 0, the cached diagram still shows, `editable` untouched) |
+| the notice is per page, not per diagram | `view::the_private_notice_is_said_once_per_page_not_once_per_diagram` |
+| unknown visibility is conservative | `capability::unknown_visibility_is_automatic_only_when_explicitly_asked`, `view::unknown_visibility_waits_for_an_explicit_m` |
+| a rejected cookie is retried anonymously | `capability::a_rejected_cookie_counts_as_no_cookie_at_all`, `capability::a_stale_cookie_on_a_public_page_is_retried_without_it`, `view::a_stale_cookie_on_a_public_page_retries_without_it` (asserts the retry job's `auth`) |
+| a refused private render keeps edits working | `view::a_refused_private_render_falls_back_to_source_without_disabling_edits` |
+| visibility resets across projects | `capability::moving_project_forgets_that_project_s_findings_but_not_the_sid`, `view::moving_to_another_project_forgets_the_old_one_s_verdict` |
+| visibility mapping matches the live API | `capability::visibility_reads_the_measured_status_codes` |
+| manual is the default and costs no browser | `capability::manual_shows_what_it_has_and_draws_only_when_asked`, `view::by_default_opening_a_page_shows_cached_diagrams_and_starts_no_browser` |
+| `m` draws the missing ones in one batch | `view::m_draws_the_diagrams_the_page_load_could_not` |
+| a cache miss is not a failure | `view::a_cache_miss_never_blocks_the_later_m` |
+| auto / off | `capability::off_touches_nothing_at_all`, `view::auto_draws_on_load_and_off_draws_never` |
+| `m` types a character while editing | `view::m_is_an_ordinary_character_while_editing` |
 
 ## 7. Live smoke results
 
@@ -508,6 +525,48 @@ websocket resync. The conflict path already reloads through `set_page`, so it cl
 too, and nothing about the existing "never lose what you typed" contract changes. The
 ~3 s poller is deliberately **not** a clear point: its apply gate is conditional, so
 treating it as authoritative would re-open the window this exists to close.
+
+## 7h. Render policy: a browser starts when you ask
+
+Launching Chrome is by a wide margin the most expensive thing this viewer does
+(~1.4 s of startup, ~250 MB resident, 8–17 s for a page of diagrams). Doing that on
+every page load, for a reader who may only be passing through, is not a good trade.
+
+`COSENSE_WEB_RENDER`, default **`manual`**:
+
+| value | page load | `m` |
+|---|---|---|
+| `manual` | disk cache only — hits draw, misses stay source, no browser, no notice | draws every missing diagram in **one** batch |
+| `auto` | draws every renderable miss | same |
+| `off` | nothing: no worker thread, no backend, no cache directory is created or swept | says the renderer is off |
+
+`m` is READ-mode only; inside an edit session it types the letter, because session keys
+are routed before the reader's keymap (`handle_key` → `handle_session_key`).
+
+A cache miss is recorded in `web_missing`, **not** `web_errors`: a miss is not a failure,
+it stops the block pulsing, and it must leave the artifact drawable by a later `m`.
+
+`COSENSE_WEB_IDLE_SECS` (0..=300, default **15**) is how long a browser is kept warm
+between batches — a re-render in a warm browser is roughly twice as fast. `0` reaps it
+after every batch.
+
+## 7i. What a private page looks like to a browser with no cookie
+
+Found by running the smoke against `my-sandbox` with `COSENSE_SID` unset.
+
+An anonymous request for a private page returns **HTTP 401** and the SPA shell renders
+with no `.lines` and no `.page` — and **the URL does not change**, so the existing
+`/login` redirect check never fired. The batch therefore spent its entire 25 s budget
+and reported `browser timed out`, which names the wrong cause entirely.
+
+The wait loop now also gives up when `document.readyState === 'complete'` and the page
+body has still not appeared after 4 s, reporting `NotAuthorized`. Measured on that page:
+**27.5 s → 8.3 s**, with the right reason. This is what makes the anonymous-retry branch
+of §5b reachable in practice rather than theoretical.
+
+The conservative gate still does the real work: a project known to be `Private` with no
+usable cookie never launches a browser at all. `Unknown` + an explicit `m` is the one
+place a wasted launch is possible, and it costs ~8 s once per project per session.
 
 ## 8. Known limits, security, distribution
 
