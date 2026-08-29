@@ -460,6 +460,7 @@ impl ChromeBackend {
         // batch spent its whole 25 s budget and reported a timeout, which
         // named the wrong cause.
         let mut settled_at: Option<Instant> = None;
+        let mut asked_api = false;
         const BLANK_GRACE: Duration = Duration::from_secs(4);
         // A block Cosense refuses to draw (a Mermaid syntax error) never
         // becomes ready, and waiting out the whole budget for it would make
@@ -490,8 +491,15 @@ impl ChromeBackend {
                 let settled = v.get("settled").and_then(|b| b.as_bool()).unwrap_or(false);
                 if settled && !ever_loaded {
                     let since = *settled_at.get_or_insert_with(Instant::now);
-                    if since.elapsed() > BLANK_GRACE {
-                        return Err(WebError::NotAuthorized);
+                    // Ask ONCE, and only for evidence — never guess from
+                    // the blankness itself.
+                    if since.elapsed() > BLANK_GRACE && !asked_api {
+                        asked_api = true;
+                        if let Some(e) = blank_verdict(self.page_api_status(cdp, reqs, deadline)) {
+                            return Err(e);
+                        }
+                        // Not a refusal: it is just slow. Keep waiting for
+                        // the ordinary budget, exactly as before.
                     }
                 } else {
                     settled_at = None;
@@ -511,6 +519,47 @@ impl ChromeBackend {
             }
             self.tick(deadline, Duration::from_millis(200))?;
         }
+    }
+
+    /// What the page API says to THIS browser, with whatever cookie the
+    /// browser is holding. Run inside the page so the request carries the
+    /// same credential state the navigation did — that is the whole point:
+    /// it distinguishes "we may not read this" from "this is slow".
+    ///
+    /// Returns `None` when no status could be obtained; the caller then
+    /// keeps waiting rather than inventing a reason.
+    fn page_api_status(
+        &self,
+        cdp: &mut Cdp,
+        reqs: &[WebRequest],
+        deadline: Instant,
+    ) -> Option<u16> {
+        let expr = format!(
+            r#"fetch('/api/pages/' + encodeURIComponent({proj}) + '/' + encodeURIComponent({title}),
+                     {{credentials: 'include'}})
+                 .then(function(r){{ return String(r.status); }})
+                 .catch(function(){{ return 'x'; }})"#,
+            proj = serde_json::to_string(&reqs[0].project).ok()?,
+            title = serde_json::to_string(&reqs[0].title).ok()?,
+        );
+        let res = cdp
+            .call(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expr,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                }),
+                deadline,
+            )
+            .ok()?;
+        let status = res
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u16>().ok());
+        self.debug(format!("blank page: page API said {status:?}"));
+        status
     }
 
     /// Sleep, but give up as soon as the deadline passes or the app quits.
@@ -633,6 +682,24 @@ fn capture(
 }
 
 /// `Runtime.evaluate` an expression that returns a JSON string, and parse it.
+/// What a page that never drew its body actually means.
+///
+/// A blank page is NOT evidence of anything on its own: a slow SPA, a
+/// throttled CPU and a page we may not read all look identical from the
+/// outside, and the previous version of this called every one of them
+/// `NotAuthorized`. So we ask the browser, in its own cookie state, what
+/// the page API says — and only a refusal counts as a refusal.
+///
+/// `status` is the HTTP status the in-page fetch saw, or `None` if the
+/// fetch itself could not be made. `None` verdict means "keep waiting":
+/// the ordinary budget then decides between `Timeout` and `NotRendered`.
+fn blank_verdict(status: Option<u16>) -> Option<WebError> {
+    match status {
+        Some(401) | Some(403) => Some(WebError::NotAuthorized),
+        _ => None,
+    }
+}
+
 fn eval_json(cdp: &mut Cdp, expr: &str, deadline: Instant) -> Result<serde_json::Value, WebError> {
     let res = cdp.call(
         "Runtime.evaluate",
@@ -812,6 +879,24 @@ mod tests {
             code_hash: 1,
             dark: true,
         }
+    }
+
+    #[test]
+    fn a_blank_page_is_only_a_refusal_when_the_api_refuses() {
+        // The evidence that matters.
+        assert!(matches!(blank_verdict(Some(401)), Some(WebError::NotAuthorized)));
+        assert!(matches!(blank_verdict(Some(403)), Some(WebError::NotAuthorized)));
+        // Everything else is "keep waiting": a slow SPA whose lines take
+        // more than the grace period to appear must NOT be called a login
+        // failure. The ordinary budget decides those.
+        for s in [200u16, 204, 404, 429, 500, 503] {
+            assert!(
+                blank_verdict(Some(s)).is_none(),
+                "HTTP {s} is not evidence that we are unauthenticated"
+            );
+        }
+        // No status at all is no evidence either.
+        assert!(blank_verdict(None).is_none());
     }
 
     #[test]
