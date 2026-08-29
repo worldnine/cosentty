@@ -1336,8 +1336,15 @@ impl App {
 
     /// Visual row at `screen_row` (0-based inside the text area), accounting
     /// for scrolling and multi-row images.
-    fn row_at_screen_row(&self, screen_row: u16) -> Option<&Row> {
-        let want = self.scroll as u32 + screen_row as u32;
+    fn row_at_screen_row(&self, screen_row: i32) -> Option<&Row> {
+        // `screen_row == 0` is the normal content anchor one row below the
+        // top rule. Once scrolled, `-1` is valid: content reclaims the screen
+        // row where that rule used to be.
+        let want = self.scroll as i32 + screen_row;
+        if want < 0 {
+            return None;
+        }
+        let want = want as u32;
         let mut y = 0u32;
         for row in &self.rows {
             let h = row.height() as u32;
@@ -1351,7 +1358,7 @@ impl App {
 
     /// The source line rendered at `screen_row`; `None` on a card row or
     /// past the end.
-    fn src_at_screen_row(&self, screen_row: u16) -> Option<usize> {
+    fn src_at_screen_row(&self, screen_row: i32) -> Option<usize> {
         self.row_at_screen_row(screen_row).and_then(Row::src)
     }
 
@@ -1360,7 +1367,7 @@ impl App {
     /// to be reverse-mapped to raw byte offsets.
     fn link_at_screen_position(
         &self,
-        screen_row: u16,
+        screen_row: i32,
         col: usize,
         pal: &cosense::theme::Palette,
     ) -> Option<(usize, LinkItem)> {
@@ -1420,7 +1427,11 @@ impl App {
         } else {
             exact
         };
-        let target_y = self.scroll as u32 + screen_row as u32;
+        let target_y = self.scroll as i32 + screen_row;
+        if target_y < 0 {
+            return None;
+        }
+        let target_y = target_y as u32;
         let mut y = 0u32;
         let mut occurrence = 0usize;
         for row in &self.rows {
@@ -3978,11 +3989,15 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
 
     let text = app.text_rect;
     let bar = app.bar_rect;
-    let in_rows = m.row >= text.y && m.row < text.y + text.height;
+    // `text.y` is the unscrolled content anchor below the top rule. The
+    // visible band also includes one row above it: that row is the rule at
+    // scroll=0 and becomes content as soon as the rule scrolls away.
+    let viewport_top = text.y.saturating_sub(1);
+    let viewport_bottom = text.y.saturating_add(text.height);
+    let in_rows = m.row >= viewport_top && m.row <= viewport_bottom;
     let in_text_col = m.column >= text.x && m.column < text.x + text.width;
-    let screen_row = m.row.saturating_sub(text.y);
-    let clamped_row =
-        m.row.clamp(text.y, (text.y + text.height).saturating_sub(1)) - text.y;
+    let screen_row = m.row as i32 - text.y as i32;
+    let clamped_row = m.row.clamp(viewport_top, viewport_bottom) as i32 - text.y as i32;
     let in_track = m.row >= bar.y && m.row < bar.y + bar.height;
     let track_row = m.row.saturating_sub(bar.y);
     // The pointer may leave the scrollbar while dragging: clamp it back.
@@ -4421,15 +4436,15 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         body.width.saturating_sub(5),
         body.height.saturating_sub(2),
     );
-    // Reserve the screen row carrying the top frame rule. The scrollbar's
-    // top-position thumb starts immediately below it instead of replacing
-    // one of its horizontal cells.
-    let bar = Rect::new(
-        bar_x,
-        body.y.saturating_add(1),
-        1,
-        body.height.saturating_sub(1),
-    );
+    // While the top rule is visible, the scrollbar starts immediately
+    // below it. After scrolling the rule away, the track reclaims that row
+    // just like text, images, and telomeres do.
+    let (bar_y, bar_h) = if app.scroll == 0 {
+        (body.y.saturating_add(1), body.height.saturating_sub(1))
+    } else {
+        (body.y, body.height)
+    };
+    let bar = Rect::new(bar_x, bar_y, 1, bar_h);
 
     // The page frame hugs PAGE CONTENT ONLY. Its explicit FrameEnd closes
     // the box; related sections continue beneath it without vertical sides.
@@ -4504,9 +4519,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
 
     let view_top = app.scroll as i32;
-    // The visible band holds band_h rows; the content plus rules scroll
-    // through it. Rows are tested against `text.y + n - scroll` below.
-    let view_bottom = view_top + band_h as i32;
+    // Row coordinates exclude the top rule, while drawing uses
+    // `text.y + row - scroll`. Therefore one row above `view_top` remains
+    // visible at the band's top after scrolling; omitting it left screen row
+    // 2 permanently blank.
+    let visible_rows_top = view_top - 1;
+    let visible_rows_bottom = view_top + band_h as i32 - 1;
     let sel_range = app.selection.map(|s| s.range());
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
@@ -4518,7 +4536,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         let top = y;
         let bottom = y + h;
         y = bottom;
-        if bottom <= view_top || top >= view_bottom {
+        if bottom <= visible_rows_top || top >= visible_rows_bottom {
             continue;
         }
         let screen_y = top - view_top;
@@ -4639,15 +4657,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 // behaves the same). Position the slice relative to text.y
                 // (the content anchor), matching how text rows move.
                 if let Some(info) = app.images.get(url) {
-                    let pos = SignedPosition { x: 1, y: screen_y as i16 };
-                    // SlicedImage draws relative to the area's top-left; give
-                    // it the full band so y = screen_y lands on the same row
-                    // the text uses.
+                    // The image area starts at the whole band's top, unlike
+                    // the unscrolled text anchor (`text.y`) one row below it.
+                    // Adding that one-cell delta lets a partially scrolled
+                    // image paint the reclaimed top row too.
+                    let pos = SignedPosition {
+                        x: 1,
+                        y: (screen_y + text.y as i32 - band_top) as i16,
+                    };
                     let img_area = Rect::new(
                         text.x,
-                        text.y,
+                        band_top as u16,
                         text.width,
-                        (band_bot - text.y as i32 + 1) as u16,
+                        band_h,
                     );
                     f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
                 }
@@ -4677,8 +4699,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // is, never a double line). The thumb tracks the VIEWPORT offset (wheel
     // scroll moves the viewport only); when the content fits, nothing is
     // drawn and the border stays clean.
-    // The track starts below the top rule; geometry still uses the full
-    // viewport so its scroll range matches keyboard/wheel scrolling.
+    // The track starts below the top rule while that rule is visible, then
+    // expands into the reclaimed row. Its scroll range still matches the
+    // full keyboard/wheel viewport.
     let thumb = Style::default().fg(CHROME_SCROLL);
     if let Some((start, len)) = cosense::theme::scroll_thumb_in_track(
         (app.total_height() + 1) as usize,
@@ -5930,6 +5953,7 @@ mod tests {
         assert_eq!(app.src_at_screen_row(5), Some(2));
         assert_eq!(app.src_at_screen_row(6), None, "past the end");
         app.scroll = 3;
+        assert_eq!(app.src_at_screen_row(-1), Some(1), "reclaimed top row maps too");
         assert_eq!(app.src_at_screen_row(0), Some(1));
         assert_eq!(app.src_at_screen_row(2), Some(2));
     }
@@ -5938,14 +5962,14 @@ mod tests {
         MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
     }
 
-    /// A 30-line page laid out in a 40x10 text area at (1,1) under a
-    /// 1-row header, with the scrollbar at column 41.
+    /// A 30-line page in the same vertical geometry as `ui`: body band
+    /// y=1..10, unscrolled content anchor y=2, scrollbar at column 41.
     fn page_with_screen() -> App {
         let texts: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let mut app = page(&refs);
         app.rebuild(42);
-        app.text_rect = Rect::new(1, 1, 40, 10);
+        app.text_rect = Rect::new(1, 2, 40, 8);
         app.bar_rect = Rect::new(41, 1, 1, 10);
         app.view_h = 10;
         app
@@ -5992,6 +6016,26 @@ mod tests {
             assert_eq!(buf.cell((40, 2)).unwrap().fg, Color::Gray);
         }
 
+        // Once the top rule scrolls away, screen row 2 (y=1) is reclaimed
+        // by every page layer instead of remaining a permanent blank strip.
+        app.scroll = 1;
+        app.follow = false;
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = terminal.backend().buffer();
+            assert_eq!(buf.cell((0, 1)).unwrap().symbol(), ">");
+            assert_ne!(buf.cell((1, 1)).unwrap().symbol(), " ", "telomere at top row");
+            assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "l", "text at top row");
+            assert_eq!(buf.cell((40, 1)).unwrap().symbol(), "▐", "scrollbar at top row");
+        }
+        app.cursor = 5;
+        handle_mouse_content(
+            &mut app,
+            &ctx,
+            mouse(MouseEventKind::Down(MouseButton::Left), 8, 1),
+        );
+        assert_eq!(app.cursor, 0, "reclaimed top row remains mouse-addressable");
+
         enter_session(&mut app, &ctx, 0, 0);
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = terminal.backend().buffer();
@@ -6000,21 +6044,60 @@ mod tests {
     }
 
     #[test]
+    fn scrolled_image_placeholder_reclaims_the_top_body_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = page(&["image"]);
+        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into() }];
+        app.srcs = vec![0];
+        let ctx = test_ctx();
+        let mut terminal = Terminal::new(TestBackend::new(42, 8)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        app.scroll = 1;
+        app.follow = false;
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = terminal.backend().buffer();
+            assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "□");
+            assert_ne!(buf.cell((1, 1)).unwrap().symbol(), " ", "image telomere at top row");
+        }
+
+        // The real sliced image uses a different widget path from its text
+        // placeholder and must reclaim the same row.
+        let pixels = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
+        let info = build_image(&ctx.picker, image::DynamicImage::ImageRgba8(pixels)).unwrap();
+        app.images.insert("https://example.com/a.png".into(), info);
+        app.rebuild(42);
+        app.scroll = 1;
+        app.follow = false;
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        assert!(
+            (3..20).any(|x| {
+                let cell = buf.cell((x, 1)).unwrap();
+                cell.fg == Color::Rgb(255, 0, 0) || cell.bg == Color::Rgb(255, 0, 0)
+            }),
+            "sliced image paints the reclaimed top row",
+        );
+    }
+
+    #[test]
     fn click_moves_cursor_and_drag_selects_a_line_range() {
         let mut app = page_with_screen();
         app.scroll = 5;
-        // press on screen row 2 -> display row 7 -> line 7
-        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 10, 3));
+        // press two rows below the content anchor -> display row 7
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 10, 4));
         assert_eq!(app.cursor, 7);
         assert_eq!(app.selection, None, "a click alone selects nothing");
-        // drag down to screen row 6 -> line 11: selection 7..=11
-        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 12, 7));
+        // drag four rows down -> line 11: selection 7..=11
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 12, 8));
         assert_eq!(app.selection.map(|s| s.range()), Some((7, 11)));
         assert_eq!(app.cursor, 11);
         // dragging back above the anchor flips the range
-        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 12, 1));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 12, 2));
         assert_eq!(app.selection.map(|s| s.range()), Some((5, 7)));
-        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Up(MouseButton::Left), 12, 1));
+        handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Up(MouseButton::Left), 12, 2));
         assert_eq!(app.drag_anchor, None);
         // the selection survives the release (c comments on it)
         assert_eq!(app.selection.map(|s| s.range()), Some((5, 7)));
