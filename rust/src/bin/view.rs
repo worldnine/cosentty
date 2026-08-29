@@ -1425,6 +1425,12 @@ impl App {
         if self.inflight > 0 || self.web_unsynced {
             return false;
         }
+        // A historical snapshot is not what the server is showing now, so a
+        // screenshot of the live page would be filed under the snapshot's
+        // source hash — the same poisoning `src_epoch` guards against.
+        if self.time.is_some() {
+            return false;
+        }
         // A block whose picture is already on screen and whose source has
         // just moved is a REFRESH, not a first draw: the reader is watching
         // that diagram and expects it to keep up. Refreshes are treated as
@@ -3949,9 +3955,15 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('q'), false) => return Action::Quit,
         (KeyCode::Esc, false) => {
             if app.time.is_some() {
-                app.time = None;
-                reload_page(app, ctx);
-                app.status = "NOW".into();
+                // Leaving history means the live page replaces the snapshot.
+                // If that fetch fails there is no live page to show, so we
+                // stay in history: `set_page` (which clears `time`) runs
+                // only on success. Clearing `time` first would relabel the
+                // SNAPSHOT's lines as NOW and editable, and let the renderer
+                // screenshot today's page under a historical source's hash.
+                if reload_page(app, ctx) {
+                    app.status = "NOW".into();
+                }
             } else if app.selection.is_some() {
                 app.selection = None;
                 app.status = "selection cleared".into();
@@ -5091,10 +5103,21 @@ fn ws_send_resync_request(app: &mut App) {
 /// at the end and the session continues there.
 fn recover_conflict(app: &mut App, ctx: &Ctx) {
     app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // 409 means the server moved and our ops did not land: local and server
+    // disagree from this moment. Marked BEFORE the reload, because if the
+    // reload fails we are still divergent and must not render — a browser
+    // would screenshot the server's text and file it under ours.
+    app.mark_desynced();
     let stash = app.session.as_ref().map(|s| {
         (app.lines.get(s.line).map(|l| l.id.clone()).unwrap_or_default(), s.input.buf.clone(), s.input.cur)
     });
-    reload_page(app, ctx); // set_page clears session + undo lineage
+    if !reload_page(app, ctx) {
+        // `reload_page` already said why on the status line; saying anything
+        // else here would bury it. The reader keeps their text, the flag
+        // stays set, and the next successful install clears it.
+        return;
+    }
+    // set_page cleared session + undo lineage and marked us synced again.
     match stash {
         None => {
             app.status = "page changed by someone else — reloaded".into();
@@ -5157,9 +5180,11 @@ fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
             show_snapshot(app, ctx, pos - 1);
         }
     } else if pos + 1 >= len {
-        app.time = None;
-        reload_page(app, ctx);
-        app.status = "NOW".into();
+        // Past the newest snapshot is NOW — but only if NOW can be fetched.
+        // See the Esc path: a failed reload keeps the snapshot, read-only.
+        if reload_page(app, ctx) {
+            app.status = "NOW".into();
+        }
     } else {
         show_snapshot(app, ctx, pos + 1);
     }
@@ -6311,6 +6336,27 @@ mod tests {
         }
     }
 
+    /// A Ctx whose every network call fails, fast and offline: `.invalid`
+    /// is reserved by RFC 2606 and cannot resolve. Used to exercise the
+    /// "the fetch did not work" branches without touching the network.
+    fn offline_ctx() -> Ctx {
+        let cfg = Config {
+            project: "proj".into(),
+            auth: AuthStore::default(),
+            api_domain: "cosense-tui-test.invalid".into(),
+        };
+        Ctx { client: Client::new(cfg).unwrap(), ..test_ctx() }
+    }
+
+    /// A page parked on a historical snapshot.
+    fn in_history(app: &mut App) {
+        app.time = Some(TimeMachine {
+            points: vec![cosense::api::SnapshotStamp { id: "s1".into(), created: 1 }],
+            pos: 0,
+            cache: HashMap::new(),
+        });
+    }
+
     fn page(texts: &[&str]) -> App {
         let mut app = App::new("proj".into());
         app.title = "t".into();
@@ -6346,6 +6392,77 @@ mod tests {
     // ---------------------------------------------------------------
     // A poll response is a photograph of the past.
     // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // A fetch that fails must not be treated as one that succeeded.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_snapshot_never_renders_diagrams() {
+        // A historical page is not what the server is showing now, so a
+        // screenshot of the live page would be filed under the snapshot's
+        // source hash.
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        in_history(&mut app);
+        app.rebuild(80);
+        assert!(!app.start_web_renders(capability::Trigger::Auto));
+        assert!(app.start_web_renders(capability::Trigger::Manual) == false);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        assert!(app.web_pending.is_empty());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_reader_in_history() {
+        let ctx = offline_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        in_history(&mut app);
+        app.rebuild(80);
+        // Esc asks for NOW. The fetch fails, so there is no NOW to show.
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.time.is_some(), "the snapshot stays on screen");
+        assert_ne!(app.status, "NOW", "and it is not labelled as the live page");
+        assert!(app.status.contains("reload failed"), "the reason is shown: {}", app.status);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no diagram work");
+    }
+
+    #[test]
+    fn a_failed_reload_at_the_newest_snapshot_also_stays_put() {
+        let ctx = offline_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        in_history(&mut app);
+        app.rebuild(80);
+        // Right from the newest snapshot is the other way out of history.
+        travel(&mut app, &ctx, 1);
+        assert!(app.time.is_some());
+        assert_ne!(app.status, "NOW");
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+    }
+
+    #[test]
+    fn a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved() {
+        // 409 means our ops did not land: local and server disagree. If the
+        // recovery fetch then fails too, we are STILL divergent — rendering
+        // would screenshot the server's text and file it under ours.
+        let ctx = offline_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        app.inflight = 1;
+        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict);
+        assert!(app.web_unsynced, "a failed recovery leaves us divergent");
+        assert!(
+            app.status.contains("reload failed"),
+            "the real reason is not overwritten: {}",
+            app.status
+        );
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        assert!(!app.start_web_renders(capability::Trigger::Manual));
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        assert!(app.web_pending.is_empty());
+    }
 
     #[test]
     fn a_poll_that_started_before_a_websocket_commit_never_rolls_it_back() {
