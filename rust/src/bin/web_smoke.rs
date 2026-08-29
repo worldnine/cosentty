@@ -9,7 +9,7 @@
 use cosense::api::{AuthStore, Client, Config};
 use cosense::chrome::ChromeBackend;
 use cosense::render::{render_lines, Block};
-use cosense::webrender::{hash_code, WebBackend, WebRequest};
+use cosense::webrender::{hash_code, ArtifactCache, WebBackend, WebRequest};
 
 /// Chrome processes launched by this viewer (they carry our profile path).
 fn chrome_procs() -> usize {
@@ -100,9 +100,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ok = again.iter().filter(|r| r.is_ok()).count();
         println!("second batch (warm browser): {ok}/{} ok in {:?}", again.len(), t1.elapsed());
     }
+    // Route successes through the real artifact cache, exactly as the
+    // viewer's render worker does, so a run also exercises (and lets the
+    // operator inspect) the on-disk cache and its permissions.
+    let cache = ArtifactCache::new();
+    println!("artifact cache: {}", cache.dir().display());
     for (req, res) in reqs.iter().zip(results) {
         match res {
             Ok(png) => {
+                cache.put(&req.cache_key(), &png);
                 let path = dir.join(format!("{}.png", req.line_id));
                 std::fs::write(&path, &png)?;
                 let dim = image::load_from_memory(&png)

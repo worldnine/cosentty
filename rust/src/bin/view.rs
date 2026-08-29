@@ -165,9 +165,17 @@ fn spawn_web_worker(
             let mut to_render: Vec<WebRequest> = Vec::new();
             for req in reqs {
                 let key = req.cache_key();
-                match cache.get(&key) {
-                    Some(png) => {
-                        let _ = out.send((gen, key, decode_web_png(&picker, &png, max_cols)));
+                match cache.get(&key).map(|png| decode_web_png(&picker, &png, max_cols)) {
+                    Some(Ok(info)) => {
+                        let _ = out.send((gen, key, Ok(info)));
+                    }
+                    // On disk but unreadable: truncated by a crash, or
+                    // corrupted underneath us. That must not become a
+                    // permanent failure for this artifact — drop the entry
+                    // and let the browser produce it again.
+                    Some(Err(_)) => {
+                        cache.remove(&key);
+                        to_render.push(req);
                     }
                     None => to_render.push(req),
                 }

@@ -20,7 +20,36 @@
 //!     does the rendering, and we only ever handle the resulting PNG bytes.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Bumped whenever OUR capture pipeline changes in a way that alters the
+/// pixels for unchanged source: the viewport width, the capture scale, the
+/// selector, or the readiness condition. It is part of the cache key, so a
+/// bump orphans every old artifact rather than showing a stale one.
+///
+/// It cannot cover the OTHER half of the rendering environment — Cosense's
+/// own Mermaid version and the project's CSS, which change without telling
+/// us. Nothing in the page identifies them, so a complete identity is not
+/// available; `artifact_ttl` bounds how long we trust an artifact instead.
+pub const ARTIFACT_SCHEMA: u32 = 1;
+
+/// Default lifetime of a cached PNG. Long enough that ordinary re-reading
+/// of a page never launches a browser, short enough that a Cosense-side
+/// renderer or ProjectCSS change works itself out without the reader
+/// knowing there is a cache. `COSENSE_WEB_CACHE_TTL_DAYS` overrides it;
+/// `0` disables the disk cache's reuse entirely.
+pub const ARTIFACT_TTL_DAYS: u64 = 7;
+
+pub fn artifact_ttl() -> Duration {
+    let days = std::env::var("COSENSE_WEB_CACHE_TTL_DAYS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|d| *d <= 3650)
+        .unwrap_or(ARTIFACT_TTL_DAYS);
+    Duration::from_secs(days * 24 * 60 * 60)
+}
 
 /// What kind of construct a request wants drawn. One variant today; the
 /// contract exists so TeX / `.icon` can be added without touching the TUI.
@@ -115,6 +144,7 @@ impl WebRequest {
         }
         h.write(&self.code_hash.to_le_bytes());
         h.write(&[self.dark as u8]);
+        h.write(&ARTIFACT_SCHEMA.to_le_bytes());
         // The `web:` prefix keeps these apart from image URLs, which share
         // the viewer's image maps.
         format!("web:{}:{:016x}", self.kind.tag(), h.0)
@@ -268,6 +298,10 @@ pub struct ArtifactCache {
     dir: PathBuf,
 }
 
+/// Temp files live in the cache directory (rename is only atomic within a
+/// filesystem) and are named so a sweep can tell them from artifacts.
+const TMP_PREFIX: &str = "incoming-";
+
 impl ArtifactCache {
     pub fn new() -> Self {
         Self::at(cache_root().join("cosense-tui").join("webrender"))
@@ -277,7 +311,66 @@ impl ArtifactCache {
     /// run never reads or writes the user's real cache.
     pub fn at(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).ok();
-        Self { dir }
+        let cache = Self { dir };
+        cache.harden_dir();
+        cache.sweep();
+        cache
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// These PNGs are renders of the user's pages, including private ones
+    /// reached with their `connect.sid`. On a shared machine the directory
+    /// must not be world- or group-readable.
+    fn harden_dir(&self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)).ok();
+        }
+    }
+
+    /// One pass over the directory that repairs and prunes:
+    ///   * artifacts written before this hardening (or with a lax umask)
+    ///     get their permissions tightened;
+    ///   * artifacts past the TTL, and empty ones, are removed;
+    ///   * artifacts orphaned by a schema bump are removed by the same TTL
+    ///     rule, since nothing will ever ask for their key again;
+    ///   * temp files left by an interrupted write are removed once they
+    ///     are too old to belong to a live writer.
+    fn sweep(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else { return };
+        let ttl = artifact_ttl();
+        let now = SystemTime::now();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .unwrap_or_default();
+            if name.starts_with(TMP_PREFIX) {
+                // A writer that is still running owns its temp file; an
+                // hour is far longer than any render.
+                if age > Duration::from_secs(3600) {
+                    std::fs::remove_file(&path).ok();
+                }
+                continue;
+            }
+            if meta.len() == 0 || age > ttl {
+                std::fs::remove_file(&path).ok();
+                continue;
+            }
+            harden_file(&path);
+        }
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -286,16 +379,101 @@ impl ArtifactCache {
         self.dir.join(format!("{}.png", key.replace(':', "-")))
     }
 
+    /// The cached PNG, if there is a fresh one. An entry past the TTL is
+    /// removed and reported as a miss, so the caller re-renders it.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.path(key)).ok().filter(|b| !b.is_empty())
+        let path = self.path(key);
+        let meta = std::fs::metadata(&path).ok()?;
+        if meta.len() == 0 {
+            std::fs::remove_file(&path).ok();
+            return None;
+        }
+        let fresh = meta
+            .modified()
+            .ok()
+            .and_then(|m| SystemTime::now().duration_since(m).ok())
+            .map(|age| age <= artifact_ttl())
+            .unwrap_or(true);
+        if !fresh {
+            std::fs::remove_file(&path).ok();
+            return None;
+        }
+        std::fs::read(&path).ok().filter(|b| !b.is_empty())
     }
 
+    /// Drop an entry — used when what came back off disk would not decode.
+    /// A corrupt artifact must never become a permanent failure: the caller
+    /// re-renders it in a browser instead.
+    pub fn remove(&self, key: &str) {
+        std::fs::remove_file(self.path(key)).ok();
+    }
+
+    /// Write an artifact so that no reader — this process, another viewer,
+    /// or the next run after a crash — can ever observe a partial PNG:
+    /// a private temp file in the same directory, then an atomic rename.
     pub fn put(&self, key: &str, png: &[u8]) {
         if png.is_empty() {
             return;
         }
-        std::fs::write(self.path(key), png).ok();
+        let Some((tmp, mut file)) = self.open_tmp() else { return };
+        let written = file
+            .write_all(png)
+            // The rename is atomic, but only the bytes that reached the
+            // disk survive a power cut; a torn PNG would then be cached
+            // forever (until the TTL), so pay for the sync.
+            .and_then(|()| file.sync_all())
+            .is_ok();
+        drop(file);
+        if !written || std::fs::rename(&tmp, self.path(key)).is_err() {
+            std::fs::remove_file(&tmp).ok();
+        }
     }
+
+    /// A uniquely named, private (0600) file in the cache directory.
+    /// `create_new` means an existing name — or a symlink planted at one —
+    /// is a failure, never a silent overwrite of somebody else's target.
+    fn open_tmp(&self) -> Option<(PathBuf, std::fs::File)> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..8 {
+            let nonce = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0)
+                ^ N.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let tmp = self.dir.join(format!(
+                "{TMP_PREFIX}{}-{nonce:016x}",
+                std::process::id()
+            ));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            if let Ok(f) = opts.open(&tmp) {
+                return Some((tmp, f));
+            }
+        }
+        None
+    }
+}
+
+/// Tighten an artifact that a previous version (or a lax umask) left
+/// readable by group or other.
+fn harden_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = std::fs::metadata(path) else { return };
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700)).ok();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 impl Default for ArtifactCache {
@@ -372,6 +550,179 @@ mod tests {
             line_id: "65695bc797c2910000c699b2".into(),
             code_hash: hash_code("flowchart LR\nA-->B"),
             dark: true,
+        }
+    }
+
+    fn scratch(tag: &str) -> ArtifactCache {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "cosense-tui-cachetest-{}-{tag}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        ArtifactCache::at(dir)
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_cache_is_private_and_repairs_what_it_finds() {
+        use std::os::unix::fs::PermissionsExt;
+        let c = scratch("perm");
+        c.put("web:mermaid:aaaa", b"png-bytes");
+        assert_eq!(mode_of(c.dir()), 0o700, "the directory holds renders of private pages");
+        let entry = c.dir().join("web-mermaid-aaaa.png");
+        assert_eq!(mode_of(&entry), 0o600);
+
+        // An artifact left world-readable by an older version is repaired
+        // the next time the cache is opened, not left as it was.
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(c.dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let reopened = ArtifactCache::at(c.dir().to_path_buf());
+        assert_eq!(mode_of(reopened.dir()), 0o700);
+        assert_eq!(mode_of(&entry), 0o600);
+        assert_eq!(reopened.get("web:mermaid:aaaa").as_deref(), Some(&b"png-bytes"[..]));
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_half_written_artifact() {
+        // Writes go to a private temp file and are renamed into place, so a
+        // concurrent reader observes either the old bytes or the new ones —
+        // never a prefix of the new ones.
+        let c = std::sync::Arc::new(scratch("atomic"));
+        let key = "web:mermaid:concurrent";
+        let a = vec![b'a'; 300_000];
+        let b = vec![b'b'; 300_000];
+        c.put(key, &a);
+        let writer = {
+            let (c, b) = (std::sync::Arc::clone(&c), b.clone());
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    c.put("web:mermaid:concurrent", &b);
+                }
+            })
+        };
+        for _ in 0..200 {
+            if let Some(got) = c.get(key) {
+                assert!(
+                    got == a || got == b,
+                    "a torn artifact reached a reader ({} bytes)",
+                    got.len()
+                );
+            }
+        }
+        writer.join().unwrap();
+        // The temp files all got renamed or cleaned up; nothing is left
+        // lying around to be mistaken for an artifact.
+        let leftovers: Vec<String> = std::fs::read_dir(c.dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(TMP_PREFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn empty_and_expired_entries_are_dropped_rather_than_served() {
+        let c = scratch("ttl");
+        // An empty file is never a valid PNG; it must not be handed out.
+        std::fs::write(c.dir().join("web-mermaid-empty.png"), b"").unwrap();
+        assert!(c.get("web:mermaid:empty").is_none());
+        assert!(!c.dir().join("web-mermaid-empty.png").exists(), "and it is removed");
+
+        // Past the TTL an artifact is a miss: Cosense's own Mermaid version
+        // and the project CSS can change without anything in the key moving.
+        c.put("web:mermaid:old", b"png-bytes");
+        let path = c.dir().join("web-mermaid-old.png");
+        let ancient =
+            SystemTime::now() - artifact_ttl() - Duration::from_secs(3600);
+        filetime_set(&path, ancient);
+        assert!(c.get("web:mermaid:old").is_none(), "expired entries are misses");
+        assert!(!path.exists());
+
+        // Inside the TTL it is served.
+        c.put("web:mermaid:new", b"png-bytes");
+        assert!(c.get("web:mermaid:new").is_some());
+    }
+
+    #[test]
+    fn the_ttl_is_configurable_and_bounded() {
+        let key = "COSENSE_WEB_CACHE_TTL_DAYS";
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        assert_eq!(artifact_ttl(), Duration::from_secs(ARTIFACT_TTL_DAYS * 86400));
+        std::env::set_var(key, "1");
+        assert_eq!(artifact_ttl(), Duration::from_secs(86400));
+        std::env::set_var(key, "0");
+        assert_eq!(artifact_ttl(), Duration::ZERO, "0 disables reuse");
+        std::env::set_var(key, "999999");
+        assert_eq!(
+            artifact_ttl(),
+            Duration::from_secs(ARTIFACT_TTL_DAYS * 86400),
+            "nonsense falls back to the default"
+        );
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn a_corrupt_entry_can_be_dropped_so_it_is_re_rendered() {
+        let c = scratch("corrupt");
+        // Truncated: a real PNG signature with nothing behind it.
+        c.put("web:mermaid:trunc", &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        assert!(c.get("web:mermaid:trunc").is_some(), "bytes are there…");
+        assert!(
+            image::load_from_memory(&c.get("web:mermaid:trunc").unwrap()).is_err(),
+            "…but they do not decode"
+        );
+        // The worker's response to that is to drop the entry, which turns
+        // the next request back into a browser render rather than a
+        // permanently cached failure.
+        c.remove("web:mermaid:trunc");
+        assert!(c.get("web:mermaid:trunc").is_none());
+        // Removing something absent is not an error.
+        c.remove("web:mermaid:never-existed");
+    }
+
+    #[test]
+    fn a_schema_bump_orphans_old_artifacts_instead_of_serving_them() {
+        // The schema is part of the key, so nothing can ask for the old
+        // one again; the TTL sweep is what eventually reclaims the file.
+        let k = req().cache_key();
+        let mut h = Fnv::new();
+        for part in ["mermaid", "help-jp", "Mermaid", "65695a556db42200239324b9", "65695bc797c2910000c699b2"] {
+            h.write(part.as_bytes());
+            h.write(b"\x1f");
+        }
+        h.write(&req().code_hash.to_le_bytes());
+        h.write(&[1u8]);
+        h.write(&(ARTIFACT_SCHEMA + 1).to_le_bytes());
+        assert_ne!(k, format!("web:mermaid:{:016x}", h.0));
+    }
+
+    /// Backdate a file's mtime. No filetime crate: this is the one syscall
+    /// the TTL tests need.
+    fn filetime_set(path: &Path, when: SystemTime) {
+        #[cfg(unix)]
+        {
+            let secs = when
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let tv = libc::timeval { tv_sec: secs, tv_usec: 0 };
+            let times = [tv, tv];
+            let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) }, 0);
         }
     }
 

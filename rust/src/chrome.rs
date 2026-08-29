@@ -102,6 +102,10 @@ pub struct ChromeBackend {
     /// PID of the Chrome we currently own, so shutdown can reap it even if
     /// the app quits while a batch is in flight.
     live_pid: Mutex<Option<u32>>,
+    /// The last browser this backend owned, kept even after shutdown so a
+    /// smoke run can prove that specific process and profile are gone
+    /// rather than counting every Chrome on the machine.
+    last_owned: Mutex<Option<(u32, PathBuf)>>,
     /// The browser, kept alive between batches. Relaunching per batch cost
     /// ~1.4s of startup AND threw away Chrome's warm HTTP/V8 caches, which
     /// is most of what makes a Cosense page slow to draw: measured on
@@ -119,13 +123,22 @@ pub struct ChromeBackend {
 struct Session {
     child: Child,
     cdp: Cdp,
-    profile: PathBuf,
+    /// Removed when the session drops. Chrome's helper processes outlive
+    /// the SIGKILL on their parent by a moment and keep files open in
+    /// here, so removal is retried briefly rather than attempted once.
+    profile: tempfile::TempDir,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         kill(&mut self.child);
-        std::fs::remove_dir_all(&self.profile).ok();
+        let path = self.profile.path().to_path_buf();
+        for _ in 0..40 {
+            if std::fs::remove_dir_all(&path).is_ok() || !path.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -138,12 +151,14 @@ impl ChromeBackend {
             exe,
             sid,
             live_pid: Mutex::new(None),
+            last_owned: Mutex::new(None),
             session: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     fn run_batch(&self, reqs: &[WebRequest]) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
+        self.check_running()?;
         let width = RENDER_WIDTH_PX;
         let dark = reqs.first().map(|r| r.dark).unwrap_or(true);
 
@@ -176,32 +191,66 @@ impl ChromeBackend {
         out
     }
 
+    /// Refuse to do anything once the app is quitting. Checked on the way
+    /// into a batch and again immediately before a browser is spawned, so
+    /// `shutdown` cannot be raced into starting a Chrome that then outlives
+    /// the TUI.
+    fn check_running(&self) -> Result<(), WebError> {
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err(WebError::Backend("cancelled".into()));
+        }
+        Ok(())
+    }
+
     /// Start a browser and attach to its page target.
     fn launch(&self, width: u32) -> Result<Session, WebError> {
+        self.check_running()?;
         let deadline = Instant::now() + budget();
-        let profile = temp_profile();
+        // The profile holds the session cookie for as long as the browser
+        // runs, so it is created 0700 with a name an attacker cannot
+        // predict or pre-create — never a fixed path plus create_dir_all.
+        let profile = tempfile::Builder::new()
+            .prefix("cosense-tui-chrome-")
+            .tempdir()
+            .map_err(|e| WebError::Backend(format!("no private profile directory: {e}")))?;
         let t0 = Instant::now();
-        let mut child = self.spawn(&profile, width)?;
+        let mut child = self.spawn(profile.path(), width)?;
         *self.live_pid.lock().unwrap() = Some(child.id());
+        *self.last_owned.lock().unwrap() = Some((child.id(), profile.path().to_path_buf()));
         let attach = self
-            .wait_for_port(&mut child, &profile, deadline)
-            .and_then(|port| page_target(port, deadline))
+            .wait_for_port(&mut child, profile.path(), deadline)
+            .and_then(|port| self.page_target(port, deadline))
             .and_then(|url| Cdp::connect(&url));
-        if std::env::var_os("COSENSE_WEB_DEBUG").is_some() {
-            eprintln!("[webrender] launch+attach {:?}", t0.elapsed());
-        }
+        self.debug(format!("launch+attach {:?}", t0.elapsed()));
         match attach {
             Ok(cdp) => Ok(Session { child, cdp, profile }),
             Err(e) => {
+                // Session::drop is what normally reaps these; there is no
+                // Session yet, so do it by hand.
                 kill(&mut child);
                 *self.live_pid.lock().unwrap() = None;
-                std::fs::remove_dir_all(&profile).ok();
                 Err(e)
             }
         }
     }
 
+    fn page_target(&self, port: u16, deadline: Instant) -> Result<String, WebError> {
+        page_target_at(port, deadline, &self.stopped)
+    }
+
+    /// Opt-in diagnostics. They must NEVER reach stdout or stderr: this
+    /// thread runs while the TUI owns the alternate screen, so a print
+    /// would corrupt the display. `COSENSE_WEB_DEBUG` is a FILE PATH.
+    fn debug(&self, line: String) {
+        let Some(path) = std::env::var_os("COSENSE_WEB_DEBUG") else { return };
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "[webrender] {line}");
+        }
+    }
+
     fn spawn(&self, profile: &Path, width: u32) -> Result<Child, WebError> {
+        self.check_running()?;
         Command::new(&self.exe)
             .arg("--headless=new")
             .arg("--remote-debugging-port=0")
@@ -244,14 +293,9 @@ impl ChromeBackend {
         dark: bool,
         deadline: Instant,
     ) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
-        // Phase timings, opt-in only: this thread runs while the TUI owns the
-        // alternate screen, so an unguarded print would corrupt the display.
-        let dbg = std::env::var_os("COSENSE_WEB_DEBUG").is_some();
         macro_rules! phase {
             ($label:expr, $t:expr) => {
-                if dbg {
-                    eprintln!("[webrender] {} {:?}", $label, $t.elapsed());
-                }
+                self.debug(format!("{} {:?}", $label, $t.elapsed()));
             };
         }
         let cdp = &mut session.cdp;
@@ -440,6 +484,14 @@ impl ChromeBackend {
     }
 }
 
+impl ChromeBackend {
+    /// `(pid, profile dir)` of the last browser this backend started, kept
+    /// after shutdown so a caller can verify it is really gone.
+    pub fn last_owned(&self) -> Option<(u32, PathBuf)> {
+        self.last_owned.lock().unwrap().clone()
+    }
+}
+
 impl WebBackend for ChromeBackend {
     fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>> {
         if reqs.is_empty() {
@@ -549,7 +601,11 @@ fn eval_json(cdp: &mut Cdp, expr: &str, deadline: Instant) -> Result<serde_json:
 }
 
 /// Ask the DevTools HTTP endpoint for the page target's websocket URL.
-fn page_target(port: u16, deadline: Instant) -> Result<String, WebError> {
+fn page_target_at(
+    port: u16,
+    deadline: Instant,
+    stopped: &std::sync::atomic::AtomicBool,
+) -> Result<String, WebError> {
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -571,6 +627,11 @@ fn page_target(port: u16, deadline: Instant) -> Result<String, WebError> {
         }
         if Instant::now() >= deadline {
             return Err(WebError::Timeout { seconds: budget().as_secs() });
+        }
+        if stopped.load(Ordering::Relaxed) {
+            // Without this the quit path could wait out the whole budget
+            // here, and the render worker could not be joined.
+            return Err(WebError::Backend("cancelled".into()));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -638,17 +699,6 @@ impl Cdp {
             }
         }
     }
-}
-
-fn temp_profile() -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "cosense-tui-chrome-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).ok();
-    dir
 }
 
 fn kill(child: &mut Child) {
