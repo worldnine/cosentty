@@ -2268,6 +2268,22 @@ impl App {
         true
     }
 
+    /// The width the body rows are wrapped at. After an edit the layout is
+    /// stale (`laid_width = 0`) until the next draw; the last text rect is
+    /// the honest answer in between.
+    fn session_wrap_width(&self) -> usize {
+        if self.laid_width > 0 {
+            return Self::text_width(self.mode, self.laid_width);
+        }
+        if self.text_rect.width > 0 {
+            return self.text_rect.width as usize;
+        }
+        // No geometry at all (nothing has been drawn yet): treat lines as
+        // unwrapped rather than as one column wide, which would turn every
+        // line into a stack of single characters.
+        usize::MAX
+    }
+
     /// Convenience for the places that only care whether it is code.
     #[cfg(test)]
     fn line_in_code(&self, line: usize) -> bool {
@@ -3015,7 +3031,17 @@ fn caret_row_col(s: &str, caret: usize, w: usize) -> (usize, usize) {
     (segs.len().saturating_sub(1), str_width(segs.last().map(String::as_str).unwrap_or("")))
 }
 
-/// Byte offset in `s` whose display column is closest to `col` (used by
+/// Byte offset in the wrapped display string for display row `row`,
+/// column `col`. The inverse of `caret_row_col`, and what both the mouse
+/// and ↑/↓ need on a line that wraps: without the row, every continuation
+/// row collapses onto the first one.
+fn display_offset_at(segs: &[String], row: usize, col: usize) -> usize {
+    let row = row.min(segs.len().saturating_sub(1));
+    let before: usize = segs.iter().take(row).map(String::len).sum();
+    before + segs.get(row).map(|s| byte_at_col(s, col)).unwrap_or(0)
+}
+
+/// Byte offset in `s` whose display column is closest to `col` (used by/// Byte offset in `s` whose display column is closest to `col` (used by
 /// sticky-column ↑/↓ and by mouse clicks).
 fn byte_at_col(s: &str, col: usize) -> usize {
     use unicode_width::UnicodeWidthChar;
@@ -5188,28 +5214,54 @@ fn session_kill(app: &mut App, ctx: &Ctx) {
 /// ↑/↓ inside the session: commit the dirty line, carry the caret to the
 /// next/previous BODY line, keeping the display column (sticky).
 fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
-    session_commit_dirty(app, ctx);
     let Some(s) = app.session.as_ref() else { return };
-    let cur = s.line as i32;
+    let (line, buf, cur) = (s.line, s.input.buf.clone(), s.input.cur);
+    let code = app.code_span_at_line(line);
+    let width = app.session_wrap_width();
+    let disp = session_display(&buf, code);
+    let segs = wrap_plain_columns(&disp, width);
+    let (row, col_now) = caret_row_col(&disp, display_caret(&buf, cur, code), width);
+    let want = s.want_col.unwrap_or(col_now);
+
+    // A wrapped line owns several display rows, and ↑/↓ mean "the row
+    // above/below" — the same movement the eye makes. Only at the top or
+    // bottom row of a line does the caret cross into the next SOURCE line.
+    let target_row = row as i32 + delta;
+    if target_row >= 0 && (target_row as usize) < segs.len() {
+        let off = display_offset_at(&segs, target_row as usize, want);
+        if let Some(s) = app.session.as_mut() {
+            s.input.cur = raw_caret_from_display(&buf, off, code);
+            s.want_col = Some(want);
+        }
+        app.follow = true;
+        app.laid_width = 0;
+        return;
+    }
+
+    // Crossing into another line: commit what is here first, as before.
+    session_commit_dirty(app, ctx);
+    let cur_line = line as i32;
     let last = app.lines.len().saturating_sub(1) as i32;
-    let target = (cur + delta).clamp(0, last);
-    if target == cur {
+    let target = (cur_line + delta).clamp(0, last);
+    if target == cur_line {
         app.status = if delta < 0 { "top of page".into() } else { "end of page — Enter adds a line".into() };
         return;
     }
-    let col = {
-        let s = app.session.as_ref().unwrap();
-        s.want_col
-            .unwrap_or_else(|| str_width(&s.input.buf[..s.input.cur]))
-    };
     let line = target as usize;
     let text = app.lines[line].text.clone();
-    let caret = byte_at_col(&text, col);
+    // Land on the row nearest where the caret came from: the FIRST row of
+    // the line below, the LAST row of the line above.
+    let code = app.code_span_at_line(line);
+    let disp = session_display(&text, code);
+    let segs = wrap_plain_columns(&disp, width);
+    let landing = if delta < 0 { segs.len().saturating_sub(1) } else { 0 };
+    let caret = raw_caret_from_display(&text, display_offset_at(&segs, landing, want), code);
     if let Some(s) = app.session.as_mut() {
         s.line = line;
         s.input = Input { buf: text.clone(), cur: caret };
         s.orig = text;
-        s.want_col = Some(col);
+        s.want_col = Some(want);
+        s.sel_from = None;
     }
     app.cursor = line;
     app.follow = true;
@@ -6232,14 +6284,7 @@ fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
     // where in the text the click landed — without the row, every
     // continuation row maps onto the first one, and the caret jumps to the
     // wrong place (and a drag selects the wrong run).
-    // The width the rows were WRAPPED at. After an edit the layout is
-    // marked stale (`laid_width = 0`) and the next draw redoes it; until
-    // then the last known text rect is the honest answer.
-    let width = if app.laid_width > 0 {
-        App::text_width(app.mode, app.laid_width)
-    } else {
-        (app.text_rect.width as usize).max(1)
-    };
+    let width = app.session_wrap_width();
     let segs = wrap_plain_columns(&disp, width);
     let seg_index = app
         .src_rows(line)
@@ -6248,9 +6293,7 @@ fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
             clicked.saturating_sub(first).min(segs.len().saturating_sub(1))
         })
         .unwrap_or(0);
-    let before: usize = segs.iter().take(seg_index).map(String::len).sum();
-    let in_seg = segs.get(seg_index).map(|s| byte_at_col(s, col)).unwrap_or(0);
-    raw_caret_from_display(&text, before + in_seg, code)
+    raw_caret_from_display(&text, display_offset_at(&segs, seg_index, col), code)
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
@@ -10120,6 +10163,49 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+    }
+
+    /// ↑/↓ mean "the row above / the row below" — the movement the eye
+    /// makes. On a wrapped line that is another row of the SAME line;
+    /// jumping the whole block to the next source line loses the reader's
+    /// place in the middle of a long paragraph.
+    #[test]
+    fn arrows_walk_display_rows_inside_a_wrapped_line() {
+        let ctx = test_ctx();
+        let long = "aaaaaaaaaa bbbbbbbbbb cccccccccc"; // 32 columns
+        let mut app = page(&["title", long, "after"]);
+        app.rebuild(26); // text area 20 wide → two rows
+        let width = App::text_width(app.mode, app.laid_width);
+        assert_eq!(width, 20);
+        // The geometry a drawn frame would have recorded (an edit marks the
+        // layout stale, so this is what the wrap width comes from).
+        app.text_rect = Rect::new(1, 2, width as u16, 8);
+        enter_session(&mut app, &ctx, 1, 3);
+
+        // Down inside the line: same line, one row further in.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Down));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1, "still the same source line");
+        assert_eq!(s.input.cur, width + 3, "the row below, same column");
+
+        // Down again: now it leaves, landing on the first row of the next.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Down));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 2);
+        assert_eq!(s.input.cur, "after".len().min(3), "the sticky column, clamped");
+
+        // Up from there lands on the LAST row of the wrapped line, not its
+        // first — the row that is visually just above.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Up));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1);
+        assert!(s.input.cur >= width, "landed on the last row: {}", s.input.cur);
+
+        // And up again walks back inside the line.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Up));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1);
+        assert!(s.input.cur < width, "the first row: {}", s.input.cur);
     }
 
     /// A wrapped line owns several display rows. Clicking the second one
