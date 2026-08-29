@@ -1225,6 +1225,11 @@ impl App {
         self.header_colors = l.header_colors;
         self.page_id = l.page_id;
         self.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Navigating leaves the joined room. Until the thread has re-joined
+        // the new one AND caught it up, there is no push channel here, so
+        // the fast poll covers the gap — and `absorb_interval` fetches at
+        // once on the way down rather than waiting out a 60 s nap.
+        self.set_sync_state(SyncState::Polling);
         self.lines = l.lines;
         self.blocks = l.blocks;
         self.srcs = l.srcs;
@@ -4822,7 +4827,14 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
 /// One event from the ws thread → the event loop.
 fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
     match ev {
-        WsEvent::State(st) => app.set_sync_state(st),
+        // A state for the room the reader has already left says nothing
+        // about the one they are on — and a late `Live` from the old room
+        // would hold the NEW page on the 60 s poll.
+        WsEvent::State { project, title, state } => {
+            if project == app.project && title == app.title {
+                app.set_sync_state(state);
+            }
+        }
         WsEvent::Status(s) => {
             // Never clobber the session hint (EDIT — …): connection notes
             // are transient and can wait.
@@ -6232,6 +6244,109 @@ mod tests {
         // The drop is delivered as its own message, so the sleeping poller
         // wakes on it instead of finishing a 60 s nap in silence.
         assert_eq!(rx.recv().unwrap(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
+        let ctx = test_ctx();
+        let mut app = page(&["a"]);
+        app.title = "t".into();
+        app.ws_attempted = true;
+        app.status = "auth: sid · edit enabled · sync: poll · ? help".into();
+        handle_ws_event(
+            &mut app,
+            &ctx,
+            WsEvent::State {
+                project: "proj".into(),
+                title: "t".into(),
+                state: SyncState::Live,
+            },
+        );
+        assert_eq!(app.sync_state, SyncState::Live);
+        assert!(app.status.contains("sync: ws"));
+
+        // The reader moves to another page. The old room is gone; nothing
+        // has joined the new one yet, so the insurance poll must be fast.
+        app.set_page(
+            Loaded {
+                project: "proj".into(),
+                title: "other".into(),
+                page_id: "P2".into(),
+                header_colors: HeaderColors::fallback(),
+                lines: Vec::new(),
+                blocks: Vec::new(),
+                srcs: Vec::new(),
+                related: Vec::new(),
+                read_at: None,
+                editable: true,
+            },
+            &ctx,
+        );
+        assert_eq!(app.sync_state, SyncState::Polling);
+        let rx = app.poll_ctrl_rx_for_test();
+        let mut last = None;
+        while let Ok(d) = rx.try_recv() {
+            last = Some(d);
+        }
+        assert_eq!(last, Some(Duration::from_secs(3)), "the poller is retuned at once");
+    }
+
+    #[test]
+    fn a_live_from_the_room_the_reader_left_is_ignored() {
+        let ctx = test_ctx();
+        let mut app = page(&["a"]);
+        app.title = "other".into();
+        app.ws_attempted = true;
+        // Still in the channel from before the navigation.
+        handle_ws_event(
+            &mut app,
+            &ctx,
+            WsEvent::State {
+                project: "proj".into(),
+                title: "t".into(),
+                state: SyncState::Live,
+            },
+        );
+        assert_eq!(
+            app.sync_state,
+            SyncState::Polling,
+            "a Live for the old page must not hold the new one on the 60 s poll"
+        );
+        // The new room's own Live is honoured.
+        handle_ws_event(
+            &mut app,
+            &ctx,
+            WsEvent::State {
+                project: "proj".into(),
+                title: "other".into(),
+                state: SyncState::Live,
+            },
+        );
+        assert_eq!(app.sync_state, SyncState::Live);
+    }
+
+    #[test]
+    fn a_rejoin_that_stalls_leaves_the_reader_on_the_fast_poll() {
+        let ctx = test_ctx();
+        let mut app = page(&["a"]);
+        app.title = "other".into();
+        app.ws_attempted = true;
+        app.status = "auth: sid · edit enabled · sync: ws · ? help".into();
+        app.sync_state = SyncState::Live;
+        // The rejoin fails, repeatedly. Every failure edge says so.
+        for _ in 0..3 {
+            handle_ws_event(
+                &mut app,
+                &ctx,
+                WsEvent::State {
+                    project: "proj".into(),
+                    title: "other".into(),
+                    state: SyncState::Reconnecting,
+                },
+            );
+        }
+        assert_eq!(app.sync_state.poll_interval(), Duration::from_secs(3));
+        assert!(app.status.contains("sync: reconnecting"));
     }
 
     #[test]
