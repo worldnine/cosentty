@@ -14,7 +14,11 @@ pub enum Block {
     /// A preserved blank line.
     Blank,
     /// An image to be fetched and rendered inline (gyazo or scrapbox files).
-    Image { url: String },
+    ///
+    /// `indent` is the display column the picture starts at. Cosense hangs
+    /// pictures off bullets too — an indented image line belongs to the
+    /// item above it, and drawing it flush left broke that reading.
+    Image { url: String, indent: usize },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
     /// A code block Cosense draws as a picture in the browser (today: only
@@ -593,6 +597,16 @@ fn strip_deco_prefix(inner: &str) -> Option<(&str, &str)> {
 /// Two display columns per nesting step. Level 1 is flush left, level 2
 /// starts at column 2, level 3 at column 4, and so on. Source data still
 /// stores one leading whitespace character per logical level.
+/// Where the TEXT of a line at this nesting level starts: the indent plus
+/// the `• ` marker an indented line wears.
+pub fn text_column(level: usize) -> usize {
+    if level == 0 {
+        0
+    } else {
+        bullet_indent_width(level) + 2
+    }
+}
+
 pub fn bullet_indent_width(level: usize) -> usize {
     level.saturating_sub(1) * 2
 }
@@ -904,7 +918,7 @@ pub fn render_lines_with(
         // either of them is worse than stacking them.
         if let Some(url) = standalone_image(body) {
             ex.images.push(url.clone());
-            emit!(Block::Image { url });
+            emit!(Block::Image { url, indent: text_column(level) });
             i += 1;
             continue;
         }
@@ -915,7 +929,7 @@ pub fn render_lines_with(
             line_spans.extend(spans);
             emit!(Block::Text(Line::from(line_spans)));
             for url in embedded {
-                emit!(Block::Image { url });
+                emit!(Block::Image { url, indent: text_column(level) });
             }
             i += 1;
             continue;
@@ -1029,7 +1043,7 @@ mod tests {
     fn plain(b: &Block) -> String {
         match b {
             Block::Blank => "[BLANK]".into(),
-            Block::Image { url } => format!("[IMAGE {url}]"),
+            Block::Image { url, .. } => format!("[IMAGE {url}]"),
             Block::Text(l) => l.spans.iter().map(|s| s.content.as_ref()).collect(),
             Block::Table(_) => "[TABLE]".into(),
             Block::WebRender { rows, .. } => rows
@@ -1094,7 +1108,7 @@ mod tests {
         ];
         let out = render_lines(&lines);
         match &out.blocks[1] {
-            Block::Image { url } => assert_eq!(url, &format!("https://acme-inc.gyazo.com/{id}")),
+            Block::Image { url, .. } => assert_eq!(url, &format!("https://acme-inc.gyazo.com/{id}")),
             other => panic!("expected image block, got {other:?}"),
         }
     }
@@ -1411,7 +1425,7 @@ mod tests {
                 .iter()
                 .skip(1) // the title row
                 .map(|b| match b {
-                    Block::Image { url } => format!("image:{url}"),
+                    Block::Image { url, indent } => format!("image:{indent}:{url}"),
                     Block::Text(l) => {
                         format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                     }
@@ -1423,7 +1437,7 @@ mod tests {
         // A line that is nothing but the bracket becomes the picture.
         assert_eq!(
             shape("[https://example.com/a.png]"),
-            vec!["image:https://example.com/a.png".to_string()],
+            vec!["image:0:https://example.com/a.png".to_string()],
         );
 
         // A bare URL stays a link — even at the start of the line, which is
@@ -1437,7 +1451,7 @@ mod tests {
         let after = shape("[https://example.com/a.png]こんな感じに後ろのテキストも表示される");
         assert_eq!(after.len(), 2, "{after:?}");
         assert!(after[0].contains("後ろのテキスト"), "{after:?}");
-        assert_eq!(after[1], "image:https://example.com/a.png");
+        assert_eq!(after[1], "image:0:https://example.com/a.png");
 
         // The text row says a picture is there; it does not spell out the
         // URL. A one-line note used to wrap into three rows of link.
@@ -1445,6 +1459,20 @@ mod tests {
         assert!(after[0].contains("🖼"), "{after:?}");
         assert!(after[0].contains("a.png"), "{after:?}");
         assert!(!after[0].contains("https://"), "the address is not the point: {after:?}");
+
+        // Cosense hangs pictures off bullets: an indented image line
+        // belongs to the item above it, so it starts where that item's
+        // text starts instead of flush left.
+        assert_eq!(
+            shape(" [https://example.com/a.png]"),
+            vec!["image:2:https://example.com/a.png".to_string()],
+            "one level in = the column after `• `",
+        );
+        assert_eq!(
+            shape("  [https://example.com/a.png] と本文")[1],
+            "image:4:https://example.com/a.png",
+            "deeper still, and the text row keeps its own indent",
+        );
 
         // Quoted notation is a line ABOUT the picture, not a picture: a
         // documentation page must be able to show what it is describing.
@@ -1457,7 +1485,7 @@ mod tests {
         let two = shape("[https://example.com/a.png] と [https://example.com/b.png]");
         assert_eq!(
             &two[1..],
-            &["image:https://example.com/a.png".to_string(), "image:https://example.com/b.png".to_string()],
+            &["image:0:https://example.com/a.png".to_string(), "image:0:https://example.com/b.png".to_string()],
             "{two:?}",
         );
         assert!(two[0].contains('と'), "the text between them survives: {two:?}");

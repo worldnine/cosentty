@@ -528,10 +528,12 @@ struct RelEntry {
 enum Row {
     Line { line: Line<'static>, src: usize },
     Blank { src: usize },
-    Image { url: String, height: u16, src: usize },
+    /// `indent`: display column the picture starts at, so a picture that
+    /// hangs off a bullet lines up with that item's text.
+    Image { url: String, height: u16, src: usize, indent: usize },
     /// Space reserved for an image still downloading in the background.
-    ImageLoading { src: usize },
-    ImageError { msg: String, src: usize },
+    ImageLoading { src: usize, indent: usize },
+    ImageError { msg: String, src: usize, indent: usize },
     Card { line: Line<'static> },
     FrameEnd,
 }
@@ -549,7 +551,7 @@ impl Row {
             Row::Line { src, .. }
             | Row::Blank { src }
             | Row::Image { src, .. }
-            | Row::ImageLoading { src }
+            | Row::ImageLoading { src, .. }
             | Row::ImageError { src, .. } => Some(*src),
             Row::Card { .. } | Row::FrameEnd => None,
         }
@@ -1405,7 +1407,7 @@ impl App {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Image { url } => Some(url.clone()),
+                Block::Image { url, .. } => Some(url.clone()),
                 _ => None,
             })
             .collect();
@@ -2425,6 +2427,7 @@ impl App {
                             url: k.clone(),
                             height: info.cells_h.max(1),
                             src: *last_src,
+                            indent: 0,
                         });
                         continue;
                     }
@@ -2444,15 +2447,21 @@ impl App {
                         }
                     }
                 }
-                Block::Image { url } => {
+                Block::Image { url, indent } => {
+                    let indent = (*indent).min(text_w.saturating_sub(4));
                     if let Some(info) = self.images.get(url) {
-                        content.push(Row::Image { url: url.clone(), height: info.cells_h.max(1), src });
+                        content.push(Row::Image {
+                            url: url.clone(),
+                            height: info.cells_h.max(1),
+                            src,
+                            indent,
+                        });
                     } else if let Some(msg) = self.image_errors.get(url) {
-                        content.push(Row::ImageError { msg: msg.clone(), src });
+                        content.push(Row::ImageError { msg: msg.clone(), src, indent });
                     } else {
                         // still downloading — reserve space so the page is
                         // readable now and the image slots in when it lands
-                        content.push(Row::ImageLoading { src });
+                        content.push(Row::ImageLoading { src, indent });
                     }
                 }
             }
@@ -5201,7 +5210,68 @@ fn read_select_line(app: &mut App, down: bool) {
     }
 }
 
-/// Shift+←/→: grow (or start) the character selection/// Shift+←/→: grow (or start) the character selection as the caret moves.
+/// Is the caret sitting inside an empty `[]`?
+fn empty_pair_at_caret(app: &App) -> bool {
+    app.session
+        .as_ref()
+        .map(|s| {
+            s.input.buf[..s.input.cur].ends_with('[') && s.input.buf[s.input.cur..].starts_with(']')
+        })
+        .unwrap_or(false)
+}
+
+/// One printable key in the session, with the bracket habits cosense web
+/// has: `[` opens a pair (or wraps the selection), and `]` typed where one
+/// is already waiting steps over it instead of doubling.
+///
+/// Brackets are how everything is written in Cosense — links, images,
+/// decoration — so typing the closing half by hand every time is the
+/// single most repeated keystroke there is.
+fn session_type_char(app: &mut App, ch: char) {
+    match ch {
+        '[' => {
+            // With a selection, the brackets go AROUND it: selecting a word
+            // and pressing `[` is how a link gets made.
+            let selected = app.session.as_ref().and_then(|s| {
+                let (a, b) = s.sel_span()?;
+                Some(s.input.buf[a..b].to_string())
+            });
+            session_cut_span(app);
+            if let Some(s) = app.session.as_mut() {
+                match selected {
+                    Some(text) => {
+                        let wrapped = format!("[{text}]");
+                        s.input.insert_str(&wrapped);
+                    }
+                    None => {
+                        s.input.insert_str("[]");
+                        s.input.cur -= 1; // between the pair
+                    }
+                }
+                s.want_col = None;
+            }
+        }
+        ']' if app.session.as_ref().map(|s| s.input.buf[s.input.cur..].starts_with(']')).unwrap_or(false)
+            && app.session.as_ref().and_then(|s| s.sel_span()).is_none() =>
+        {
+            if let Some(s) = app.session.as_mut() {
+                s.input.right();
+                s.want_col = None;
+            }
+        }
+        _ => {
+            session_cut_span(app);
+            if let Some(s) = app.session.as_mut() {
+                s.input.insert_char(ch);
+                s.want_col = None;
+            }
+        }
+    }
+    app.laid_width = 0;
+    app.follow = true;
+}
+
+/// Shift+←/→: grow (or start) the character selection/// Shift+←/→: grow (or start) the character selection/// Shift+←/→: grow (or start) the character selection as the caret moves.
 fn session_select_char(app: &mut App, right: bool) {
     if let Some(s) = app.session.as_mut() {
         if s.sel_from.is_none() {
@@ -5693,6 +5763,11 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
                 session_join_up(app, ctx);
+            } else if empty_pair_at_caret(app) {
+                // Backspacing out of `[|]` takes the bracket that was put
+                // there for you, not just the one you typed.
+                edit_input(app, Input::delete);
+                edit_input(app, Input::backspace);
             } else {
                 edit_input(app, Input::backspace);
             }
@@ -5711,16 +5786,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         }
         (KeyCode::Tab, _) => session_indent(app, 1),
         (KeyCode::BackTab, _) => session_indent(app, -1),
-        (KeyCode::Char(ch), false) => {
-            // Typing over a selection replaces it, as everywhere else.
-            session_cut_span(app);
-            if let Some(s) = app.session.as_mut() {
-                s.input.insert_char(ch);
-                s.want_col = None;
-            }
-            app.laid_width = 0;
-            app.follow = true;
-        }
+        (KeyCode::Char(ch), false) => session_type_char(app, ch),
         _ => {
             reset_col(app);
         }
@@ -7169,23 +7235,26 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new("").style(base), r);
                 }
             }
-            Row::ImageError { msg, .. } => {
+            Row::ImageError { msg, indent, .. } => {
                 if let Some(r) = one_row(screen_y) {
+                    let pad = " ".repeat(*indent);
                     f.render_widget(
-                        Paragraph::new(format!(" {msg}")).style(base.fg(Color::Red)),
+                        Paragraph::new(format!("{pad} {msg}")).style(base.fg(Color::Red)),
                         r,
                     );
                 }
             }
-            Row::ImageLoading { .. } => {
+            Row::ImageLoading { indent, .. } => {
                 if let Some(r) = one_row(screen_y) {
+                    let pad = " ".repeat(*indent);
                     f.render_widget(
-                        Paragraph::new(" □ loading image…").style(base.fg(Color::DarkGray)),
+                        Paragraph::new(format!("{pad} □ loading image…"))
+                            .style(base.fg(Color::DarkGray)),
                         r,
                     );
                 }
             }
-            Row::Image { url, .. } => {
+            Row::Image { url, indent, .. } => {
                 // Render into the full text area with a signed position: when
                 // the image top is scrolled above the viewport, screen_y is
                 // negative and the sliced protocol clips the hidden rows; when
@@ -7204,14 +7273,17 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         x: 1,
                         y: (screen_y + text.y as i32 - band_top) as i16,
                     };
+                    // A picture hanging off a bullet starts where that
+                    // item's text starts.
+                    let off = (*indent as u16).min(text.width.saturating_sub(2));
                     // Never hand the protocol more columns than it has, and
                     // never more than the pane: a diagram encoded for a
                     // wider pane (a rescale still in flight) is clipped here
                     // rather than painting over the frame.
                     let img_area = Rect::new(
-                        text.x,
+                        text.x + off,
                         band_top as u16,
-                        info.cells_w.min(text.width),
+                        info.cells_w.min(text.width.saturating_sub(off)),
                         band_h,
                     );
                     f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
@@ -10221,6 +10293,56 @@ mod tests {
         assert!(held.contains("編集中の行"), "{held}");
     }
 
+    /// Everything in Cosense is written in brackets, so the closing half
+    /// is the most repeated keystroke there is. `[` opens the pair, `]`
+    /// steps over one that is already waiting, and ⌫ takes both back.
+    #[test]
+    fn typing_a_bracket_opens_a_pair() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", ""]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+
+        type_str(&mut app, &ctx, "[");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "[]");
+        assert_eq!(s.input.cur, 1, "the caret waits between them");
+
+        type_str(&mut app, &ctx, "改善案");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "[改善案]");
+
+        // Typing the closing bracket steps over the one already there
+        // instead of leaving `]]` behind.
+        type_str(&mut app, &ctx, "]");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "[改善案]");
+        assert_eq!(s.input.cur, s.input.buf.len(), "past the pair");
+
+        // ⌫ inside an empty pair removes both halves.
+        type_str(&mut app, &ctx, "[");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "[改善案][]");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "[改善案]");
+    }
+
+    /// Selecting a word and pressing `[` is how a link gets written.
+    #[test]
+    fn typing_a_bracket_over_a_selection_wraps_it() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "改善案 を見る"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        for _ in 0..3 {
+            handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        }
+
+        type_str(&mut app, &ctx, "[");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "[改善案] を見る");
+        assert_eq!(s.input.cur, "[改善案]".len(), "the caret follows the new link");
+        assert!(s.sel_span().is_none());
+    }
+
     /// Backticks quote notation. A line that WRITES about `[a link]` must
     /// not BE one — a page documenting the syntax turned into a field of
     /// links to pages nobody meant to name, and Enter followed them.
@@ -11791,7 +11913,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut app = page(&["image"]);
-        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into() }];
+        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into(), indent: 0 }];
         app.srcs = vec![0];
         let ctx = test_ctx();
         let mut terminal = Terminal::new(TestBackend::new(42, 8)).unwrap();

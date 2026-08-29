@@ -11,7 +11,7 @@ use cosense::render::{render_lines, Block};
 fn block_to_plain(b: &Block) -> String {
     match b {
         Block::Blank => "[BLANK]".to_string(),
-        Block::Image { url } => format!("[IMAGE {url}]"),
+        Block::Image { url, .. } => format!("[IMAGE {url}]"),
         Block::Text(line) => line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
         Block::WebRender { kind, rows, last_src, .. } => format!(
             "[WEB {kind:?} last_src={last_src}]\n{}",
