@@ -580,6 +580,30 @@ pub fn shimmer_level(pos: u16, len: u16, elapsed: f32) -> f32 {
     0.55 + 0.45 * intensity
 }
 
+/// A barely-there wash marking a `code:` block as one surface.
+///
+/// Derived from the TERMINAL background, not from the syntax theme: this
+/// band sits directly against rows that are on the terminal background, so
+/// a color borrowed from the theme would read as a foreign rectangle
+/// dropped on the page (the site header composites onto the terminal
+/// background for the same reason). Nudging the real background a few
+/// percent also keeps every syntax color the theme chose legible on top.
+///
+/// Light backgrounds get darker, dark ones get lighter — always by less
+/// than a step the eye reads as "a color", so the block reads as a region
+/// rather than a box.
+pub fn code_wash(terminal_bg: (u8, u8, u8)) -> Color {
+    let (r, g, b) = terminal_bg;
+    let step = |c: u8| -> u8 {
+        if relative_luminance(terminal_bg) > 0.179 {
+            c.saturating_sub(10)
+        } else {
+            c.saturating_add(12)
+        }
+    };
+    Color::Rgb(step(r), step(g), step(b))
+}
+
 /// Apply `shimmer_level` to one span's style: an RGB foreground is mixed
 /// toward the terminal background, which is the only way to modulate
 /// brightness without inventing a color the theme never chose.
@@ -702,6 +726,25 @@ mod tests {
         assert_eq!(scroll_offset_at_in_track(100, 20, 19, 0), Some(0));
         assert_eq!(scroll_offset_at_in_track(100, 20, 19, 16), Some(80));
         assert_eq!(scroll_offset_drag_in_track(100, 20, 19, 4, 20, 8), Some(40));
+    }
+
+    /// The wash has to come from the terminal's own background, or the
+    /// block reads as a foreign rectangle dropped onto the page.
+    #[test]
+    fn the_code_wash_nudges_the_terminal_background_both_ways() {
+        let dark = code_wash((24, 24, 24));
+        let light = code_wash((250, 250, 250));
+        assert_eq!(dark, Color::Rgb(36, 36, 36), "dark terminal: a little lighter");
+        assert_eq!(light, Color::Rgb(240, 240, 240), "light terminal: a little darker");
+        assert_ne!(dark, light);
+        // Never so far that the text on top has to be re-chosen.
+        for bg in [(0, 0, 0), (255, 255, 255), (40, 44, 52)] {
+            let Color::Rgb(r, g, b) = code_wash(bg) else { panic!("rgb") };
+            let delta = (r as i16 - bg.0 as i16).abs();
+            assert!(delta <= 12, "{bg:?} moved by {delta}");
+            assert_eq!((r as i16 - bg.0 as i16), (g as i16 - bg.1 as i16));
+            assert_eq!((g as i16 - bg.1 as i16), (b as i16 - bg.2 as i16));
+        }
     }
 
     #[test]

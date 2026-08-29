@@ -58,6 +58,20 @@ impl CodeSpan {
     pub fn body_indent(&self) -> String {
         " ".repeat(self.header_indent + 1)
     }
+
+    /// Leading whitespace CHARACTERS the renderer strips from a body line
+    /// before drawing it.
+    pub fn strip_chars(&self) -> usize {
+        self.header_indent + 1
+    }
+
+    /// Display columns the renderer puts back in their place: the header's
+    /// own nesting plus the block's two-cell code gutter. An editor that
+    /// shows the raw line instead lands the caret one cell to the left of
+    /// every other line in the block.
+    pub fn gutter_cols(&self) -> usize {
+        bullet_indent_width(self.header_indent) + 2
+    }
 }
 
 /// Is `i` inside a `code:` block (header line included)?
@@ -99,6 +113,39 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
         k = j.max(k + 1);
     }
     None
+}
+
+/// Which source lines belong to a `code:` block, in one pass over the
+/// page. The viewer paints those rows with a wash, so it needs the whole
+/// map per frame rather than one lookup at a time.
+pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
+    let mut flags = vec![false; lines.len()];
+    let mut k = 0;
+    while k < lines.len() {
+        let (_, header_indent, body) = indent_info(lines[k]);
+        if !body.starts_with("code:") {
+            k += 1;
+            continue;
+        }
+        let mut end = k + 1;
+        let mut j = k + 1;
+        while j < lines.len() {
+            let (_, raw_len, _) = indent_info(lines[j]);
+            if raw_len > header_indent {
+                j += 1;
+                end = j;
+            } else if lines[j].trim().is_empty() {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        for f in flags.iter_mut().take(end).skip(k) {
+            *f = true;
+        }
+        k = j.max(k + 1);
+    }
+    flags
 }
 
 /// Does a `code:` block's language name mark a Mermaid diagram?
