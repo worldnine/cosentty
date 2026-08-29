@@ -172,7 +172,7 @@ struct WebMsg {
 enum WebOutcome {
     Drawn(ImageInfo),
     /// Nothing on disk, and this pass was not allowed to draw. Not an
-    /// error: it must not land in `web_errors`, or `m` could never draw it.
+    /// error: it must not land in `web_errors`, or `R` could never render it.
     Missing,
     /// The browser was refused (login wall). The session decides what to do
     /// with that — it says nothing about the REST credential.
@@ -304,7 +304,7 @@ fn spawn_web_worker(
                         merged_src = src_epoch;
                         merged_cols = Some(max_cols);
                         // Coalescing several passes: the most permissive
-                        // one wins, so an explicit `m` arriving behind a
+                        // one wins, so an explicit `R` arriving behind a
                         // page-load probe is not silently downgraded to
                         // cache-only.
                         merged_auth = merged_auth.or(auth);
@@ -754,24 +754,11 @@ struct App {
     /// The project the probe was last asked about, so a page move inside
     /// the same project does not re-ask.
     vis_asked: Option<String>,
-    /// Blocks whose diagram has been drawn on THIS page, identified by the
-    /// id of the block's `code:` HEADER line. A block in here is one the
-    /// reader is actually looking at, so when its source changes the picture
-    /// must follow — even under the manual policy. The browser cost was
-    /// already accepted for this page; making the reader press `m` again
-    /// after every edit is not "manual", it is broken.
-    ///
-    /// The header line is the anchor because it is the one line an edit to
-    /// the diagram does NOT move. Keying this on the block's LAST line —
-    /// which is what the render request itself is keyed on — meant that
-    /// pressing Enter inside the block moved the anchor too, and the
-    /// refresh silently stopped firing for the most ordinary edit there is.
-    web_drawn_blocks: HashSet<String>,
     /// Artifacts a cache-only pass looked for and did not find. They are
-    /// NOT failures: they stay code blocks, stop shimmering, and `m` can
-    /// still draw them.
+    /// NOT failures: they stay as source, stop shimmering, and `R` can
+    /// still render them.
     web_missing: HashSet<String>,
-    /// `m` was pressed while the page-load cache probe was still out. The
+    /// `R` was pressed while the page-load cache probe was still out. The
     /// probe owns those keys until it answers, so the keypress cannot queue
     /// anything yet — it is remembered here and served the moment the
     /// misses come back. Cleared per page.
@@ -1254,7 +1241,6 @@ impl App {
             vis_tx,
             vis_asked: None,
             web_missing: HashSet::new(),
-            web_drawn_blocks: HashSet::new(),
             web_manual_wanted: false,
             web_notice_shown: false,
             src_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1358,7 +1344,6 @@ impl App {
         self.web_errors.clear();
         self.web_rescaling.clear();
         self.web_missing.clear();
-        self.web_drawn_blocks.clear();
         self.web_manual_wanted = false;
         // Once per page, not once per diagram.
         self.web_notice_shown = false;
@@ -1455,17 +1440,6 @@ impl App {
         if self.time.is_some() {
             return false;
         }
-        // A block whose picture is already on screen and whose source has
-        // just moved is a REFRESH, not a first draw: the reader is watching
-        // that diagram and expects it to keep up. Refreshes are treated as
-        // explicit, so `manual` does not mean "press m after every edit".
-        // One navigation draws the whole page anyway, so the other diagrams
-        // on it ride along for free.
-        let trigger = if trigger == capability::Trigger::Auto && self.has_stale_diagram() {
-            capability::Trigger::Manual
-        } else {
-            trigger
-        };
         // What this session may do, right now, for this project.
         let decision = capability::decide(&self.caps, self.render_policy, trigger);
         let auth = match decision {
@@ -1484,7 +1458,7 @@ impl App {
             }
         };
         // The one anonymous attempt on an Unknown project is spent HERE,
-        // when it is dispatched — not when it answers, or a second `m`
+        // when it is dispatched — not when it answers, or a second `R`
         // pressed while the first is in flight would spend it twice.
         if auth == Some(RenderCapability::Anonymous)
             && self.caps.visibility != capability::Visibility::Public
@@ -1503,13 +1477,6 @@ impl App {
             }
             let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
             let key = req.cache_key();
-            if self.images.contains_key(&key) {
-                // On screen: if this block's source later moves, that is a
-                // refresh rather than a first draw.
-                if let Some(anchor) = self.block_anchor(rows) {
-                    self.web_drawn_blocks.insert(anchor);
-                }
-            }
             if self.images.contains_key(&key)
                 || self.web_errors.contains_key(&key)
                 || self.web_pending.contains(&key)
@@ -1576,7 +1543,7 @@ impl App {
         // A refused cookie is a refused cookie whatever we do next: from
         // here it counts as absent, so no later pass presents it again.
         // (Without this, a private page would retry the same dead cookie on
-        // every `m`, forever.)
+        // every `R`, forever.)
         if attempted == RenderCapability::Authenticated {
             self.caps.cookie_rejected = true;
         }
@@ -1677,33 +1644,6 @@ impl App {
         } else {
             SyncState::Polling.label()
         }
-    }
-
-    /// Does the page hold a diagram that HAD a picture and no longer does,
-    /// because its own source changed? That is the edit loop, and it must
-    /// not wait for a keypress.
-    fn has_stale_diagram(&self) -> bool {
-        self.blocks.iter().any(|b| {
-            let Block::WebRender { kind, code, rows, last_src } = b else { return false };
-            if self.caret_is_inside(rows) {
-                return false;
-            }
-            let Some(anchor) = self.block_anchor(rows) else { return false };
-            if !self.web_drawn_blocks.contains(&anchor) {
-                return false;
-            }
-            let Some(req) = self.web_request(*kind, code, *last_src) else { return false };
-            let key = req.cache_key();
-            !self.images.contains_key(&key) && !self.web_errors.contains_key(&key)
-        })
-    }
-
-    /// A stable name for a diagram block: the id of its `code:` header line.
-    /// Every other line in the block can be added, removed or retyped by an
-    /// ordinary edit; the header is what stays put.
-    fn block_anchor(&self, rows: &[(usize, Line<'static>)]) -> Option<String> {
-        let (src, _) = rows.first()?;
-        self.lines.get(*src).map(|l| l.id.clone())
     }
 
     /// Is the edit session's caret on one of these source lines? Such a
@@ -1892,7 +1832,7 @@ impl App {
                     self.images.insert(key, info);
                 }
                 // Not on disk, and this pass could not draw. The block goes
-                // back to being source, silently — `m` will pick it up.
+                // back to being source, silently — `R` will pick it up.
                 WebOutcome::Missing => {
                     self.web_missing.insert(key);
                 }
@@ -1917,7 +1857,7 @@ impl App {
         if !denied.is_empty() {
             self.note_denied(denied);
         }
-        // An `m` that arrived while the cache probe was out: now that the
+        // An `R` that arrived while the cache probe was out: now that the
         // misses are known, serve it. Once — the flag is cleared whether or
         // not there turned out to be anything to draw.
         if self.web_manual_wanted && self.web_pending.is_empty() {
@@ -4137,17 +4077,18 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             enter_session(app, ctx, app.cursor, caret);
         }
 
-        // ---- draw this page's diagrams (**m**ermaid) ----
-        // Rendering is manual by default: a page load only shows diagrams
+        // ---- render this page's missing web artifacts ----
+        // Rendering is manual by default: a page load only shows artifacts
         // it already has on disk, because launching a browser is by far the
-        // most expensive thing this viewer does. This is how you ask.
-        (KeyCode::Char('m'), false) => {
+        // most expensive thing this viewer does. Uppercase `R` is generic:
+        // Mermaid today, and TeX / icons / ProjectCSS-backed views later.
+        (KeyCode::Char('R'), false) => {
             if app.start_web_renders(capability::Trigger::Manual) {
                 // Drawing; the blocks pulse and say the rest themselves.
             } else if app.web_pending.iter().any(|k| !app.images.contains_key(k)) {
                 // The page-load cache probe still owns these keys, so the
                 // request cannot be queued yet. Remember it and serve it the
-                // moment the probe reports its misses — pressing `m` twice
+                // moment the probe reports its misses — pressing `R` twice
                 // should not be part of the interface.
                 app.web_manual_wanted = true;
             } else if app.web_notice.is_none() {
@@ -5766,7 +5707,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         "L-/-".to_string()
     } else if app.cursor >= app.lines.len() && !app.virtual_items.is_empty() {
         // Cursor is on a related row below the body.
-        format!("R{}/{}", app.cursor - app.lines.len() + 1, app.virtual_items.len())
+        format!("link {}/{}", app.cursor - app.lines.len() + 1, app.virtual_items.len())
     } else {
         let cur = app.cursor_src().map(|s| s + 1).unwrap_or(1).min(app.lines.len());
         format!("L{}/{}", cur, app.lines.len())
@@ -6265,8 +6206,8 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "          screenshotted from the real Cosense page by headless Chrome".into(),
                 "          (COSENSE_CHROME to point at it). No browser, a private page".into(),
                 "          without COSENSE_SID, or a Mermaid error → the code block stays.".into(),
-                "          m draws this page's diagrams. Opening a page only shows the".into(),
-                "          ones already cached: a browser is expensive, so it starts".into(),
+                "          R renders this page's missing web artifacts. Opening a page".into(),
+                "          only shows cached ones: a browser is expensive, so it starts".into(),
                 "          when you ask. COSENSE_WEB_RENDER=auto|off changes that;".into(),
                 "          COSENSE_WEB_IDLE_SECS is how long the browser stays warm.".into(),
                 "output    y copy all comments".into(),
@@ -7222,7 +7163,7 @@ mod tests {
     }
 
     #[test]
-    fn m_draws_the_diagrams_the_page_load_could_not() {
+    fn r_renders_the_artifacts_the_page_load_could_not() {
         let mut app = mermaid_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
@@ -7230,11 +7171,11 @@ mod tests {
         let keys = diagram_keys(&app);
         settle(&mut app, keys.len());
         assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-        // The reader presses `m`.
+        // The reader presses `R`.
         for k in &keys {
             backend.answer(k, Ok(tiny_png()));
         }
-        handle_key(&mut app, &test_ctx(), key(KeyCode::Char('m')));
+        handle_key(&mut app, &test_ctx(), key(KeyCode::Char('R')));
         settle(&mut app, keys.len());
         assert_eq!(
             backend.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -7246,153 +7187,53 @@ mod tests {
     }
 
     #[test]
-    fn editing_a_drawn_diagram_redraws_it_without_asking_again() {
+    fn editing_a_drawn_artifact_in_manual_mode_waits_for_explicit_render() {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
-        let first = diagram_keys(&app);
-        // The reader pressed `m` once and got a picture.
-        let backend = Arc::new(cosense::webrender::FakeBackend::new());
-        for k in &first {
-            backend.answer(k, Ok(tiny_png()));
+        let before = diagram_keys(&app);
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(before[0].clone(), info);
+        // The initial cache-only pass has already established that the other
+        // current artifacts are absent.
+        app.web_missing.extend(before.iter().cloned());
+
+        // Editing changes the artifact key. Manual mode may probe the cache,
+        // but it must not launch Chrome just because the old picture existed.
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        let after = diagram_keys(&app);
+        assert_ne!(after[0], before[0]);
+        assert!(!app.images.contains_key(&after[0]), "the changed source falls back to source");
+        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("cache probe");
+        let WebJob::Render { reqs, auth, .. } = job else { panic!("expected a render job") };
+        assert!(auth.is_none(), "manual edits never start Chrome implicitly");
+        assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
+
+        // A cache miss keeps the source visible until the explicit render key.
+        for req in reqs {
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: req.cache_key(),
+                    rescale: false,
+                    attempted: None,
+                    res: WebOutcome::Missing,
+                })
+                .unwrap();
         }
-        spawn_web_worker(
-            app.web_jobs_rx.take().unwrap(),
-            app.web_tx.clone(),
-            Arc::clone(&backend) as Arc<dyn WebBackend>,
-            Picker::halfblocks(),
-            scratch_cache(),
-            Arc::clone(&app.web_gen),
-            Arc::clone(&app.src_epoch),
-        );
-        // The edited artifact's key is known in advance, so the backend is
-        // scripted BEFORE the edit: `rerender` queues the job immediately,
-        // and the worker must not reach the backend first.
-        let edited = app
-            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
-            .unwrap()
-            .cache_key();
-        backend.answer(&edited, Ok(tiny_png()));
-        app.start_web_renders(capability::Trigger::Manual);
-        settle(&mut app, first.len());
-        assert!(app.images.contains_key(&first[0]), "the diagram is on screen");
-        app.start_web_renders(capability::Trigger::Auto);
-
-        // Now they edit that block's source. The picture they were looking
-        // at is now stale, and its key has moved with the source.
-        app.lines[3].text = "   A-->C".into();
-        rerender(&mut app, &ctx);
-        let after = diagram_keys(&app);
-        assert_eq!(after[0], edited);
-        assert_ne!(after[0], first[0], "the edit is a different artifact");
-        settle(&mut app, 1);
-        assert!(
-            app.images.contains_key(&after[0]),
-            "a diagram the reader is watching must follow its source without a second `m`"
-        );
-    }
-
-    #[test]
-    fn a_committed_edit_redraws_the_diagram_the_reader_was_watching() {
-        // The shape the app actually runs: leaving the block COMMITS it, so
-        // the re-render that `rerender` attempts happens while the commit is
-        // still in flight and is refused. Whatever redraws the diagram has
-        // to happen after the commit lands, on an ordinary frame.
-        let ctx = test_ctx();
-        let mut app = mermaid_page();
-        app.render_policy = capability::RenderPolicy::Manual;
-        app.rebuild(80);
-        let first = diagram_keys(&app);
-        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-        app.images.insert(first[0].clone(), info);
-        // One ordinary frame notices the diagram is on screen.
-        app.start_web_renders(capability::Trigger::Auto);
-        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
-        app.web_pending.clear();
-
-        // The reader edits the block and moves the caret off it: the line is
-        // committed, and the re-render lands mid-flight.
-        app.lines[3].text = "   A-->C".into();
-        app.inflight = 1;
-        rerender(&mut app, &ctx);
-        assert!(
-            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
-            "nothing may be rendered while the server has not got the edit yet"
-        );
-
-        // The commit lands. From here the server agrees with the screen.
-        handle_commit_outcome(
-            &mut app,
-            &ctx,
-            CommitOutcome::Done { label: "line 4".into(), title: String::new() },
-        );
-        assert_eq!(app.inflight, 0);
-        app.start_web_renders(capability::Trigger::Auto);
-
-        let after = diagram_keys(&app);
-        assert_ne!(after[0], first[0], "the edit is a different artifact");
-        let job = app
-            .web_jobs_rx
-            .as_ref()
-            .unwrap()
-            .try_recv()
-            .expect("the edited diagram must be redrawn once the commit lands");
-        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        app.drain_web_renders();
+        assert!(!app.images.contains_key(&after[0]));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
+        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("explicit render");
+        let WebJob::Render { reqs, auth, .. } = job else { panic!("expected a render job") };
+        assert!(auth.is_some(), "R permits the browser in manual mode");
         assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
-        assert!(auth.is_some(), "a refresh must be allowed to reach the browser");
     }
 
     #[test]
-    fn adding_a_line_to_a_drawn_diagram_still_redraws_it() {
-        // Pressing Enter inside a Mermaid block is the ordinary edit. It
-        // moves the block's LAST line, which is the line the request is
-        // keyed on.
-        let ctx = test_ctx();
-        let mut app = mermaid_page();
-        app.render_policy = capability::RenderPolicy::Manual;
-        app.rebuild(80);
-        let first = diagram_keys(&app);
-        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-        app.images.insert(first[0].clone(), info);
-        app.start_web_renders(capability::Trigger::Auto);
-        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
-        app.web_pending.clear();
-
-        // A new line at the end of the block.
-        app.lines.insert(
-            4,
-            PageLine {
-                id: "id-new".into(),
-                text: "   B-->C".into(),
-                user_id: String::new(),
-                created: 0,
-                updated: 0,
-            },
-        );
-        app.inflight = 1;
-        rerender(&mut app, &ctx);
-        handle_commit_outcome(
-            &mut app,
-            &ctx,
-            CommitOutcome::Done { label: "line 5".into(), title: String::new() },
-        );
-        app.start_web_renders(capability::Trigger::Auto);
-
-        let after = diagram_keys(&app);
-        let job = app
-            .web_jobs_rx
-            .as_ref()
-            .unwrap()
-            .try_recv()
-            .expect("adding a line to a diagram must redraw it too");
-        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
-        assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
-        assert!(auth.is_some());
-    }
-
-    #[test]
-    fn m_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
+    fn r_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.render_policy = capability::RenderPolicy::Manual;
@@ -7403,9 +7244,9 @@ mod tests {
         assert_eq!(app.web_pending.len(), keys.len());
         while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
 
-        // The reader presses `m` now. It cannot queue anything yet, and it
+        // The reader presses `R` now. It cannot queue anything yet, and it
         // must NOT report "nothing to draw".
-        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
         assert!(app.web_manual_wanted);
         assert!(app.web_notice.is_none(), "a request in flight is not 'nothing to draw'");
         assert!(
@@ -7413,7 +7254,7 @@ mod tests {
             "no duplicate batch while the probe owns the keys"
         );
 
-        // The probe reports misses. The remembered `m` is served, once.
+        // The probe reports misses. The remembered `R` is served, once.
         for k in &keys {
             app.web_tx
                 .send(WebMsg {
@@ -7432,7 +7273,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .try_recv()
-            .expect("the remembered m is served without a second keypress");
+            .expect("the remembered R is served without a second keypress");
         let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
         assert!(auth.is_some(), "this one may reach the browser");
         assert_eq!(reqs.len(), keys.len());
@@ -7443,7 +7284,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cache_miss_never_blocks_the_later_m() {
+    fn a_cache_miss_never_blocks_the_later_r() {
         let mut app = mermaid_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
@@ -7461,7 +7302,7 @@ mod tests {
             .unwrap();
         app.drain_web_renders();
         assert!(!app.web_errors.contains_key(&keys[0]), "a miss is not an error");
-        // ...and `m` still asks for it.
+        // ...and `R` still asks for it.
         app.start_web_renders(capability::Trigger::Manual);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
         assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
@@ -7489,14 +7330,14 @@ mod tests {
     }
 
     #[test]
-    fn m_is_an_ordinary_character_while_editing() {
+    fn r_is_an_ordinary_character_while_editing() {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
         enter_session(&mut app, &ctx, 0, 1);
-        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
         let s = app.session.as_ref().expect("still editing");
-        assert!(s.input.buf.contains('m'), "m typed a character, not a render");
+        assert!(s.input.buf.contains('R'), "R typed a character, not a render");
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
     }
 
@@ -7585,7 +7426,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_visibility_waits_for_an_explicit_m() {
+    fn unknown_visibility_waits_for_an_explicit_r() {
         let mut app = mermaid_page();
         app.caps.sid = false;
         app.caps.visibility = capability::Visibility::Unknown;
@@ -7901,7 +7742,7 @@ mod tests {
             "the source is what the reader sees"
         );
         // No further BROWSER work is queued for this project: even an
-        // explicit `m` can now only consult the disk cache.
+        // explicit `R` can now only consult the disk cache.
         while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
         app.web_pending.clear();
         app.start_web_renders(capability::Trigger::Manual);

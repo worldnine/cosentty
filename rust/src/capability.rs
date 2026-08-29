@@ -81,7 +81,7 @@ impl SyncState {
 /// When diagrams may be drawn. `COSENSE_WEB_RENDER`, default `manual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderPolicy {
-    /// Page load consults the disk cache only; `m` draws the rest.
+    /// Page load consults the disk cache only; `R` renders the rest.
     #[default]
     Manual,
     /// Every renderable miss is drawn as the page loads.
@@ -124,7 +124,7 @@ pub enum Decision {
     /// Ask the backend; a cache miss may launch a browser.
     Render(RenderCapability),
     /// Serve disk-cache hits and nothing else. A miss stays a code block and
-    /// is NOT an error — a later `m` must still be able to draw it.
+    /// is NOT an error — a later `R` must still be able to render it.
     CacheOnly {
         /// Shown once per page when the reason is worth saying out loud.
         notice: Option<&'static str>,
