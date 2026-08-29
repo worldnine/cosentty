@@ -515,6 +515,11 @@ pub enum WsEvent {
     Resynced(ResyncPage),
     /// One-shot status text (throttled by the thread).
     Status(String),
+    /// The push channel's state changed. NEVER throttled and never derived
+    /// from the status text: the poller's interval hangs off this, and a
+    /// swallowed `Reconnecting` would leave it at 60 s — the exact silence
+    /// this whole mechanism exists to prevent.
+    State(crate::capability::SyncState),
 }
 
 /// Requests the event loop sends to the sync thread. Only the thread talks
@@ -526,16 +531,17 @@ pub enum WsRequest {
     Resync,
 }
 
-/// Which live-update plan to run: push sync when a `connect.sid` exists,
-/// plus a slow insurance poll so a broken push still surfaces web edits
-/// (worst case = the poll interval, never silence). No sid keeps the
-/// classic 3 s polling as the ONLY channel.
-pub fn sync_plan(sid_available: bool) -> (bool, Duration) {
-    if sid_available {
-        (true, Duration::from_secs(60))
-    } else {
-        (false, Duration::from_secs(3))
-    }
+/// Which live-update plan to start with: a push channel is attempted when a
+/// `connect.sid` exists, but it has proven NOTHING yet, so the poll starts
+/// fast either way.
+///
+/// This is the fix for the stale-sid hole. Choosing 60 s from the mere
+/// PRESENCE of a cookie meant an expired one delayed every web edit by up to
+/// a minute, silently. The interval is now relaxed only by a
+/// [`SyncState::Live`](crate::capability::SyncState::Live) event, i.e. after
+/// a room join AND its catch-up fetch have both succeeded.
+pub fn initial_plan(sid_available: bool) -> (bool, crate::capability::SyncState) {
+    (sid_available, crate::capability::SyncState::Polling)
 }
 
 /// An edge-triggered resync request that is served until SUCCESS: a failed
@@ -593,6 +599,7 @@ pub fn spawn_ws_sync(
     tx: Sender<WsEvent>,
 ) {
     std::thread::spawn(move || {
+        use crate::capability::SyncState;
         let api_domain = client.config().api_domain.clone();
         let mut backoff = Duration::from_secs(1);
         let mut last_status = Instant::now() - STATUS_THROTTLE;
@@ -623,6 +630,7 @@ pub fn spawn_ws_sync(
                 Ok(p) => p,
                 Err(e) => {
                     throttled_status(&tx, &mut last_status, &format!("ws: page lookup failed ({e})"));
+                    state(&tx, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
                     continue;
@@ -632,6 +640,7 @@ pub fn spawn_ws_sync(
                 Ok(p) => p,
                 Err(e) => {
                     throttled_status(&tx, &mut last_status, &format!("ws: project lookup failed ({e})"));
+                    state(&tx, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
                     continue;
@@ -642,6 +651,7 @@ pub fn spawn_ws_sync(
                 Ok(l) => l,
                 Err(e) => {
                     throttled_status(&tx, &mut last_status, &format!("ws: reconnect… ({e})"));
+                    state(&tx, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
                     continue;
@@ -652,6 +662,7 @@ pub fn spawn_ws_sync(
                 Ok(()) => {}
                 Err(e) => {
                     throttled_status(&tx, &mut last_status, &format!("ws: join failed ({e})"));
+                    state(&tx, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
                     continue;
@@ -668,6 +679,10 @@ pub fn spawn_ws_sync(
                         page,
                         head: last_commit_id.clone(),
                     }));
+                    // The join AND its catch-up both landed: this is the only place
+                    // the push channel counts as live, so the only place the
+                    // insurance poll is allowed to relax.
+                    state(&tx, SyncState::Live);
                     throttled_status(&tx, &mut last_status, "ws: 接続済み (push sync)");
                 }
                 Err(e) => {
@@ -676,6 +691,7 @@ pub fn spawn_ws_sync(
                         &mut last_status,
                         &format!("ws: catch-up fetch failed ({e}) — reconnecting"),
                     );
+                    state(&tx, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
                     continue; // re-read the target, reconnect, rejoin, refetch
@@ -698,6 +714,7 @@ pub fn spawn_ws_sync(
             if changed {
                 // Navigation: loop re-reads the target and rejoins there.
             } else {
+                state(&tx, SyncState::Reconnecting);
                 throttled_status(&tx, &mut last_status, "ws: 切断 — 再接続します");
                 std::thread::sleep(backoff);
                 backoff = grow(backoff);
@@ -797,6 +814,12 @@ fn grow(b: Duration) -> Duration {
     (b * 2).min(MAX_BACKOFF)
 }
 
+/// Publish a push-channel state. Deliberately NOT throttled — see
+/// [`WsEvent::State`].
+fn state(tx: &Sender<WsEvent>, s: crate::capability::SyncState) {
+    let _ = tx.send(WsEvent::State(s));
+}
+
 /// Status text, at most once per [`STATUS_THROTTLE`] (the status line is
 /// transient — the app overwrites it constantly).
 fn throttled_status(tx: &Sender<WsEvent>, last: &mut Instant, text: &str) {
@@ -820,12 +843,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_plan_keeps_an_insurance_poll_in_ws_mode() {
-        // sid present: push sync ACTIVE, but a slow insurance poll still
-        // runs so a broken/stale push degrades to polling, never silence.
-        assert_eq!(sync_plan(true), (true, Duration::from_secs(60)));
-        // no sid: classic 3s polling, no push.
-        assert_eq!(sync_plan(false), (false, Duration::from_secs(3)));
+    fn a_sid_alone_does_not_earn_the_slow_poll() {
+        use crate::capability::SyncState;
+        // Push sync is ATTEMPTED when a sid exists — but it has proven
+        // nothing yet, so both sessions start at the fast poll. A stale sid
+        // used to cost up to 60 s of silence here.
+        assert_eq!(initial_plan(true), (true, SyncState::Polling));
+        assert_eq!(initial_plan(false), (false, SyncState::Polling));
+        assert_eq!(
+            initial_plan(true).1.poll_interval(),
+            Duration::from_secs(3)
+        );
     }
 
     #[test]

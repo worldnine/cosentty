@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
+use cosense::capability::{self, SyncState};
 use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
@@ -578,6 +579,16 @@ struct App {
     poll_rx: mpsc::Receiver<PolledPage>,
     /// The poller's sender (kept for the spawn call in `main`).
     poll_tx: mpsc::Sender<PolledPage>,
+    /// Retunes the poller's interval while it sleeps. The push channel's
+    /// state is what drives it (see `sync_state`).
+    poll_ctrl_tx: mpsc::Sender<Duration>,
+    poll_ctrl_rx: Option<mpsc::Receiver<Duration>>,
+    /// The push channel's state, TYPED. The status line renders this; the
+    /// poller's interval follows it. Nothing reads the status text.
+    sync_state: capability::SyncState,
+    /// Whether a push channel is being attempted at all (a sid exists).
+    /// A session without one shows `poll`, not `reconnecting`.
+    ws_attempted: bool,
 
     /// Websocket push events (commit payloads, resyncs, status notes).
     ws_rx: mpsc::Receiver<ws::WsEvent>,
@@ -766,23 +777,71 @@ fn spawn_web_poller(
     client: Client,
     target: Arc<std::sync::Mutex<(String, String)>>,
     tx: mpsc::Sender<PolledPage>,
+    ctrl: mpsc::Receiver<Duration>,
     interval: Duration,
 ) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(interval);
-        let (project, title) = match target.lock() {
-            Ok(t) => t.clone(),
-            Err(_) => return,
-        };
-        if project.is_empty() || title.is_empty() {
-            continue;
-        }
-        if let Ok(page) = client.get_page_in(&project, &title) {
-            if tx.send(PolledPage { project, title, page }).is_err() {
-                return; // app gone
+    std::thread::spawn(move || {
+        let mut interval = interval;
+        loop {
+            // The sleep IS the control channel: a push channel that dies
+            // 2 s into a 60 s nap must not leave the reader waiting out the
+            // other 58. `recv_timeout` wakes on either.
+            let fetch_now = match absorb_interval(&ctrl, interval) {
+                Some((next, urgent)) => {
+                    interval = next;
+                    urgent
+                }
+                None => return, // app gone
+            };
+            if !fetch_now {
+                continue;
+            }
+            let (project, title) = match target.lock() {
+                Ok(t) => t.clone(),
+                Err(_) => return,
+            };
+            if project.is_empty() || title.is_empty() {
+                continue;
+            }
+            if let Ok(page) = client.get_page_in(&project, &title) {
+                if tx.send(PolledPage { project, title, page }).is_err() {
+                    return; // app gone
+                }
             }
         }
     });
+}
+
+/// Wait out `current`, or wake early on a new interval from the control
+/// channel. Returns the interval to use next and whether to fetch right now;
+/// `None` means the channel is gone and the poller should stop.
+///
+/// Speeding up fetches immediately — that transition means "the push channel
+/// just stopped being trustworthy", and the point of the switch is to close
+/// the gap, not to open a fresh one. Slowing down does not: the push channel
+/// went live and just delivered a catch-up, so there is nothing to catch.
+fn absorb_interval(
+    ctrl: &mpsc::Receiver<Duration>,
+    current: Duration,
+) -> Option<(Duration, bool)> {
+    match ctrl.recv_timeout(current) {
+        // Timed out: an ordinary tick.
+        Err(mpsc::RecvTimeoutError::Timeout) => Some((current, true)),
+        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        Ok(first) => {
+            // Several state changes can pile up while we slept; only the
+            // last one describes the world.
+            let mut next = first;
+            loop {
+                match ctrl.try_recv() {
+                    Ok(d) => next = d,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return None,
+                }
+            }
+            Some((next, next < current))
+        }
+    }
 }
 
 /// The serial commit worker: one job in flight at a time, in queue order —
@@ -876,6 +935,7 @@ impl App {
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
         let (poll_tx, poll_rx) = mpsc::channel();
+        let (poll_ctrl_tx, poll_ctrl_rx) = mpsc::channel();
         let (ws_tx, ws_rx) = mpsc::channel();
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         App {
@@ -944,6 +1004,10 @@ impl App {
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
             poll_rx,
             poll_tx,
+            poll_ctrl_tx,
+            poll_ctrl_rx: Some(poll_ctrl_rx),
+            sync_state: capability::SyncState::Polling,
+            ws_attempted: false,
             ws_rx,
             ws_tx,
             ws_req_tx,
@@ -1149,6 +1213,49 @@ impl App {
             for k in &keys {
                 self.web_pending.remove(k);
             }
+        }
+    }
+
+    /// The poller's end of the control channel, for tests: `main` normally
+    /// takes it when the poller is spawned.
+    #[cfg(test)]
+    fn poll_ctrl_rx_for_test(&mut self) -> &mpsc::Receiver<Duration> {
+        self.poll_ctrl_rx.as_ref().expect("still held in tests")
+    }
+
+    /// Adopt the push channel's new state: retune the poller and, when the
+    /// status line is showing the session summary, refresh its `sync:` tag.
+    ///
+    /// The retune is what makes a stale sid cheap. The old code picked 60 s
+    /// from the mere existence of a cookie; now the interval is a function
+    /// of a state the websocket thread has actually demonstrated.
+    fn set_sync_state(&mut self, st: SyncState) {
+        if self.sync_state == st {
+            return;
+        }
+        self.sync_state = st;
+        // A dead channel just means the poller is gone (shutdown).
+        let _ = self.poll_ctrl_tx.send(st.poll_interval());
+        self.refresh_sync_tag();
+    }
+
+    /// The `sync:` word inside the session summary, kept truthful as the
+    /// state moves. Only that summary is rewritten — a live status message
+    /// (a commit result, an auth note) is left alone.
+    fn refresh_sync_tag(&mut self) {
+        let Some(at) = self.status.find("sync: ") else { return };
+        let Some(rest) = self.status.get(at + "sync: ".len()..) else { return };
+        let end = rest.find(' ').map(|i| at + "sync: ".len() + i).unwrap_or(self.status.len());
+        self.status.replace_range(at + "sync: ".len()..end, self.sync_label());
+    }
+
+    /// What to call the live-update channel. A session with no sid is not
+    /// "reconnecting" — it never had a push channel to lose.
+    fn sync_label(&self) -> &'static str {
+        if self.ws_attempted {
+            self.sync_state.label()
+        } else {
+            SyncState::Polling.label()
         }
     }
 
@@ -2586,12 +2693,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // invalid sid (push stuck reconnecting forever) must degrade to
     // "web edits still land, just at the poll interval" — never silence.
     let sid = ctx.client.sid().map(str::to_string);
-    let (ws_active, poll_interval) = cosense::ws::sync_plan(sid.is_some());
+    let (ws_active, initial_state) = cosense::ws::initial_plan(sid.is_some());
+    app.ws_attempted = ws_active;
+    app.sync_state = initial_state;
+    let poll_ctrl_rx = app
+        .poll_ctrl_rx
+        .take()
+        .expect("poller control receiver is only handed out once");
     spawn_web_poller(
         ctx.client.clone(),
         Arc::clone(&app.poll_target),
         app.poll_tx.clone(),
-        poll_interval,
+        poll_ctrl_rx,
+        initial_state.poll_interval(),
     );
     if let Some(sid) = &sid {
         let ws_req_rx = app
@@ -2615,12 +2729,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(c) if app.editable => format!(
             "auth: {} · edit enabled · sync: {} · ? help",
             c.kind(),
-            if ws_active { "ws" } else { "poll" }
+            app.sync_label()
         ),
         Some(c) => format!(
             "auth: {} · read-only (not a project member) · sync: {} · ? help",
             c.kind(),
-            if ws_active { "ws" } else { "poll" }
+            app.sync_label()
         ),
         None => "no auth — public read-only (`cosense login` to enable edits)".into(),
     };
@@ -4313,6 +4427,7 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
 /// One event from the ws thread → the event loop.
 fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
     match ev {
+        WsEvent::State(st) => app.set_sync_state(st),
         WsEvent::Status(s) => {
             // Never clobber the session hint (EDIT — …): connection notes
             // are transient and can wait.
@@ -5675,6 +5790,90 @@ mod tests {
         app.blocks = r.blocks;
         app.srcs = r.srcs;
         app
+    }
+
+    // ---------------------------------------------------------------
+    // Live-update plan: the poller's interval follows a TYPED push state.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_stale_sid_polls_fast_from_the_first_second() {
+        let mut app = page(&["a"]);
+        app.ws_attempted = true; // a sid exists...
+        app.status = "auth: pat · edit enabled · sync: poll · ? help".into();
+        // ...but nothing has joined a room, so the plan is still the fast one.
+        assert_eq!(app.sync_state, SyncState::Polling);
+        assert_eq!(app.sync_state.poll_interval(), Duration::from_secs(3));
+        // A sid that never works keeps failing; each failure re-asserts fast.
+        app.set_sync_state(SyncState::Reconnecting);
+        assert_eq!(
+            app.poll_ctrl_rx_for_test().recv().unwrap(),
+            Duration::from_secs(3)
+        );
+        assert!(app.status.contains("sync: reconnecting"));
+    }
+
+    #[test]
+    fn only_a_proven_room_relaxes_the_poll_and_a_drop_tightens_it_again() {
+        let mut app = page(&["a"]);
+        app.ws_attempted = true;
+        app.status = "auth: sid · edit enabled · sync: poll · ? help".into();
+        app.set_sync_state(SyncState::Live);
+        assert!(app.status.contains("sync: ws"));
+        app.set_sync_state(SyncState::Reconnecting);
+        assert!(app.status.contains("sync: reconnecting"));
+        let rx = app.poll_ctrl_rx_for_test();
+        assert_eq!(rx.recv().unwrap(), Duration::from_secs(60));
+        // The drop is delivered as its own message, so the sleeping poller
+        // wakes on it instead of finishing a 60 s nap in silence.
+        assert_eq!(rx.recv().unwrap(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_session_without_a_sid_is_never_called_reconnecting() {
+        let mut app = page(&["a"]);
+        app.ws_attempted = false;
+        app.set_sync_state(SyncState::Reconnecting);
+        assert_eq!(app.sync_label(), "poll");
+    }
+
+    #[test]
+    fn speeding_up_the_poll_fetches_at_once_slowing_down_does_not() {
+        let (tx, rx) = mpsc::channel::<Duration>();
+        // Slow -> fast: the push channel just died; close the gap now.
+        tx.send(Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            absorb_interval(&rx, Duration::from_secs(60)),
+            Some((Duration::from_secs(3), true))
+        );
+        // Fast -> slow: the room just delivered a catch-up; nothing to fetch.
+        tx.send(Duration::from_secs(60)).unwrap();
+        assert_eq!(
+            absorb_interval(&rx, Duration::from_secs(3)),
+            Some((Duration::from_secs(60), false))
+        );
+    }
+
+    #[test]
+    fn a_pile_of_state_changes_collapses_to_the_last_one() {
+        let (tx, rx) = mpsc::channel::<Duration>();
+        // Flap during one sleep: live, dropped, live again.
+        for d in [60, 3, 60] {
+            tx.send(Duration::from_secs(d)).unwrap();
+        }
+        // Only the world as it now IS matters; the interval ends slow and
+        // no fetch is forced, because the channel came back up.
+        assert_eq!(
+            absorb_interval(&rx, Duration::from_secs(60)),
+            Some((Duration::from_secs(60), false))
+        );
+    }
+
+    #[test]
+    fn the_poller_stops_when_the_app_is_gone() {
+        let (tx, rx) = mpsc::channel::<Duration>();
+        drop(tx);
+        assert_eq!(absorb_interval(&rx, Duration::from_secs(60)), None);
     }
 
     // ---------------------------------------------------------------
