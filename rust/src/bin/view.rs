@@ -115,7 +115,19 @@ fn spawn_web_worker(
     cache: ArtifactCache,
 ) {
     std::thread::spawn(move || {
-        while let Ok(job) = jobs.recv() {
+        // Idle window. The backend keeps a browser warm between batches (a
+        // re-render in a warm browser is roughly twice as fast), but a
+        // viewer nobody is editing should not hold a browser process.
+        const IDLE: std::time::Duration = std::time::Duration::from_secs(90);
+        loop {
+            let job = match jobs.recv_timeout(IDLE) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    backend.idle();
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let mut to_render: Vec<WebRequest> = Vec::new();
             for req in job.reqs {
                 let key = req.cache_key();

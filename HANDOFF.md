@@ -33,6 +33,14 @@ Notable details:
   `--user-data-dir`** under `$TMPDIR`; the port it actually bound is read back from
   `DevToolsActivePort`. stdout/stderr are `Stdio::null()` — anything Chrome printed
   would land in the alternate screen and wreck the TUI.
+* **The browser is kept alive between batches** (`Mutex<Option<Session>>`). Relaunching
+  per batch cost ~1.4 s of startup *and* discarded Chrome's warm HTTP/V8 caches, which
+  is most of what makes a Cosense page slow to draw. Measured on help-jp/Mermaid:
+  navigate+draw is ~3.5 s cold and ~2.3 s warm, so a whole batch goes 5.8 s → 2.6 s.
+  A session that returns *any* error is reaped and never reused (a CDP error can leave
+  the socket half-consumed); if the failed session was an inherited one, the batch is
+  retried once on a fresh browser. The worker closes the browser after 90 s idle, so a
+  viewer left open holds nothing.
 * `clip.scale = 2` gives a crisp 2× PNG; `build_image` downsizes it to cells anyway.
 * **Before measuring we `window.scrollTo(0, 0)`.** Cosense's navbar is `position:
   sticky`, and with `captureBeyondViewport` it paints wherever the viewport happens to
@@ -118,7 +126,7 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 | --- | --- |
 | `rust/src/webrender.rs` | **new** — the contract above, `cache_key`, `FakeBackend`, `ArtifactCache`. |
 | `rust/src/chrome.rs` | **new** — CDP client, Chrome discovery/launch/reaping, element capture, base64. |
-| `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). |
+| `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). `--twice` exercises the warm-browser path; it also reports Chrome process counts across `idle()`/`shutdown()`. |
 | `rust/src/render.rs` | `mermaid_lang()`; `code:` blocks whose language is Mermaid emit `Block::WebRender` carrying the code plus the unchanged code rows. Everything else is byte-for-byte as before. |
 | `rust/src/bin/view.rs` | `WebJob`/`WebMsg`/`spawn_web_worker`; App fields (`revision`, `web_gen`, `web_width_px`, `web_dark`, `web_pending`, `web_errors`, channels); `web_request`, `start_web_renders`, `drain_web_renders`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
 | `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary. |
@@ -188,12 +196,19 @@ New coverage, against the acceptance list:
 
 **Public, no credential needed — `https://scrapbox.io/help-jp/Mermaid`**
 
-| line id (selector `#mermaid-preview-<id>`) | result | time |
-| --- | --- | --- |
-| `65695bc797c2910000c699b2` | 1332×124 PNG | |
-| `65695d8097c2910000c699e8` | 1332×314 PNG | |
-| `65695ac297c2910000c699a0` | 1332×788 PNG (sequence diagram, visually verified) | |
-| **batch of 3, one navigation** | | **5.1 s** |
+| line id (selector `#mermaid-preview-<id>`) | result |
+| --- | --- |
+| `65695bc797c2910000c699b2` | 1332×124 PNG |
+| `65695d8097c2910000c699e8` | 1332×314 PNG |
+| `65695ac297c2910000c699a0` | 1332×788 PNG (sequence diagram, visually verified) |
+
+| batch of 3, one navigation | time |
+| --- | --- |
+| cold (browser launched) | **5.8 s** — launch+attach 1.5 s · navigate 0.6 s · **wait-for-draw 3.5 s** · capture 0.16 s |
+| warm (browser reused) | **2.6 s** — navigate 0.2 s · wait-for-draw 2.3 s · capture 0.13 s |
+| already in the disk cache | instant, no browser |
+
+The 3.5 s is Cosense's own page boot, not ours; it is the floor for a first render.
 
 **Private, with `COSENSE_SID` — `https://scrapbox.io/my-sandbox/テスト`**
 
@@ -202,7 +217,11 @@ New coverage, against the acceptance list:
 | `056f612a7f428aa9f83223e2` (flowchart) | 1374×180 PNG, visually verified | |
 | `9a3c759df691479055deb208` (pie) | 1374×918 PNG | |
 | `7bbaac0d02c5590651d0d957` (deliberately broken) | `diagram not drawn by Cosense` → code fallback | |
-| **batch of 3** | | **10.3 s** |
+| **batch of 3** | | **10.2 s cold, 8.5 s warm** (the broken block spends the 6 s quiet-cutoff either way) |
+
+Browser lifecycle, measured in the same run: **10** Chrome processes alive while the
+session is warm, **0** after `idle()`, **0** after `shutdown()`, **0** after the process
+exits, and no leftover `cosense-tui-chrome-*` profile directory.
 
 Failure paths exercised live: `COSENSE_CHROME=/nonexistent/chrome` → `no Chrome found`;
 private project with no credential → REST 401 before the browser is ever reached.
@@ -250,14 +269,14 @@ Delete them with `cosense previewEdit` + `submitEdit` if the page is wanted clea
 * **Time-machine snapshots are never rendered** (`web_request` returns `None` when
   `app.time` is set): the browser can only show the current page, and a current
   diagram on a historical snapshot would be a lie. Snapshots show code.
-* **Cost.** ~4–10 s and one Chrome process per page-load/resize/commit that has an
-  uncached diagram. Results are cached to `~/.cache/cosense-tui/webrender/` and keyed
-  so a revisit is instant. The width is bucketed to 80 CSS px so ordinary resizes
-  do not re-render.
-* **Process hygiene.** The child is killed *and waited* at the end of every batch, its
-  profile directory removed, and `shutdown()` on the quit path SIGKILLs a batch still
-  in flight. Verified: no orphan Chrome and no leftover `cosense-tui-chrome-*` profile
-  after the smoke runs.
+* **Cost.** ~5.8 s for the first uncached page, ~2.6 s for a re-render in a warm
+  browser; ~3.5 s of the first is Cosense's own page boot and cannot be removed from
+  this design. Results are cached to `~/.cache/cosense-tui/webrender/`, so a revisit is
+  instant and launches nothing. The width is bucketed to 80 CSS px so ordinary resizes
+  do not re-render, and renders never fire while the reader is editing.
+* **Process hygiene.** `Session::drop` kills *and waits* the child and removes its
+  profile; it runs when a batch fails, when the worker goes idle (90 s), and on quit.
+  `shutdown()` additionally SIGKILLs a batch still in flight. Verified live — see §7.
 * **Nothing from the browser is executed in-process.** Only PNG bytes cross back; no
   SVG, no HTML, no page script. The credential's only exit is `Network.setCookie`.
 * **Distribution.** Chrome/Chromium/Edge/Brave must be installed. Auto-detected on

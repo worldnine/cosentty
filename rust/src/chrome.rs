@@ -94,9 +94,31 @@ pub struct ChromeBackend {
     /// PID of the Chrome we currently own, so shutdown can reap it even if
     /// the app quits while a batch is in flight.
     live_pid: Mutex<Option<u32>>,
+    /// The browser, kept alive between batches. Relaunching per batch cost
+    /// ~1.4s of startup AND threw away Chrome's warm HTTP/V8 caches, which
+    /// is most of what makes a Cosense page slow to draw: measured on
+    /// help-jp/Mermaid, navigate+draw is ~4.6s cold and ~2.5s in a browser
+    /// that has already loaded the site once. The worker closes it after an
+    /// idle spell (`idle`), and quitting kills it (`shutdown`).
+    session: Mutex<Option<Session>>,
     /// Set once the app is quitting: an in-flight batch stops early instead
     /// of holding the exit open for the full budget.
     stopped: std::sync::atomic::AtomicBool,
+}
+
+/// A live browser: the process, its DevTools socket and its throwaway
+/// profile. Dropping it reaps all three.
+struct Session {
+    child: Child,
+    cdp: Cdp,
+    profile: PathBuf,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        kill(&mut self.child);
+        std::fs::remove_dir_all(&self.profile).ok();
+    }
 }
 
 impl ChromeBackend {
@@ -108,24 +130,67 @@ impl ChromeBackend {
             exe,
             sid,
             live_pid: Mutex::new(None),
+            session: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     fn run_batch(&self, reqs: &[WebRequest]) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
-        let deadline = Instant::now() + budget();
         let width = reqs.iter().map(|r| r.width_px).max().unwrap_or(900).clamp(320, 2400);
         let dark = reqs.first().map(|r| r.dark).unwrap_or(true);
 
+        let mut held = self.session.lock().unwrap();
+        let reused = held.is_some();
+        if held.is_none() {
+            *held = Some(self.launch(width)?);
+        }
+        let deadline = Instant::now() + budget();
+        let out = self.drive(held.as_mut().unwrap(), reqs, width, dark, deadline);
+        if out.is_err() {
+            // A CDP error can leave the socket half-consumed, so a session
+            // that failed is never reused: it is reaped here and the next
+            // batch starts a fresh browser.
+            *held = None;
+            *self.live_pid.lock().unwrap() = None;
+            if reused && !self.stopped.load(Ordering::Relaxed) {
+                // The browser we inherited may simply have died (crash, OOM,
+                // the machine slept). One clean retry before giving up.
+                *held = Some(self.launch(width)?);
+                let deadline = Instant::now() + budget();
+                let retry = self.drive(held.as_mut().unwrap(), reqs, width, dark, deadline);
+                if retry.is_err() {
+                    *held = None;
+                    *self.live_pid.lock().unwrap() = None;
+                }
+                return retry;
+            }
+        }
+        out
+    }
+
+    /// Start a browser and attach to its page target.
+    fn launch(&self, width: u32) -> Result<Session, WebError> {
+        let deadline = Instant::now() + budget();
         let profile = temp_profile();
+        let t0 = Instant::now();
         let mut child = self.spawn(&profile, width)?;
         *self.live_pid.lock().unwrap() = Some(child.id());
-        // Whatever happens below, the child and its profile go away.
-        let out = self.drive(&mut child, &profile, reqs, width, dark, deadline);
-        kill(&mut child);
-        *self.live_pid.lock().unwrap() = None;
-        std::fs::remove_dir_all(&profile).ok();
-        out
+        let attach = self
+            .wait_for_port(&mut child, &profile, deadline)
+            .and_then(|port| page_target(port, deadline))
+            .and_then(|url| Cdp::connect(&url));
+        if std::env::var_os("COSENSE_WEB_DEBUG").is_some() {
+            eprintln!("[webrender] launch+attach {:?}", t0.elapsed());
+        }
+        match attach {
+            Ok(cdp) => Ok(Session { child, cdp, profile }),
+            Err(e) => {
+                kill(&mut child);
+                *self.live_pid.lock().unwrap() = None;
+                std::fs::remove_dir_all(&profile).ok();
+                Err(e)
+            }
+        }
     }
 
     fn spawn(&self, profile: &Path, width: u32) -> Result<Child, WebError> {
@@ -163,17 +228,14 @@ impl ChromeBackend {
             .map_err(|e| WebError::Backend(format!("chrome did not start: {e}")))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn drive(
         &self,
-        child: &mut Child,
-        profile: &Path,
+        session: &mut Session,
         reqs: &[WebRequest],
         width: u32,
         dark: bool,
         deadline: Instant,
     ) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
-        let t0 = Instant::now();
         // Phase timings, opt-in only: this thread runs while the TUI owns the
         // alternate screen, so an unguarded print would corrupt the display.
         let dbg = std::env::var_os("COSENSE_WEB_DEBUG").is_some();
@@ -184,12 +246,10 @@ impl ChromeBackend {
                 }
             };
         }
-        let port = self.wait_for_port(child, profile, deadline)?;
-        let ws_url = page_target(port, deadline)?;
-        let mut cdp = Cdp::connect(&ws_url)?;
-        phase!("launch+attach", t0);
+        let cdp = &mut session.cdp;
         let t1 = Instant::now();
-
+        // Re-applied every batch: the pane may have been resized, and the
+        // cookie is idempotent.
         cdp.call("Page.enable", serde_json::json!({}), deadline)?;
         cdp.call(
             "Emulation.setDeviceMetricsOverride",
@@ -236,7 +296,7 @@ impl ChromeBackend {
         phase!("setup+navigate", t1);
         let t2 = Instant::now();
         let selectors: Vec<String> = reqs.iter().map(|r| r.selector()).collect();
-        let ready = self.wait_for_elements(&mut cdp, reqs, &selectors, deadline)?;
+        let ready = self.wait_for_elements(cdp, reqs, &selectors, deadline)?;
         phase!("wait-for-draw", t2);
         let t3 = Instant::now();
 
@@ -253,7 +313,7 @@ impl ChromeBackend {
                 out.push(Err(WebError::NotRendered));
                 continue;
             }
-            out.push(capture(&mut cdp, &selectors[i], req, capture_deadline));
+            out.push(capture(cdp, &selectors[i], req, capture_deadline));
         }
         phase!("capture", t3);
         Ok(out)
@@ -385,8 +445,21 @@ impl WebBackend for ChromeBackend {
         }
     }
 
+    fn idle(&self) {
+        // Dropping the Session kills the browser and removes its profile.
+        // A viewer left open overnight holds nothing.
+        *self.session.lock().unwrap() = None;
+        *self.live_pid.lock().unwrap() = None;
+    }
+
     fn shutdown(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        // `try_lock`: a batch in flight holds the session lock, and the
+        // whole point here is not to wait for it — the pid below is what
+        // reaps that browser.
+        if let Ok(mut held) = self.session.try_lock() {
+            *held = None;
+        }
         if let Some(pid) = *self.live_pid.lock().unwrap() {
             // The batch's own cleanup may already have reaped it; SIGKILL on
             // a gone pid is harmless, and this is the last chance to avoid

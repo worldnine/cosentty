@@ -190,6 +190,11 @@ pub trait WebBackend: Send + Sync {
     /// returned per request, in the same order.
     fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>>;
 
+    /// No work has arrived for a while. A backend that keeps a browser warm
+    /// between batches releases it here, so an idle viewer holds no browser
+    /// process. The next request starts a fresh one.
+    fn idle(&self) {}
+
     /// Release any browser process. Called once on shutdown; must not panic
     /// and must leave no orphan behind.
     fn shutdown(&self) {}

@@ -11,8 +11,22 @@ use cosense::chrome::ChromeBackend;
 use cosense::render::{render_lines, Block};
 use cosense::webrender::{hash_code, WebBackend, WebRequest};
 
+/// Chrome processes launched by this viewer (they carry our profile path).
+fn chrome_procs() -> usize {
+    std::process::Command::new("pgrep")
+        .args(["-f", "cosense-tui-chrome-"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(0)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--twice` runs the batch a second time through the SAME backend, which
+    // is how the warm-browser path gets exercised: the second number is what
+    // a re-render (an edited diagram, a pane resize) actually costs.
+    let twice = args.iter().any(|a| a == "--twice");
+    args.retain(|a| a != "--twice");
     let project = args.first().cloned().unwrap_or_else(|| "help-jp".into());
     let title = args.get(1).cloned().unwrap_or_else(|| "Mermaid".into());
 
@@ -66,6 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
     let results = backend.render_batch(&reqs);
     let elapsed = t0.elapsed();
+    if twice {
+        let t1 = std::time::Instant::now();
+        let again = backend.render_batch(&reqs);
+        let ok = again.iter().filter(|r| r.is_ok()).count();
+        println!("second batch (warm browser): {ok}/{} ok in {:?}", again.len(), t1.elapsed());
+    }
     for (req, res) in reqs.iter().zip(results) {
         match res {
             Ok(png) => {
@@ -80,6 +100,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("batch of {} in {:?}", reqs.len(), elapsed);
+    // The browser is kept warm between batches; prove that going idle
+    // actually reaps it, and that shutdown leaves nothing behind either.
+    println!("chrome alive after the batch: {}", chrome_procs());
+    backend.idle();
+    println!("chrome alive after idle():    {}", chrome_procs());
     backend.shutdown();
+    println!("chrome alive after shutdown(): {}", chrome_procs());
     Ok(())
 }
