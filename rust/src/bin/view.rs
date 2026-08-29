@@ -9279,9 +9279,20 @@ mod tests {
         let b = app.web_request(cosense::webrender::WebKind::Mermaid, "pie", 7).unwrap();
         backend.answer(&a.cache_key(), Ok(tiny_png()));
         backend.answer(&b.cache_key(), Ok(tiny_png()));
-        // Hold the worker until BOTH jobs are queued, so it sees them
-        // together — the gate, not a sleep, is what makes this repeatable.
-        let held = backend.gate.lock().unwrap();
+
+        // Both passes are queued BEFORE the worker exists. Merging happens
+        // when a job arrives while others are already waiting, so the only
+        // way to test it deterministically is to have them all waiting.
+        // (Holding the backend gate instead pins the worker AFTER it has
+        // taken the first job — it would already have formed a batch of
+        // one, and the second pass would be a batch of its own. That race
+        // is what made this test flaky.)
+        app.web_job_tx
+            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
+            .unwrap();
+        app.web_job_tx
+            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![b.clone(), a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
+            .unwrap();
         let handle = spawn_web_worker(
             app.web_jobs_rx.take().unwrap(),
             app.web_tx.clone(),
@@ -9291,13 +9302,7 @@ mod tests {
             Arc::clone(&app.web_gen),
             Arc::clone(&app.src_epoch),
         );
-        app.web_job_tx
-            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
-            .unwrap();
-        app.web_job_tx
-            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![b.clone(), a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
-            .unwrap();
-        drop(held);
+
         let mut keys = Vec::new();
         for _ in 0..2 {
             keys.push(
@@ -9313,6 +9318,11 @@ mod tests {
         let mut want = vec![a.cache_key(), b.cache_key()];
         want.sort();
         assert_eq!(keys, want, "each request answered exactly once, no duplicates");
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "and the whole page cost ONE browser batch, which is the point",
+        );
     }
 
     #[test]
