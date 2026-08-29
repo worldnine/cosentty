@@ -243,5 +243,6 @@ ProjectCSS つきブロックも同じ経路に載せられる。
   HTTP/V8 キャッシュが温まるため、再描画が約 2 倍速い）。同じ図の 2 回目以降はディスク
   キャッシュから即座に出るので、ブラウザは起動しない。
 - 動作確認用: `cargo run --bin web_smoke -- <project> <title>`（テストスイートには入らない）。
-  `COSENSE_WEB_DEBUG=1` で各フェーズの所要時間を stderr に出す（TUI 実行中は画面を壊すので
-  smoke 専用）。
+  `COSENSE_WEB_DEBUG=<ファイルパス>` で各フェーズの所要時間をそのファイルへ追記する。
+  レンダリングは TUI が alternate screen を握っている間に別スレッドで走るので、
+  stdout / stderr へは一切書かない（画面が壊れるため）。

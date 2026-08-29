@@ -474,12 +474,15 @@ struct App {
     /// the reader is looking at. Cleared only when an authoritative page
     /// install proves the two agree again (see `mark_desynced`).
     web_unsynced: bool,
-    /// A diagram-failure note and when it stops being worth the status line.
-    /// The status line doubles as the key-hint bar, so a message left there
-    /// forever costs the reader their hints; a render failure is worth a
-    /// few seconds, not the rest of the session. Scoped to THIS feature's
-    /// messages — see `expire_web_status`.
-    web_status: Option<(String, std::time::Instant)>,
+    /// A diagram-failure note, and when it stops being worth showing.
+    ///
+    /// It lives in its OWN slot rather than in `app.status`, and ranks
+    /// BELOW it: a commit failure, an auth error or a resync notice must
+    /// never be overwritten — or worse, wiped when the diagram note times
+    /// out — by something as minor as a picture that did not draw. It ranks
+    /// above the key hints, and gives the line back after a few seconds so
+    /// the hints return.
+    web_notice: Option<(String, std::time::Instant)>,
     /// Jobs into the render worker, results back. Artifacts land in
     /// `images` (they are images), so drawing needs no special case.
     web_job_tx: mpsc::Sender<WebJob>,
@@ -917,7 +920,7 @@ impl App {
             web_cols: IMAGE_MAX_COLS,
             web_rescaling: HashSet::new(),
             web_unsynced: false,
-            web_status: None,
+            web_notice: None,
             web_job_tx,
             web_jobs_rx: Some(web_jobs_rx),
             web_tx,
@@ -1212,29 +1215,57 @@ impl App {
         }
     }
 
-    /// Show a diagram note on the status line, and remember to take it back
-    /// down. Nothing else about the status line changes.
-    fn note_web_status(&mut self, msg: String) {
+    /// Note that a diagram did not draw. This never touches `app.status`,
+    /// so it cannot overwrite — or, on expiry, erase — a commit, auth or
+    /// resync message.
+    fn note_web_failure(&mut self, msg: String) {
         const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(6);
-        self.status = msg.clone();
-        self.web_status = Some((msg, std::time::Instant::now() + SHOWN_FOR));
+        self.web_notice = Some((msg, std::time::Instant::now() + SHOWN_FOR));
     }
 
-    /// Clear a diagram note once it has had its seconds, so the key hints
-    /// come back. Deliberately narrow: if anything else has since written to
-    /// the status line, that message is left alone and simply inherits the
-    /// line. Returns whether the status changed.
-    fn expire_web_status(&mut self) -> bool {
-        let Some((msg, until)) = self.web_status.as_ref() else { return false };
+    /// Drop the diagram note once it has had its seconds, so the key hints
+    /// come back. Returns whether anything changed.
+    fn expire_web_notice(&mut self) -> bool {
+        let Some((_, until)) = self.web_notice.as_ref() else { return false };
         if std::time::Instant::now() < *until {
             return false;
         }
-        let ours = self.status == *msg;
-        if ours {
-            self.status.clear();
+        self.web_notice = None;
+        true
+    }
+
+    /// What the bottom row should say, in priority order: the edit
+    /// session's keys, then the links on the cursor line, then whatever
+    /// wrote to `status` (commits, auth, resync — the things a reader must
+    /// not miss), then a diagram note, and finally the key hints.
+    fn hint_text(&self, cursor_links: &[LinkItem]) -> String {
+        if let Some(s) = self.session.as_ref() {
+            let dirty = s.input.buf != s.orig;
+            return format!(
+                "{}↑↓ move · Enter new line · ⌫@行頭 join · Tab indent · Esc done",
+                if dirty { "● " } else { "" }
+            );
         }
-        self.web_status = None;
-        ours
+        if !cursor_links.is_empty() {
+            let listed: Vec<String> = cursor_links
+                .iter()
+                .take(9)
+                .enumerate()
+                .map(|(i, l)| format!("{}:{}", i + 1, l.label()))
+                .collect();
+            return format!("Enter/f open → {}", listed.join("  "));
+        }
+        if !self.status.is_empty() {
+            return self.status.clone();
+        }
+        if let Some((msg, _)) = self.web_notice.as_ref() {
+            return msg.clone();
+        }
+        if self.editable {
+            "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit".into()
+        } else {
+            "j/k move  Enter link  w browser  ? help  q quit  · read-only".into()
+        }
     }
 
     /// The local model may have drifted from the server. Deliberately
@@ -1285,7 +1316,7 @@ impl App {
                     self.images.insert(key, info);
                 }
                 Err(e) => {
-                    self.note_web_status(format!("diagram: {e} (showing source)"));
+                    self.note_web_failure(format!("diagram: {e} (showing source)"));
                     self.web_errors.insert(key, e);
                 }
             }
@@ -3194,7 +3225,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // the column cap it was built for.
         app.start_web_renders();
         app.rescale_diagrams();
-        app.expire_web_status();
+        app.expire_web_notice();
         app.drain_downloads();
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
@@ -5008,34 +5039,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         format!("L{}/{}", cur, app.lines.len())
     };
     let cur_links = if app.session.is_some() { Vec::new() } else { app.cursor_line_links() };
-    let hint = if app.session.is_some() {
-        let dirty = app
-            .session
-            .as_ref()
-            .map(|s| s.input.buf != s.orig)
-            .unwrap_or(false);
-        format!(
-            "{}↑↓ move · Enter new line · ⌫@行頭 join · Tab indent · Esc done",
-            if dirty { "● " } else { "" }
-        )
-    } else if !cur_links.is_empty() {
-        let listed: Vec<String> = cur_links
-            .iter()
-            .take(9)
-            .enumerate()
-            .map(|(i, l)| format!("{}:{}", i + 1, l.label()))
-            .collect();
-        format!("Enter/f open → {}", listed.join("  "))
-    } else if app.status.is_empty() {
-        if app.editable {
-            "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
-                .to_string()
-        } else {
-            "j/k move  Enter link  w browser  ? help  q quit  · read-only".to_string()
-        }
-    } else {
-        app.status.clone()
-    };
+    let hint = app.hint_text(&cur_links);
     f.render_widget(
         Paragraph::new(format!(" {} {} · {}", mode_tag, pos, hint))
             .style(Style::default().fg(CHROME_DIM)),
@@ -5891,7 +5895,11 @@ mod tests {
         assert!(text.iter().any(|t| t.contains("code:mmd")));
         assert!(text.iter().any(|t| t.contains("flowchart LR")));
         assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })));
-        assert!(app.status.contains("showing source"), "and the reader is told: {}", app.status);
+        assert!(
+            app.hint_text(&[]).contains("showing source"),
+            "and the reader is told: {}",
+            app.hint_text(&[]),
+        );
     }
 
     #[test]
@@ -6212,7 +6220,7 @@ mod tests {
         assert!(!app.web_rescaling.contains(&key), "it stops being in flight");
         assert!(app.images.contains_key(&key), "the picture on screen survives");
         assert!(app.web_errors.is_empty(), "a resize failure is not a diagram failure");
-        assert!(app.web_status.is_none(), "and the reader is not told about it");
+        assert!(app.web_notice.is_none(), "and the reader is not told about it");
     }
 
     #[test]
@@ -6455,34 +6463,55 @@ mod tests {
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         app.web_pending.insert(key.clone());
+        assert!(app.hint_text(&[]).contains("? help"), "hints by default");
         app.web_tx
-            .send(WebMsg { gen: app.gen_now(), key, rescale: false, res: Err(WebError::NoBrowser.to_string()) })
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key,
+                rescale: false,
+                res: Err(WebError::NoBrowser.to_string()),
+            })
             .unwrap();
         assert!(app.drain_web_renders());
-        assert!(app.status.contains("showing source"), "the reader is told once");
+        // It never touches the status line — it has its own slot.
+        assert!(app.status.is_empty());
+        assert!(app.hint_text(&[]).contains("showing source"), "the reader is told once");
         // It holds the line for its few seconds…
-        assert!(!app.expire_web_status());
-        assert!(!app.status.is_empty());
-        // …and then hands the status line — the key-hint bar — back.
-        let (msg, _) = app.web_status.clone().unwrap();
-        app.web_status = Some((msg, std::time::Instant::now()));
-        assert!(app.expire_web_status());
-        assert!(app.status.is_empty(), "hints are visible again");
-        assert!(app.web_status.is_none());
-        assert!(!app.expire_web_status(), "and it stays gone");
+        assert!(!app.expire_web_notice());
+        // …and then hands the row back to the key hints.
+        let (msg, _) = app.web_notice.clone().unwrap();
+        app.web_notice = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_web_notice());
+        assert!(app.web_notice.is_none());
+        assert!(app.hint_text(&[]).contains("? help"), "hints are visible again");
+        assert!(!app.expire_web_notice(), "and it stays gone");
     }
 
     #[test]
-    fn an_expiring_diagram_note_never_clears_someone_elses_status() {
+    fn a_diagram_note_never_hides_or_erases_a_commit_or_auth_message() {
         let mut app = mermaid_page();
-        app.note_web_status("diagram: boom".into());
-        // Anything else writing to the status line takes ownership of it.
-        app.status = "✓ done".into();
-        let (msg, _) = app.web_status.clone().unwrap();
-        app.web_status = Some((msg, std::time::Instant::now()));
-        assert!(!app.expire_web_status());
-        assert_eq!(app.status, "✓ done");
-        assert!(app.web_status.is_none(), "but the note stops being tracked");
+        // Something the reader must not miss is already on the status line.
+        app.status = "commit failed: line 4 — 500".into();
+        app.note_web_failure("diagram: no Chrome found (showing source)".into());
+        assert_eq!(
+            app.hint_text(&[]),
+            "commit failed: line 4 — 500",
+            "status outranks a diagram note",
+        );
+        // When the note times out it takes only itself with it.
+        let (msg, _) = app.web_notice.clone().unwrap();
+        app.web_notice = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_web_notice());
+        assert_eq!(app.status, "commit failed: line 4 — 500", "the real message survives");
+        assert_eq!(app.hint_text(&[]), "commit failed: line 4 — 500");
+
+        // And with the status line free, the note would have shown.
+        app.note_web_failure("diagram: browser timed out (showing source)".into());
+        app.status.clear();
+        assert!(app.hint_text(&[]).contains("browser timed out"));
+        // The edit session and cursor links still outrank both.
+        let links = vec![LinkItem::Page("Somewhere".into())];
+        assert!(app.hint_text(&links).contains("Enter/f open"));
     }
 
     #[test]
