@@ -120,11 +120,31 @@ enum WebJob {
     /// the pane was resized. No browser is involved: this is a decode plus
     /// a resize, done on the worker so the UI thread never stalls on it.
     Rescale { gen: u64, key: String, max_cols: u16 },
+    /// Quit. Sent once, on the way out, so the worker can be joined.
+    Stop,
+}
+
+impl WebJob {
+    /// The page generation this job belongs to. `Stop` belongs to none.
+    fn gen(&self) -> Option<u64> {
+        match self {
+            WebJob::Render { gen, .. } | WebJob::Rescale { gen, .. } => Some(*gen),
+            WebJob::Stop => None,
+        }
+    }
 }
 
 /// A finished web render, already decoded and protocol-encoded on the
 /// worker. `gen` and `key` together decide whether it is still wanted.
-type WebMsg = (u64, String, Result<ImageInfo, String>);
+struct WebMsg {
+    gen: u64,
+    key: String,
+    /// True when this answers a `Rescale`. A failed rescale is not a failed
+    /// diagram: the artifact already on screen stays, and the reader is
+    /// told nothing.
+    rescale: bool,
+    res: Result<ImageInfo, String>,
+}
 
 /// The web-render worker: the ONLY thread that talks to a browser. It takes
 /// whole batches, answers the on-disk cache without launching anything, and
@@ -135,15 +155,20 @@ fn spawn_web_worker(
     out: mpsc::Sender<WebMsg>,
     backend: Arc<dyn WebBackend>,
     picker: Picker,
+    // `current_gen` is the App's page generation: work queued for a page the
+    // reader has already left is dropped BEFORE it costs a decode or a
+    // browser navigation.
     cache: ArtifactCache,
-) {
+    current_gen: Arc<std::sync::atomic::AtomicU64>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // Idle window. The backend keeps a browser warm between batches (a
         // re-render in a warm browser is roughly twice as fast), but a
         // viewer nobody is editing should not hold a browser process.
         const IDLE: std::time::Duration = std::time::Duration::from_secs(90);
+        let live = |gen: u64| gen == current_gen.load(std::sync::atomic::Ordering::SeqCst);
         loop {
-            let job = match jobs.recv_timeout(IDLE) {
+            let first = match jobs.recv_timeout(IDLE) {
                 Ok(job) => job,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     backend.idle();
@@ -151,55 +176,124 @@ fn spawn_web_worker(
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            let (gen, reqs, max_cols) = match job {
-                WebJob::Rescale { gen, key, max_cols } => {
-                    // The PNG the artifact was made from is on disk; if it
-                    // is not, the viewer simply keeps the size it has.
-                    if let Some(png) = cache.get(&key) {
-                        let _ = out.send((gen, key, decode_web_png(&picker, &png, max_cols)));
-                    }
-                    continue;
-                }
-                WebJob::Render { gen, reqs, max_cols } => (gen, reqs, max_cols),
-            };
-            let mut to_render: Vec<WebRequest> = Vec::new();
-            for req in reqs {
-                let key = req.cache_key();
-                match cache.get(&key).map(|png| decode_web_png(&picker, &png, max_cols)) {
-                    Some(Ok(info)) => {
-                        let _ = out.send((gen, key, Ok(info)));
-                    }
-                    // On disk but unreadable: truncated by a crash, or
-                    // corrupted underneath us. That must not become a
-                    // permanent failure for this artifact — drop the entry
-                    // and let the browser produce it again.
-                    Some(Err(_)) => {
-                        cache.remove(&key);
-                        to_render.push(req);
-                    }
-                    None => to_render.push(req),
-                }
+            // Take everything already queued behind it. A burst of jobs for
+            // the page the reader has moved on from must not make the
+            // current page wait through several browser navigations.
+            let mut batch = vec![first];
+            let mut stop = false;
+            while let Ok(job) = jobs.try_recv() {
+                batch.push(job);
             }
-            if to_render.is_empty() {
-                continue;
-            }
-            let results = backend.render_batch(&to_render);
-            for (req, res) in to_render.iter().zip(results) {
-                let key = req.cache_key();
-                let msg = match res {
-                    Ok(png) => {
-                        let img = decode_web_png(&picker, &png, max_cols);
-                        if img.is_ok() {
-                            cache.put(&key, &png);
+            // Stale-generation jobs are never ACCEPTED, so they owe no
+            // reply: `set_page` clears `web_pending`/`web_rescaling` for the
+            // page being left, which is what keeps this from leaking. See
+            // `set_page_clears_the_state_a_dropped_job_would_have_answered`.
+            batch.retain(|job| match job.gen() {
+                None => {
+                    stop = true;
+                    false
+                }
+                Some(g) => live(g),
+            });
+
+            // Every same-generation render is merged into ONE batch, so a
+            // page's diagrams still cost a single navigation however many
+            // passes queued them.
+            let mut merged: Vec<WebRequest> = Vec::new();
+            let mut merged_cols: Option<u16> = None;
+            let mut merged_gen = 0u64;
+            for job in batch {
+                match job {
+                    WebJob::Stop => {}
+                    WebJob::Rescale { gen, key, max_cols } => {
+                        // A rescale is answered from the disk cache. If the
+                        // PNG is gone, the answer is an error so the viewer
+                        // stops waiting — it keeps the size it has.
+                        let res = match cache.get(&key) {
+                            Some(png) => decode_web_png(&picker, &png, max_cols),
+                            None => Err("no cached artifact to resize".to_string()),
+                        };
+                        let _ = out.send(WebMsg { gen, key, rescale: true, res });
+                    }
+                    WebJob::Render { gen, reqs, max_cols } => {
+                        merged_gen = gen;
+                        merged_cols = Some(max_cols);
+                        for req in reqs {
+                            if !merged.iter().any(|r| r.cache_key() == req.cache_key()) {
+                                merged.push(req);
+                            }
                         }
-                        img
                     }
-                    Err(e) => Err(e.to_string()),
-                };
-                let _ = out.send((gen, key, msg));
+                }
+            }
+
+            if let Some(max_cols) = merged_cols {
+                run_render_batch(
+                    &*backend,
+                    &picker,
+                    &cache,
+                    &out,
+                    merged_gen,
+                    merged,
+                    max_cols,
+                );
+            }
+            if stop {
+                break;
             }
         }
-    });
+    })
+}
+
+/// Serve one page's worth of requests: the disk cache first, the browser for
+/// whatever is left. EVERY request gets exactly one reply, including cache
+/// misses and decode failures — a request with no reply would leave the
+/// viewer pulsing a diagram forever.
+fn run_render_batch(
+    backend: &dyn WebBackend,
+    picker: &Picker,
+    cache: &ArtifactCache,
+    out: &mpsc::Sender<WebMsg>,
+    gen: u64,
+    reqs: Vec<WebRequest>,
+    max_cols: u16,
+) {
+    let mut to_render: Vec<WebRequest> = Vec::new();
+    for req in reqs {
+        let key = req.cache_key();
+        match cache.get(&key).map(|png| decode_web_png(picker, &png, max_cols)) {
+            Some(Ok(info)) => {
+                let _ = out.send(WebMsg { gen, key, rescale: false, res: Ok(info) });
+            }
+            // On disk but unreadable: truncated by a crash, or corrupted
+            // underneath us. That must not become a permanent failure for
+            // this artifact — drop the entry and let the browser produce
+            // it again.
+            Some(Err(_)) => {
+                cache.remove(&key);
+                to_render.push(req);
+            }
+            None => to_render.push(req),
+        }
+    }
+    if to_render.is_empty() {
+        return;
+    }
+    let results = backend.render_batch(&to_render);
+    for (req, res) in to_render.iter().zip(results) {
+        let key = req.cache_key();
+        let res = match res {
+            Ok(png) => {
+                let img = decode_web_png(picker, &png, max_cols);
+                if img.is_ok() {
+                    cache.put(&key, &png);
+                }
+                img
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = out.send(WebMsg { gen, key, rescale: false, res });
+    }
 }
 
 /// PNG bytes -> terminal image. Only image decoding happens here: no SVG or
@@ -348,9 +442,11 @@ struct App {
     file_rx: mpsc::Receiver<FileMsg>,
 
     // --- web renderer (Mermaid today; see cosense::webrender) -------------
-    /// Bumped on every page install. A render that comes back for an older
-    /// generation is dropped even if its key were to collide.
-    web_gen: u64,
+    /// Bumped on every page install. Shared with the render worker, which
+    /// drops queued work for a page the reader has left before spending a
+    /// decode or a browser navigation on it. A result that comes back for
+    /// an older generation is dropped even if its key were to collide.
+    web_gen: Arc<std::sync::atomic::AtomicU64>,
     /// Terminal background is dark (picks the browser's color scheme).
     web_dark: bool,
     /// Render keys currently in flight.
@@ -804,7 +900,7 @@ impl App {
             history: Vec::new(),
             forward: Vec::new(),
             overlay: None,
-            web_gen: 0,
+            web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,
             web_pending: HashSet::new(),
             web_errors: HashMap::new(),
@@ -885,7 +981,7 @@ impl App {
         self.title = l.title;
         self.header_colors = l.header_colors;
         self.page_id = l.page_id;
-        self.web_gen = self.web_gen.wrapping_add(1);
+        self.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.lines = l.lines;
         self.blocks = l.blocks;
         self.srcs = l.srcs;
@@ -1020,17 +1116,24 @@ impl App {
         if reqs.is_empty() {
             return;
         }
-        for r in &reqs {
-            self.web_pending.insert(r.cache_key());
+        let keys: Vec<String> = reqs.iter().map(|r| r.cache_key()).collect();
+        for k in &keys {
+            self.web_pending.insert(k.clone());
         }
         // Those blocks now shimmer; the map is rebuilt with the layout.
         self.laid_width = 0;
         self.web_anim = std::time::Instant::now();
-        let _ = self.web_job_tx.send(WebJob::Render {
-            gen: self.web_gen,
-            reqs,
-            max_cols: self.web_cols,
-        });
+        if self
+            .web_job_tx
+            .send(WebJob::Render { gen: self.gen_now(), reqs, max_cols: self.web_cols })
+            .is_err()
+        {
+            // The worker is gone (shutting down). Nothing will ever answer,
+            // so un-mark them: the code block stays, and it stops pulsing.
+            for k in &keys {
+                self.web_pending.remove(k);
+            }
+        }
     }
 
     /// Is the edit session's caret on one of these source lines? Such a
@@ -1086,11 +1189,13 @@ impl App {
         }
         for key in keys {
             self.web_rescaling.insert(key.clone());
-            let _ = self.web_job_tx.send(WebJob::Rescale {
-                gen: self.web_gen,
-                key,
-                max_cols: want,
-            });
+            if self
+                .web_job_tx
+                .send(WebJob::Rescale { gen: self.gen_now(), key: key.clone(), max_cols: want })
+                .is_err()
+            {
+                self.web_rescaling.remove(&key);
+            }
         }
     }
 
@@ -1119,20 +1224,34 @@ impl App {
         ours
     }
 
+    fn gen_now(&self) -> u64 {
+        self.web_gen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Install finished web renders. A result from an older page generation
-    /// is dropped outright — the reader has moved on, and showing it would
-    /// put yesterday's diagram on today's page.
+    /// is dropped WITHOUT touching any state: the reader has moved on, and
+    /// the same key can legitimately be pending again for the current page
+    /// (navigate away and back), so clearing by key alone would cancel the
+    /// live request and leave the diagram pulsing forever.
     fn drain_web_renders(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((gen, key, res)) = self.web_rx.try_recv() {
-            if gen != self.web_gen {
-                // Stale generation: forget it ever happened.
-                self.web_pending.remove(&key);
+        while let Ok(msg) = self.web_rx.try_recv() {
+            if msg.gen != self.gen_now() {
+                continue;
+            }
+            let WebMsg { key, rescale, res, .. } = msg;
+            if rescale {
+                // A rescale only ever changes the SIZE of a picture that is
+                // already on screen. If it failed, the reader keeps the
+                // size they had: no error, no notice, no lost diagram.
                 self.web_rescaling.remove(&key);
+                if let Ok(info) = res {
+                    self.images.insert(key, info);
+                    changed = true;
+                }
                 continue;
             }
             self.web_pending.remove(&key);
-            self.web_rescaling.remove(&key);
             match res {
                 Ok(info) => {
                     self.images.insert(key, info);
@@ -2391,15 +2510,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(b) => Arc::new(b),
         None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
     };
-    if let Some(jobs_rx) = app.web_jobs_rx.take() {
+    let web_worker = app.web_jobs_rx.take().map(|jobs_rx| {
         spawn_web_worker(
             jobs_rx,
             app.web_tx.clone(),
             Arc::clone(&web_backend),
             ctx.picker.clone(),
             ArtifactCache::new(),
-        );
-    }
+            Arc::clone(&app.web_gen),
+        )
+    });
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
     // PAT while the push channel only accepts the sid), polling otherwise.
@@ -2458,11 +2578,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let res = run(&mut terminal, &mut app, &ctx);
-    // Reap the headless browser before anything else: a render in flight
-    // must not outlive the TUI as an orphan process.
+    // Shutdown contract, in this order:
+    //   1. `shutdown()` refuses further work and SIGKILLs any browser in
+    //      flight. That is also what unblocks the worker: its DevTools
+    //      socket dies, so a batch mid-navigation errors out promptly
+    //      instead of waiting out its budget.
+    //   2. give the terminal back, so a slow reap is never a black screen.
+    //   3. `Stop` ends the worker loop, and the join makes "no browser and
+    //      no worker outlive this process" a fact rather than a hope.
     web_backend.shutdown();
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
+    if let Some(worker) = web_worker {
+        let _ = app.web_job_tx.send(WebJob::Stop);
+        let _ = worker.join();
+    }
     drop(app.ime_guard.take());
 
     if !app.comments.is_empty() {
@@ -5536,6 +5666,7 @@ mod tests {
         match job {
             WebJob::Render { gen, reqs, .. } => (gen, reqs),
             WebJob::Rescale { key, .. } => panic!("expected a render job, got a rescale of {key}"),
+            WebJob::Stop => panic!("expected a render job, got Stop"),
         }
     }
 
@@ -5562,7 +5693,7 @@ mod tests {
         app.start_web_renders();
         let rx = app.web_jobs_rx.take().unwrap();
         let (gen, reqs) = render_job(rx.try_recv().expect("one batch was queued"));
-        assert_eq!(gen, app.web_gen);
+        assert_eq!(gen, app.gen_now());
         let ids: Vec<&str> = reqs.iter().map(|r| r.line_id.as_str()).collect();
         // The LAST content line of each block — not the `code:` header, and
         // nothing at all for the js block.
@@ -5684,11 +5815,16 @@ mod tests {
         app.web_pending.insert(key.clone());
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         // The reader navigated away and back while the browser was busy.
-        let stale_gen = app.web_gen.wrapping_sub(1);
-        app.web_tx.send((stale_gen, key.clone(), Ok(info))).unwrap();
-        assert!(app.drain_web_renders() == false, "a stale result changes nothing");
+        let stale_gen = app.gen_now().wrapping_sub(1);
+        app.web_tx.send(WebMsg { gen: stale_gen, key: key.clone(), rescale: false, res: Ok(info) }).unwrap();
+        assert!(!app.drain_web_renders(), "a stale result changes nothing");
         assert!(!app.images.contains_key(&key), "yesterday's diagram is not installed");
-        assert!(!app.web_pending.contains(&key), "but it does stop being pending");
+        // …and it touches NO state. The same key can legitimately be
+        // pending again for the current page, so clearing by key alone
+        // would cancel that live request. What keeps pending from leaking
+        // is `set_page` — see
+        // `set_page_clears_the_state_a_dropped_job_would_have_answered`.
+        assert!(app.web_pending.contains(&key));
     }
 
     #[test]
@@ -5701,7 +5837,7 @@ mod tests {
             .cache_key();
         app.web_pending.insert(key.clone());
         app.web_tx
-            .send((app.web_gen, key.clone(), Err(WebError::NoBrowser.to_string())))
+            .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: Err(WebError::NoBrowser.to_string()) })
             .unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
@@ -5730,7 +5866,7 @@ mod tests {
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-        app.web_tx.send((app.web_gen, key.clone(), Ok(info))).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: Ok(info) }).unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
         app.rebuild(80);
@@ -5779,6 +5915,7 @@ mod tests {
             Arc::clone(&backend) as Arc<dyn WebBackend>,
             Picker::halfblocks(),
             scratch_cache(),
+            Arc::clone(&app.web_gen),
         );
         // Pin the backend mid-render: the worker cannot make progress while
         // this guard is held.
@@ -5797,13 +5934,13 @@ mod tests {
         assert!(app.images.is_empty(), "nothing is drawn until the browser answers");
         // Let the worker through; the artifact arrives on the channel.
         drop(held);
-        let (gen, got_key, res) = app
+        let msg = app
             .web_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the worker answered");
-        assert_eq!(gen, app.web_gen);
-        assert_eq!(got_key, key);
-        assert!(res.is_ok());
+        assert_eq!(msg.gen, app.gen_now());
+        assert_eq!(msg.key, key);
+        assert!(msg.res.is_ok());
     }
 
     #[test]
@@ -5858,6 +5995,256 @@ mod tests {
         buf.into_inner()
     }
 
+    /// Run the worker against a scripted backend and hand back everything
+    /// it replies with, using the channel itself as the synchronisation —
+    /// no sleeps, no wall-clock assumptions.
+    fn worker_replies(
+        app: &mut App,
+        backend: Arc<cosense::webrender::FakeBackend>,
+        cache: cosense::webrender::ArtifactCache,
+        jobs: Vec<WebJob>,
+        expect: usize,
+    ) -> Vec<WebMsg> {
+        let handle = spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache,
+            Arc::clone(&app.web_gen),
+        );
+        for job in jobs {
+            app.web_job_tx.send(job).unwrap();
+        }
+        let mut out = Vec::new();
+        for _ in 0..expect {
+            out.push(
+                app.web_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("the worker owes a reply"),
+            );
+        }
+        app.web_job_tx.send(WebJob::Stop).unwrap();
+        handle.join().expect("the worker joins on Stop");
+        out
+    }
+
+    #[test]
+    fn the_worker_joins_on_stop_and_answers_every_accepted_job() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        backend.answer(&key, Ok(tiny_png()));
+        let gen = app.gen_now();
+        let req = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        let msgs = worker_replies(
+            &mut app,
+            Arc::clone(&backend),
+            scratch_cache(),
+            vec![
+                WebJob::Render { gen, reqs: vec![req], max_cols: 64 },
+                // A rescale with nothing on disk STILL owes a reply, or the
+                // viewer would wait on it forever.
+                WebJob::Rescale { gen, key: "web:mermaid:absent".into(), max_cols: 20 },
+            ],
+            2,
+        );
+        assert_eq!(msgs.len(), 2, "one reply per accepted job");
+        let render = msgs.iter().find(|m| m.key == key).unwrap();
+        assert!(!render.rescale && render.res.is_ok());
+        let rescale = msgs.iter().find(|m| m.key == "web:mermaid:absent").unwrap();
+        assert!(rescale.rescale && rescale.res.is_err(), "a cache miss is answered, not dropped");
+    }
+
+    #[test]
+    fn a_rescale_that_cannot_be_served_keeps_the_diagram_it_has() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders();
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(key.clone(), info);
+        app.web_rescaling.insert(key.clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: key.clone(),
+                rescale: true,
+                res: Err("no cached artifact to resize".into()),
+            })
+            .unwrap();
+        app.drain_web_renders();
+        assert!(!app.web_rescaling.contains(&key), "it stops being in flight");
+        assert!(app.images.contains_key(&key), "the picture on screen survives");
+        assert!(app.web_errors.is_empty(), "a resize failure is not a diagram failure");
+        assert!(app.web_status.is_none(), "and the reader is not told about it");
+    }
+
+    #[test]
+    fn a_stale_result_never_cancels_the_live_request_for_the_same_key() {
+        // Navigate away and back: the same diagram is pending again under
+        // the same key, but for a NEW generation. The old page's result
+        // must not clear that.
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders();
+        let (old_gen, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        app.web_pending.insert(key.clone());
+        app.web_rescaling.insert(key.clone());
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.web_tx
+            .send(WebMsg { gen: old_gen, key: key.clone(), rescale: false, res: Ok(info) })
+            .unwrap();
+        assert!(!app.drain_web_renders(), "yesterday's answer changes nothing");
+        assert!(app.web_pending.contains(&key), "the live request is still in flight");
+        assert!(app.web_rescaling.contains(&key));
+        assert!(!app.images.contains_key(&key), "and no stale picture is installed");
+    }
+
+    #[test]
+    fn set_page_clears_the_state_a_dropped_job_would_have_answered() {
+        // The worker drops stale-generation jobs without replying, which is
+        // only safe because installing a page clears what those replies
+        // would have cleared. This pins that invariant.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders();
+        app.web_rescaling.insert("web:mermaid:whatever".into());
+        assert!(!app.web_pending.is_empty());
+        app.set_page(
+            Loaded {
+                project: "proj".into(),
+                title: "next".into(),
+                header_colors: HeaderColors::fallback(),
+                page_id: "p2".into(),
+                lines: vec![],
+                blocks: vec![],
+                srcs: vec![],
+                read_at: None,
+                editable: true,
+                related: Vec::new(),
+            },
+            &ctx,
+        );
+        assert!(app.web_pending.is_empty(), "no request outlives the page it was for");
+        assert!(app.web_rescaling.is_empty());
+    }
+
+    #[test]
+    fn work_queued_for_a_page_the_reader_left_never_reaches_the_browser() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let stale_gen = app.gen_now();
+        // The reader moves on before the worker gets to it.
+        app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let live_gen = app.gen_now();
+        let req = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        backend.answer(&req.cache_key(), Ok(tiny_png()));
+        let msgs = worker_replies(
+            &mut app,
+            Arc::clone(&backend),
+            scratch_cache(),
+            vec![
+                WebJob::Render { gen: stale_gen, reqs: vec![req.clone()], max_cols: 64 },
+                WebJob::Rescale { gen: stale_gen, key: "web:mermaid:old".into(), max_cols: 20 },
+                WebJob::Render { gen: live_gen, reqs: vec![req.clone()], max_cols: 64 },
+            ],
+            1,
+        );
+        assert_eq!(msgs.len(), 1, "only the live page is answered");
+        assert_eq!(msgs[0].gen, live_gen);
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the abandoned page cost no browser navigation",
+        );
+    }
+
+    #[test]
+    fn several_passes_over_one_page_cost_a_single_browser_batch() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let gen = app.gen_now();
+        let a = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        let b = app.web_request(cosense::webrender::WebKind::Mermaid, "pie", 7).unwrap();
+        backend.answer(&a.cache_key(), Ok(tiny_png()));
+        backend.answer(&b.cache_key(), Ok(tiny_png()));
+        // Hold the worker until BOTH jobs are queued, so it sees them
+        // together — the gate, not a sleep, is what makes this repeatable.
+        let held = backend.gate.lock().unwrap();
+        let handle = spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+        );
+        app.web_job_tx
+            .send(WebJob::Render { gen, reqs: vec![a.clone()], max_cols: 64 })
+            .unwrap();
+        app.web_job_tx
+            .send(WebJob::Render { gen, reqs: vec![b.clone(), a.clone()], max_cols: 64 })
+            .unwrap();
+        drop(held);
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            keys.push(
+                app.web_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap()
+                    .key,
+            );
+        }
+        app.web_job_tx.send(WebJob::Stop).unwrap();
+        handle.join().unwrap();
+        keys.sort();
+        let mut want = vec![a.cache_key(), b.cache_key()];
+        want.sort();
+        assert_eq!(keys, want, "each request answered exactly once, no duplicates");
+    }
+
+    #[test]
+    fn a_send_to_a_dead_worker_stops_the_pulse_instead_of_hanging_it() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // No worker was ever spawned and the receiver is dropped: every
+        // send fails, exactly as it does once the worker has stopped.
+        drop(app.web_jobs_rx.take());
+        app.start_web_renders();
+        assert!(app.web_pending.is_empty(), "nothing waits on a reply that cannot come");
+        app.rebuild(80);
+        assert!(app.web_shimmer.is_empty(), "so nothing pulses");
+
+        // Same for a resize.
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(key.clone(), info);
+        app.laid_width = 0;
+        app.rebuild(30);
+        app.rescale_diagrams();
+        assert!(app.web_rescaling.is_empty());
+    }
+
     #[test]
     fn a_diagram_is_never_encoded_wider_than_the_pane() {
         // The cap itself: the pane wins while it is narrower than the
@@ -5895,7 +6282,7 @@ mod tests {
         let wide = decode_web_png(&Picker::halfblocks(), &wide_png(), app.web_cols).unwrap();
         assert_eq!(app.web_cols, IMAGE_MAX_COLS, "80 columns leaves room for the ceiling");
         app.web_pending.insert(key.clone());
-        app.web_tx.send((app.web_gen, key.clone(), Ok(wide))).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: Ok(wide) }).unwrap();
         assert!(app.drain_web_renders());
 
         // Two narrow panes, well under the 64-column image ceiling.
@@ -5909,14 +6296,16 @@ mod tests {
             let WebJob::Rescale { key: k, max_cols, gen } = job else {
                 panic!("a resize must never send the browser a render job")
             };
-            assert_eq!((k.as_str(), max_cols, gen), (key.as_str(), want_cap, app.web_gen));
+            assert_eq!((k.as_str(), max_cols, gen), (key.as_str(), want_cap, app.gen_now()));
             // Asking again while it is in flight queues nothing.
             app.rescale_diagrams();
             assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
 
             // The worker answers; the diagram now fits the pane.
             let info = decode_web_png(&Picker::halfblocks(), &wide_png(), max_cols).unwrap();
-            app.web_tx.send((app.web_gen, key.clone(), Ok(info))).unwrap();
+            app.web_tx
+                .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: true, res: Ok(info) })
+                .unwrap();
             assert!(app.drain_web_renders());
             let shown_w = app.images[&key].cells_w;
             assert!(shown_w <= want_cap, "{shown_w} cells in a {cols}-column pane");
@@ -5939,7 +6328,7 @@ mod tests {
         let key = reqs[0].cache_key();
         app.web_pending.insert(key.clone());
         app.web_tx
-            .send((app.web_gen, key, Err(WebError::NoBrowser.to_string())))
+            .send(WebMsg { gen: app.gen_now(), key, rescale: false, res: Err(WebError::NoBrowser.to_string()) })
             .unwrap();
         assert!(app.drain_web_renders());
         assert!(app.status.contains("showing source"), "the reader is told once");

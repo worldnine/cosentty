@@ -742,6 +742,60 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// A backend pointed at a path that cannot be executed. `shutdown`
+    /// must make `run_batch` refuse BEFORE it ever gets as far as spawning.
+    fn dead_backend() -> ChromeBackend {
+        ChromeBackend {
+            exe: PathBuf::from("/nonexistent/definitely-not-chrome"),
+            sid: None,
+            live_pid: Mutex::new(None),
+            last_owned: Mutex::new(None),
+            session: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn a_request() -> WebRequest {
+        WebRequest {
+            kind: crate::webrender::WebKind::Mermaid,
+            project: "p".into(),
+            title: "t".into(),
+            page_id: "id".into(),
+            line_id: "line".into(),
+            code_hash: 1,
+            dark: true,
+        }
+    }
+
+    #[test]
+    fn a_shut_down_backend_never_starts_another_browser() {
+        let b = dead_backend();
+        b.shutdown();
+        // No spawn is even attempted: the failure is the cancellation, not
+        // "chrome did not start".
+        let out = b.render_batch(&[a_request()]);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Err(WebError::Backend(m)) => assert_eq!(m, "cancelled"),
+            other => panic!("a batch after shutdown must be cancelled, got {other:?}"),
+        }
+        assert!(b.last_owned().is_none(), "and nothing was ever owned");
+        // Repeated shutdowns are harmless.
+        b.shutdown();
+    }
+
+    #[test]
+    fn a_running_backend_reports_the_real_launch_failure() {
+        // The contrast case: without shutdown it does try, and says so.
+        let b = dead_backend();
+        match &b.render_batch(&[a_request()])[0] {
+            Err(WebError::Backend(m)) => {
+                assert!(m.contains("chrome did not start"), "got {m}");
+            }
+            other => panic!("expected a launch failure, got {other:?}"),
+        }
+    }
+
     #[test]
     fn base64_round_trips_a_png_signature() {
         // "iVBORw0KGgo=" is the standard PNG magic in base64.
