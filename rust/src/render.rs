@@ -325,21 +325,19 @@ fn decorate_inline(s: &str, links: &mut Vec<String>, images: &mut Vec<String>, p
             // `[[text]]` (bold) has to be matched as a PAIR: taking the
             // first `]` would cut it at `[text`, and the notation would
             // read as a link to a page whose name starts with a bracket.
-            let doubled = rest[start + 1..].starts_with('[');
-            let found = if doubled {
-                rest[start + 2..].find("]]").map(|i| (start + 2 + i, i + start + 2 + 2))
-            } else {
-                rest[start + 1..].find(']').map(|i| (start + 1 + i, start + 1 + i + 1))
-            };
-            if let Some((end, after)) = found {
+            // Balanced, so notation can nest: `[[[page]]]` is a bold link
+            // and `[* [page]]` is a decorated one. Closing at the first
+            // `]` cut both one bracket short, and the link inside was lost.
+            if let Some(close) = matching_bracket(rest, start) {
+                let doubled =
+                    rest[start + 1..].starts_with('[') && rest[..close].ends_with(']');
                 push_plain(&mut spans, &rest[..start], links, pal);
-                let inner = if doubled { &rest[start + 2..end] } else { &rest[start + 1..end] };
                 if doubled {
-                    decorate_bold(inner, &mut spans, links, pal);
+                    decorate_bold(&rest[start + 2..close - 1], &mut spans, links, pal);
                 } else {
-                    decorate_bracket(inner, &mut spans, links, images, pal);
+                    decorate_bracket(&rest[start + 1..close], &mut spans, links, images, pal);
                 }
-                rest = &rest[after..];
+                rest = &rest[close + 1..];
                 continue;
             }
         }
@@ -436,18 +434,39 @@ fn decorate_bold(
         spans.push(Span::raw(format!("[[{inner}]]")));
         return;
     }
-    let mut sub: Vec<Span<'static>> = Vec::new();
     let mut images = Vec::new();
-    // The inside is ordinary notation: `[[[link]]]` is a bold link, and a
-    // bold URL is still a URL.
-    sub.extend(decorate_inline(inner, links, &mut images, pal));
-    for sp in sub {
-        let style = sp.style.add_modifier(Modifier::BOLD);
-        spans.push(Span::styled(sp.content, style));
+    // The inside is ordinary notation: `[[[link]]]` is a bold link (still
+    // followable), and a bold URL is still a URL. `[[x]]` is Cosense's
+    // one-star heading, so it wears the same style `[* x]` does.
+    let heading = pal.heading_style_for(1);
+    for sp in decorate_inline(inner, links, &mut images, pal) {
+        spans.push(Span::styled(sp.content, heading.patch(sp.style)));
     }
 }
 
-/// Decorate a `[...]` bracket's inner content.
+/// Byte index of the `]` that closes the `[` at `open`, counting nesting.
+///
+/// Taking the FIRST `]` cuts `[* [改善案]]` at `[改善案`, and the link
+/// inside a decoration is lost — it renders as text with a stray bracket
+/// and cannot be followed.
+fn matching_bracket(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in s[open..].char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Decorate a `[...]` bracket's inner content./// Decorate a `[...]` bracket's inner content.
 fn decorate_bracket(
     inner: &str,
     spans: &mut Vec<Span<'static>>,
@@ -466,12 +485,31 @@ fn decorate_bracket(
     // decoration: [* text] [** text] [*/ text] [- strike] [_ underline]
     if let Some(rest) = strip_deco_prefix(inner) {
         let (flags, body) = rest;
-        let mut style = Style::default();
-        if flags.contains('*') {
+        // Stars are HEADING LEVELS, not just bold, and they mean the same
+        // thing mid-line as they do on a line of their own: the number of
+        // stars picks the level and the level wears the theme's markdown
+        // heading style. Rendering them as plain bold threw the level away
+        // — `[* x]` and `[*** x]` looked identical.
+        let stars = flags.chars().filter(|c| *c == '*').count();
+        let mut style = if stars > 0 {
+            pal.heading_style_for(stars)
+        } else {
+            Style::default()
+        };
+        if stars > 0 && style == Style::default() {
             style = style.add_modifier(Modifier::BOLD);
         }
         if flags.contains('/') {
             style = style.add_modifier(Modifier::ITALIC);
+        }
+        // The inside is ordinary notation, so a decorated LINK is still a
+        // link: `[[[改善案]]]` and `[* [改善案]]` both have to stay
+        // followable, not just look bold.
+        if body.contains('[') && body.contains(']') {
+            for sp in decorate_inline(body, links, images, pal) {
+                spans.push(Span::styled(sp.content, style.patch(sp.style)));
+            }
+            return;
         }
         if flags.contains('-') {
             style = style.add_modifier(Modifier::CROSSED_OUT);
@@ -633,8 +671,7 @@ fn line_images(body: &str) -> Vec<String> {
                 }
             }
             (_, Some(o)) => {
-                let Some(end_rel) = rest[o + 1..].find(']') else { break };
-                let end = o + 1 + end_rel;
+                let Some(end) = matching_bracket(rest, o) else { break };
                 if let Some(u) = image_in_bracket(&rest[o + 1..end]) {
                     out.push(u);
                 }
@@ -906,7 +943,7 @@ pub fn render_lines_with(
         // Markdown would make these competing block types; Cosense composes
         // them. Keep the positional bullet in the bullet style and apply the
         // theme's heading style only to the heading text.
-        if let Some(heading) = parse_heading(body, pal) {
+        if let Some(heading) = parse_heading(body, pal, &mut ex.links, &mut ex.images) {
             let mut spans: Vec<Span<'static>> = Vec::new();
             if level > 0 {
                 spans.push(Span::raw(indent.clone()));
@@ -939,14 +976,31 @@ pub fn render_lines_with(
 /// `[* ]` level 4, and each level wears the theme's own markdown heading
 /// style (see `Palette::from_theme`) — the same look as a markdown file in
 /// akapen under that theme.
-fn parse_heading(body: &str, pal: &Palette) -> Option<Vec<Span<'static>>> {
-    let inner = body.strip_prefix('[')?.strip_suffix(']')?;
+fn parse_heading(
+    body: &str,
+    pal: &Palette,
+    links: &mut Vec<String>,
+    images: &mut Vec<String>,
+) -> Option<Vec<Span<'static>>> {
+    let close = matching_bracket(body.trim_end(), body.find('[')?)?;
+    if close + 1 != body.trim_end().len() {
+        return None; // something follows the bracket: not a heading LINE
+    }
+    let inner = &body.trim_end()[body.find('[')? + 1..close];
     let stars = inner.char_indices().find(|(_, c)| *c != '*').map(|(i, _)| i)?;
     if stars == 0 {
         return None;
     }
     let text = inner[stars..].strip_prefix(' ')?;
-    Some(vec![Span::styled(text.to_string(), pal.heading_style_for(stars))])
+    // A heading is still ordinary notation inside: `[* [page]]` has to
+    // stay a followable link, not become the letters of one.
+    let style = pal.heading_style_for(stars);
+    Some(
+        decorate_inline(text, links, images, pal)
+            .into_iter()
+            .map(|sp| Span::styled(sp.content, style.patch(sp.style)))
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1305,20 +1359,21 @@ mod tests {
         // it at `[text` and it would read as a link.
         assert_eq!(plain("[[太字]]"), "太字");
         assert_eq!(plain("[[]]"), "[[]]", "empty double brackets are text too");
-        let bold = render_lines_with(&["t".into(), "[[太字]]".into()], None, &pal);
-        let styled = bold
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Text(l) => Some(l.spans.clone()),
-                _ => None,
-            })
-            .nth(1)
-            .unwrap_or_default();
-        assert!(
-            styled.iter().all(|s| s.style.add_modifier.contains(Modifier::BOLD)),
-            "and it really is bold",
-        );
+        // `[[x]]` is Cosense's other spelling of `[* x]`, so it wears the
+        // same style — whatever the theme makes that level look like.
+        let styles = |src: &str| -> Vec<Style> {
+            render_lines_with(&["t".to_string(), src.to_string()], None, &pal)
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Text(l) => Some(l.spans.iter().map(|s| s.style).collect::<Vec<_>>()),
+                    _ => None,
+                })
+                .nth(1)
+                .unwrap_or_default()
+        };
+        assert_eq!(styles("[[太字]]"), styles("[* 太字]"));
+        assert_ne!(styles("[[太字]]"), styles("太字"), "and it is not plain text");
     }
 
     /// The memo's three image complaints, as one test: a bare URL is not a
@@ -1376,5 +1431,60 @@ mod tests {
             "{two:?}",
         );
         assert!(two[0].contains('と'), "the text between them survives: {two:?}");
+    }
+
+    /// Star count is a heading LEVEL, mid-line as much as on a line of its
+    /// own, and a decorated link is still a link. Rendering the inline
+    /// forms as flat bold threw both away: `[* x]` and `[*** x]` looked
+    /// identical, and `[[[page]]]` was bold text you could not follow.
+    #[test]
+    fn inline_decorations_carry_the_heading_level_and_keep_links() {
+        let pal = Palette::for_light(false);
+        let render = |src: &str| -> RenderOutput {
+            render_lines_with(&["t".to_string(), src.to_string()], None, &pal)
+        };
+        let styles = |src: &str| -> Vec<Style> {
+            render(src)
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Text(l) => Some(l.spans.iter().map(|s| s.style).collect::<Vec<_>>()),
+                    _ => None,
+                })
+                .nth(1)
+                .unwrap_or_default()
+        };
+
+        // Each level is its own look, and the inline form matches the
+        // whole-line heading of the same level.
+        let one = styles("→ [* 見出し]");
+        let two = styles("→ [** 見出し]");
+        let three = styles("→ [*** 見出し]");
+        assert_ne!(one, two);
+        assert_ne!(two, three);
+        assert_eq!(
+            *one.last().unwrap(),
+            pal.heading_style_for(1),
+            "one star = the level-4 heading style, same as a heading line",
+        );
+        assert_eq!(*two.last().unwrap(), pal.heading_style_for(2));
+        assert_eq!(*three.last().unwrap(), pal.heading_style_for(3));
+
+        // `/` still italicises, on top of the level.
+        let slash = *styles("→ [*/ 斜体]").last().unwrap();
+        assert!(slash.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(slash.fg, pal.heading_style_for(1).fg, "and keeps its level");
+
+        // A link inside a decoration is REGISTERED as a link (so Enter can
+        // follow it) and keeps the link colour.
+        let out = render("[[[改善案]]]");
+        assert_eq!(out.extracted.links, vec!["改善案".to_string()], "followable");
+        let deco = styles("[[[改善案]]]");
+        assert_eq!(deco.last().unwrap().fg, Some(pal.link), "still reads as a link");
+        assert!(deco.last().unwrap().add_modifier.contains(Modifier::UNDERLINED));
+
+        // Same for the single-bracket decoration form.
+        let out = render("[* [改善案]]");
+        assert_eq!(out.extracted.links, vec!["改善案".to_string()]);
     }
 }
