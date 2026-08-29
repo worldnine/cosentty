@@ -224,7 +224,17 @@ pub trait WebBackend: Send + Sync {
     /// Render one batch of requests that all target the SAME page, so a
     /// single navigation serves them all. Results are returned per request,
     /// in the same order.
-    fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>>;
+    ///
+    /// `auth` says whether the session cookie may be presented. It is a
+    /// parameter rather than backend state because the same session
+    /// legitimately renders a public page anonymously right after a private
+    /// one — and because a cookie the server has rejected must be dropped
+    /// without tearing down the rest of the app's credentials.
+    fn render_batch(
+        &self,
+        reqs: &[WebRequest],
+        auth: crate::capability::RenderCapability,
+    ) -> Vec<Result<Vec<u8>, WebError>>;
 
     /// No work has arrived for a while. A backend that keeps a browser warm
     /// between batches releases it here, so an idle viewer holds no browser
@@ -242,7 +252,11 @@ pub trait WebBackend: Send + Sync {
 pub struct UnavailableBackend(pub WebError);
 
 impl WebBackend for UnavailableBackend {
-    fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>> {
+    fn render_batch(
+        &self,
+        reqs: &[WebRequest],
+        _auth: crate::capability::RenderCapability,
+    ) -> Vec<Result<Vec<u8>, WebError>> {
         reqs.iter().map(|_| Err(self.0.clone())).collect()
     }
 }
@@ -255,6 +269,9 @@ pub struct FakeBackend {
     /// pin the worker mid-render and check the UI still draws.
     pub gate: std::sync::Mutex<()>,
     pub calls: std::sync::atomic::AtomicUsize,
+    /// The `auth` of the most recent call, so a test can prove which
+    /// credential state the renderer actually asked for.
+    pub last_auth: std::sync::Mutex<Option<crate::capability::RenderCapability>>,
 }
 
 impl Default for FakeBackend {
@@ -269,6 +286,7 @@ impl FakeBackend {
             answers: std::sync::Mutex::new(std::collections::HashMap::new()),
             gate: std::sync::Mutex::new(()),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            last_auth: std::sync::Mutex::new(None),
         }
     }
 
@@ -278,8 +296,13 @@ impl FakeBackend {
 }
 
 impl WebBackend for FakeBackend {
-    fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>> {
+    fn render_batch(
+        &self,
+        reqs: &[WebRequest],
+        auth: crate::capability::RenderCapability,
+    ) -> Vec<Result<Vec<u8>, WebError>> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.last_auth.lock().unwrap() = Some(auth);
         let _held = self.gate.lock().unwrap();
         let answers = self.answers.lock().unwrap();
         reqs.iter()
@@ -540,6 +563,7 @@ pub fn hash_code(code: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::RenderCapability;
 
     fn req() -> WebRequest {
         WebRequest {
@@ -796,7 +820,7 @@ mod tests {
     #[test]
     fn unavailable_backend_fails_every_request_without_a_browser() {
         let b = UnavailableBackend(WebError::NoBrowser);
-        let out = b.render_batch(&[req(), req()]);
+        let out = b.render_batch(&[req(), req()], RenderCapability::Anonymous);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], Err(WebError::NoBrowser)));
         assert_eq!(WebError::NoBrowser.to_string(), "no Chrome found (set COSENSE_CHROME)");
@@ -808,7 +832,7 @@ mod tests {
         f.answer(&req().cache_key(), Ok(vec![1, 2, 3]));
         let mut other = req();
         other.line_id = "zzz".into();
-        let out = f.render_batch(&[req(), other]);
+        let out = f.render_batch(&[req(), other], RenderCapability::Anonymous);
         assert_eq!(out[0].as_ref().unwrap(), &vec![1, 2, 3]);
         assert!(matches!(out[1], Err(WebError::NotRendered)));
     }

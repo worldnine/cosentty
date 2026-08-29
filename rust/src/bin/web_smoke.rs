@@ -7,6 +7,7 @@
 // Prints, per Mermaid block: the line id, the selector, the PNG size and the
 // wall time; PNGs land in $TMPDIR/cosense-web-smoke/.
 use cosense::api::{AuthStore, Client, Config};
+use cosense::capability::RenderCapability;
 use cosense::chrome::ChromeBackend;
 use cosense::render::{render_lines, Block};
 use cosense::webrender::{hash_code, ArtifactCache, WebBackend, WebRequest};
@@ -69,15 +70,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // The smoke renders as the session actually would: with the cookie when
+    // one is configured, anonymously when not — which is exactly the public
+    // fallback path.
+    let auth = if sid.is_some() {
+        RenderCapability::Authenticated
+    } else {
+        RenderCapability::Anonymous
+    };
+    println!(
+        "browser auth: {}",
+        if sid.is_some() { "session cookie" } else { "anonymous" }
+    );
     let backend = ChromeBackend::detect(sid).ok_or("no Chrome found (set COSENSE_CHROME)")?;
     let dir = std::env::temp_dir().join("cosense-web-smoke");
     std::fs::create_dir_all(&dir)?;
     let t0 = std::time::Instant::now();
-    let results = backend.render_batch(&reqs);
+    let results = backend.render_batch(&reqs, auth);
     let elapsed = t0.elapsed();
     if twice {
         let t1 = std::time::Instant::now();
-        let again = backend.render_batch(&reqs);
+        let again = backend.render_batch(&reqs, auth);
         let ok = again.iter().filter(|r| r.is_ok()).count();
         println!("second batch (warm browser): {ok}/{} ok in {:?}", again.len(), t1.elapsed());
     }

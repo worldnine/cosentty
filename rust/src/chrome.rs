@@ -13,6 +13,7 @@
 //! `Page.captureScreenshot` clipped to that box. No full-page screenshot is
 //! guessed at and cropped.
 
+use crate::capability::RenderCapability;
 use crate::webrender::{WebBackend, WebError, WebRequest};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -123,6 +124,11 @@ pub struct ChromeBackend {
 struct Session {
     child: Child,
     cdp: Cdp,
+    /// Which credential state this browser was built for. Chrome keeps the
+    /// cookie in its profile, so a session that has ever been handed the
+    /// sid cannot be reused for an anonymous render: switching modes throws
+    /// the whole browser away (Drop reaps the profile with it).
+    auth: RenderCapability,
     /// Removed when the session drops. Chrome's helper processes outlive
     /// the SIGKILL on their parent by a moment and keep files open in
     /// here, so removal is retried briefly rather than attempted once.
@@ -157,15 +163,24 @@ impl ChromeBackend {
         })
     }
 
-    fn run_batch(&self, reqs: &[WebRequest]) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
+    fn run_batch(
+        &self,
+        reqs: &[WebRequest],
+        auth: RenderCapability,
+    ) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
         self.check_running()?;
         let width = RENDER_WIDTH_PX;
         let dark = reqs.first().map(|r| r.dark).unwrap_or(true);
 
         let mut held = self.session.lock().unwrap();
+        // Reuse only a browser built for the SAME credential state.
+        if held.as_ref().is_some_and(|s| s.auth != auth) {
+            *held = None;
+            *self.live_pid.lock().unwrap() = None;
+        }
         let reused = held.is_some();
         if held.is_none() {
-            *held = Some(self.launch(width)?);
+            *held = Some(self.launch(width, auth)?);
         }
         let deadline = Instant::now() + budget();
         let out = self.drive(held.as_mut().unwrap(), reqs, width, dark, deadline);
@@ -178,7 +193,7 @@ impl ChromeBackend {
             if reused && !self.stopped.load(Ordering::Relaxed) {
                 // The browser we inherited may simply have died (crash, OOM,
                 // the machine slept). One clean retry before giving up.
-                *held = Some(self.launch(width)?);
+                *held = Some(self.launch(width, auth)?);
                 let deadline = Instant::now() + budget();
                 let retry = self.drive(held.as_mut().unwrap(), reqs, width, dark, deadline);
                 if retry.is_err() {
@@ -203,7 +218,7 @@ impl ChromeBackend {
     }
 
     /// Start a browser and attach to its page target.
-    fn launch(&self, width: u32) -> Result<Session, WebError> {
+    fn launch(&self, width: u32, auth: RenderCapability) -> Result<Session, WebError> {
         self.check_running()?;
         let deadline = Instant::now() + budget();
         // The profile holds the session cookie for as long as the browser
@@ -223,7 +238,7 @@ impl ChromeBackend {
             .and_then(|url| Cdp::connect(&url));
         self.debug(format!("launch+attach {:?}", t0.elapsed()));
         match attach {
-            Ok(cdp) => Ok(Session { child, cdp, profile }),
+            Ok(cdp) => Ok(Session { child, cdp, auth, profile }),
             Err(e) => {
                 // Session::drop is what normally reaps these; there is no
                 // Session yet, so do it by hand.
@@ -298,6 +313,7 @@ impl ChromeBackend {
                 self.debug(format!("{} {:?}", $label, $t.elapsed()));
             };
         }
+        let auth = session.auth;
         let cdp = &mut session.cdp;
         let t1 = Instant::now();
         // Re-applied every batch: the pane may have been resized, and the
@@ -323,7 +339,14 @@ impl ChromeBackend {
         )
         .ok(); // cosmetic; an old Chrome without it is still usable
 
-        if let Some(sid) = &self.sid {
+        // Anonymous is a real mode, not "no cookie configured": a public
+        // page renders fine without one, and it is the retry when the
+        // server has told us this cookie is stale.
+        let cookie = match auth {
+            RenderCapability::Authenticated => self.sid.as_ref(),
+            RenderCapability::Anonymous => None,
+        };
+        if let Some(sid) = cookie {
             cdp.call("Network.enable", serde_json::json!({}), deadline)?;
             // The ONLY place the credential is handed over. Chrome stores it
             // in the throwaway profile, which is deleted with the batch.
@@ -493,11 +516,15 @@ impl ChromeBackend {
 }
 
 impl WebBackend for ChromeBackend {
-    fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>> {
+    fn render_batch(
+        &self,
+        reqs: &[WebRequest],
+        auth: RenderCapability,
+    ) -> Vec<Result<Vec<u8>, WebError>> {
         if reqs.is_empty() {
             return Vec::new();
         }
-        match self.run_batch(reqs) {
+        match self.run_batch(reqs, auth) {
             Ok(out) => out,
             // A whole-session failure (no port, dead socket, login wall)
             // applies to every request in the batch.
@@ -773,7 +800,7 @@ mod tests {
         b.shutdown();
         // No spawn is even attempted: the failure is the cancellation, not
         // "chrome did not start".
-        let out = b.render_batch(&[a_request()]);
+        let out = b.render_batch(&[a_request()], RenderCapability::Anonymous);
         assert_eq!(out.len(), 1);
         match &out[0] {
             Err(WebError::Backend(m)) => assert_eq!(m, "cancelled"),
@@ -788,7 +815,7 @@ mod tests {
     fn a_running_backend_reports_the_real_launch_failure() {
         // The contrast case: without shutdown it does try, and says so.
         let b = dead_backend();
-        match &b.render_batch(&[a_request()])[0] {
+        match &b.render_batch(&[a_request()], RenderCapability::Anonymous)[0] {
             Err(WebError::Backend(m)) => {
                 assert!(m.contains("chrome did not start"), "got {m}");
             }

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
-use cosense::capability::{self, SyncState};
+use cosense::capability::{self, RenderCapability, SyncState};
 use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
@@ -116,7 +116,16 @@ type FileMsg = (String, Result<std::path::PathBuf, String>);
 enum WebJob {
     /// Draw these in a browser (or serve them from the disk cache), encoded
     /// for a pane whose text area is `max_cols` wide.
-    Render { gen: u64, reqs: Vec<WebRequest>, max_cols: u16 },
+    Render {
+        gen: u64,
+        reqs: Vec<WebRequest>,
+        max_cols: u16,
+        /// `Some` lets the batch reach a browser, in that credential state.
+        /// `None` is cache-only: serve what is on disk and answer every
+        /// miss with `Missing`. That is the default page-load pass, and it
+        /// is also what a project we may not render gets.
+        auth: Option<RenderCapability>,
+    },
     /// Re-encode an artifact already on disk at a new column cap, because
     /// the pane was resized. No browser is involved: this is a decode plus
     /// a resize, done on the worker so the UI thread never stalls on it.
@@ -144,7 +153,29 @@ struct WebMsg {
     /// diagram: the artifact already on screen stays, and the reader is
     /// told nothing.
     rescale: bool,
-    res: Result<ImageInfo, String>,
+    res: WebOutcome,
+}
+
+/// What became of one request. Typed because the three failures are NOT
+/// interchangeable: a cache miss must leave the artifact renderable later,
+/// a refusal must retune the session's capabilities, and only a genuine
+/// failure is worth telling the reader about.
+enum WebOutcome {
+    Drawn(ImageInfo),
+    /// Nothing on disk, and this pass was not allowed to draw. Not an
+    /// error: it must not land in `web_errors`, or `m` could never draw it.
+    Missing,
+    /// The browser was refused (login wall). The session decides what to do
+    /// with that — it says nothing about the REST credential.
+    Denied,
+    Failed(String),
+}
+
+impl WebOutcome {
+    /// Did this produce a picture?
+    fn is_drawn(&self) -> bool {
+        matches!(self, WebOutcome::Drawn(_))
+    }
 }
 
 /// The web-render worker: the ONLY thread that talks to a browser. It takes
@@ -202,6 +233,7 @@ fn spawn_web_worker(
             // passes queued them.
             let mut merged: Vec<WebRequest> = Vec::new();
             let mut merged_cols: Option<u16> = None;
+            let mut merged_auth: Option<RenderCapability> = None;
             let mut merged_gen = 0u64;
             for job in batch {
                 match job {
@@ -211,14 +243,22 @@ fn spawn_web_worker(
                         // PNG is gone, the answer is an error so the viewer
                         // stops waiting — it keeps the size it has.
                         let res = match cache.get(&key) {
-                            Some(png) => decode_web_png(&picker, &png, max_cols),
-                            None => Err("no cached artifact to resize".to_string()),
+                            Some(png) => match decode_web_png(&picker, &png, max_cols) {
+                                Ok(info) => WebOutcome::Drawn(info),
+                                Err(e) => WebOutcome::Failed(e),
+                            },
+                            None => WebOutcome::Failed("no cached artifact to resize".into()),
                         };
                         let _ = out.send(WebMsg { gen, key, rescale: true, res });
                     }
-                    WebJob::Render { gen, reqs, max_cols } => {
+                    WebJob::Render { gen, reqs, max_cols, auth } => {
                         merged_gen = gen;
                         merged_cols = Some(max_cols);
+                        // Coalescing several passes: the most permissive
+                        // one wins, so an explicit `m` arriving behind a
+                        // page-load probe is not silently downgraded to
+                        // cache-only.
+                        merged_auth = merged_auth.or(auth);
                         for req in reqs {
                             if !merged.iter().any(|r| r.cache_key() == req.cache_key()) {
                                 merged.push(req);
@@ -237,6 +277,7 @@ fn spawn_web_worker(
                     merged_gen,
                     merged,
                     max_cols,
+                    merged_auth,
                 );
             }
             if stop {
@@ -258,13 +299,17 @@ fn run_render_batch(
     gen: u64,
     reqs: Vec<WebRequest>,
     max_cols: u16,
+    // `None` means this pass may not launch a browser: hits are served,
+    // misses are answered `Missing`.
+    auth: Option<RenderCapability>,
 ) {
     let mut to_render: Vec<WebRequest> = Vec::new();
     for req in reqs {
         let key = req.cache_key();
         match cache.get(&key).map(|png| decode_web_png(picker, &png, max_cols)) {
             Some(Ok(info)) => {
-                let _ = out.send(WebMsg { gen, key, rescale: false, res: Ok(info) });
+                let _ =
+                    out.send(WebMsg { gen, key, rescale: false, res: WebOutcome::Drawn(info) });
             }
             // On disk but unreadable: truncated by a crash, or corrupted
             // underneath us. That must not become a permanent failure for
@@ -280,18 +325,28 @@ fn run_render_batch(
     if to_render.is_empty() {
         return;
     }
-    let results = backend.render_batch(&to_render);
+    let Some(auth) = auth else {
+        // Cache-only pass. Every miss still owes exactly one reply, or the
+        // viewer would pulse those blocks forever.
+        for req in &to_render {
+            let key = req.cache_key();
+            let _ = out.send(WebMsg { gen, key, rescale: false, res: WebOutcome::Missing });
+        }
+        return;
+    };
+    let results = backend.render_batch(&to_render, auth);
     for (req, res) in to_render.iter().zip(results) {
         let key = req.cache_key();
         let res = match res {
-            Ok(png) => {
-                let img = decode_web_png(picker, &png, max_cols);
-                if img.is_ok() {
+            Ok(png) => match decode_web_png(picker, &png, max_cols) {
+                Ok(info) => {
                     cache.put(&key, &png);
+                    WebOutcome::Drawn(info)
                 }
-                img
-            }
-            Err(e) => Err(e.to_string()),
+                Err(e) => WebOutcome::Failed(e),
+            },
+            Err(WebError::NotAuthorized) => WebOutcome::Denied,
+            Err(e) => WebOutcome::Failed(e.to_string()),
         };
         let _ = out.send(WebMsg { gen, key, rescale: false, res });
     }
@@ -583,6 +638,26 @@ struct App {
     /// state is what drives it (see `sync_state`).
     poll_ctrl_tx: mpsc::Sender<Duration>,
     poll_ctrl_rx: Option<mpsc::Receiver<Duration>>,
+    /// What this session may do for the current project: sid presence,
+    /// project visibility, and whatever the renderer has been refused.
+    /// Never a single "authenticated" flag — see `cosense::capability`.
+    caps: capability::Capabilities,
+    /// When diagrams may be drawn (`COSENSE_WEB_RENDER`).
+    render_policy: capability::RenderPolicy,
+    /// Visibility answers from the background probe (project, verdict).
+    vis_rx: mpsc::Receiver<(String, capability::Visibility)>,
+    vis_tx: mpsc::Sender<(String, capability::Visibility)>,
+    /// The project the probe was last asked about, so a page move inside
+    /// the same project does not re-ask.
+    vis_asked: Option<String>,
+    /// Artifacts a cache-only pass looked for and did not find. They are
+    /// NOT failures: they stay code blocks, stop shimmering, and `m` can
+    /// still draw them.
+    web_missing: HashSet<String>,
+    /// The "you need a cookie" notice has been shown for THIS page already.
+    /// Reset by `set_page`, so it is said once per page and not per block.
+    web_notice_shown: bool,
+
     /// The push channel's state, TYPED. The status line renders this; the
     /// poller's interval follows it. Nothing reads the status text.
     sync_state: capability::SyncState,
@@ -812,6 +887,20 @@ fn spawn_web_poller(
     });
 }
 
+/// Ask, off the UI thread, whether a project is readable with no credential
+/// at all. One anonymous request per project, and only when the answer could
+/// change a decision.
+fn spawn_visibility_probe(
+    client: Client,
+    project: String,
+    tx: mpsc::Sender<(String, capability::Visibility)>,
+) {
+    std::thread::spawn(move || {
+        let verdict = client.probe_visibility(&project);
+        let _ = tx.send((project, verdict));
+    });
+}
+
 /// Wait out `current`, or wake early on a new interval from the control
 /// channel. Returns the interval to use next and whether to fetch right now;
 /// `None` means the channel is gone and the poller should stop.
@@ -936,6 +1025,7 @@ impl App {
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
         let (poll_tx, poll_rx) = mpsc::channel();
         let (poll_ctrl_tx, poll_ctrl_rx) = mpsc::channel();
+        let (vis_tx, vis_rx) = mpsc::channel();
         let (ws_tx, ws_rx) = mpsc::channel();
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         App {
@@ -1006,6 +1096,13 @@ impl App {
             poll_tx,
             poll_ctrl_tx,
             poll_ctrl_rx: Some(poll_ctrl_rx),
+            caps: capability::Capabilities::default(),
+            render_policy: capability::RenderPolicy::from_env(),
+            vis_rx,
+            vis_tx,
+            vis_asked: None,
+            web_missing: HashSet::new(),
+            web_notice_shown: false,
             sync_state: capability::SyncState::Polling,
             ws_attempted: false,
             ws_rx,
@@ -1053,6 +1150,13 @@ impl App {
         self.session = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        // A different project is a different set of capabilities: what we
+        // learned about the old one (visibility, a refused browser) says
+        // nothing here. The sid is a property of the SESSION and survives.
+        if self.project != l.project {
+            self.caps = self.caps.for_new_project();
+            self.vis_asked = None;
+        }
         self.project = l.project;
         self.title = l.title;
         self.header_colors = l.header_colors;
@@ -1085,6 +1189,9 @@ impl App {
         self.web_pending.clear();
         self.web_errors.clear();
         self.web_rescaling.clear();
+        self.web_missing.clear();
+        // Once per page, not once per diagram.
+        self.web_notice_shown = false;
         // A freshly fetched page IS the server's state.
         self.mark_synced();
         self.laid_width = 0; // force rebuild
@@ -1094,7 +1201,7 @@ impl App {
         self.follow = true;
         self.web_dark = !ctx.light;
         self.start_image_loads(ctx);
-        self.start_web_renders();
+        self.start_web_renders(capability::Trigger::Auto);
     }
 
     /// Kick off background downloads for every image on the page. Each
@@ -1162,7 +1269,7 @@ impl App {
     /// Queue every not-yet-rendered diagram on the page as ONE batch. Returns
     /// immediately: the worker owns the browser, and the code block stays on
     /// screen until an artifact arrives.
-    fn start_web_renders(&mut self) {
+    fn start_web_renders(&mut self, trigger: capability::Trigger) {
         // The browser can only ever show what the SERVER has, so nothing is
         // requested while a commit is still on its way there, or while a
         // commit is known to have failed. Both are whole-page gates: any
@@ -1171,6 +1278,31 @@ impl App {
         // "everything landed".
         if self.inflight > 0 || self.web_unsynced {
             return;
+        }
+        // What this session may do, right now, for this project.
+        let decision = capability::decide(&self.caps, self.render_policy, trigger);
+        let auth = match decision {
+            capability::Decision::Nothing => return,
+            capability::Decision::Render(cap) => Some(cap),
+            capability::Decision::CacheOnly { notice } => {
+                // Said once per page: repeating it per diagram, per pass,
+                // would bury every other status the reader needs.
+                if let Some(text) = notice {
+                    if !self.web_notice_shown {
+                        self.web_notice_shown = true;
+                        self.note_web_failure(text.to_string());
+                    }
+                }
+                None
+            }
+        };
+        // The one anonymous attempt on an Unknown project is spent HERE,
+        // when it is dispatched — not when it answers, or a second `m`
+        // pressed while the first is in flight would spend it twice.
+        if auth == Some(RenderCapability::Anonymous)
+            && self.caps.visibility != capability::Visibility::Public
+        {
+            self.caps.anonymous_spent = true;
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
         for b in &self.blocks {
@@ -1191,6 +1323,12 @@ impl App {
             {
                 continue;
             }
+            // A cache-only pass already looked at this one and found
+            // nothing. Asking again would just re-answer `Missing`; only a
+            // pass that may actually draw is worth sending.
+            if self.web_missing.contains(&key) && auth.is_none() {
+                continue;
+            }
             reqs.push(req);
         }
         if reqs.is_empty() {
@@ -1199,19 +1337,80 @@ impl App {
         let keys: Vec<String> = reqs.iter().map(|r| r.cache_key()).collect();
         for k in &keys {
             self.web_pending.insert(k.clone());
+            self.web_missing.remove(k);
         }
         // Those blocks now shimmer; the map is rebuilt with the layout.
         self.laid_width = 0;
         self.web_anim = std::time::Instant::now();
         if self
             .web_job_tx
-            .send(WebJob::Render { gen: self.gen_now(), reqs, max_cols: self.web_cols })
+            .send(WebJob::Render {
+                gen: self.gen_now(),
+                reqs,
+                max_cols: self.web_cols,
+                auth,
+            })
             .is_err()
         {
             // The worker is gone (shutting down). Nothing will ever answer,
             // so un-mark them: the code block stays, and it stops pulsing.
             for k in &keys {
                 self.web_pending.remove(k);
+            }
+        }
+    }
+
+    /// The browser hit a login wall. This says something about the COOKIE,
+    /// never about the PAT that is reading and committing this page — so
+    /// nothing here touches `editable`, the credential, or the status.
+    fn note_denied(&mut self, key: String) {
+        match capability::on_not_authorized(&self.caps) {
+            // A public page that refused a cookie refused a STALE cookie.
+            // Anonymous is a different request, and usually works.
+            capability::Denial::RetryAnonymous => {
+                self.caps.anonymous_spent = true;
+                self.web_missing.insert(key);
+                self.start_web_renders(capability::Trigger::Manual);
+            }
+            capability::Denial::GiveUp => {
+                self.caps.browser_denied = true;
+                self.web_missing.insert(key);
+                if !self.web_notice_shown {
+                    self.web_notice_shown = true;
+                    let msg = if self.caps.sid {
+                        "diagram: ブラウザのセッションが拒否されました (showing source)"
+                    } else {
+                        capability::NEEDS_SID
+                    };
+                    self.note_web_failure(msg.to_string());
+                }
+            }
+        }
+    }
+
+    /// Start the anonymous visibility probe for the current project, once.
+    ///
+    /// Free evidence first: if this session resolved NO credential for the
+    /// project and still read the page, it is public by demonstration and
+    /// no request is needed.
+    fn ensure_visibility(&mut self, ctx: &Ctx) {
+        if self.project.is_empty() || self.vis_asked.as_deref() == Some(&self.project) {
+            return;
+        }
+        self.vis_asked = Some(self.project.clone());
+        if ctx.client.credential_for(&self.project).is_none() {
+            self.caps.visibility = capability::Visibility::Public;
+            return;
+        }
+        spawn_visibility_probe(ctx.client.clone(), self.project.clone(), self.vis_tx.clone());
+    }
+
+    /// Take whatever the visibility probe learned. Pure bookkeeping: the
+    /// verdict only ever widens or narrows what a LATER render pass may do.
+    fn drain_visibility(&mut self) {
+        while let Ok((project, verdict)) = self.vis_rx.try_recv() {
+            if project == self.project {
+                self.caps.visibility = verdict;
             }
         }
     }
@@ -1411,7 +1610,7 @@ impl App {
                 // already on screen. If it failed, the reader keeps the
                 // size they had: no error, no notice, no lost diagram.
                 self.web_rescaling.remove(&key);
-                if let Ok(info) = res {
+                if let WebOutcome::Drawn(info) = res {
                     self.images.insert(key, info);
                     changed = true;
                 }
@@ -1419,10 +1618,20 @@ impl App {
             }
             self.web_pending.remove(&key);
             match res {
-                Ok(info) => {
+                WebOutcome::Drawn(info) => {
                     self.images.insert(key, info);
                 }
-                Err(e) => {
+                // Not on disk, and this pass could not draw. The block goes
+                // back to being source, silently — `m` will pick it up.
+                WebOutcome::Missing => {
+                    self.web_missing.insert(key);
+                }
+                // The BROWSER was refused. The REST credential is untouched:
+                // edits and reads carry on exactly as before.
+                WebOutcome::Denied => {
+                    self.note_denied(key);
+                }
+                WebOutcome::Failed(e) => {
                     self.note_web_failure(format!("diagram: {e} (showing source)"));
                     self.web_errors.insert(key, e);
                 }
@@ -2693,6 +2902,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // invalid sid (push stuck reconnecting forever) must degrade to
     // "web edits still land, just at the poll interval" — never silence.
     let sid = ctx.client.sid().map(str::to_string);
+    // A sid is one capability among several: it enables push sync and lets
+    // the browser see private pages. It is NOT what makes the app usable —
+    // a PAT session without one still reads, edits and commits.
+    app.caps.sid = sid.is_some();
     let (ws_active, initial_state) = cosense::ws::initial_plan(sid.is_some());
     app.ws_attempted = ws_active;
     app.sync_state = initial_state;
@@ -3337,7 +3550,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // Both are no-ops on most frames: a diagram is only requested when
         // its own source changed, and only re-encoded when the pane crossed
         // the column cap it was built for.
-        app.start_web_renders();
+        app.ensure_visibility(ctx);
+        app.drain_visibility();
+        app.start_web_renders(capability::Trigger::Auto);
         app.rescale_diagrams();
         app.expire_web_notice();
         app.drain_downloads();
@@ -3785,7 +4000,7 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     app.srcs = r.srcs;
     app.laid_width = 0;
     app.start_image_loads(ctx);
-    app.start_web_renders();
+    app.start_web_renders(capability::Trigger::Auto);
 }
 
 fn ensure_editable(app: &mut App) -> bool {
@@ -5774,6 +5989,12 @@ mod tests {
         let mut app = App::new("proj".into());
         app.title = "t".into();
         app.editable = true;
+        // Most tests predate the capability split and care about the render
+        // pipeline, not the gate: give them a session that may draw. The
+        // gate's own behaviour is tested explicitly further down.
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.caps.sid = true;
+        app.caps.visibility = capability::Visibility::Private;
         app.lines = texts
             .iter()
             .enumerate()
@@ -5929,7 +6150,7 @@ mod tests {
     fn each_mermaid_block_is_requested_against_its_own_cosense_line_id() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let rx = app.web_jobs_rx.take().unwrap();
         let (gen, reqs) = render_job(rx.try_recv().expect("one batch was queued"));
         assert_eq!(gen, app.gen_now());
@@ -5945,7 +6166,7 @@ mod tests {
         assert_ne!(reqs[0].cache_key(), reqs[1].cache_key());
         assert!(reqs.iter().all(|r| r.page_id == "PAGE"));
         // Asking again while they are in flight queues nothing new.
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
     }
 
@@ -5973,11 +6194,11 @@ mod tests {
         assert_eq!(before, key(&app, "flowchart"));
         // With the page's diagrams already requested once, resizing queues
         // no further work at all.
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "the initial batch");
         for w in [60, 100, 200, 37] {
             app.rebuild(w);
-            app.start_web_renders();
+            app.start_web_renders(capability::Trigger::Auto);
             assert!(
                 app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
                 "resizing to {w} columns must queue nothing",
@@ -6005,7 +6226,7 @@ mod tests {
         // The caret is inside the FIRST diagram (lines 1..=3): that one is
         // still being typed, but the second diagram has nothing to wait for.
         session_on(&mut app, 2);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) =
             render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes"));
         assert_eq!(
@@ -6020,7 +6241,7 @@ mod tests {
         // next request goes out after the frame that rebuilds it.)
         app.rebuild(80);
         session_on(&mut app, 5);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         assert_eq!(
             reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
@@ -6036,12 +6257,12 @@ mod tests {
         // A commit is still on its way to the server: the browser would see
         // the pre-edit page, so nothing is requested at all.
         app.inflight = 1;
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
         assert!(app.web_pending.is_empty());
         // Settled: one batch goes out, against text the server now has.
         app.inflight = 0;
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok());
     }
 
@@ -6055,7 +6276,7 @@ mod tests {
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         // The reader navigated away and back while the browser was busy.
         let stale_gen = app.gen_now().wrapping_sub(1);
-        app.web_tx.send(WebMsg { gen: stale_gen, key: key.clone(), rescale: false, res: Ok(info) }).unwrap();
+        app.web_tx.send(WebMsg { gen: stale_gen, key: key.clone(), rescale: false, res: WebOutcome::Drawn(info) }).unwrap();
         assert!(!app.drain_web_renders(), "a stale result changes nothing");
         assert!(!app.images.contains_key(&key), "yesterday's diagram is not installed");
         // …and it touches NO state. The same key can legitimately be
@@ -6076,7 +6297,7 @@ mod tests {
             .cache_key();
         app.web_pending.insert(key.clone());
         app.web_tx
-            .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: Err(WebError::NoBrowser.to_string()) })
+            .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: WebOutcome::Failed(WebError::NoBrowser.to_string()) })
             .unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
@@ -6105,11 +6326,11 @@ mod tests {
     fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: Ok(info) }).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: WebOutcome::Drawn(info) }).unwrap();
         assert!(app.drain_web_renders());
         app.laid_width = 0;
         app.rebuild(80);
@@ -6142,6 +6363,279 @@ mod tests {
         assert!(code_rows(&app).iter().any(|t| t.contains("flowchart LR")));
     }
 
+    // ---------------------------------------------------------------
+    // Capability fallback: what a session without a usable `connect.sid`
+    // may still do. The REST side must be untouched by ALL of it.
+    // ---------------------------------------------------------------
+
+    /// Wire a page to a worker and a fake backend, and run one pass.
+    /// Returns the backend so the test can count what it was asked to do.
+    fn run_pass(
+        app: &mut App,
+        trigger: capability::Trigger,
+    ) -> Arc<cosense::webrender::FakeBackend> {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+        );
+        app.start_web_renders(trigger);
+        backend
+    }
+
+    /// The page's rendered text rows, for "the source is still on screen".
+    fn text_rows(app: &App) -> Vec<String> {
+        app.rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, .. } => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every key this page's diagrams will be filed under.
+    fn diagram_keys(app: &App) -> Vec<String> {
+        let mut out = Vec::new();
+        for b in &app.blocks {
+            if let Block::WebRender { kind, code, last_src, .. } = b {
+                if let Some(r) = app.web_request(*kind, code, *last_src) {
+                    out.push(r.cache_key());
+                }
+            }
+        }
+        out
+    }
+
+    /// Wait for one reply per key, then apply them all. Collected first
+    /// because `drain_web_renders` empties the whole channel.
+    fn settle(app: &mut App, n: usize) {
+        let mut msgs = Vec::new();
+        for _ in 0..n {
+            msgs.push(
+                app.web_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("every accepted request is answered exactly once"),
+            );
+        }
+        for m in msgs {
+            app.web_tx.send(m).unwrap();
+        }
+        app.drain_web_renders();
+    }
+
+    #[test]
+    fn no_sid_on_a_public_project_renders_anonymously_and_leaves_rest_alone() {
+        let mut app = mermaid_page();
+        app.editable = true;
+        app.caps = capability::Capabilities {
+            sid: false,
+            visibility: capability::Visibility::Public,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        // The browser WAS used, with no cookie.
+        assert!(backend.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert_eq!(
+            *backend.last_auth.lock().unwrap(),
+            Some(RenderCapability::Anonymous)
+        );
+        // ...and nothing about the missing sid touched the REST side.
+        assert!(app.editable, "no sid is not a reason to stop editing");
+        assert_eq!(app.sync_label(), "poll");
+    }
+
+    #[test]
+    fn no_sid_on_a_private_project_serves_the_cache_and_never_launches_a_browser() {
+        let mut app = mermaid_page();
+        app.editable = true; // a PAT / service account is reading this page
+        app.caps = capability::Capabilities {
+            sid: false,
+            visibility: capability::Visibility::Private,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        // One diagram is already on disk from an earlier, authenticated
+        // session. Reaching this page needed REST access, so showing it is
+        // not a leak — the cache itself is 0700/0600.
+        let cache = scratch_cache();
+        cache.put(&keys[0], &tiny_png());
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache,
+            Arc::clone(&app.web_gen),
+        );
+        app.start_web_renders(capability::Trigger::Auto);
+        settle(&mut app, keys.len());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a private project with no sid must not start a browser"
+        );
+        assert!(app.images.contains_key(&keys[0]), "the cached diagram still shows");
+        // The uncached one is a miss, NOT a failure: it stays source and
+        // stays drawable.
+        assert!(app.web_missing.contains(&keys[1]));
+        assert!(!app.web_errors.contains_key(&keys[1]));
+        assert!(app.web_pending.is_empty(), "nothing is left pulsing");
+        assert!(app.hint_text(&[]).contains("connect.sid"));
+        assert!(app.editable, "the renderer's limits never reach the editor");
+    }
+
+    #[test]
+    fn the_private_notice_is_said_once_per_page_not_once_per_diagram() {
+        let mut app = mermaid_page();
+        app.caps.sid = false;
+        app.caps.visibility = capability::Visibility::Private;
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_notice_shown);
+        app.web_notice = None;
+        // A second pass over the same page says nothing more.
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_notice.is_none());
+    }
+
+    #[test]
+    fn unknown_visibility_waits_for_an_explicit_m() {
+        let mut app = mermaid_page();
+        app.caps.sid = false;
+        app.caps.visibility = capability::Visibility::Unknown;
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an automatic pass never gambles a browser on an unknown project"
+        );
+        // The reader asks explicitly: one anonymous attempt is allowed.
+        app.start_web_renders(capability::Trigger::Manual);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        assert!(backend.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert_eq!(
+            *backend.last_auth.lock().unwrap(),
+            Some(RenderCapability::Anonymous)
+        );
+        assert!(app.caps.anonymous_spent);
+    }
+
+    #[test]
+    fn a_stale_cookie_on_a_public_page_retries_without_it() {
+        let mut app = mermaid_page();
+        app.caps = capability::Capabilities {
+            sid: true,
+            visibility: capability::Visibility::Public,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        app.web_pending.insert(keys[0].clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: keys[0].clone(),
+                rescale: false,
+                res: WebOutcome::Denied,
+            })
+            .unwrap();
+        app.drain_web_renders();
+        // The refusal was about the COOKIE. A second, cookie-free attempt
+        // is queued, and the REST credential is not touched.
+        assert!(app.caps.anonymous_spent);
+        assert!(!app.caps.browser_denied);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
+        assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
+    }
+
+    #[test]
+    fn a_refused_private_render_falls_back_to_source_without_disabling_edits() {
+        let mut app = mermaid_page();
+        app.editable = true;
+        app.caps = capability::Capabilities {
+            sid: true,
+            visibility: capability::Visibility::Private,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        app.web_pending.insert(keys[0].clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: keys[0].clone(),
+                rescale: false,
+                res: WebOutcome::Denied,
+            })
+            .unwrap();
+        app.drain_web_renders();
+        assert!(app.caps.browser_denied, "the RENDERER gives up");
+        assert!(app.editable, "...and nothing else does");
+        assert!(!app.web_errors.contains_key(&keys[0]));
+        app.rebuild(80);
+        assert!(
+            text_rows(&app).iter().any(|t| t.contains("flowchart LR")),
+            "the source is what the reader sees"
+        );
+        // No further BROWSER work is queued for this project: even an
+        // explicit `m` can now only consult the disk cache.
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+        app.start_web_renders(capability::Trigger::Manual);
+        if let Ok(WebJob::Render { auth, .. }) = app.web_jobs_rx.as_ref().unwrap().try_recv() {
+            assert_eq!(auth, None, "a denied project never reaches a browser again");
+        }
+    }
+
+    #[test]
+    fn moving_to_another_project_forgets_the_old_one_s_verdict() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.caps.visibility = capability::Visibility::Private;
+        app.caps.browser_denied = true;
+        app.caps.sid = true;
+        app.set_page(
+            Loaded {
+                project: "other".into(),
+                title: "t".into(),
+                page_id: "P2".into(),
+                header_colors: HeaderColors::fallback(),
+                lines: Vec::new(),
+                blocks: Vec::new(),
+                srcs: Vec::new(),
+                related: Vec::new(),
+                read_at: None,
+                editable: true,
+            },
+            &ctx,
+        );
+        assert_eq!(app.caps.visibility, capability::Visibility::Unknown);
+        assert!(!app.caps.browser_denied);
+        assert!(app.caps.sid, "the session's cookie did not go anywhere");
+    }
+
     #[test]
     fn the_ui_thread_never_waits_for_the_browser() {
         let backend = Arc::new(cosense::webrender::FakeBackend::new());
@@ -6164,7 +6658,7 @@ mod tests {
         // this guard is held.
         let held = backend.gate.lock().unwrap();
         let t0 = std::time::Instant::now();
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         // …and the UI thread still lays out and would draw, immediately.
         app.laid_width = 0;
         app.rebuild(80);
@@ -6183,7 +6677,7 @@ mod tests {
             .expect("the worker answered");
         assert_eq!(msg.gen, app.gen_now());
         assert_eq!(msg.key, key);
-        assert!(msg.res.is_ok());
+        assert!(msg.res.is_drawn());
     }
 
     #[test]
@@ -6192,7 +6686,7 @@ mod tests {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         app.rebuild(80);
         // Every row of both Mermaid blocks pulses — header and body — and
         // nothing else on the page does.
@@ -6300,7 +6794,7 @@ mod tests {
         );
         assert_eq!(app.inflight, 0, "the job is no longer in flight…");
         assert!(app.web_unsynced, "…but the page is known to have drifted");
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(
             app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
             "inflight == 0 is not enough: nothing may be rendered while desynced",
@@ -6316,7 +6810,7 @@ mod tests {
             CommitOutcome::Done { label: "line 9".into(), title: String::new() },
         );
         assert!(app.web_unsynced, "one success does not prove the page agrees");
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
 
         // Only a whole page from the server settles it.
@@ -6347,7 +6841,7 @@ mod tests {
         install_remote_lines(&mut app, &ctx, &page, "⟳ resync");
         assert!(!app.web_unsynced, "an authoritative install resolves the drift");
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "rendering resumes");
     }
 
@@ -6360,7 +6854,7 @@ mod tests {
         queue_commit(&mut app, "line 4", vec![]);
         assert_eq!(app.inflight, 0, "nothing is in flight — it never left");
         assert!(app.web_unsynced);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
     }
 
@@ -6383,7 +6877,12 @@ mod tests {
             Arc::clone(&backend),
             scratch_cache(),
             vec![
-                WebJob::Render { gen, reqs: vec![req], max_cols: 64 },
+                WebJob::Render {
+                    gen,
+                    reqs: vec![req],
+                    max_cols: 64,
+                    auth: Some(RenderCapability::Authenticated),
+                },
                 // A rescale with nothing on disk STILL owes a reply, or the
                 // viewer would wait on it forever.
                 WebJob::Rescale { gen, key: "web:mermaid:absent".into(), max_cols: 20 },
@@ -6392,16 +6891,16 @@ mod tests {
         );
         assert_eq!(msgs.len(), 2, "one reply per accepted job");
         let render = msgs.iter().find(|m| m.key == key).unwrap();
-        assert!(!render.rescale && render.res.is_ok());
+        assert!(!render.rescale && render.res.is_drawn());
         let rescale = msgs.iter().find(|m| m.key == "web:mermaid:absent").unwrap();
-        assert!(rescale.rescale && rescale.res.is_err(), "a cache miss is answered, not dropped");
+        assert!(rescale.rescale && !rescale.res.is_drawn(), "a cache miss is answered, not dropped");
     }
 
     #[test]
     fn a_rescale_that_cannot_be_served_keeps_the_diagram_it_has() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
@@ -6412,7 +6911,7 @@ mod tests {
                 gen: app.gen_now(),
                 key: key.clone(),
                 rescale: true,
-                res: Err("no cached artifact to resize".into()),
+                res: WebOutcome::Failed("no cached artifact to resize".into()),
             })
             .unwrap();
         app.drain_web_renders();
@@ -6429,7 +6928,7 @@ mod tests {
         // must not clear that.
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (old_gen, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -6437,7 +6936,7 @@ mod tests {
         app.web_rescaling.insert(key.clone());
         let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
         app.web_tx
-            .send(WebMsg { gen: old_gen, key: key.clone(), rescale: false, res: Ok(info) })
+            .send(WebMsg { gen: old_gen, key: key.clone(), rescale: false, res: WebOutcome::Drawn(info) })
             .unwrap();
         assert!(!app.drain_web_renders(), "yesterday's answer changes nothing");
         assert!(app.web_pending.contains(&key), "the live request is still in flight");
@@ -6453,7 +6952,7 @@ mod tests {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         app.web_rescaling.insert("web:mermaid:whatever".into());
         assert!(!app.web_pending.is_empty());
         app.set_page(
@@ -6493,9 +6992,9 @@ mod tests {
             Arc::clone(&backend),
             scratch_cache(),
             vec![
-                WebJob::Render { gen: stale_gen, reqs: vec![req.clone()], max_cols: 64 },
+                WebJob::Render { gen: stale_gen, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
                 WebJob::Rescale { gen: stale_gen, key: "web:mermaid:old".into(), max_cols: 20 },
-                WebJob::Render { gen: live_gen, reqs: vec![req.clone()], max_cols: 64 },
+                WebJob::Render { gen: live_gen, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
             ],
             1,
         );
@@ -6532,10 +7031,10 @@ mod tests {
             Arc::clone(&app.web_gen),
         );
         app.web_job_tx
-            .send(WebJob::Render { gen, reqs: vec![a.clone()], max_cols: 64 })
+            .send(WebJob::Render { gen, reqs: vec![a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
             .unwrap();
         app.web_job_tx
-            .send(WebJob::Render { gen, reqs: vec![b.clone(), a.clone()], max_cols: 64 })
+            .send(WebJob::Render { gen, reqs: vec![b.clone(), a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
             .unwrap();
         drop(held);
         let mut keys = Vec::new();
@@ -6562,7 +7061,7 @@ mod tests {
         // No worker was ever spawned and the receiver is dropped: every
         // send fails, exactly as it does once the worker has stopped.
         drop(app.web_jobs_rx.take());
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_pending.is_empty(), "nothing waits on a reply that cannot come");
         app.rebuild(80);
         assert!(app.web_shimmer.is_empty(), "so nothing pulses");
@@ -6610,14 +7109,14 @@ mod tests {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         // The artifact arrives sized for the wide pane.
         let wide = decode_web_png(&Picker::halfblocks(), &wide_png(), app.web_cols).unwrap();
         assert_eq!(app.web_cols, IMAGE_MAX_COLS, "80 columns leaves room for the ceiling");
         app.web_pending.insert(key.clone());
-        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: Ok(wide) }).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, res: WebOutcome::Drawn(wide) }).unwrap();
         assert!(app.drain_web_renders());
 
         // Two narrow panes, well under the 64-column image ceiling.
@@ -6639,7 +7138,7 @@ mod tests {
             // The worker answers; the diagram now fits the pane.
             let info = decode_web_png(&Picker::halfblocks(), &wide_png(), max_cols).unwrap();
             app.web_tx
-                .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: true, res: Ok(info) })
+                .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: true, res: WebOutcome::Drawn(info) })
                 .unwrap();
             assert!(app.drain_web_renders());
             let shown_w = app.images[&key].cells_w;
@@ -6658,7 +7157,7 @@ mod tests {
     fn a_diagram_failure_gives_the_key_hints_back() {
         let mut app = mermaid_page();
         app.rebuild(80);
-        app.start_web_renders();
+        app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         app.web_pending.insert(key.clone());
@@ -6668,7 +7167,7 @@ mod tests {
                 gen: app.gen_now(),
                 key,
                 rescale: false,
-                res: Err(WebError::NoBrowser.to_string()),
+                res: WebOutcome::Failed(WebError::NoBrowser.to_string()),
             })
             .unwrap();
         assert!(app.drain_web_renders());
