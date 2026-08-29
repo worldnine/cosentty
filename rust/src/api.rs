@@ -248,7 +248,15 @@ pub struct RelatedPages {
 
 #[derive(Debug, Deserialize)]
 pub struct Page {
+    /// Empty for a page that does not exist yet: Cosense answers 200 for
+    /// any title, with `persistent: false` and no id. That is how the web
+    /// opens a link to an uncreated page, and how this viewer does too.
+    #[serde(default)]
     pub id: String,
+    /// Does this page exist on the server? `false` = a template the first
+    /// commit will create.
+    #[serde(default)]
+    pub persistent: bool,
     pub title: String,
     /// The page's current commit. Reported by the `web_smoke` binary as
     /// page metadata. NOT part of any diagram's cache key: Cosense commits
@@ -742,6 +750,10 @@ impl Client {
     /// page API). Nothing is written; the returned preview commits via
     /// `submit_edit`. A changed page fails with `NotFastForward` here
     /// already, not only at submit.
+    /// Dry-run an edit. An EMPTY `page_id` means "this page does not exist
+    /// yet": the request goes out without `pageId`, which is how the API
+    /// creates a page (the first inserted line becomes its title). Same
+    /// shape the official CLI uses for `previewEdit --new`.
     pub fn preview_edit(
         &self,
         project: &str,
@@ -779,7 +791,11 @@ impl Client {
             self.cfg.base(),
             urlencoding(project)
         );
-        let body = serde_json::json!({ "pageId": page_id, "changes": changes });
+        let body = if page_id.is_empty() {
+            serde_json::json!({ "changes": changes })
+        } else {
+            serde_json::json!({ "pageId": page_id, "changes": changes })
+        };
         let v = self.post_edit_json(project, &url, &body)?;
         let preview_id = v
             .get("previewId")

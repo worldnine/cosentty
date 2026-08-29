@@ -722,6 +722,9 @@ struct App {
     /// A server refresh threw away history that could no longer be
     /// replayed. Only used to explain an empty stack instead of shrugging.
     history_dropped: bool,
+    /// The page does not exist yet (`page_id` empty) and local edits are
+    /// waiting to bring it into being. Cleared when the create job is sent.
+    needs_create: bool,
     /// Commit queue into the serial worker, and its outcomes back.
     commit_tx: mpsc::Sender<CommitJob>,
     commit_res_rx: mpsc::Receiver<CommitOutcome>,
@@ -1232,6 +1235,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             history_dropped: false,
+            needs_create: false,
             commit_tx,
             commit_res_rx,
             commit_jobs_rx: Some(commit_jobs_rx),
@@ -1308,6 +1312,8 @@ impl App {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.history_dropped = false;
+        // Whatever the last page was waiting to become, it is not this one.
+        self.needs_create = false;
         // A different project is a different set of capabilities: what we
         // learned about the old one (visibility, a refused browser) says
         // nothing here. The sid is a property of the SESSION and survives.
@@ -3568,8 +3574,18 @@ fn record_visit(project: &str, title: &str, now: i64) -> Option<i64> {
 /// with many images still appears immediately.
 fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Error>> {
     let page = ctx.client.get_page_in(project, title)?;
-    let lines: Vec<PageLine> = page.lines.clone();
-    let texts: Vec<String> = page.lines.iter().map(|l| l.text.clone()).collect();
+    let mut lines: Vec<PageLine> = page.lines.clone();
+    if !page.persistent {
+        // An uncreated page comes back as a template: a title line with no
+        // id. Give every line an id here, so editing works exactly as on a
+        // real page and the create request can name its own lines.
+        for l in lines.iter_mut() {
+            if l.id.is_empty() {
+                l.id = new_line_id();
+            }
+        }
+    }
+    let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
     let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
@@ -3828,7 +3844,11 @@ fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) {
         Ok(loaded) => {
             app.history.push(from);
             app.set_page(loaded, ctx);
-            app.status = if same_project {
+            app.status = if page_is_uncreated(app) {
+                // Following a link to a page nobody has written yet is how
+                // a wiki grows. Say what it is, and what makes it real.
+                format!("未作成のページ — e / o で書き始めると作成されます（{title}）")
+            } else if same_project {
                 format!("→ {title}")
             } else {
                 format!("→ /{project}/{title}")
@@ -3882,6 +3902,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         while let Ok(polled) = app.poll_rx.try_recv() {
             apply_remote(app, ctx, polled);
         }
+        // A page typed into existence goes up as soon as the queue is free.
+        dispatch_create(app);
         // Install any images that finished downloading, then draw.
         if app.drain_images() | app.drain_web_renders() {
             app.laid_width = 0; // heights changed — rebuild layout
@@ -4425,8 +4447,38 @@ fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
     // A fresh edit starts a fresh lineage: an older drop no longer
     // explains anything.
     app.history_dropped = false;
-    queue_commit(app, label, ops);
+    if page_is_uncreated(app) {
+        // Nothing to commit against yet. The edit lives locally and the
+        // whole page goes up as one create instead — sending these ops
+        // would need a pageId that does not exist.
+        app.needs_create = true;
+    } else {
+        queue_commit(app, label, ops);
+    }
     rerender(app, ctx);
+}
+
+/// Does this page exist on the server yet? Cosense answers 200 for any
+/// title, so a link to an uncreated page opens as a template with just its
+/// title line; it becomes real on the first commit.
+fn page_is_uncreated(app: &App) -> bool {
+    app.page_id.is_empty()
+}
+
+/// Bring an uncreated page into being: one insert of the whole local page,
+/// with no `pageId` — the API reads the first inserted line as the title.
+/// Sent once, when nothing else is in flight, so a burst of typing cannot
+/// race two creates (which the server would answer with two pages, the
+/// second auto-suffixed).
+fn dispatch_create(app: &mut App) {
+    if !app.needs_create || !page_is_uncreated(app) || app.inflight > 0 {
+        return;
+    }
+    app.needs_create = false;
+    let lines: Vec<(String, String)> =
+        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    queue_commit(app, "create page", vec![EditOp::Insert { anchor: "_end".into(), lines }]);
+    app.status = "ページを作成しています…".into();
 }
 
 /// Send one commit job to the serial worker.
@@ -5108,6 +5160,36 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     }
 }
 
+/// The page we typed now exists on the server. Take its id and its line
+/// ids as the base, then commit whatever was typed after the create left —
+/// those keystrokes were never part of it.
+///
+/// The lines come back with the ids WE generated (the create names its own
+/// lines), so the cursor, the session and the telomere all survive this.
+fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::Page) {
+    let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
+    let session_id =
+        app.session.as_ref().and_then(|s| app.lines.get(s.line)).map(|l| l.id.clone());
+    let local: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+    let server: Vec<(String, String)> =
+        page.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    app.page_id = page.id.clone();
+    app.lines = page.lines.clone();
+    app.bump_server_epoch();
+    app.mark_synced();
+    let ops = cosense::editops::diff_to_ops(&server, &local);
+    if ops.is_empty() {
+        rerender(app, ctx);
+        app.status = "✓ ページを作成しました".into();
+    } else {
+        // `do_edit` applies locally, stacks the undo and queues the commit
+        // — the same path any other edit takes, now that there is a page.
+        do_edit(app, ctx, "sync new page", ops);
+        app.status = "✓ ページを作成しました".into();
+    }
+    reanchor_cursor_session(app, cursor_id, session_id);
+}
+
 /// The shared apply gate: never install remote state while the local
 /// model is at stake — viewing history, a commit in flight, a composer
 /// open, or a dirty caret line. Polling drops the page when gated (it
@@ -5203,6 +5285,14 @@ fn reanchor_cursor_session(app: &mut App, cursor_id: Option<String>, session_id:
 /// lines as unread, exactly like a browser revisit.
 fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
     if polled.project != app.project || polled.title != app.title {
+        return;
+    }
+    if page_is_uncreated(app) {
+        // Until the create lands, every poll is the same empty template.
+        // Installing it would wipe the page being typed.
+        if polled.page.persistent && !polled.page.id.is_empty() {
+            adopt_created_page(app, ctx, &polled.page);
+        }
         return;
     }
     // The snapshot was taken before something newer landed — a commit of
@@ -6677,6 +6767,9 @@ mod tests {
     fn page(texts: &[&str]) -> App {
         let mut app = App::new("proj".into());
         app.title = "t".into();
+        // A page that EXISTS: an empty page_id means "not created yet",
+        // which holds every commit back until the create lands.
+        app.page_id = "pid".into();
         app.editable = true;
         // Most tests predate the capability split and care about the render
         // pipeline, not the gate: give them a session that may draw. The
@@ -8280,6 +8373,7 @@ mod tests {
         // Only a whole page from the server settles it.
         let mut page = cosense::api::Page {
             id: app.page_id.clone(),
+            persistent: true,
             title: app.title.clone(),
             commit_id: String::new(),
             lines: vec![],
@@ -8908,6 +9002,7 @@ mod tests {
         };
         let page = Page {
             id: String::new(),
+            persistent: true,
             title: "me".into(),
             commit_id: String::new(),
             lines: vec![],
@@ -9109,6 +9204,83 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// A page nobody has written yet: Cosense answers 200 for any title,
+    /// so the viewer opens a template. Editing it must CREATE the page,
+    /// which is a different request (no pageId) — and it must go out
+    /// exactly once, no matter how much is typed first.
+    #[test]
+    fn an_uncreated_page_is_created_by_the_first_edit() {
+        let ctx = test_ctx();
+        let mut app = page(&["new title"]);
+        app.page_id = String::new(); // the page does not exist yet
+        app.rebuild(40);
+
+        enter_session(&mut app, &ctx, 0, "new title".len());
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        type_str(&mut app, &ctx, "body");
+        leave_session(&mut app, &ctx);
+        assert!(drain_jobs(&mut app).is_empty(), "nothing can be committed yet");
+        assert!(app.needs_create, "…but the page owes the server its existence");
+
+        dispatch_create(&mut app);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "one create, whatever was typed");
+        assert_eq!(jobs[0].0, "create page");
+        match &jobs[0].1[0] {
+            EditOp::Insert { anchor, lines } => {
+                assert_eq!(anchor, "_end");
+                let texts: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
+                assert_eq!(texts, vec!["new title", "body"], "title first, then the body");
+            }
+            other => panic!("expected an insert, got {other:?}"),
+        }
+
+        // A second dispatch while the first is in flight would make a
+        // SECOND page (the server auto-suffixes the title).
+        app.needs_create = true;
+        dispatch_create(&mut app);
+        assert!(drain_jobs(&mut app).is_empty(), "not while one is in flight");
+    }
+
+    /// Once the page exists, the viewer adopts its id and commits whatever
+    /// was typed after the create left — those keystrokes were never in it.
+    #[test]
+    fn adopting_a_created_page_commits_what_the_create_missed() {
+        let ctx = test_ctx();
+        let mut app = page(&["new title", "body"]);
+        app.page_id = String::new();
+        app.rebuild(40);
+        // Typed while the create was in flight.
+        app.lines[1].text = "body, and more".into();
+
+        let mut server = polled(&[("id0", "new title"), ("id1", "body")]).page;
+        server.id = "PID".into();
+        adopt_created_page(&mut app, &ctx, &server);
+
+        assert_eq!(app.page_id, "PID", "later commits have something to name");
+        assert_eq!(app.lines[1].text, "body, and more", "the local text wins");
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1);
+        assert!(matches!(&jobs[0].1[0], EditOp::Replace { id, .. } if id == "id1"));
+    }
+
+    /// While the page does not exist, every poll returns the same empty
+    /// template. Installing it would wipe the page being typed.
+    #[test]
+    fn polls_never_overwrite_a_page_being_typed_into_existence() {
+        let ctx = test_ctx();
+        let mut app = page(&["new title", "body"]);
+        app.page_id = String::new();
+        app.rebuild(40);
+
+        let mut template = polled(&[("", "new title")]);
+        template.page.id = String::new();
+        template.page.persistent = false;
+        apply_remote(&mut app, &ctx, template);
+        assert_eq!(app.lines.len(), 2, "the template did not replace anything");
+        assert_eq!(app.lines[1].text, "body");
     }
 
     /// Typing a code block has to be possible at all: Enter on the
@@ -9445,6 +9617,7 @@ mod tests {
             title: "t".into(),
             page: cosense::api::Page {
                 id: "pid".into(),
+                persistent: true,
                 title: "t".into(),
                 commit_id: String::new(),
                 lines: texts
