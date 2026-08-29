@@ -719,6 +719,13 @@ struct App {
     /// Reset by `set_page`, so it is said once per page and not per block.
     web_notice_shown: bool,
 
+    /// Monotonic counter of everything that makes the server's state newer
+    /// than a poll already in flight: a local commit landing, a websocket
+    /// commit applied, a page installed. A poller stamps this when it
+    /// starts a GET; if it has moved by the time the response arrives, that
+    /// response is a photograph of the past and is dropped.
+    server_epoch: Arc<std::sync::atomic::AtomicU64>,
+
     /// The push channel's state, TYPED. The status line renders this; the
     /// poller's interval follows it. Nothing reads the status text.
     sync_state: capability::SyncState,
@@ -902,6 +909,12 @@ struct PolledPage {
     project: String,
     title: String,
     page: cosense::api::Page,
+    /// The server-state epoch when this fetch was STARTED. If anything has
+    /// advanced the epoch since — a local commit, an applied websocket
+    /// commit, a page install — then this snapshot predates it and would
+    /// roll the reader back. `commitId` cannot be used for this: it is not
+    /// safely ordered from the client's side.
+    epoch: u64,
 }
 
 /// The web-edit poller: refetches the CURRENT page every few seconds on
@@ -914,6 +927,7 @@ fn spawn_web_poller(
     target: Arc<std::sync::Mutex<(String, String)>>,
     tx: mpsc::Sender<PolledPage>,
     ctrl: mpsc::Receiver<Duration>,
+    epoch: Arc<std::sync::atomic::AtomicU64>,
     interval: Duration,
 ) {
     std::thread::spawn(move || {
@@ -939,8 +953,11 @@ fn spawn_web_poller(
             if project.is_empty() || title.is_empty() {
                 continue;
             }
+            // Stamped BEFORE the request goes out: everything that happens
+            // while it is in flight makes the answer stale.
+            let started_at = epoch.load(std::sync::atomic::Ordering::SeqCst);
             if let Ok(page) = client.get_page_in(&project, &title) {
-                if tx.send(PolledPage { project, title, page }).is_err() {
+                if tx.send(PolledPage { project, title, page, epoch: started_at }).is_err() {
                     return; // app gone
                 }
             }
@@ -1166,6 +1183,7 @@ impl App {
             web_drawn_blocks: HashSet::new(),
             web_manual_wanted: false,
             web_notice_shown: false,
+            server_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sync_state: capability::SyncState::Polling,
             ws_attempted: false,
             ws_rx,
@@ -1207,6 +1225,7 @@ impl App {
     /// downloads. Loading is folded in here so no navigation path can forget
     /// it (back/forward included).
     fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
+        self.bump_server_epoch();
         self.time = None; // installing a live page always exits history
         // A page install ends any edit session and cuts the undo lineage:
         // undo ops reference THIS page's line ids.
@@ -1728,6 +1747,16 @@ impl App {
     /// which would re-open the window it exists to close.
     fn mark_synced(&mut self) {
         self.web_unsynced = false;
+    }
+
+    /// The server's state has moved on: any poll response fetched before
+    /// this moment is stale.
+    fn bump_server_epoch(&self) {
+        self.server_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn server_epoch_now(&self) -> u64 {
+        self.server_epoch.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn gen_now(&self) -> u64 {
@@ -3080,6 +3109,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::clone(&app.poll_target),
         app.poll_tx.clone(),
         poll_ctrl_rx,
+        Arc::clone(&app.server_epoch),
         initial_state.poll_interval(),
     );
     if let Some(sid) = &sid {
@@ -4697,6 +4727,9 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     app.inflight = app.inflight.saturating_sub(1);
     match outcome {
         CommitOutcome::Done { label, title } => {
+            // The server now holds something a poll started before this may
+            // not know about.
+            app.bump_server_epoch();
             // Title-line edits rename the page (auto-suffix included).
             if !title.is_empty() && title != app.title {
                 app.title = title;
@@ -4737,6 +4770,7 @@ fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, sta
     // A full page from the server replaces the local lines wholesale, so
     // whatever a failed commit had left diverging is resolved here. This
     // and `set_page` are the only places the desync flag clears.
+    app.bump_server_epoch();
     app.mark_synced();
     let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
     let session_id = app
@@ -4804,6 +4838,13 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
     if polled.project != app.project || polled.title != app.title {
         return;
     }
+    // The snapshot was taken before something newer landed — a commit of
+    // ours, a websocket commit, a page install. Installing it now would
+    // undo that on screen. It is not an error; the next poll is seconds
+    // away and will carry the newer state.
+    if polled.epoch != app.server_epoch_now() {
+        return;
+    }
     if !remote_gate_clear(app) {
         return;
     }
@@ -4815,6 +4856,18 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
             .zip(&app.lines)
             .all(|(a, b)| a.id == b.id && a.text == b.text);
     if same {
+        // Identical — nothing to install. But this IS a fresh, authoritative
+        // full snapshot (the epoch guard above proved it is not stale), and
+        // it agrees with the screen line for line. So if a failed commit had
+        // left us believing the page had drifted, that belief is now
+        // demonstrably wrong: an undo, a retry or a web-side revert brought
+        // the two back together. Clearing it here is what lets diagrams
+        // render again — without it the flag is sticky for the session.
+        //
+        // Only the flag is touched: no lines, no cursor, no undo lineage.
+        if app.web_unsynced {
+            app.mark_synced();
+        }
         return;
     }
     install_remote_lines(app, ctx, &polled.page, "⟳ web側の編集を反映");
@@ -4929,6 +4982,8 @@ fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
             .and_then(|s| app.lines.get(s.line))
             .map(|l| l.id.clone());
         cosense::ws::apply_remote_ops(&mut app.lines, &c.ops, &c.user_id);
+        // The screen now holds a state newer than any poll already out.
+        app.bump_server_epoch();
         app.ws_head = Some(c.commit_id.clone());
         rerender(app, ctx);
         reanchor_cursor_session(app, cursor_id, session_id);
@@ -6212,6 +6267,111 @@ mod tests {
     // ---------------------------------------------------------------
     // Live-update plan: the poller's interval follows a TYPED push state.
     // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // A poll response is a photograph of the past.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_poll_that_started_before_a_websocket_commit_never_rolls_it_back() {
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        // A GET goes out now, seeing "a"/"b".
+        let in_flight =
+            polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        // While it is out, a websocket commit lands and the screen moves on.
+        app.lines[1].text = "b2".into();
+        app.bump_server_epoch();
+        // Now the old response arrives.
+        apply_remote(&mut app, &ctx, in_flight);
+        assert_eq!(
+            app.lines[1].text, "b2",
+            "a snapshot older than the applied commit must not be installed"
+        );
+    }
+
+    #[test]
+    fn a_poll_that_started_before_a_local_commit_never_rolls_it_back() {
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        let in_flight =
+            polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        // The reader's own edit commits while the GET is out.
+        app.lines[1].text = "mine".into();
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 2".into(), title: String::new() },
+        );
+        apply_remote(&mut app, &ctx, in_flight);
+        assert_eq!(app.lines[1].text, "mine", "the server has our commit; the snapshot predates it");
+    }
+
+    #[test]
+    fn an_undo_that_restores_agreement_lets_diagrams_render_again() {
+        // A failed commit leaves local and server divergent, and diagrams
+        // stop rendering so the browser cannot screenshot the server's old
+        // text and file it under the local source. Undoing the edit makes
+        // the two agree again — but nothing was telling the app so, and the
+        // flag stayed set for the rest of the session.
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        app.lines[1].text = "typo".into();
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Failed { label: "line 2".into(), msg: "500".into() },
+        );
+        assert!(app.web_unsynced, "the page is known to have drifted");
+
+        // The reader undoes it: the screen is back to what the server has.
+        app.lines[1].text = "b".into();
+        // A fresh poll now agrees with the screen, line for line.
+        let agreeing =
+            polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        apply_remote(&mut app, &ctx, agreeing);
+        assert!(
+            !app.web_unsynced,
+            "an authoritative snapshot that MATCHES proves the drift is over"
+        );
+        assert_eq!(app.lines[1].text, "b", "and it changed nothing else");
+        assert_eq!(app.cursor, 0);
+
+        // ...so the next frame can render again.
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+    }
+
+    #[test]
+    fn a_stale_equal_poll_does_not_clear_the_drift() {
+        // Agreement only counts when the snapshot is CURRENT. An old
+        // response that happens to match says nothing about now.
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        app.web_unsynced = true;
+        let stale = polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        app.bump_server_epoch();
+        apply_remote(&mut app, &ctx, stale);
+        assert!(app.web_unsynced, "a photograph of the past proves nothing");
+    }
+
+    #[test]
+    fn a_fresh_poll_still_applies_web_edits() {
+        // The guard must not turn into "polling stopped working".
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        let fresh =
+            polled_at(&[("id0", "a"), ("id1", "web edit")], app.server_epoch_now());
+        apply_remote(&mut app, &ctx, fresh);
+        assert_eq!(app.lines[1].text, "web edit");
+    }
 
     #[test]
     fn a_stale_sid_polls_fast_from_the_first_second() {
@@ -8324,7 +8484,13 @@ mod tests {
 
     /// A server page shaped like the poller would deliver it.
     fn polled(texts: &[(&str, &str)]) -> PolledPage {
+        polled_at(texts, 0)
+    }
+
+    /// A poll response, stamped with the epoch its fetch started at.
+    fn polled_at(texts: &[(&str, &str)], epoch: u64) -> PolledPage {
         PolledPage {
+            epoch,
             project: "proj".into(),
             title: "t".into(),
             page: cosense::api::Page {
