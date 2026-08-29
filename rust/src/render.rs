@@ -17,6 +17,38 @@ pub enum Block {
     Image { url: String },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
+    /// A code block Cosense draws as a picture in the browser (today: only
+    /// Mermaid). The viewer shows the rendered artifact when it has one and
+    /// falls back to `rows` — the ordinary highlighted code block — until
+    /// then, or forever if no browser is available. See `crate::webrender`.
+    WebRender {
+        kind: crate::webrender::WebKind,
+        /// The block's own source (the mermaid text), for the render key.
+        code: String,
+        /// The plain code-block presentation: `(source line, styled line)`
+        /// for the `code:` header and every continuation line.
+        rows: Vec<(usize, Line<'static>)>,
+        /// Source line of the block's LAST content line. Cosense hangs the
+        /// preview element off THAT line's id, not the header's (verified
+        /// live — see HANDOFF.md).
+        last_src: usize,
+    },
+}
+
+/// Does a `code:` block's language name mark a Mermaid diagram?
+///
+/// Cosense accepts `code:mmd`, `code:mermaid` and `code:<filename>.mmd`
+/// (documented on scrapbox.io/help-jp/Mermaid). Matching is
+/// case-insensitive, and a bare extension-less name never counts.
+pub fn mermaid_lang(lang: &str) -> bool {
+    let name = lang.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    if name == "mmd" || name == "mermaid" {
+        return true;
+    }
+    matches!(name.rsplit_once('.'), Some((_, ext)) if ext == "mmd" || ext == "mermaid")
 }
 
 /// Links and images discovered while rendering, for navigation and prefetch.
@@ -521,11 +553,16 @@ pub fn render_lines_with(
         if let Some(rest) = body.strip_prefix("code:") {
             let lang = rest.trim().to_string();
             let code_indent = raw_len;
-            // header line
-            emit!(Block::Text(Line::from(vec![
+            let header = Line::from(vec![
                 Span::raw(indent.clone()),
                 Span::styled(format!("code:{lang}"), Style::default().fg(pal.code_fence)),
-            ])));
+            ]);
+            // A Mermaid block is collected whole and handed to the web
+            // renderer; everything else emits the header row right away.
+            let webbable = mermaid_lang(&lang);
+            if !webbable {
+                emit!(Block::Text(header.clone()));
+            }
             // collect continuation lines (deeper indent, or blank)
             let mut j = i + 1;
             let mut raws: Vec<usize> = Vec::new(); // source indices
@@ -554,6 +591,8 @@ pub fn render_lines_with(
                 raws.pop();
                 j -= 1;
             }
+            // The code rows, styled exactly as they always were.
+            let mut code_rows: Vec<(usize, Line<'static>)> = Vec::new();
             match hl {
                 Some(h) => {
                     let content = bodies.join("\n");
@@ -564,19 +603,43 @@ pub fn render_lines_with(
                         for (text, style) in spans {
                             line_spans.push(Span::styled(text, style));
                         }
-                        out.push(Block::Text(Line::from(line_spans)));
-                        srcs.push(src);
+                        code_rows.push((src, Line::from(line_spans)));
                     }
                 }
                 None => {
                     for (k, b) in bodies.iter().enumerate() {
                         let src = raws.get(k).copied().unwrap_or(i);
-                        out.push(Block::Text(Line::from(vec![
-                            Span::raw(format!("{indent}  ")),
-                            Span::styled(b.clone(), Style::default().fg(Color::DarkGray)),
-                        ])));
-                        srcs.push(src);
+                        code_rows.push((
+                            src,
+                            Line::from(vec![
+                                Span::raw(format!("{indent}  ")),
+                                Span::styled(b.clone(), Style::default().fg(Color::DarkGray)),
+                            ]),
+                        ));
                     }
+                }
+            }
+            if webbable {
+                // Cosense attaches the preview to the block's LAST content
+                // line. With no content there is nothing to draw, so such a
+                // block stays an ordinary (empty) code block.
+                match raws.last().copied() {
+                    Some(last_src) => {
+                        let mut rows = vec![(i, header)];
+                        rows.extend(code_rows);
+                        emit!(Block::WebRender {
+                            kind: crate::webrender::WebKind::Mermaid,
+                            code: bodies.join("\n"),
+                            rows,
+                            last_src,
+                        });
+                    }
+                    None => emit!(Block::Text(header)),
+                }
+            } else {
+                for (src, line) in code_rows {
+                    out.push(Block::Text(line));
+                    srcs.push(src);
                 }
             }
             i = j;
@@ -685,6 +748,11 @@ mod tests {
             Block::Image { url } => format!("[IMAGE {url}]"),
             Block::Text(l) => l.spans.iter().map(|s| s.content.as_ref()).collect(),
             Block::Table(_) => "[TABLE]".into(),
+            Block::WebRender { rows, .. } => rows
+                .iter()
+                .map(|(_, l)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -801,6 +869,94 @@ mod tests {
         // an untitled one shows the file name
         let out = render_lines(&["t".into(), format!("[{pdf}]")]);
         assert_eq!(plain(&out.blocks[1]), "📎 6a8e7e5d714feb3f195319dd.pdf");
+    }
+
+    #[test]
+    fn mermaid_is_recognised_by_language_and_by_filename() {
+        // The three forms scrapbox.io/help-jp/Mermaid documents.
+        for yes in ["mmd", "mermaid", "MMD", " Mermaid ", "flow.mmd", "図.mermaid", "a.b.mmd"] {
+            assert!(mermaid_lang(yes), "{yes} should be a mermaid block");
+        }
+        for no in ["", "js", "python", "mmdx", "mermaidjs", "readme.md", "mmd.txt", "diagram"] {
+            assert!(!mermaid_lang(no), "{no} should stay a plain code block");
+        }
+    }
+
+    #[test]
+    fn a_mermaid_block_becomes_one_web_render_keyed_on_its_last_line() {
+        let lines: Vec<String> = [
+            "title",
+            "code:mmd",
+            " flowchart LR",
+            "   A-->B",
+            "",
+            "after",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let web: Vec<_> = out
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::WebRender { code, rows, last_src, .. } => Some((code, rows, *last_src)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(web.len(), 1);
+        let (code, rows, last_src) = web[0];
+        // Cosense hangs the preview off the block's LAST content line (3),
+        // not the `code:` header (1) — verified live on help-jp/Mermaid.
+        assert_eq!(last_src, 3);
+        assert_eq!(code, "flowchart LR\n  A-->B");
+        // The fallback presentation is the whole code block, header first.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, 1);
+        assert!(plain(&Block::Text(rows[0].1.clone())).contains("code:mmd"));
+        assert_eq!(rows.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![1, 2, 3]);
+        // The trailing blank still belongs to the page, not the block.
+        assert!(matches!(out.blocks.last(), Some(Block::Text(_))));
+    }
+
+    #[test]
+    fn several_mermaid_blocks_stay_separate_and_other_languages_are_untouched() {
+        let lines: Vec<String> = [
+            "title",
+            "code:one.mmd",
+            " graph TD",
+            "code:js",
+            " let a = 1",
+            "code:mermaid",
+            " pie",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let last_srcs: Vec<usize> = out
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::WebRender { last_src, .. } => Some(*last_src),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(last_srcs, vec![2, 6], "one web block per mermaid block");
+        // The JS block is still ordinary text rows.
+        assert!(out
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Text(_)) && plain(b).contains("let a = 1")));
+    }
+
+    #[test]
+    fn an_empty_mermaid_block_stays_a_plain_code_header() {
+        // No content line means no line id to hang a preview off.
+        let lines: Vec<String> = ["title", "code:mmd"].iter().map(|s| s.to_string()).collect();
+        let out = render_lines(&lines);
+        assert!(!out.blocks.iter().any(|b| matches!(b, Block::WebRender { .. })));
+        assert!(out.blocks.iter().any(|b| plain(b).contains("code:mmd")));
     }
 
     #[test]

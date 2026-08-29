@@ -13,6 +13,13 @@ fn block_to_plain(b: &Block) -> String {
         Block::Blank => "[BLANK]".to_string(),
         Block::Image { url } => format!("[IMAGE {url}]"),
         Block::Text(line) => line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+        Block::WebRender { kind, rows, last_src, .. } => format!(
+            "[WEB {kind:?} last_src={last_src}]\n{}",
+            rows.iter()
+                .map(|(_, l)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
         Block::Table(t) => {
             // lay out at a generous width for probing
             t.layout(100)

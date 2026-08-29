@@ -182,3 +182,32 @@ Markdown を開いたときと同じ見え方になる。テーマが書式を�
 （メインスレッドは受け取って差し込むだけなので、読み込み中も操作は止まらない）。ページは即座に読め、届いた画像から
 順に差し替わる（未到着の間は `□ loading image…` のプレースホルダが場所を確保）。
 gyazo に加え、任意の http(s) 画像 URL（拡張子つき）とリンク付き画像 `[href 画像URL]` に対応。
+
+## Mermaid 図の描画（Web renderer）
+
+`code:mmd` / `code:mermaid` / `code:<名前>.mmd` のコードブロックは、**図として表示**される。
+
+Mermaid には「ソース → SVG」の公開 REST API がない。Cosense はブラウザ側でハッシュ付きの Mermaid
+チャンクを動的 import して `.mermaid-preview` に SVG を差し込んでいる。そこで TUI 側で Mermaid を
+再実装するのではなく、**ヘッドレス Chrome で実際の Cosense ページを開き、Cosense 自身が描いた
+DOM 要素を PNG で切り出す**（`cosense::webrender` / `cosense::chrome`）。将来 TeX・`.icon`・
+ProjectCSS つきブロックも同じ経路に載せられる。
+
+- **描画は完全にバックグラウンド**。ブラウザの起動・待機・撮影は専用ワーカースレッドが行い、
+  UI スレッドは一切待たない。図が届くまで（届かなければずっと）**元のコードブロックがそのまま出る**。
+- **依存**: Chrome / Chromium / Edge / Brave のいずれか。macOS の `/Applications/…` と `PATH` を
+  自動検出する。`COSENSE_CHROME=/path/to/chrome` で明示指定できる（指定したものが無ければ
+  他のブラウザに勝手に落ちない）。
+- **private project**: ブラウザには `connect.sid`（`--sid` / `COSENSE_SID`）だけを CDP の
+  `Network.setCookie` で渡す。argv・ログ・エラー表示・キャッシュキーには一切載らない。
+  public project は SID なしで動く。
+- **フォールバック**: ブラウザが無い・SID が無い/失効・タイムアウト・Mermaid の構文エラーの
+  いずれでもクラッシュせず、コードブロック表示のままステータス行に短い理由を出す。
+- **キャッシュと世代管理**: `project / title / pageId / commitId / lineId / 幅 / テーマ` で
+  1 つの図を同定する。コミット・ページ移動・リサイズはすべて別のキーになるので、**古い図が
+  新しいページに出ることはない**。PNG は `~/.cache/cosense-tui/webrender/` に残る。
+- **EDIT 中**: 編集セッションがそのブロックの行に入ると図は引っ込み、生ソースが出る。
+  編集の契約（行単位の生テキスト編集）は図があっても変わらない。
+- **タイムアウト**: 既定 25 秒（`COSENSE_WEB_TIMEOUT=<秒>`）。描画が止まって 6 秒進展が無ければ
+  待つのをやめるので、1 つ壊れた図が他の図の表示を遅らせない。
+- 動作確認用: `cargo run --bin web_smoke -- <project> <title>`（テストスイートには入らない）。

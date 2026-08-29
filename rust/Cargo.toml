@@ -38,5 +38,9 @@ name = "edit_smoke"
 path = "src/bin/edit_smoke.rs"
 
 [[bin]]
+name = "web_smoke"
+path = "src/bin/web_smoke.rs"
+
+[[bin]]
 name = "ws_smoke"
 path = "src/bin/ws_smoke.rs"

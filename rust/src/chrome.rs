@@ -1,0 +1,635 @@
+//! Headless-Chrome backend for `crate::webrender`, spoken over raw CDP.
+//!
+//! Why raw CDP and not Playwright/Puppeteer/a browser crate: the viewer is a
+//! single Rust binary and already depends on `tungstenite` (websocket, for
+//! Cosense's push channel) and `reqwest` (http). CDP is exactly those two
+//! plus a child process, so the whole backend costs ZERO new dependencies
+//! and no Node runtime at install time. A crate like `headless_chrome` or
+//! `chromiumoxide` would pull an async runtime and a large tree for the four
+//! commands we actually send. See HANDOFF.md.
+//!
+//! The flow mirrors what Puppeteer's `elementHandle.screenshot` does:
+//! navigate, wait for the element Cosense drew, read its bounding box, then
+//! `Page.captureScreenshot` clipped to that box. No full-page screenshot is
+//! guessed at and cropped.
+
+use crate::webrender::{WebBackend, WebError, WebRequest};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Chrome executables we look for, after `COSENSE_CHROME`.
+const MAC_CANDIDATES: [&str; 4] = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+];
+
+const UNIX_CANDIDATES: [&str; 6] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "microsoft-edge",
+    "brave-browser",
+];
+
+/// Locate a Chrome/Chromium binary. `COSENSE_CHROME` always wins, so an
+/// unusual install (or a Nix/flatpak path) needs no code change.
+pub fn find_chrome() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("COSENSE_CHROME") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+        // An explicit-but-wrong setting should not silently fall back to a
+        // different browser than the user asked for.
+        return None;
+    }
+    if cfg!(target_os = "macos") {
+        for c in MAC_CANDIDATES {
+            let p = PathBuf::from(c);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    for name in UNIX_CANDIDATES {
+        if let Some(p) = which(name) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// How long one batch (launch → navigate → all captures) may take.
+fn budget() -> Duration {
+    let secs = std::env::var("COSENSE_WEB_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s >= 3 && *s <= 300)
+        .unwrap_or(25);
+    Duration::from_secs(secs)
+}
+
+pub struct ChromeBackend {
+    exe: PathBuf,
+    /// Browser `connect.sid` for private projects. Passed to Chrome only via
+    /// a CDP `Network.setCookie` call — never argv, never a log, never a key.
+    sid: Option<String>,
+    /// PID of the Chrome we currently own, so shutdown can reap it even if
+    /// the app quits while a batch is in flight.
+    live_pid: Mutex<Option<u32>>,
+    /// Set once the app is quitting: an in-flight batch stops early instead
+    /// of holding the exit open for the full budget.
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+impl ChromeBackend {
+    /// `None` when no browser could be found — the caller then installs
+    /// `UnavailableBackend(WebError::NoBrowser)` and the viewer keeps
+    /// showing plain code blocks.
+    pub fn detect(sid: Option<String>) -> Option<Self> {
+        find_chrome().map(|exe| Self {
+            exe,
+            sid,
+            live_pid: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn run_batch(&self, reqs: &[WebRequest]) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
+        let deadline = Instant::now() + budget();
+        let width = reqs.iter().map(|r| r.width_px).max().unwrap_or(900).clamp(320, 2400);
+        let dark = reqs.first().map(|r| r.dark).unwrap_or(true);
+
+        let profile = temp_profile();
+        let mut child = self.spawn(&profile, width)?;
+        *self.live_pid.lock().unwrap() = Some(child.id());
+        // Whatever happens below, the child and its profile go away.
+        let out = self.drive(&mut child, &profile, reqs, width, dark, deadline);
+        kill(&mut child);
+        *self.live_pid.lock().unwrap() = None;
+        std::fs::remove_dir_all(&profile).ok();
+        out
+    }
+
+    fn spawn(&self, profile: &Path, width: u32) -> Result<Child, WebError> {
+        Command::new(&self.exe)
+            .arg("--headless=new")
+            .arg("--remote-debugging-port=0")
+            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg(format!("--window-size={width},1400"))
+            .args([
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-gpu",
+                "--hide-scrollbars",
+                "--mute-audio",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-sync",
+            ])
+            // The sandbox stays ON by default: this browser holds the user's
+            // live `connect.sid` and loads remote content (ProjectCSS can
+            // pull third-party resources). Containers that cannot sandbox
+            // opt out explicitly; if Chrome then refuses to start, the batch
+            // fails and the code block stays on screen.
+            .args(if std::env::var_os("COSENSE_CHROME_NO_SANDBOX").is_some() {
+                &["--no-sandbox", "about:blank"][..]
+            } else {
+                &["about:blank"][..]
+            })
+            // stdout/stderr MUST be discarded: anything Chrome prints would
+            // land in the alternate screen and corrupt the TUI.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| WebError::Backend(format!("chrome did not start: {e}")))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drive(
+        &self,
+        child: &mut Child,
+        profile: &Path,
+        reqs: &[WebRequest],
+        width: u32,
+        dark: bool,
+        deadline: Instant,
+    ) -> Result<Vec<Result<Vec<u8>, WebError>>, WebError> {
+        let port = self.wait_for_port(child, profile, deadline)?;
+        let ws_url = page_target(port, deadline)?;
+        let mut cdp = Cdp::connect(&ws_url)?;
+
+        cdp.call("Page.enable", serde_json::json!({}), deadline)?;
+        cdp.call(
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({
+                "width": width, "height": 1400,
+                "deviceScaleFactor": 1, "mobile": false,
+            }),
+            deadline,
+        )?;
+        cdp.call(
+            "Emulation.setEmulatedMedia",
+            serde_json::json!({
+                "features": [{
+                    "name": "prefers-color-scheme",
+                    "value": if dark { "dark" } else { "light" },
+                }]
+            }),
+            deadline,
+        )
+        .ok(); // cosmetic; an old Chrome without it is still usable
+
+        if let Some(sid) = &self.sid {
+            cdp.call("Network.enable", serde_json::json!({}), deadline)?;
+            // The ONLY place the credential is handed over. Chrome stores it
+            // in the throwaway profile, which is deleted with the batch.
+            cdp.call(
+                "Network.setCookie",
+                serde_json::json!({
+                    "name": "connect.sid",
+                    "value": sid,
+                    "domain": ".scrapbox.io",
+                    "path": "/",
+                    "secure": true,
+                    "httpOnly": true,
+                }),
+                deadline,
+            )
+            .map_err(|_| WebError::NotAuthorized)?;
+        }
+
+        let url = reqs[0].page_url();
+        cdp.call("Page.navigate", serde_json::json!({ "url": url }), deadline)?;
+
+        let selectors: Vec<String> = reqs.iter().map(|r| r.selector()).collect();
+        let ready = self.wait_for_elements(&mut cdp, reqs, &selectors, deadline)?;
+
+        // Capturing gets its own allowance: waiting for a slow (or broken)
+        // diagram must not eat the time needed to screenshot the ones that
+        // DID render — that used to fail a whole page because of one bad
+        // block.
+        let capture_deadline = Instant::now() + Duration::from_secs(10);
+        let mut out = Vec::with_capacity(reqs.len());
+        for (i, req) in reqs.iter().enumerate() {
+            if !ready[i] {
+                // The page rendered but Cosense never drew this one — a
+                // Mermaid syntax error looks exactly like this.
+                out.push(Err(WebError::NotRendered));
+                continue;
+            }
+            out.push(capture(&mut cdp, &selectors[i], req, capture_deadline));
+        }
+        Ok(out)
+    }
+
+    /// Chrome writes the port it actually bound into `DevToolsActivePort`.
+    fn wait_for_port(
+        &self,
+        child: &mut Child,
+        profile: &Path,
+        deadline: Instant,
+    ) -> Result<u16, WebError> {
+        let file = profile.join("DevToolsActivePort");
+        loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Err(WebError::Backend(format!("chrome exited early ({status})")));
+            }
+            if let Ok(text) = std::fs::read_to_string(&file) {
+                if let Some(first) = text.lines().next() {
+                    if let Ok(port) = first.trim().parse::<u16>() {
+                        return Ok(port);
+                    }
+                }
+            }
+            self.tick(deadline, Duration::from_millis(50))?;
+        }
+    }
+
+    /// Poll the page until every target element has actually been drawn.
+    /// One evaluate covers the whole batch, so N diagrams cost one page load.
+    fn wait_for_elements(
+        &self,
+        cdp: &mut Cdp,
+        reqs: &[WebRequest],
+        selectors: &[String],
+        deadline: Instant,
+    ) -> Result<Vec<bool>, WebError> {
+        let ready_child = reqs[0].kind.ready_child();
+        let expr = format!(
+            r#"(function(){{
+                var sels = {sels};
+                var body = document.querySelector('.lines') || document.querySelector('.page');
+                return JSON.stringify({{
+                    loaded: !!body,
+                    href: location.href,
+                    ready: sels.map(function(s){{
+                        var e = document.querySelector(s);
+                        if (!e) return false;
+                        var c = e.querySelector({child});
+                        if (!c) return false;
+                        var r = c.getBoundingClientRect();
+                        return r.width > 1 && r.height > 1;
+                    }})
+                }});
+            }})()"#,
+            sels = serde_json::to_string(selectors).unwrap(),
+            child = serde_json::to_string(ready_child).unwrap(),
+        );
+        let mut last = vec![false; reqs.len()];
+        let mut ever_loaded = false;
+        let mut login_wall = false;
+        // A block Cosense refuses to draw (a Mermaid syntax error) never
+        // becomes ready, and waiting out the whole budget for it would make
+        // every OTHER diagram on the page arrive 20s late. So the wait also
+        // ends once the page has gone quiet: loaded, and nothing new drawn
+        // for this long.
+        let quiet = Duration::from_secs(6);
+        let mut last_progress = Instant::now();
+        loop {
+            if let Ok(v) = eval_json(cdp, &expr, deadline) {
+                ever_loaded |= v.get("loaded").and_then(|b| b.as_bool()).unwrap_or(false);
+                login_wall |= v
+                    .get("href")
+                    .and_then(|h| h.as_str())
+                    .map(|h| h.contains("/login") || h.contains("/auth"))
+                    .unwrap_or(false);
+                if let Some(arr) = v.get("ready").and_then(|r| r.as_array()) {
+                    for (i, b) in arr.iter().enumerate() {
+                        if i < last.len() && b.as_bool().unwrap_or(false) && !last[i] {
+                            last[i] = true;
+                            last_progress = Instant::now();
+                        }
+                    }
+                }
+                if last.iter().all(|b| *b) {
+                    return Ok(last);
+                }
+            }
+            let stalled = ever_loaded && last_progress.elapsed() > quiet;
+            if stalled || Instant::now() >= deadline || self.stopped.load(Ordering::Relaxed) {
+                if login_wall {
+                    // Redirected away from the page: no sid, or a stale one.
+                    return Err(WebError::NotAuthorized);
+                }
+                if !ever_loaded {
+                    return Err(WebError::Timeout { seconds: budget().as_secs() });
+                }
+                // Some diagrams may still have made it; report per request.
+                return Ok(last);
+            }
+            self.tick(deadline, Duration::from_millis(200))?;
+        }
+    }
+
+    /// Sleep, but give up as soon as the deadline passes or the app quits.
+    fn tick(&self, deadline: Instant, step: Duration) -> Result<(), WebError> {
+        if self.stopped.load(Ordering::Relaxed) {
+            return Err(WebError::Backend("cancelled".into()));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(WebError::Timeout { seconds: budget().as_secs() });
+        }
+        std::thread::sleep(step.min(deadline - now));
+        Ok(())
+    }
+}
+
+impl WebBackend for ChromeBackend {
+    fn render_batch(&self, reqs: &[WebRequest]) -> Vec<Result<Vec<u8>, WebError>> {
+        if reqs.is_empty() {
+            return Vec::new();
+        }
+        match self.run_batch(reqs) {
+            Ok(out) => out,
+            // A whole-session failure (no port, dead socket, login wall)
+            // applies to every request in the batch.
+            Err(e) => reqs.iter().map(|_| Err(e.clone())).collect(),
+        }
+    }
+
+    fn shutdown(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        if let Some(pid) = *self.live_pid.lock().unwrap() {
+            // The batch's own cleanup may already have reaped it; SIGKILL on
+            // a gone pid is harmless, and this is the last chance to avoid
+            // leaving a headless Chrome behind after the TUI exits.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Screenshot one element, clipped to the box Cosense actually laid out.
+fn capture(
+    cdp: &mut Cdp,
+    selector: &str,
+    req: &WebRequest,
+    deadline: Instant,
+) -> Result<Vec<u8>, WebError> {
+    let expr = format!(
+        r#"(function(){{
+            var e = document.querySelector({sel});
+            if (!e) return JSON.stringify(null);
+            // Scroll to the very top before measuring: Cosense's navbar is
+            // position:sticky, so with `captureBeyondViewport` it paints
+            // wherever the viewport happens to be — right on top of the
+            // diagram if we scrolled it into view. Parked at y=0 it can only
+            // ever cover the page header.
+            window.scrollTo(0, 0);
+            var r = e.getBoundingClientRect();
+            return JSON.stringify({{
+                x: r.left + window.pageXOffset,
+                y: r.top + window.pageYOffset,
+                w: r.width, h: r.height
+            }});
+        }})()"#,
+        sel = serde_json::to_string(selector).unwrap(),
+    );
+    let v = eval_json(cdp, &expr, deadline)?;
+    let (x, y, w, h) = match (
+        v.get("x").and_then(|n| n.as_f64()),
+        v.get("y").and_then(|n| n.as_f64()),
+        v.get("w").and_then(|n| n.as_f64()),
+        v.get("h").and_then(|n| n.as_f64()),
+    ) {
+        (Some(x), Some(y), Some(w), Some(h)) if w > 1.0 && h > 1.0 => (x, y, w, h),
+        _ => return Err(WebError::NotRendered),
+    };
+    let res = cdp.call(
+        "Page.captureScreenshot",
+        serde_json::json!({
+            "format": "png",
+            "captureBeyondViewport": true,
+            "clip": { "x": x, "y": y, "width": w, "height": h, "scale": 2 },
+        }),
+        deadline,
+    )?;
+    let b64 = res
+        .get("data")
+        .and_then(|d| d.as_str())
+        .ok_or(WebError::NotRendered)?;
+    let png = b64_decode(b64).ok_or_else(|| WebError::Backend("bad screenshot payload".into()))?;
+    debug_assert_eq!(req.kind.ready_child(), "svg");
+    Ok(png)
+}
+
+/// `Runtime.evaluate` an expression that returns a JSON string, and parse it.
+fn eval_json(cdp: &mut Cdp, expr: &str, deadline: Instant) -> Result<serde_json::Value, WebError> {
+    let res = cdp.call(
+        "Runtime.evaluate",
+        serde_json::json!({ "expression": expr, "returnByValue": true }),
+        deadline,
+    )?;
+    let s = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_str())
+        .ok_or(WebError::NotRendered)?;
+    serde_json::from_str(s).map_err(|_| WebError::NotRendered)
+}
+
+/// Ask the DevTools HTTP endpoint for the page target's websocket URL.
+fn page_target(port: u16, deadline: Instant) -> Result<String, WebError> {
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| WebError::Backend(e.to_string()))?;
+    loop {
+        let got = http
+            .get(format!("http://127.0.0.1:{port}/json/list"))
+            .send()
+            .and_then(|r| r.json::<serde_json::Value>());
+        if let Ok(list) = got {
+            if let Some(url) = list.as_array().and_then(|a| {
+                a.iter()
+                    .find(|t| t.get("type").and_then(|s| s.as_str()) == Some("page"))
+                    .and_then(|t| t.get("webSocketDebuggerUrl"))
+                    .and_then(|s| s.as_str())
+            }) {
+                return Ok(url.to_string());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(WebError::Timeout { seconds: budget().as_secs() });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A minimal CDP client: request/response over one websocket, skipping the
+/// event stream. Nothing here interprets page content — only our own
+/// command results.
+struct Cdp {
+    ws: tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+}
+
+impl Cdp {
+    fn connect(url: &str) -> Result<Self, WebError> {
+        let (ws, _) = tungstenite::connect(url)
+            .map_err(|e| WebError::Backend(format!("devtools connect failed: {e}")))?;
+        if let tungstenite::stream::MaybeTlsStream::Plain(tcp) = ws.get_ref() {
+            // Without this a wedged browser would hang the render worker
+            // forever, and with it the quit path.
+            tcp.set_read_timeout(Some(Duration::from_millis(500))).ok();
+        }
+        Ok(Self { ws })
+    }
+
+    fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: Instant,
+    ) -> Result<serde_json::Value, WebError> {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!({ "id": id, "method": method, "params": params });
+        self.ws
+            .send(tungstenite::Message::Text(msg.to_string().into()))
+            .map_err(|e| WebError::Backend(format!("devtools send failed: {e}")))?;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(WebError::Timeout { seconds: budget().as_secs() });
+            }
+            match self.ws.read() {
+                Ok(tungstenite::Message::Text(t)) => {
+                    let v: serde_json::Value = match serde_json::from_str(&t) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if v.get("id").and_then(|i| i.as_u64()) != Some(id) {
+                        continue; // an event, or another call's answer
+                    }
+                    if let Some(err) = v.get("error") {
+                        let m = err.get("message").and_then(|m| m.as_str()).unwrap_or("cdp error");
+                        return Err(WebError::Backend(format!("{method}: {m}")));
+                    }
+                    return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                }
+                Ok(_) => continue,
+                Err(tungstenite::Error::Io(e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue // read timeout: loop back and re-check the deadline
+                }
+                Err(e) => return Err(WebError::Backend(format!("devtools read failed: {e}"))),
+            }
+        }
+    }
+}
+
+fn temp_profile() -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "cosense-tui-chrome-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
+fn kill(child: &mut Child) {
+    child.kill().ok();
+    // Reap it: an unwaited child would sit as a zombie for the life of the
+    // TUI, which is exactly the orphan we promised not to leave.
+    child.wait().ok();
+}
+
+/// Standard base64 (CDP screenshots). Small enough to not warrant a crate,
+/// and it only ever sees our own DevTools socket.
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a') as u32 + 26,
+            b'0'..=b'9' => (c - b'0') as u32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for c in s.bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_round_trips_a_png_signature() {
+        // "iVBORw0KGgo=" is the standard PNG magic in base64.
+        assert_eq!(
+            b64_decode("iVBORw0KGgo=").unwrap(),
+            vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+        assert_eq!(b64_decode("").unwrap(), Vec::<u8>::new());
+        assert_eq!(b64_decode("QUJD").unwrap(), b"ABC".to_vec());
+        assert!(b64_decode("!!!!").is_none());
+    }
+
+    #[test]
+    fn an_explicit_but_missing_cosense_chrome_does_not_fall_back() {
+        // Set it to a path that cannot exist; detect must report "no browser"
+        // rather than quietly launching some other Chrome on the machine.
+        let key = "COSENSE_CHROME";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "/nonexistent/definitely-not-chrome");
+        assert!(find_chrome().is_none());
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn the_render_budget_is_clamped_to_something_survivable() {
+        let key = "COSENSE_WEB_TIMEOUT";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "0");
+        assert_eq!(budget(), Duration::from_secs(25), "0 is nonsense; use the default");
+        std::env::set_var(key, "8");
+        assert_eq!(budget(), Duration::from_secs(8));
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}

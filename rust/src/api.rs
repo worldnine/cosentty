@@ -250,6 +250,10 @@ pub struct RelatedPages {
 pub struct Page {
     pub id: String,
     pub title: String,
+    /// The page's current commit. The web renderer keys diagrams on it, so a
+    /// commit invalidates every rendered artifact for the page.
+    #[serde(default, rename = "commitId")]
+    pub commit_id: String,
     #[serde(default)]
     pub lines: Vec<PageLine>,
     #[serde(default)]

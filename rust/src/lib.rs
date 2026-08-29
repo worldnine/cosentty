@@ -1,4 +1,5 @@
 pub mod api;
+pub mod chrome;
 pub mod comment;
 pub mod editops;
 pub mod highlight;
@@ -8,4 +9,5 @@ pub mod render;
 pub mod table;
 pub mod theme;
 pub mod wrap;
+pub mod webrender;
 pub mod ws;

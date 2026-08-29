@@ -34,6 +34,7 @@ use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
+use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::highlight::Highlighter;
 use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
@@ -89,6 +90,70 @@ type ImageMsg = (String, Result<ImageInfo, String>);
 /// A finished background file download: the label shown to the user and
 /// where it landed, or why it failed.
 type FileMsg = (String, Result<std::path::PathBuf, String>);
+
+/// One batch of web renders: everything on ONE page at ONE revision, so the
+/// worker can serve them with a single browser navigation. `gen` is the
+/// App's page generation at the time of the request.
+struct WebJob {
+    gen: u64,
+    reqs: Vec<WebRequest>,
+}
+
+/// A finished web render, already decoded and protocol-encoded on the
+/// worker. `gen` and `key` together decide whether it is still wanted.
+type WebMsg = (u64, String, Result<ImageInfo, String>);
+
+/// The web-render worker: the ONLY thread that talks to a browser. It takes
+/// whole batches, answers the on-disk cache without launching anything, and
+/// hands back terminal-ready images. The UI thread never waits on it — it
+/// only sends and later drains.
+fn spawn_web_worker(
+    jobs: mpsc::Receiver<WebJob>,
+    out: mpsc::Sender<WebMsg>,
+    backend: Arc<dyn WebBackend>,
+    picker: Picker,
+    cache: ArtifactCache,
+) {
+    std::thread::spawn(move || {
+        while let Ok(job) = jobs.recv() {
+            let mut to_render: Vec<WebRequest> = Vec::new();
+            for req in job.reqs {
+                let key = req.cache_key();
+                match cache.get(&key) {
+                    Some(png) => {
+                        let _ = out.send((job.gen, key, decode_web_png(&picker, &png)));
+                    }
+                    None => to_render.push(req),
+                }
+            }
+            if to_render.is_empty() {
+                continue;
+            }
+            let results = backend.render_batch(&to_render);
+            for (req, res) in to_render.iter().zip(results) {
+                let key = req.cache_key();
+                let msg = match res {
+                    Ok(png) => {
+                        let img = decode_web_png(&picker, &png);
+                        if img.is_ok() {
+                            cache.put(&key, &png);
+                        }
+                        img
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = out.send((job.gen, key, msg));
+            }
+        }
+    });
+}
+
+/// PNG bytes -> terminal image. Only image decoding happens here: no SVG or
+/// HTML from the browser is ever interpreted in this process.
+fn decode_web_png(picker: &Picker, png: &[u8]) -> Result<ImageInfo, String> {
+    let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
+    build_image(picker, img)
+}
 
 /// Something Enter/f can act on from the cursor line.
 #[derive(Clone, Debug, PartialEq)]
@@ -227,6 +292,30 @@ struct App {
     /// File downloads in flight (Enter/f on a 📎 link).
     file_tx: mpsc::Sender<FileMsg>,
     file_rx: mpsc::Receiver<FileMsg>,
+
+    // --- web renderer (Mermaid today; see cosense::webrender) -------------
+    /// Page revision the diagrams on screen were rendered against
+    /// (`commitId` at load; the websocket head takes over once it moves).
+    revision: String,
+    /// Bumped on every page install. A render that comes back for an older
+    /// generation is dropped even if its key were to collide.
+    web_gen: u64,
+    /// Render width in CSS pixels, bucketed so a one-column resize does not
+    /// re-render the page. 0 until the first layout.
+    web_width_px: u32,
+    /// Terminal background is dark (picks the browser's color scheme).
+    web_dark: bool,
+    /// Render keys currently in flight.
+    web_pending: HashSet<String>,
+    /// Why a key failed, for the status line. Its block falls back to code.
+    web_errors: HashMap<String, String>,
+    /// Jobs into the render worker, results back. Artifacts land in
+    /// `images` (they are images), so drawing needs no special case.
+    web_job_tx: mpsc::Sender<WebJob>,
+    /// Held until `main` spawns the worker; tests keep it and inspect jobs.
+    web_jobs_rx: Option<mpsc::Receiver<WebJob>>,
+    web_tx: mpsc::Sender<WebMsg>,
+    web_rx: mpsc::Receiver<WebMsg>,
 
     rows: Vec<Row>,
     laid_width: u16,
@@ -608,6 +697,8 @@ impl App {
     fn new(project: String) -> Self {
         let (image_tx, image_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
+        let (web_job_tx, web_jobs_rx) = mpsc::channel();
+        let (web_tx, web_rx) = mpsc::channel();
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
         let (poll_tx, poll_rx) = mpsc::channel();
@@ -646,6 +737,16 @@ impl App {
             history: Vec::new(),
             forward: Vec::new(),
             overlay: None,
+            revision: String::new(),
+            web_gen: 0,
+            web_width_px: 0,
+            web_dark: true,
+            web_pending: HashSet::new(),
+            web_errors: HashMap::new(),
+            web_job_tx,
+            web_jobs_rx: Some(web_jobs_rx),
+            web_tx,
+            web_rx,
             read_at: None,
             members: HashMap::new(),
             time: None,
@@ -714,6 +815,8 @@ impl App {
         self.title = l.title;
         self.header_colors = l.header_colors;
         self.page_id = l.page_id;
+        self.revision = l.revision;
+        self.web_gen = self.web_gen.wrapping_add(1);
         self.lines = l.lines;
         self.blocks = l.blocks;
         self.srcs = l.srcs;
@@ -738,12 +841,16 @@ impl App {
         self.images.clear();
         self.image_errors.clear();
         self.pending.clear();
+        self.web_pending.clear();
+        self.web_errors.clear();
         self.laid_width = 0; // force rebuild
         self.scroll = 0;
         self.cursor = 0;
         self.selection = None;
         self.follow = true;
+        self.web_dark = !ctx.light;
         self.start_image_loads(ctx);
+        self.start_web_renders(ctx);
     }
 
     /// Kick off background downloads for every image on the page. Each
@@ -778,6 +885,104 @@ impl App {
                 let _ = tx.send((url, res));
             });
         }
+    }
+
+    /// The render order for one Mermaid block, or `None` when the block
+    /// cannot be rendered from the live web page: a historical snapshot (the
+    /// browser only ever shows the current page), a line Cosense has not
+    /// given an id yet, or a layout that has not happened.
+    fn web_request(
+        &self,
+        kind: cosense::webrender::WebKind,
+        code: &str,
+        last_src: usize,
+    ) -> Option<WebRequest> {
+        if self.time.is_some() || self.web_width_px == 0 {
+            return None;
+        }
+        let line_id = self.lines.get(last_src)?.id.clone();
+        if line_id.is_empty() {
+            return None;
+        }
+        Some(WebRequest {
+            kind,
+            project: self.project.clone(),
+            title: self.title.clone(),
+            page_id: self.page_id.clone(),
+            // The websocket head is authoritative once it moves; before that
+            // (and without a websocket) the load-time commit stands in.
+            revision: self.ws_head.clone().unwrap_or_else(|| self.revision.clone()),
+            line_id,
+            code_hash: cosense::webrender::hash_code(code),
+            width_px: self.web_width_px,
+            dark: self.web_dark,
+        })
+    }
+
+    /// Queue every not-yet-rendered diagram on the page as ONE batch. Returns
+    /// immediately: the worker owns the browser, and the code block stays on
+    /// screen until an artifact arrives.
+    fn start_web_renders(&mut self, ctx: &Ctx) {
+        // Before the first layout the pane width is unknown; rendering at a
+        // guessed width would only be thrown away one frame later.
+        if self.laid_width == 0 {
+            return;
+        }
+        // Width in CSS pixels, bucketed to 80px: a diagram is re-rendered on
+        // a real resize, not on every column the pane gains.
+        let cells = self.laid_width as u32;
+        let px = (cells * ctx.picker.font_size().width.max(1) as u32).max(320);
+        let bucketed = (px / 80).max(4) * 80;
+        if bucketed != self.web_width_px {
+            self.web_width_px = bucketed;
+        }
+        let mut reqs: Vec<WebRequest> = Vec::new();
+        for b in &self.blocks {
+            let Block::WebRender { kind, code, last_src, .. } = b else { continue };
+            let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
+            let key = req.cache_key();
+            if self.images.contains_key(&key)
+                || self.web_errors.contains_key(&key)
+                || self.web_pending.contains(&key)
+                || reqs.iter().any(|r| r.cache_key() == key)
+            {
+                continue;
+            }
+            reqs.push(req);
+        }
+        if reqs.is_empty() {
+            return;
+        }
+        for r in &reqs {
+            self.web_pending.insert(r.cache_key());
+        }
+        let _ = self.web_job_tx.send(WebJob { gen: self.web_gen, reqs });
+    }
+
+    /// Install finished web renders. A result from an older page generation
+    /// is dropped outright — the reader has moved on, and showing it would
+    /// put yesterday's diagram on today's page.
+    fn drain_web_renders(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((gen, key, res)) = self.web_rx.try_recv() {
+            if gen != self.web_gen {
+                // Stale generation: forget it ever happened.
+                self.web_pending.remove(&key);
+                continue;
+            }
+            self.web_pending.remove(&key);
+            match res {
+                Ok(info) => {
+                    self.images.insert(key, info);
+                }
+                Err(e) => {
+                    self.status = format!("diagram: {e} (showing source)");
+                    self.web_errors.insert(key, e);
+                }
+            }
+            changed = true;
+        }
+        changed
     }
 
     /// Install images that finished loading. Returns true if anything
@@ -1097,7 +1302,9 @@ impl App {
         let mut content: Vec<Row> = Vec::new();
         for (b, &src) in self.blocks.iter().zip(self.srcs.iter()) {
             if let Some((eline, ebuf)) = edit {
-                if src == eline && !matches!(b, Block::Table(_)) {
+                if src == eline
+                    && !matches!(b, Block::Table(_) | Block::WebRender { .. })
+                {
                     raw_rows(&mut content, ebuf, src);
                     continue;
                 }
@@ -1127,6 +1334,45 @@ impl App {
                             }
                         }
                         content.push(Row::Line { line, src: row_src });
+                    }
+                }
+                Block::WebRender { kind, code, rows, last_src } => {
+                    let key = self
+                        .web_request(*kind, code, *last_src)
+                        .map(|r| r.cache_key());
+                    // While the edit session is inside this block the reader
+                    // is working on the raw source, so the picture steps
+                    // aside — the existing source-editing contract wins.
+                    let editing_here = edit
+                        .map(|(eline, _)| rows.iter().any(|(rsrc, _)| *rsrc == eline))
+                        .unwrap_or(false);
+                    let art = if editing_here {
+                        None
+                    } else {
+                        key.as_ref().and_then(|k| self.images.get(k).map(|i| (k, i)))
+                    };
+                    if let Some((k, info)) = art {
+                        content.push(Row::Image {
+                            url: k.clone(),
+                            height: info.cells_h.max(1),
+                            src: *last_src,
+                        });
+                        continue;
+                    }
+                    // No artifact (yet, or ever): the plain code block, with
+                    // the session's caret row swapped to raw source.
+                    for (rsrc, line) in rows {
+                        if let Some((eline, ebuf)) = edit {
+                            if *rsrc == eline {
+                                raw_rows(&mut content, ebuf, *rsrc);
+                                continue;
+                            }
+                        }
+                        for wrapped in
+                            wrap_line_continued(line, text_w, &hanging_prefix(line))
+                        {
+                            content.push(Row::Line { line: wrapped, src: *rsrc });
+                        }
                     }
                 }
                 Block::Image { url } => {
@@ -1967,6 +2213,25 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&app.gen),
         );
     }
+    // The web renderer: headless Chrome when one can be found, otherwise a
+    // backend that fails every request so diagrams simply stay code blocks.
+    // The session's `connect.sid` (never the PAT) is what a browser can use,
+    // and it is handed to the backend here and nowhere else.
+    let web_backend: Arc<dyn WebBackend> = match cosense::chrome::ChromeBackend::detect(
+        ctx.client.sid().map(str::to_string),
+    ) {
+        Some(b) => Arc::new(b),
+        None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
+    };
+    if let Some(jobs_rx) = app.web_jobs_rx.take() {
+        spawn_web_worker(
+            jobs_rx,
+            app.web_tx.clone(),
+            Arc::clone(&web_backend),
+            ctx.picker.clone(),
+            ArtifactCache::new(),
+        );
+    }
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
     // PAT while the push channel only accepts the sid), polling otherwise.
@@ -2025,6 +2290,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let res = run(&mut terminal, &mut app, &ctx);
+    // Reap the headless browser before anything else: a render in flight
+    // must not outlive the TUI as an orphan process.
+    web_backend.shutdown();
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     drop(app.ime_guard.take());
@@ -2114,6 +2382,8 @@ struct Loaded {
     editable: bool,
     /// Related-pages sections (see `build_related`).
     related: Vec<RelSection>,
+    /// The page's `commitId` at load time — the web renderer's revision.
+    revision: String,
 }
 
 /// Build the related-pages sections the way scrapbox.io presents them:
@@ -2297,6 +2567,7 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         title: title.to_string(),
         header_colors: HeaderColors { fg: header_fg, bg: header_bg },
         page_id: page.id.clone(),
+        revision: page.commit_id.clone(),
         lines,
         blocks: rendered.blocks,
         srcs: rendered.srcs,
@@ -2580,9 +2851,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
             apply_remote(app, ctx, polled);
         }
         // Install any images that finished downloading, then draw.
-        if app.drain_images() {
+        if app.drain_images() | app.drain_web_renders() {
             app.laid_width = 0; // heights changed — rebuild layout
         }
+        // A resize (or a first layout) changes the render width, and a
+        // commit changes the revision: both mean new diagram keys.
+        app.start_web_renders(ctx);
         app.drain_downloads();
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
@@ -3024,6 +3298,7 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     app.srcs = r.srcs;
     app.laid_width = 0;
     app.start_image_loads(ctx);
+    app.start_web_renders(ctx);
 }
 
 fn ensure_editable(app: &mut App) -> bool {
@@ -3890,6 +4165,8 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.images.clear();
     app.image_errors.clear();
     app.pending.clear();
+    app.web_pending.clear();
+    app.web_errors.clear();
     app.selection = None;
     app.laid_width = 0; // rebuild (clamps the cursor)
     app.follow = true;
@@ -4864,6 +5141,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "time      ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
                 "comment   v select · c add · d delete · ^n/^p jump".into(),
                 "detail    t who/when edited this line".into(),
+                "diagram   code:mmd / code:mermaid / code:<name>.mmd draw as pictures,".into(),
+                "          screenshotted from the real Cosense page by headless Chrome".into(),
+                "          (COSENSE_CHROME to point at it). No browser, a private page".into(),
+                "          without COSENSE_SID, or a Mermaid error → the code block stays.".into(),
                 "output    y copy all comments".into(),
                 "list      l comments · ? help".into(),
                 "quit      q  (Esc cancels; comments print to stdout)".into(),
@@ -5007,6 +5288,237 @@ mod tests {
         app.blocks = r.blocks;
         app.srcs = r.srcs;
         app
+    }
+
+    // ---------------------------------------------------------------
+    // Web renderer (Mermaid). The browser itself is never launched here:
+    // `FakeBackend` stands in at the request→artifact boundary.
+    // ---------------------------------------------------------------
+
+    /// A 4×4 PNG — the smallest thing `image` will decode for us.
+    fn tiny_png() -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    fn scratch_cache() -> cosense::webrender::ArtifactCache {
+        let dir = std::env::temp_dir().join(format!(
+            "cosense-tui-test-webcache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        cosense::webrender::ArtifactCache::at(dir)
+    }
+
+    /// A page with two Mermaid blocks and one ordinary code block.
+    fn mermaid_page() -> App {
+        let mut app = page(&[
+            "t",           // 0
+            "code:mmd",    // 1
+            " flowchart LR", // 2
+            "   A-->B",    // 3  <- preview hangs here
+            "code:js",     // 4
+            " let a = 1",  // 5
+            "code:two.mmd", // 6
+            " pie",        // 7  <- and here
+        ]);
+        app.page_id = "PAGE".into();
+        app.revision = "COMMIT1".into();
+        app
+    }
+
+    #[test]
+    fn each_mermaid_block_is_requested_against_its_own_cosense_line_id() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(&ctx);
+        let rx = app.web_jobs_rx.take().unwrap();
+        let job = rx.try_recv().expect("one batch was queued");
+        assert_eq!(job.gen, app.web_gen);
+        let ids: Vec<&str> = job.reqs.iter().map(|r| r.line_id.as_str()).collect();
+        // The LAST content line of each block — not the `code:` header, and
+        // nothing at all for the js block.
+        assert_eq!(ids, vec!["id3", "id7"]);
+        assert_eq!(
+            job.reqs[0].selector(),
+            "#mermaid-preview-id3",
+            "the selector addresses Cosense's own preview element"
+        );
+        assert_ne!(job.reqs[0].cache_key(), job.reqs[1].cache_key());
+        assert!(job.reqs.iter().all(|r| r.revision == "COMMIT1" && r.page_id == "PAGE"));
+        // Asking again while they are in flight queues nothing new.
+        app.start_web_renders(&ctx);
+        assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
+    }
+
+    #[test]
+    fn a_commit_or_a_resize_makes_a_new_artifact_key() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // Before the first layout there is no width and so no request at all.
+        let mut fresh = mermaid_page();
+        assert!(fresh
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3)
+            .is_none());
+        fresh.rebuild(80);
+        app.start_web_renders(&ctx); // fixes web_width_px
+        let at_width = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
+        // A websocket commit moves the revision → a different artifact.
+        app.ws_head = Some("COMMIT2".into());
+        let after_commit =
+            app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
+        assert_ne!(at_width.cache_key(), after_commit.cache_key());
+        // A pane resize does too.
+        app.rebuild(140);
+        app.start_web_renders(&ctx);
+        let wider = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
+        assert_ne!(after_commit.cache_key(), wider.cache_key());
+        // …and a snapshot of an older page is never rendered from the web.
+        app.time = Some(TimeMachine { points: vec![], pos: 0, cache: HashMap::new() });
+        assert!(app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3)
+            .is_none());
+    }
+
+    #[test]
+    fn a_result_for_an_older_page_generation_is_dropped() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.web_width_px = 800;
+        let req = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
+        let key = req.cache_key();
+        app.web_pending.insert(key.clone());
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png()).unwrap();
+        // The reader navigated away and back while the browser was busy.
+        let stale_gen = app.web_gen.wrapping_sub(1);
+        app.web_tx.send((stale_gen, key.clone(), Ok(info))).unwrap();
+        assert!(app.drain_web_renders() == false, "a stale result changes nothing");
+        assert!(!app.images.contains_key(&key), "yesterday's diagram is not installed");
+        assert!(!app.web_pending.contains(&key), "but it does stop being pending");
+    }
+
+    #[test]
+    fn a_renderer_failure_leaves_the_code_block_on_screen() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.web_width_px = 800;
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        app.web_pending.insert(key.clone());
+        app.web_tx
+            .send((app.web_gen, key.clone(), Err(WebError::NoBrowser.to_string())))
+            .unwrap();
+        assert!(app.drain_web_renders());
+        app.laid_width = 0;
+        app.rebuild(80);
+        let text: Vec<String> = app
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, .. } => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(text.iter().any(|t| t.contains("code:mmd")));
+        assert!(text.iter().any(|t| t.contains("flowchart LR")));
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })));
+        assert!(app.status.contains("showing source"), "and the reader is told: {}", app.status);
+    }
+
+    #[test]
+    fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(&ctx);
+        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap();
+        let key = job.reqs[0].cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png()).unwrap();
+        app.web_tx.send((app.web_gen, key.clone(), Ok(info))).unwrap();
+        assert!(app.drain_web_renders());
+        app.laid_width = 0;
+        app.rebuild(80);
+        // The first block draws as a picture, the second is still code.
+        assert!(app.rows.iter().any(|r| matches!(r, Row::Image { url, src, .. } if *url == key && *src == 3)));
+        let code_rows = |app: &App| {
+            app.rows
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Line { line, .. } => {
+                        Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!code_rows(&app).iter().any(|t| t.contains("flowchart LR")));
+
+        // Opening the edit session on a line of that block hands the raw
+        // source back: editing always addresses the text, never the picture.
+        app.session = Some(EditSession {
+            line: 2,
+            input: Input::new("  flowchart LR".into()),
+            orig: "  flowchart LR".into(),
+            want_col: None,
+        });
+        app.laid_width = 0;
+        app.rebuild(80);
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })));
+        assert!(code_rows(&app).iter().any(|t| t.contains("flowchart LR")));
+    }
+
+    #[test]
+    fn the_ui_thread_never_waits_for_the_browser() {
+        let ctx = test_ctx();
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.web_width_px = 800; // fix the key before the backend is primed
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        backend.answer(&key, Ok(tiny_png()));
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+        );
+        // Pin the backend mid-render: the worker cannot make progress while
+        // this guard is held.
+        let held = backend.gate.lock().unwrap();
+        let t0 = std::time::Instant::now();
+        app.start_web_renders(&ctx);
+        // …and the UI thread still lays out and would draw, immediately.
+        app.laid_width = 0;
+        app.rebuild(80);
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "queueing a render must not block the UI (took {elapsed:?})"
+        );
+        assert!(app.web_pending.contains(&key));
+        assert!(app.images.is_empty(), "nothing is drawn until the browser answers");
+        // Let the worker through; the artifact arrives on the channel.
+        drop(held);
+        let (gen, got_key, res) = app
+            .web_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the worker answered");
+        assert_eq!(gen, app.web_gen);
+        assert_eq!(got_key, key);
+        assert!(res.is_ok());
     }
 
     #[test]
@@ -5207,6 +5719,7 @@ mod tests {
         let page = Page {
             id: String::new(),
             title: "me".into(),
+            commit_id: String::new(),
             lines: vec![],
             links: vec!["Hub1".into(), "Hub2".into()],
             project_links: vec!["/other/Page".into(), "/bare".into()],
@@ -5442,6 +5955,7 @@ mod tests {
             page: cosense::api::Page {
                 id: "pid".into(),
                 title: "t".into(),
+                commit_id: String::new(),
                 lines: texts
                     .iter()
                     .map(|(id, t)| PageLine {
