@@ -433,6 +433,7 @@ impl ChromeBackend {
                 var body = document.querySelector('.lines') || document.querySelector('.page');
                 return JSON.stringify({{
                     loaded: !!body,
+                    settled: document.readyState === 'complete',
                     href: location.href,
                     ready: sels.map(function(s){{
                         var e = document.querySelector(s);
@@ -450,6 +451,16 @@ impl ChromeBackend {
         let mut last = vec![false; reqs.len()];
         let mut ever_loaded = false;
         let mut login_wall = false;
+        // When the document has finished loading and Cosense has still put
+        // NO page body on screen, we are not looking at a slow page — we
+        // are looking at a page this browser may not see. Measured: an
+        // anonymous request for a private page gets HTTP 401 and the SPA
+        // shell renders with no `.lines` at all, keeping its URL (so the
+        // `/login` redirect check below never fires). Without this the
+        // batch spent its whole 25 s budget and reported a timeout, which
+        // named the wrong cause.
+        let mut settled_at: Option<Instant> = None;
+        const BLANK_GRACE: Duration = Duration::from_secs(4);
         // A block Cosense refuses to draw (a Mermaid syntax error) never
         // becomes ready, and waiting out the whole budget for it would make
         // every OTHER diagram on the page arrive 20s late. So the wait also
@@ -475,6 +486,15 @@ impl ChromeBackend {
                 }
                 if last.iter().all(|b| *b) {
                     return Ok(last);
+                }
+                let settled = v.get("settled").and_then(|b| b.as_bool()).unwrap_or(false);
+                if settled && !ever_loaded {
+                    let since = *settled_at.get_or_insert_with(Instant::now);
+                    if since.elapsed() > BLANK_GRACE {
+                        return Err(WebError::NotAuthorized);
+                    }
+                } else {
+                    settled_at = None;
                 }
             }
             let stalled = ever_loaded && last_progress.elapsed() > quiet;
