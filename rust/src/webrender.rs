@@ -317,6 +317,10 @@ impl WebBackend for FakeBackend {
 }
 
 /// On-disk PNG cache, shared with the image cache's directory layout.
+///
+/// `Clone` shares the same directory: it is a handle, not the data. Cloning
+/// re-runs no setup — `at` already hardened and swept it.
+#[derive(Clone)]
 pub struct ArtifactCache {
     dir: PathBuf,
 }

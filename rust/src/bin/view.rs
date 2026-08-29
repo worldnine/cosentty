@@ -120,6 +120,10 @@ enum WebJob {
         gen: u64,
         reqs: Vec<WebRequest>,
         max_cols: u16,
+        /// The source epoch this batch was built from. Re-checked on the
+        /// worker before the browser is asked and again before anything is
+        /// written to the cache.
+        src_epoch: u64,
         /// `Some` lets the batch reach a browser, in that credential state.
         /// `None` is cache-only: serve what is on disk and answer every
         /// miss with `Missing`. That is the default page-load pass, and it
@@ -174,6 +178,11 @@ enum WebOutcome {
     /// with that — it says nothing about the REST credential.
     Denied,
     Failed(String),
+    /// The page source moved while this was in flight, so the picture (if
+    /// there is one) describes different text than the key naming it. The
+    /// block simply goes back to source: it is NOT a miss and NOT a failure,
+    /// and the pass that follows the new source picks it up.
+    Stale,
 }
 
 impl WebOutcome {
@@ -198,6 +207,9 @@ fn spawn_web_worker(
     // browser navigation.
     cache: ArtifactCache,
     current_gen: Arc<std::sync::atomic::AtomicU64>,
+    // The App's source epoch: a render whose source has moved is discarded
+    // rather than written to the cache under a key it no longer matches.
+    current_src: Arc<std::sync::atomic::AtomicU64>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         // Idle window. The backend keeps a browser warm between batches (a
@@ -250,6 +262,7 @@ fn spawn_web_worker(
             let mut merged: Vec<WebRequest> = Vec::new();
             let mut merged_cols: Option<u16> = None;
             let mut merged_auth: Option<RenderCapability> = None;
+            let mut merged_src = 0u64;
             let mut merged_gen = 0u64;
             for job in batch {
                 match job {
@@ -267,8 +280,11 @@ fn spawn_web_worker(
                         };
                         let _ = out.send(WebMsg { gen, key, rescale: true, attempted: None, res });
                     }
-                    WebJob::Render { gen, reqs, max_cols, auth } => {
+                    WebJob::Render { gen, src_epoch, reqs, max_cols, auth } => {
                         merged_gen = gen;
+                        // Coalesced batches take the NEWEST source they were
+                        // built from; anything older is re-checked out below.
+                        merged_src = merged_src.max(src_epoch);
                         merged_cols = Some(max_cols);
                         // Coalescing several passes: the most permissive
                         // one wins, so an explicit `m` arriving behind a
@@ -291,6 +307,8 @@ fn spawn_web_worker(
                     &cache,
                     &out,
                     merged_gen,
+                    merged_src,
+                    &current_src,
                     merged,
                     max_cols,
                     merged_auth,
@@ -329,6 +347,11 @@ fn run_render_batch(
     cache: &ArtifactCache,
     out: &mpsc::Sender<WebMsg>,
     gen: u64,
+    // The source this batch was built from. A render captures what the
+    // SERVER shows when the browser looks, so if the source has moved since,
+    // the picture belongs to different text than the key naming it.
+    src_epoch: u64,
+    current_src: &std::sync::atomic::AtomicU64,
     reqs: Vec<WebRequest>,
     max_cols: u16,
     // `None` means this pass may not launch a browser: hits are served,
@@ -362,6 +385,7 @@ fn run_render_batch(
     if to_render.is_empty() {
         return;
     }
+    let fresh = || src_epoch == current_src.load(std::sync::atomic::Ordering::SeqCst);
     let Some(auth) = auth else {
         // Cache-only pass. Every miss still owes exactly one reply, or the
         // viewer would pulse those blocks forever.
@@ -377,10 +401,30 @@ fn run_render_batch(
         }
         return;
     };
+    // Checked here, before the browser is asked: the source may have moved
+    // while this job sat in the queue behind another batch.
+    if !fresh() {
+        for req in &to_render {
+            let key = req.cache_key();
+            let _ = out.send(WebMsg {
+                gen,
+                key,
+                rescale: false,
+                attempted: None,
+                res: WebOutcome::Stale,
+            });
+        }
+        return;
+    }
     let results = backend.render_batch(&to_render, auth);
+    // ...and again here. A page of diagrams takes seconds to draw, which is
+    // exactly long enough for a commit to land underneath it. Writing that
+    // PNG under this key would poison the cache for a week.
+    let still_fresh = fresh();
     for (req, res) in to_render.iter().zip(results) {
         let key = req.cache_key();
         let res = match res {
+            _ if !still_fresh => WebOutcome::Stale,
             Ok(png) => match decode_web_png(picker, &png, max_cols) {
                 Ok(info) => {
                     cache.put(&key, &png);
@@ -718,6 +762,18 @@ struct App {
     /// The "you need a cookie" notice has been shown for THIS page already.
     /// Reset by `set_page`, so it is said once per page and not per block.
     web_notice_shown: bool,
+
+    /// Monotonic counter of the page SOURCE as the app holds it. Deliberately
+    /// separate from `server_epoch`: that one guards poll responses against
+    /// local progress, this one guards a render in flight against the source
+    /// moving underneath it. Folding them together would either throw away
+    /// good poll snapshots on every keystroke or good renders on every poll.
+    ///
+    /// A render captures whatever the SERVER is showing at the moment the
+    /// browser looks. If the source has moved since the job was queued, that
+    /// screenshot belongs to a different text than the key it would be filed
+    /// under — and the artifact cache keeps it for a week.
+    src_epoch: Arc<std::sync::atomic::AtomicU64>,
 
     /// Monotonic counter of everything that makes the server's state newer
     /// than a poll already in flight: a local commit landing, a websocket
@@ -1183,6 +1239,7 @@ impl App {
             web_drawn_blocks: HashSet::new(),
             web_manual_wanted: false,
             web_notice_shown: false,
+            src_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sync_state: capability::SyncState::Polling,
             ws_attempted: false,
@@ -1454,6 +1511,7 @@ impl App {
             .web_job_tx
             .send(WebJob::Render {
                 gen: self.gen_now(),
+                src_epoch: self.src_epoch_now(),
                 reqs,
                 max_cols: self.web_cols,
                 auth,
@@ -1749,6 +1807,16 @@ impl App {
         self.web_unsynced = false;
     }
 
+    /// The page source has changed: any render queued before this moment
+    /// would be filed under a hash it no longer matches.
+    fn bump_src_epoch(&self) {
+        self.src_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn src_epoch_now(&self) -> u64 {
+        self.src_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The server's state has moved on: any poll response fetched before
     /// this moment is stale.
     fn bump_server_epoch(&self) {
@@ -1806,6 +1874,9 @@ impl App {
                 WebOutcome::Denied => {
                     denied.push((key, attempted));
                 }
+                // Nothing is recorded: not an image, not a miss, not an
+                // error. The next pass sees the new source and asks again.
+                WebOutcome::Stale => {}
                 WebOutcome::Failed(e) => {
                     self.note_web_failure(format!("diagram: {e} (showing source)"));
                     self.web_errors.insert(key, e);
@@ -3084,6 +3155,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ctx.picker.clone(),
             ArtifactCache::new(),
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         )
     });
     // Live web edits: websocket push when the session has a `connect.sid`
@@ -4209,6 +4281,9 @@ fn finish_composer(app: &mut App, input: Input) {
 
 /// Re-render the page body from the (just mutated) local model.
 fn rerender(app: &mut App, ctx: &Ctx) {
+    // The source is about to change shape. Anything already queued against
+    // the old text must not come back and be filed under it.
+    app.bump_src_epoch();
     let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
     let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
     app.blocks = r.blocks;
@@ -6841,6 +6916,7 @@ mod tests {
             Picker::halfblocks(),
             scratch_cache(),
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         );
         app.start_web_renders(trigger);
         backend
@@ -6956,6 +7032,7 @@ mod tests {
             Picker::halfblocks(),
             scratch_cache(),
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         );
         // The edited artifact's key is known in advance, so the backend is
         // scripted BEFORE the edit: `rerender` queues the job immediately,
@@ -7241,6 +7318,7 @@ mod tests {
             Picker::halfblocks(),
             cache,
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         );
         app.start_web_renders(capability::Trigger::Auto);
         settle(&mut app, keys.len());
@@ -7334,6 +7412,77 @@ mod tests {
             *auth,
             Some(RenderCapability::Anonymous),
             "retrying with the SAME rejected cookie just fails again"
+        );
+    }
+
+    #[test]
+    fn a_render_whose_source_moved_is_never_filed_under_the_old_hash() {
+        // A page of diagrams takes seconds to draw. If a commit lands in
+        // that window, the browser screenshots the NEW text — but the job
+        // is keyed on the old hash, and the artifact cache keeps what it is
+        // given for a week. The next reader of the old text would be served
+        // a picture of something else.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let key_a = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        backend.answer(&key_a, Ok(tiny_png()));
+        let cache = scratch_cache();
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache.clone(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+
+        // Pin the backend so the job is provably still mid-render...
+        let held = backend.gate.lock().unwrap();
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_pending.contains(&key_a));
+        // ...and commit B underneath it.
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        drop(held);
+
+        // Every request still gets exactly one reply, so nothing pulses on.
+        let mut replies = 0;
+        while replies < 2 {
+            let msg = app
+                .web_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("an accepted request is always answered");
+            app.web_tx.send(msg).unwrap();
+            replies += 1;
+        }
+        app.drain_web_renders();
+
+        assert!(
+            cache.get(&key_a).is_none(),
+            "B's picture must never be written under A's hash"
+        );
+        assert!(!app.images.contains_key(&key_a));
+        // Stale is not a failure and not a miss: B is simply asked for.
+        assert!(app.web_errors.is_empty());
+        assert!(!app.web_missing.contains(&key_a));
+        assert!(!app.web_pending.contains(&key_a), "the abandoned key stopped pulsing");
+
+        // ...and B is what gets asked for instead.
+        let key_b = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap()
+            .cache_key();
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(
+            app.web_pending.contains(&key_b),
+            "the new source is what gets rendered next"
         );
     }
 
@@ -7495,6 +7644,7 @@ mod tests {
             Picker::halfblocks(),
             scratch_cache(),
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         );
         // Pin the backend mid-render: the worker cannot make progress while
         // this guard is held.
@@ -7591,6 +7741,7 @@ mod tests {
             Picker::halfblocks(),
             cache,
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         );
         for job in jobs {
             app.web_job_tx.send(job).unwrap();
@@ -7721,6 +7872,7 @@ mod tests {
             vec![
                 WebJob::Render {
                     gen,
+                    src_epoch: 0,
                     reqs: vec![req],
                     max_cols: 64,
                     auth: Some(RenderCapability::Authenticated),
@@ -7835,9 +7987,9 @@ mod tests {
             Arc::clone(&backend),
             scratch_cache(),
             vec![
-                WebJob::Render { gen: stale_gen, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
+                WebJob::Render { gen: stale_gen, src_epoch: 0, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
                 WebJob::Rescale { gen: stale_gen, key: "web:mermaid:old".into(), max_cols: 20 },
-                WebJob::Render { gen: live_gen, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
+                WebJob::Render { gen: live_gen, src_epoch: 0, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
             ],
             1,
         );
@@ -7872,12 +8024,13 @@ mod tests {
             Picker::halfblocks(),
             scratch_cache(),
             Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
         );
         app.web_job_tx
-            .send(WebJob::Render { gen, reqs: vec![a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
+            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
             .unwrap();
         app.web_job_tx
-            .send(WebJob::Render { gen, reqs: vec![b.clone(), a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
+            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![b.clone(), a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
             .unwrap();
         drop(held);
         let mut keys = Vec::new();
