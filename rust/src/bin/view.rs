@@ -318,6 +318,13 @@ struct App {
     web_pending: HashSet<String>,
     /// Why a key failed, for the status line. Its block falls back to code.
     web_errors: HashMap<String, String>,
+    /// Source lines whose code block is being rendered right now, each with
+    /// `(row's position in the block, block row count)`. The draw pass runs
+    /// a band of brightness down them so the reader can see the renderer
+    /// working — rebuilt with the layout, empty whenever nothing is pending.
+    web_shimmer: HashMap<usize, (u16, u16)>,
+    /// Clock the shimmer animates against.
+    web_anim: std::time::Instant,
     /// Jobs into the render worker, results back. Artifacts land in
     /// `images` (they are images), so drawing needs no special case.
     web_job_tx: mpsc::Sender<WebJob>,
@@ -751,6 +758,8 @@ impl App {
             web_dark: true,
             web_pending: HashSet::new(),
             web_errors: HashMap::new(),
+            web_shimmer: HashMap::new(),
+            web_anim: std::time::Instant::now(),
             web_job_tx,
             web_jobs_rx: Some(web_jobs_rx),
             web_tx,
@@ -969,7 +978,35 @@ impl App {
         for r in &reqs {
             self.web_pending.insert(r.cache_key());
         }
+        // Those blocks now shimmer; the map is rebuilt with the layout.
+        self.laid_width = 0;
+        self.web_anim = std::time::Instant::now();
         let _ = self.web_job_tx.send(WebJob { gen: self.web_gen, reqs });
+    }
+
+    /// Source lines belonging to a diagram that is being rendered right now,
+    /// mapped to their position in the block. Derived from the blocks rather
+    /// than the laid-out rows, so wrapped continuation rows of one source
+    /// line pulse together.
+    fn web_shimmer_rows(&self) -> HashMap<usize, (u16, u16)> {
+        let mut out = HashMap::new();
+        // Source mode shows the raw notation and never a picture, so there
+        // is nothing there for the pulse to be about.
+        if self.web_pending.is_empty() || self.mode == Mode::Source {
+            return out;
+        }
+        for b in &self.blocks {
+            let Block::WebRender { kind, code, rows, last_src } = b else { continue };
+            let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
+            if !self.web_pending.contains(&req.cache_key()) {
+                continue;
+            }
+            let len = rows.len() as u16;
+            for (i, (src, _)) in rows.iter().enumerate() {
+                out.insert(*src, (i as u16, len));
+            }
+        }
+        out
     }
 
     /// Install finished web renders. A result from an older page generation
@@ -1513,6 +1550,7 @@ impl App {
         rows.push(Row::FrameEnd);
         rows.extend(related);
         self.rows = rows;
+        self.web_shimmer = self.web_shimmer_rows();
         self.laid_width = width;
         self.clamp_cursor();
     }
@@ -2874,7 +2912,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // A wheel flick — or herdr, which delivers bursts at once — queues
         // dozens of mouse events; a redraw per event (images included)
         // made scrolling crawl. akapen's event_loop does the same.
-        if !event::poll(Duration::from_millis(120))? {
+        // Idle: one wake-up per 120ms is enough to slot in arriving images.
+        // While a diagram renders, the shimmer wants smoother frames — but
+        // only then, so an idle viewer still costs ~8 wake-ups a second.
+        let tick = if app.web_shimmer.is_empty() { 120 } else { 60 };
+        if !event::poll(Duration::from_millis(tick))? {
             continue;
         }
         for _ in 0..MAX_EVENTS_PER_FRAME {
@@ -4905,7 +4947,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         };
 
         match row {
-            Row::Line { line, .. } | Row::Card { line } => {
+            Row::Line { line, src } => {
+                if let Some(r) = one_row(screen_y) {
+                    // A diagram being rendered dims its code and lets a band
+                    // of brightness run down it: the reader sees the work
+                    // happening without the text moving under them.
+                    let painted = match app.web_shimmer.get(src) {
+                        Some((pos, len)) => shimmer(line, *pos, *len, app, ctx),
+                        None => line.clone(),
+                    };
+                    f.render_widget(Paragraph::new(painted).style(base), r);
+                }
+            }
+            Row::Card { line } => {
                 if let Some(r) = one_row(screen_y) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
@@ -5059,6 +5113,23 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if app.overlay.is_some() {
         draw_overlay(f, app, area);
     }
+}
+
+/// One row of a block the web renderer is still working on, with the
+/// brightness band applied to every span.
+fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: &Ctx) -> Line<'static> {
+    let level = cosense::theme::shimmer_level(pos, len, app.web_anim.elapsed().as_secs_f32());
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .map(|s| {
+            Span::styled(
+                s.content.clone(),
+                cosense::theme::shimmer_style(s.style, ctx.terminal_bg, level),
+            )
+        })
+        .collect();
+    Line::from(spans)
 }
 
 /// Draw the open overlay as a centered panel.
@@ -5560,6 +5631,48 @@ mod tests {
         assert_eq!(gen, app.web_gen);
         assert_eq!(got_key, key);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn a_rendering_diagram_pulses_its_code_and_stops_when_it_lands() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(&ctx);
+        app.rebuild(80);
+        // Every row of both Mermaid blocks pulses — header and body — and
+        // nothing else on the page does.
+        let mut srcs: Vec<usize> = app.web_shimmer.keys().copied().collect();
+        srcs.sort();
+        assert_eq!(srcs, vec![1, 2, 3, 6, 7]);
+        assert_eq!(app.web_shimmer[&1], (0, 3), "the code: header leads its block");
+        assert_eq!(app.web_shimmer[&3], (2, 3));
+        assert_eq!(app.web_shimmer[&7], (1, 2), "the second block counts from its own top");
+
+        let dim_cells = |app: &mut App, ctx: &Ctx| {
+            let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+            terminal.draw(|f| ui(f, app, ctx)).unwrap();
+            terminal.draw(|f| ui(f, app, ctx)).unwrap();
+            let buf = terminal.backend().buffer();
+            (0..buf.area.width)
+                .flat_map(|x| (0..buf.area.height).map(move |y| (x, y)))
+                .filter(|(x, y)| {
+                    buf.cell((*x, *y)).unwrap().modifier.contains(Modifier::DIM)
+                })
+                .count()
+        };
+        assert!(dim_cells(&mut app, &ctx) > 0, "the reader can see the renderer working");
+
+        // The renders land: the pulse stops and the page goes back to normal.
+        let keys: Vec<String> = app.web_pending.iter().cloned().collect();
+        for key in keys {
+            app.web_pending.remove(&key);
+        }
+        app.laid_width = 0;
+        app.rebuild(80);
+        assert!(app.web_shimmer.is_empty());
+        assert_eq!(dim_cells(&mut app, &ctx), 0, "nothing pulses once nothing is pending");
     }
 
     #[test]
@@ -6980,3 +7093,4 @@ mod tests {
         assert_eq!(app.cursor_fraction(), 0.5);
     }
 }
+

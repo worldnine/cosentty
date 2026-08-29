@@ -128,6 +128,7 @@ map, so drawing, partial scroll, resize and cursor handling need **no** new code
 | `rust/src/chrome.rs` | **new** — CDP client, Chrome discovery/launch/reaping, element capture, base64. |
 | `rust/src/bin/web_smoke.rs` | **new** — live smoke binary (not in `cargo test`). `--twice` exercises the warm-browser path; it also reports Chrome process counts across `idle()`/`shutdown()`. |
 | `rust/src/render.rs` | `mermaid_lang()`; `code:` blocks whose language is Mermaid emit `Block::WebRender` carrying the code plus the unchanged code rows. Everything else is byte-for-byte as before. |
+| `rust/src/theme.rs` | `shimmer_level` / `shimmer_style` — the pure "still rendering" brightness wave, mixing an RGB foreground toward the terminal background (DIM attribute for named colors). |
 | `rust/src/bin/view.rs` | `WebJob`/`WebMsg`/`spawn_web_worker`; App fields (`revision`, `web_gen`, `web_width_px`, `web_dark`, `web_pending`, `web_errors`, channels); `web_request`, `start_web_renders`, `drain_web_renders`; layout arm for `Block::WebRender`; backend construction + `shutdown()` on the quit path; `?` help entry. |
 | `rust/src/api.rs` | `Page.commit_id` (`commitId`), reported by the smoke binary. |
 | `rust/src/bin/probe.rs` | prints the new block kind. |
@@ -258,6 +259,24 @@ Delete them with `cosense previewEdit` + `submitEdit` if the page is wanted clea
    ends early once the page has been quiet for 6 s. Broken-block page went 25 s → 10 s,
    and the two good diagrams now render. A block that never draws now reports
    `NotRendered` ("diagram not drawn by Cosense"), not a misleading timeout.
+
+## 7b. Feedback while a diagram is rendering
+
+A render takes seconds, so the block it will replace shows that work is happening: the
+code block dims and a band of brightness runs down its rows (`theme::shimmer_level` /
+`shimmer_style`, `App::web_shimmer`). Design constraints that shaped it:
+
+* **The text must not move.** A spinner or a "rendering…" line would reflow the page
+  under a reader who is mid-sentence. Only brightness changes.
+* **Brightness is made by mixing toward the terminal background**, never by inventing a
+  color — the theme still owns every hue. A named/indexed color has no components to
+  mix, so it falls back to the DIM attribute (in practice code rows are
+  syntax-highlighted and therefore RGB).
+* **It stays readable**: the wave spans 0.55–1.0 of the original color, and the floor is
+  a dimmed version of the real text, not a placeholder.
+* **It costs nothing when idle.** The map is empty unless something is pending; the
+  event loop's input tick tightens from 120 ms to 60 ms only while it is not.
+* Source mode (`Tab`) never pulses — there is no picture there for it to be about.
 
 ## 8. Known limits, security, distribution
 
