@@ -3883,16 +3883,43 @@ fn positioned_labelled_urls(text: &str) -> Vec<(usize, String, String)> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             continue;
         }
-        // the enclosing bracket, if the URL sits inside one on this line
-        let label = text[..start]
+        // The bracket around this URL, if any: `[label url]`.
+        let bracket = text[..start]
             .rfind('[')
             .filter(|&lb| !text[lb..start].contains(']'))
-            .and_then(|lb| text[url_end..].find(']').map(|rb| (lb, url_end + rb)))
+            .and_then(|lb| text[url_end..].find(']').map(|rb| (lb, url_end + rb)));
+        // A LINKED IMAGE (`[href imageUrl]`) is one link, not two: the
+        // picture is the label and the href is where it goes. Offering
+        // both, with each labelled by the other, was the reason a linked
+        // image asked which link you meant — and then opened the other one.
+        if let Some((lb, rb)) = bracket {
+            let inner = &text[lb + 1..rb];
+            if cosense::render::looks_like_image_url(url) && has_other_url(inner, url) {
+                continue; // the href carries this bracket
+            }
+        }
+        let label = bracket
             .map(|(lb, rb)| text[lb + 1..rb].replace(url, "").trim().to_string())
             .filter(|l| !l.is_empty())
+            .map(|l| {
+                // The other side of a linked image is the picture: say so
+                // rather than printing its URL.
+                if gyazo_permalink(&l).is_some() {
+                    "\u{1f5bc} gyazo".to_string()
+                } else if cosense::render::looks_like_image_url(&l) {
+                    format!("\u{1f5bc} {}", file_name_of_url(&l))
+                } else {
+                    l
+                }
+            })
             .unwrap_or_else(|| {
                 if is_scrapbox_file_url(url) {
                     file_name_of_url(url).to_string()
+                } else if gyazo_permalink(url).is_some() {
+                    // `link_item_for_url` names these "gyazo" — leave it to it.
+                    url.to_string()
+                } else if cosense::render::looks_like_image_url(url) {
+                    format!("\u{1f5bc} {}", file_name_of_url(url))
                 } else {
                     url.to_string()
                 }
@@ -3900,6 +3927,13 @@ fn positioned_labelled_urls(text: &str) -> Vec<(usize, String, String)> {
         out.push((start, label, url.to_string()));
     }
     out
+}
+
+/// Does `inner` hold a URL other than `url`?
+fn has_other_url(inner: &str, url: &str) -> bool {
+    inner
+        .split_whitespace()
+        .any(|t| t != url && (t.starts_with("http://") || t.starts_with("https://")))
 }
 
 fn labelled_urls(text: &str) -> Vec<(String, String)> {
@@ -10158,6 +10192,44 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// A linked image (`[href imageUrl]`) is ONE link: the picture is the
+    /// label, the href is where Enter goes. Treating the two URLs as two
+    /// links made the viewer ask which one you meant — and label each
+    /// choice with the other one's address, so either pick looked wrong.
+    #[test]
+    fn a_linked_image_is_one_link_to_its_href() {
+        let img = "https://example.com/photo.png";
+        let href = "https://scrapbox.io/proj/Page";
+        let mut app = page(&["t", &format!("[{href} {img}]")]);
+        app.rebuild(80);
+        app.goto_src(1);
+        let links = app.cursor_line_links();
+        assert_eq!(links.len(), 1, "one link, not a question: {links:?}");
+        match &links[0] {
+            LinkItem::Url { label, url } => {
+                assert_eq!(url, href, "Enter follows the href");
+                assert!(label.contains("photo.png"), "labelled by the picture: {label}");
+            }
+            other => panic!("expected a url link, got {other:?}"),
+        }
+
+        // The order the two are written in does not change the answer.
+        let mut app = page(&["t", &format!("[{img} {href}]")]);
+        app.rebuild(80);
+        app.goto_src(1);
+        let links = app.cursor_line_links();
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == href));
+
+        // A picture with no href is still just itself.
+        let mut app = page(&["t", &format!("[{img}]")]);
+        app.rebuild(80);
+        app.goto_src(1);
+        let links = app.cursor_line_links();
+        assert_eq!(links.len(), 1);
+        assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == img));
     }
 
     /// A pasted URL usually wants brackets: that is what makes an image a

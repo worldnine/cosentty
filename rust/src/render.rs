@@ -556,6 +556,12 @@ fn decorate_bracket(
             // "open in browser". Enter/f in the viewer saves and opens it.
             let label = if title.is_empty() { file_name_of_url(url) } else { title };
             spans.push(Span::styled(format!("📎 {label}"), style_url(pal)));
+        } else if looks_like_image_url(url) {
+            // The picture is drawn on its own row; the text row only needs
+            // to say that it is there. Spelling out the whole URL made a
+            // one-line note wrap over three rows of link.
+            let label = if title.is_empty() { file_name_of_url(url) } else { title };
+            spans.push(Span::styled(format!("\u{1f5bc} {label}"), style_url(pal)));
         } else {
             let label = if title.is_empty() { url } else { title };
             spans.push(Span::styled(label.to_string(), style_url(pal)));
@@ -1432,6 +1438,13 @@ mod tests {
         assert_eq!(after.len(), 2, "{after:?}");
         assert!(after[0].contains("後ろのテキスト"), "{after:?}");
         assert_eq!(after[1], "image:https://example.com/a.png");
+
+        // The text row says a picture is there; it does not spell out the
+        // URL. A one-line note used to wrap into three rows of link.
+        let after = shape("[https://example.com/a.png]こんな感じに後ろのテキストも表示される");
+        assert!(after[0].contains("🖼"), "{after:?}");
+        assert!(after[0].contains("a.png"), "{after:?}");
+        assert!(!after[0].contains("https://"), "the address is not the point: {after:?}");
 
         // Quoted notation is a line ABOUT the picture, not a picture: a
         // documentation page must be able to show what it is describing.
