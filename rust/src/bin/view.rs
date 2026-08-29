@@ -1754,7 +1754,39 @@ impl App {
     /// session's keys, then the links on the cursor line, then whatever
     /// wrote to `status` (commits, auth, resync — the things a reader must
     /// not miss), then a diagram note, and finally the key hints.
+    /// Why the page might not be showing the newest state, in a few
+    /// characters — or nothing at all when it is.
+    ///
+    /// Live sync with nothing held is the quiet, normal case. Everything
+    /// else is worth a word: `poll` means web-side edits take up to three
+    /// seconds, and `held` means they have ARRIVED and are waiting for the
+    /// caret line to be committed (remote state is never installed over an
+    /// unsaved line). Without this, both look like "the viewer got slow".
+    fn sync_notice(&self) -> Option<String> {
+        if !self.ws_pending.is_empty() {
+            let dirty = self
+                .session
+                .as_ref()
+                .map(|s| s.input.buf != s.orig)
+                .unwrap_or(false);
+            let why = if dirty { "編集中の行を待っています" } else { "適用待ち" };
+            return Some(format!("⟳ {} 件{}", self.ws_pending.len(), why));
+        }
+        match self.sync_state {
+            capability::SyncState::Live => None,
+            capability::SyncState::Polling => Some("sync: poll".into()),
+            capability::SyncState::Reconnecting => Some("sync: reconnecting".into()),
+        }
+    }
+
     fn hint_text(&self, cursor_links: &[LinkItem]) -> String {
+        match self.sync_notice() {
+            Some(tag) => format!("{tag} · {}", self.hint_body(cursor_links)),
+            None => self.hint_body(cursor_links),
+        }
+    }
+
+    fn hint_body(&self, cursor_links: &[LinkItem]) -> String {
         if let Some(s) = self.session.as_ref() {
             let dirty = s.input.buf != s.orig;
             return format!(
@@ -9008,6 +9040,9 @@ mod tests {
     #[test]
     fn a_diagram_note_never_hides_or_erases_a_commit_or_auth_message() {
         let mut app = mermaid_page();
+        // Live sync keeps the footer quiet, so this test sees only the
+        // status-vs-note ordering it is about.
+        app.sync_state = capability::SyncState::Live;
         // Something the reader must not miss is already on the status line.
         app.status = "commit failed: line 4 — 500".into();
         app.note_web_failure("diagram: no Chrome found (showing source)".into());
@@ -9597,6 +9632,35 @@ mod tests {
         handle_session_key(&mut app, &ctx, key(KeyCode::Delete));
         assert_eq!(app.lines[0].text, "title", "the title stayed");
         assert!(app.status.contains("タイトル行は残した"), "status: {}", app.status);
+    }
+
+    /// "Web edits are slow" has three different causes, and the footer
+    /// should say which one is in play — including the one that is not
+    /// slowness at all: updates arrived and are waiting for the caret line.
+    #[test]
+    fn the_footer_says_why_the_page_is_not_the_newest_state() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+
+        app.sync_state = capability::SyncState::Live;
+        assert_eq!(app.sync_notice(), None, "live and idle says nothing");
+
+        app.sync_state = capability::SyncState::Polling;
+        assert_eq!(app.sync_notice().as_deref(), Some("sync: poll"));
+        assert!(app.hint_text(&[]).starts_with("sync: poll · "), "and it leads the footer");
+
+        app.sync_state = capability::SyncState::Live;
+        app.ws_pending.push_back(commit("c1", "p0", "pid", "someone", vec![]));
+        let held = app.sync_notice().unwrap_or_default();
+        assert!(held.contains('1'), "how many: {held}");
+        assert!(held.contains("適用待ち"), "{held}");
+
+        // With an unsaved caret line, that IS the reason — say so.
+        enter_session(&mut app, &ctx, 1, 0);
+        type_str(&mut app, &ctx, "!");
+        let held = app.sync_notice().unwrap_or_default();
+        assert!(held.contains("編集中の行"), "{held}");
     }
 
     /// The bug that made a new page look saved and arrive empty: Cosense
