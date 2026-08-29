@@ -11,28 +11,9 @@ use cosense::chrome::ChromeBackend;
 use cosense::render::{render_lines, Block};
 use cosense::webrender::{hash_code, ArtifactCache, WebBackend, WebRequest};
 
-/// Chrome processes launched by this viewer (they carry our profile path).
-fn chrome_procs() -> usize {
-    std::process::Command::new("pgrep")
-        .args(["-f", "cosense-tui-chrome-"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
-        .unwrap_or(0)
-}
-
-/// Same, but give Chrome's helper processes a moment to follow their parent
-/// down. Killing and reaping the browser does not instantly reap the GPU and
-/// renderer children, so an immediate count reports stragglers that are on
-/// their way out and reads like a leak.
-fn chrome_procs_settled() -> usize {
-    for _ in 0..40 {
-        let n = chrome_procs();
-        if n == 0 {
-            return 0;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    chrome_procs()
+/// Is a pid still alive? `kill(pid, 0)` probes without signalling it.
+fn alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -105,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // operator inspect) the on-disk cache and its permissions.
     let cache = ArtifactCache::new();
     println!("artifact cache: {}", cache.dir().display());
+    let mut failed: Vec<String> = Vec::new();
     for (req, res) in reqs.iter().zip(results) {
         match res {
             Ok(png) => {
@@ -116,16 +98,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|e| format!("undecodable: {e}"));
                 println!("  OK  {} -> {} {dim} ({} bytes)", req.line_id, path.display(), png.len());
             }
-            Err(e) => println!("  ERR {} -> {e}", req.line_id),
+            Err(e) => {
+                println!("  ERR {} -> {e}", req.line_id);
+                failed.push(format!("{}: {e}", req.line_id));
+            }
         }
     }
     println!("batch of {} in {:?}", reqs.len(), elapsed);
-    // The browser is kept warm between batches; prove that going idle
-    // actually reaps it, and that shutdown leaves nothing behind either.
-    println!("chrome alive after the batch: {}", chrome_procs());
+
+    // Lifecycle check against THIS backend's own browser — not every Chrome
+    // on the machine, which says nothing about whether we leaked.
+    let owned = backend.last_owned();
+    match &owned {
+        Some((pid, dir)) => println!("owned browser: pid {pid}, profile {}", dir.display()),
+        None => println!("owned browser: none was started"),
+    }
     backend.idle();
-    println!("chrome alive after idle():    {}", chrome_procs_settled());
     backend.shutdown();
-    println!("chrome alive after shutdown(): {}", chrome_procs_settled());
+    let mut leaked: Vec<String> = Vec::new();
+    if let Some((pid, dir)) = owned {
+        // Chrome's helper processes outlive the SIGKILL on their parent by a
+        // moment, and hold files open in the profile until they go.
+        for _ in 0..60 {
+            if !alive(pid) && !dir.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if alive(pid) {
+            leaked.push(format!("browser pid {pid} still running"));
+        }
+        if dir.exists() {
+            leaked.push(format!("profile {} still present", dir.display()));
+        }
+    }
+    println!("after shutdown: owned browser gone = {}", leaked.is_empty());
+
+    if !failed.is_empty() || !leaked.is_empty() {
+        for f in &failed {
+            eprintln!("FAILED diagram {f}");
+        }
+        for l in &leaked {
+            eprintln!("LEAKED {l}");
+        }
+        std::process::exit(1);
+    }
     Ok(())
 }

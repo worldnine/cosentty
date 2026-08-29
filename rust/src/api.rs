@@ -250,8 +250,10 @@ pub struct RelatedPages {
 pub struct Page {
     pub id: String,
     pub title: String,
-    /// The page's current commit. The web renderer keys diagrams on it, so a
-    /// commit invalidates every rendered artifact for the page.
+    /// The page's current commit. Reported by the `web_smoke` binary as
+    /// page metadata. NOT part of any diagram's cache key: Cosense commits
+    /// on every keystroke-level edit, so keying on it re-rendered every
+    /// diagram on a page whenever any line was touched (see HANDOFF.md §2).
     #[serde(default, rename = "commitId")]
     pub commit_id: String,
     #[serde(default)]
