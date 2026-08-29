@@ -4414,7 +4414,7 @@ fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
     app.follow = true;
     app.laid_width = 0;
     app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-    app.status = "EDIT — ↑↓ move · Enter new line · Esc done".into();
+    app.status = "EDIT — ↑↓ move · Enter new line · ^_ undo · Esc done".into();
 }
 
 /// Commit the caret line's text if it changed (called whenever the caret
@@ -4433,13 +4433,63 @@ fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
     }
 }
 
-/// Leave the session (Esc): commit the dirty line, back to READ + ASCII.
-fn leave_session(app: &mut App, ctx: &Ctx) {
-    session_commit_dirty(app, ctx);
+/// Drop the session state and go back to READ + ASCII. Commits nothing —
+/// callers decide what to do with the dirty line first.
+fn close_session(app: &mut App) {
     app.session = None;
     app.ime_guard = None;
     app.laid_width = 0;
+}
+
+/// Leave the session (Esc): commit the dirty line, back to READ + ASCII.
+fn leave_session(app: &mut App, ctx: &Ctx) {
+    session_commit_dirty(app, ctx);
+    close_session(app);
     app.status = "✓ done".into();
+}
+
+/// `^_` (undo) / `^r` (redo) inside the session — SPEC §6 says the safety
+/// net works in EDIT too, not only in READ.
+///
+/// The dirty line commits first, so undo means "take back what I just
+/// typed" instead of skipping over it to the commit before. Afterwards the
+/// caret line may have moved, changed text, or been undone out of
+/// existence, so the session is re-seated by line id — the id is what
+/// survives an undo, the index is not.
+fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
+    session_commit_dirty(app, ctx);
+    let Some(s) = app.session.as_ref() else { return };
+    let id = app.lines[s.line].id.clone();
+    let col = s.want_col.unwrap_or_else(|| str_width(&s.input.buf[..s.input.cur]));
+    let stack_was_empty = if back { app.undo_stack.is_empty() } else { app.redo_stack.is_empty() };
+    if back {
+        undo(app, ctx);
+    } else {
+        redo(app, ctx);
+    }
+    if stack_was_empty {
+        return; // nothing happened; the status line already says so
+    }
+    let Some(line) = app.lines.iter().position(|l| l.id == id) else {
+        // The caret line itself was undone away. READ is the honest place
+        // to be — there is no line left to hold the caret.
+        let status = std::mem::take(&mut app.status);
+        close_session(app);
+        app.cursor = app.cursor.min(app.lines.len().saturating_sub(1));
+        app.status = format!("{status} — EDIT closed");
+        return;
+    };
+    let text = app.lines[line].text.clone();
+    let caret = byte_at_col(&text, col);
+    if let Some(s) = app.session.as_mut() {
+        s.line = line;
+        s.input = Input { buf: text.clone(), cur: caret };
+        s.orig = text;
+        s.want_col = Some(col);
+    }
+    app.cursor = line;
+    app.follow = true;
+    app.laid_width = 0;
 }
 
 /// ↑/↓ inside the session: commit the dirty line, carry the caret to the
@@ -4660,6 +4710,15 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::End, _) | (KeyCode::Char('e'), true) => edit_input(app, Input::end),
         (KeyCode::Char('w'), true) => edit_input(app, Input::delete_word),
         (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
+        // `u` is a printable key in a modeless session, so undo takes the
+        // readline/emacs seat: `^_` (Ctrl+/). `^z` stays with the terminal
+        // (SIGTSTP). Ctrl+/ and Ctrl+_ both put 0x1F on the wire, which
+        // crossterm reports as Ctrl+'7' unless the kitty protocol is on —
+        // accept every spelling so the key works on any terminal.
+        (KeyCode::Char('7'), true)
+        | (KeyCode::Char('_'), true)
+        | (KeyCode::Char('/'), true) => session_history(app, ctx, true),
+        (KeyCode::Char('r'), true) => session_history(app, ctx, false),
         (KeyCode::Backspace, _) => {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
@@ -8629,6 +8688,9 @@ mod tests {
     fn key(code: KeyCode) -> event::KeyEvent {
         event::KeyEvent::new(code, KeyModifiers::NONE)
     }
+    fn ctrl(ch: char) -> event::KeyEvent {
+        event::KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
     fn type_str(app: &mut App, ctx: &Ctx, s: &str) {
         for ch in s.chars() {
             handle_session_key(app, ctx, key(KeyCode::Char(ch)));
@@ -8786,6 +8848,55 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// SPEC §6: the safety net has to be reachable without leaving EDIT.
+    #[test]
+    fn session_undo_takes_back_the_typing_and_keeps_editing() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3); // caret at end of "one"
+        type_str(&mut app, &ctx, "!!");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "one!!");
+
+        handle_session_key(&mut app, &ctx, ctrl('7')); // 0x1F on a legacy terminal
+        assert_eq!(app.lines[1].text, "one", "the dirty text committed, then undid");
+        let s = app.session.as_ref().expect("still editing");
+        assert_eq!(s.line, 1);
+        assert_eq!(s.input.buf, "one", "the caret line reloaded from the undone state");
+        assert_eq!(s.orig, "one", "and is clean again");
+
+        handle_session_key(&mut app, &ctx, ctrl('r'));
+        assert_eq!(app.lines[1].text, "one!!", "^r redoes without leaving EDIT");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "one!!");
+
+        let labels: Vec<String> = drain_jobs(&mut app).into_iter().map(|j| j.0).collect();
+        assert_eq!(labels.len(), 3, "typing, undo and redo each committed");
+        assert!(labels[1].starts_with("undo"));
+        assert!(labels[2].starts_with("redo"));
+    }
+
+    /// Undoing the line the caret sits on leaves nowhere to type: the
+    /// session closes instead of pointing at a line that no longer exists.
+    #[test]
+    fn session_undo_that_removes_the_caret_line_closes_the_session() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        app.cursor = 1;
+        open_line(&mut app, &ctx, false); // new line 2, session on it
+        type_str(&mut app, &ctx, "fresh");
+
+        handle_session_key(&mut app, &ctx, ctrl('_')); // undo the typing
+        assert_eq!(app.lines.len(), 3);
+        assert!(app.session.is_some(), "the line survives, so EDIT does too");
+
+        handle_session_key(&mut app, &ctx, ctrl('_')); // undo the line itself
+        assert_eq!(app.lines.len(), 2, "the new line is gone");
+        assert!(app.session.is_none(), "no line to hold the caret");
+        assert_eq!(app.cursor, 1);
+        assert!(app.status.contains("EDIT closed"), "status: {}", app.status);
     }
 
     #[test]
