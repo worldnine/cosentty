@@ -941,13 +941,11 @@ impl App {
         if self.laid_width == 0 {
             return;
         }
-        // Never render while the reader is editing or a commit is in flight.
-        // The browser can only ever show what the SERVER has, so a render
-        // started mid-edit would either capture the pre-edit diagram or
-        // race the commit. Waiting until the session closes and the queue
-        // drains also means typing never launches a browser: one render
-        // happens at the end, against the text that was actually committed.
-        if self.session.is_some() || self.inflight > 0 {
+        // The browser can only ever show what the SERVER has, so nothing is
+        // requested while a commit is still on its way there. This is a
+        // whole-page gate: any queued commit could be the one that changes
+        // a diagram.
+        if self.inflight > 0 {
             return;
         }
         // Width in CSS pixels, bucketed to 80px: a diagram is re-rendered on
@@ -960,7 +958,14 @@ impl App {
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
         for b in &self.blocks {
-            let Block::WebRender { kind, code, last_src, .. } = b else { continue };
+            let Block::WebRender { kind, code, rows, last_src } = b else { continue };
+            // An open session does NOT hold up the rest of the page: only
+            // the block under the caret waits, because that one line's
+            // buffer has not been committed yet (every caret MOVE commits
+            // the dirty line first, so leaving a block releases it).
+            if self.caret_is_inside(rows) {
+                continue;
+            }
             let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
             let key = req.cache_key();
             if self.images.contains_key(&key)
@@ -982,6 +987,15 @@ impl App {
         self.laid_width = 0;
         self.web_anim = std::time::Instant::now();
         let _ = self.web_job_tx.send(WebJob { gen: self.web_gen, reqs });
+    }
+
+    /// Is the edit session's caret on one of these source lines? Such a
+    /// line is being typed into, so `app.lines` still holds the committed
+    /// text while the session's buffer holds the reader's — the block is not
+    /// renderable until the caret leaves and the commit lands.
+    fn caret_is_inside(&self, rows: &[(usize, Line<'static>)]) -> bool {
+        let Some(s) = &self.session else { return false };
+        rows.iter().any(|(src, _)| *src == s.line)
     }
 
     /// Source lines belonging to a diagram that is being rendered right now,
@@ -5471,27 +5485,56 @@ mod tests {
     }
 
     #[test]
+    fn an_open_session_only_holds_back_the_block_under_the_caret() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let session_on = |app: &mut App, line: usize| {
+            app.session = Some(EditSession {
+                line,
+                input: Input::new(app.lines[line].text.clone()),
+                orig: app.lines[line].text.clone(),
+                want_col: None,
+            });
+        };
+        // The caret is inside the FIRST diagram (lines 1..=3): that one is
+        // still being typed, but the second diagram has nothing to wait for.
+        session_on(&mut app, 2);
+        app.start_web_renders(&ctx);
+        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes");
+        assert_eq!(
+            job.reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
+            vec!["id7"],
+            "only the block the caret is NOT in",
+        );
+
+        // The caret moves off the diagram — every caret move commits the
+        // dirty line first, so the block is now renderable. (Queueing a
+        // batch invalidates the layout so the pulse can appear, and the
+        // next request goes out after the frame that rebuilds it.)
+        app.rebuild(80);
+        session_on(&mut app, 5);
+        app.start_web_renders(&ctx);
+        let job = app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap();
+        assert_eq!(
+            job.reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
+            vec!["id3"],
+            "the block the caret just left starts rendering, session still open",
+        );
+    }
+
+    #[test]
     fn typing_never_launches_a_browser() {
         let ctx = test_ctx();
         let mut app = mermaid_page();
         app.rebuild(80);
-        // An open edit session: the browser can only show what the server
-        // has, so nothing is requested until the session closes.
-        app.session = Some(EditSession {
-            line: 2,
-            input: Input::new("  flowchart LR".into()),
-            orig: "  flowchart LR".into(),
-            want_col: None,
-        });
-        app.start_web_renders(&ctx);
-        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
-        assert!(app.web_pending.is_empty());
-        // Session closed, but a commit is still on its way to the server.
-        app.session = None;
+        // A commit is still on its way to the server: the browser would see
+        // the pre-edit page, so nothing is requested at all.
         app.inflight = 1;
         app.start_web_renders(&ctx);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
-        // Everything settled: now one batch goes out, against committed text.
+        assert!(app.web_pending.is_empty());
+        // Settled: one batch goes out, against text the server now has.
         app.inflight = 0;
         app.start_web_renders(&ctx);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok());

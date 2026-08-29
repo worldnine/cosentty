@@ -96,10 +96,20 @@ Page identity is still guarded, twice over: `project/title/page_id/line_id` are 
 key, and `web_gen` (bumped on every page install) drops any result that arrives for a
 page the reader has already left.
 
-Because the browser can only ever show what the **server** has, renders are deferred
-while `app.session.is_some() || app.inflight > 0`. Typing therefore never launches a
-browser; one render happens after the session closes and the commit queue drains,
-against the text that was actually committed. The credential is **not** in `WebRequest` — it is constructor
+Because the browser can only ever show what the **server** has, a render is only issued
+for a block whose text the server already has:
+
+* `app.inflight > 0` gates the **whole page** — any queued commit could be the one that
+  changes a diagram.
+* An open edit session gates **only the block under the caret** (`caret_is_inside`).
+  That one line's buffer is uncommitted; every other block on the page is committed and
+  renders normally. Since every caret move calls `session_commit_dirty` first, moving
+  off a diagram is what releases it — the reader edits a diagram, moves away, and it
+  starts rendering while the session is still open.
+
+Typing itself therefore never launches a browser, and when a picture does land
+mid-session the cursor keeps its screen row (`relayout_preserving_screen_row`, which
+already runs on every layout invalidation). The credential is **not** in `WebRequest` — it is constructor
 state on the backend, so it cannot reach a key, a log or an error string.
 
 ### `cosense::chrome` — the one implementation
@@ -185,6 +195,8 @@ New coverage, against the acceptance list:
 | block → lineId, multiple blocks | `render::a_mermaid_block_becomes_one_web_render_keyed_on_its_last_line`, `render::several_mermaid_blocks_stay_separate_and_other_languages_are_untouched`, `view::each_mermaid_block_is_requested_against_its_own_cosense_line_id` |
 | stale generation / page rejected | `view::a_result_for_an_older_page_generation_is_dropped`, `webrender::a_new_source_page_or_width_is_a_different_artifact` |
 | an unrelated edit does NOT re-render | `view::an_unrelated_commit_does_not_invalidate_a_diagram_but_its_own_source_does`, `view::typing_never_launches_a_browser` |
+| an open session only blocks its own diagram | `view::an_open_session_only_holds_back_the_block_under_the_caret` |
+| the reader sees the renderer working | `theme::shimmer_*` (4), `view::a_rendering_diagram_pulses_its_code_and_stops_when_it_lands` |
 | renderer failure → code fallback | `view::a_renderer_failure_leaves_the_code_block_on_screen`, `webrender::unavailable_backend_fails_every_request_without_a_browser` |
 | UI thread does not block | `view::the_ui_thread_never_waits_for_the_browser` (the fake backend is pinned mid-render; the UI still queues, lays out and reports pending in <200 ms, and the artifact arrives after the gate is released) |
 | selector / artifact correspondence | `webrender::selector_addresses_the_preview_by_line_id`, `webrender::fake_backend_answers_by_key`, `view::an_artifact_replaces_the_code_block_and_edit_puts_it_back` |
