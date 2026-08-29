@@ -344,7 +344,8 @@ struct App {
     /// Link pressed with the left button. Activation waits for button-up on
     /// the same target, so dragging can still select text/lines.
     pressed_link: Option<(usize, LinkItem)>,
-    /// Related-pages sections below the body (view mode only).
+    /// Related-pages sections below the body (view mode only; hidden while
+    /// the edit session is open).
     related: Vec<RelSection>,
     /// Flattened related entries in render order. Entry `i` renders with
     /// the VIRTUAL source index `lines.len() + i`, so the cursor, Enter and
@@ -682,10 +683,16 @@ impl App {
     }
 
     /// Number of cursor-addressable source indices: body lines, plus the
-    /// related entries in view mode (virtual lines after the body).
+    /// related entries in view mode (virtual lines after the body). The
+    /// edit session hides the related section, so its rows are not
+    /// addressable then either — exactly like source mode.
     fn src_count(&self) -> usize {
         self.lines.len()
-            + if self.mode == Mode::View { self.virtual_items.len() } else { 0 }
+            + if self.mode == Mode::View && self.session.is_none() {
+                self.virtual_items.len()
+            } else {
+                0
+            }
     }
 
     /// Read state for a cursor-addressable related row. The flattening order
@@ -1204,10 +1211,18 @@ impl App {
     fn rebuild(&mut self, width: u16) {
         // 1. Page rows and related rows are separate visual regions. The
         // page is boxed; related sections are appended after its FrameEnd.
+        // The edit session (and source mode) hides the related sections:
+        // the caret line is raw source and the region below the frame is
+        // pure page content.
         let (content, related): (Vec<Row>, Vec<Row>) = match self.mode {
             Mode::View => {
                 let text_w = Self::text_width(Mode::View, width);
-                (self.content_view(width), self.related_rows(text_w))
+                let related = if self.session.is_none() {
+                    self.related_rows(text_w)
+                } else {
+                    Vec::new()
+                };
+                (self.content_view(width), related)
             }
             Mode::Source => (self.content_source(width), Vec::new()),
         };
@@ -5190,6 +5205,37 @@ mod tests {
         app.rebuild(60);
         assert_eq!(app.src_count(), 2);
         assert!(app.cursor < 2, "cursor clamped into the body");
+    }
+
+    #[test]
+    fn edit_session_hides_the_related_section() {
+        let mut app = page(&["title", "body"]);
+        app.related = test_related();
+        app.virtual_items = app
+            .related
+            .iter()
+            .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+            .collect();
+        app.rebuild(60);
+        let frame = app.rows.iter().position(|r| matches!(r, Row::FrameEnd)).unwrap();
+        assert!(app.rows[frame + 1..].iter().any(|r| r.src() == Some(2)));
+        assert_eq!(app.src_count(), 5);
+
+        // Entering the session hides the related section entirely: nothing
+        // follows the frame, and the rows are not addressable.
+        enter_session(&mut app, &test_ctx(), 1, 0);
+        app.rebuild(60);
+        assert_eq!(app.src_count(), 2, "related rows are unaddressable in the session");
+        let end = app.rows.iter().position(|r| matches!(r, Row::FrameEnd)).unwrap();
+        assert_eq!(end, app.rows.len() - 1, "nothing follows the frame while editing");
+        assert!(app.cursor < 2, "cursor stays on a body line");
+
+        // Leaving the session restores them.
+        leave_session(&mut app, &test_ctx());
+        app.rebuild(60);
+        assert_eq!(app.src_count(), 5);
+        let end = app.rows.iter().position(|r| matches!(r, Row::FrameEnd)).unwrap();
+        assert!(app.rows[end + 1..].iter().any(|r| r.src() == Some(2)));
     }
 
     #[test]
