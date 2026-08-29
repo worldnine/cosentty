@@ -7487,7 +7487,14 @@ fn place_beside_image(
     // Too narrow to read beside the picture: put it all underneath.
     let (first, rest) = if beside_w >= 8 {
         let mut wrapped = wrap_line(line, beside_w).into_iter();
-        (wrapped.next(), wrapped.collect::<Vec<_>>())
+        let first = wrapped.next();
+        // What did NOT fit beside the picture is re-wrapped to the width
+        // it will actually get down there. Carrying the narrow pieces
+        // straight down left the text in a column as thin as the gap
+        // beside the image, with the pane empty to its right.
+        let rest: Vec<Span<'static>> =
+            wrapped.flat_map(|l| l.spans.into_iter()).collect();
+        (first, wrap_line(&Line::from(rest), below_w))
     } else {
         (None, wrap_line(line, below_w))
     };
@@ -7497,6 +7504,9 @@ fn place_beside_image(
     }
     let mut row = img_h;
     for l in rest {
+        if l.spans.iter().all(|s| s.content.trim().is_empty()) {
+            continue; // the re-wrap can leave an empty tail
+        }
         placed.push((row, indent as u16, l));
         row += 1;
     }
@@ -10420,12 +10430,26 @@ mod tests {
         assert_eq!(*row, 5, "on the picture\'s last row, like a baseline");
         assert_eq!(*col, 11, "just right of it, with a column of air");
 
-        // Long text spills under the picture at full width.
+        // Long text spills under the picture AT FULL WIDTH: the pieces
+        // that did not fit beside it are re-wrapped for the room they get
+        // down there, not carried down in the narrow column.
         let long = Line::from("あ".repeat(80));
         let (side, extra) = place_beside_image(&long, 0, 10, 3, 40);
         assert!(extra > 0, "{side:?}");
         assert_eq!(side[0].0, 2, "the first piece still rides the last row");
         assert!(side[1..].iter().all(|(r, c, _)| *r >= 3 && *c == 0), "{side:?}");
+        let below_widths: Vec<usize> = side[1..]
+            .iter()
+            .map(|(_, _, l)| {
+                str_width(&l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            })
+            .collect();
+        let beside_w = 40 - (10 + 1);
+        assert!(
+            below_widths[..below_widths.len() - 1].iter().all(|w| *w > beside_w),
+            "the rows under the picture use the whole pane: {below_widths:?} (beside was {beside_w})",
+        );
+        assert!(below_widths.iter().all(|w| *w <= 40), "{below_widths:?}");
 
         // An indented picture puts the overflow at ITS column, not the margin.
         let (side, _) = place_beside_image(&long, 4, 10, 2, 40);
