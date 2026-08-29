@@ -2445,11 +2445,35 @@ impl App {
         if self.cursor_rows().is_some() {
             return;
         }
+        // A drawn diagram collapses its whole source span into ONE image
+        // row, owned by the block's last line. A cursor anywhere else in
+        // that span owns no row — and the generic search below goes UP,
+        // landing the reader on the line BEFORE the diagram rather than on
+        // the diagram they were just editing. Send it to the row the block
+        // actually has, which is also where it visually already is.
+        if let Some(owner) = self.diagram_row_owner(self.cursor) {
+            self.cursor = owner;
+            return;
+        }
         let up = (0..self.cursor).rev().find(|&s| self.src_rows(s).is_some());
         let down = (self.cursor + 1..n).find(|&s| self.src_rows(s).is_some());
         if let Some(s) = up.or(down) {
             self.cursor = s;
         }
+    }
+
+    /// If `src` lies inside a diagram block that is currently showing its
+    /// picture, the source line that owns that picture's row.
+    fn diagram_row_owner(&self, src: usize) -> Option<usize> {
+        self.blocks.iter().find_map(|b| {
+            let Block::WebRender { rows, last_src, .. } = b else { return None };
+            if !rows.iter().any(|(rsrc, _)| *rsrc == src) {
+                return None;
+            }
+            // Only when the block really is a picture right now: an undrawn
+            // one renders its source lines normally, and they own rows.
+            self.src_rows(*last_src).map(|_| *last_src)
+        })
     }
 
     /// The display rows occupied by source line `src`, as an inclusive
@@ -6396,6 +6420,65 @@ mod tests {
     // ---------------------------------------------------------------
     // A fetch that fails must not be treated as one that succeeded.
     // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // Leaving an edit inside a diagram block.
+    // ---------------------------------------------------------------
+
+    /// `mermaid_page` with the first block's picture installed, so that
+    /// block collapses to a single image row.
+    fn drawn_mermaid_page() -> App {
+        let mut app = mermaid_page();
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(key, info);
+        app
+    }
+
+    #[test]
+    fn leaving_an_edit_inside_a_diagram_lands_on_the_picture_not_before_it() {
+        // The drawn block is ONE image row, owned by its last source line.
+        // A cursor left on the header or an interior line owns no row, and
+        // the generic clamp searches UP — landing the reader on the line
+        // BEFORE the diagram, which is not where they were working.
+        for (name, start) in [("header", 1usize), ("interior", 2), ("last", 3)] {
+            let mut app = drawn_mermaid_page();
+            app.cursor = start;
+            app.rebuild(80);
+            assert_eq!(
+                app.cursor, 3,
+                "a cursor on the {name} line belongs to the picture it is inside"
+            );
+            assert!(
+                app.cursor_rows().is_some(),
+                "and that line owns a row ({name})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cursor_before_a_diagram_is_left_where_it_is() {
+        // The remap must not swallow lines that merely sit near a block.
+        let mut app = drawn_mermaid_page();
+        app.cursor = 0;
+        app.rebuild(80);
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn an_undrawn_diagram_block_keeps_its_source_lines_addressable() {
+        // Without a picture the block is ordinary code rows; every line of
+        // it owns rows and nothing should be remapped.
+        let mut app = mermaid_page();
+        for start in [1usize, 2, 3] {
+            app.cursor = start;
+            app.rebuild(80);
+            assert_eq!(app.cursor, start, "source lines stay addressable");
+        }
+    }
 
     #[test]
     fn a_snapshot_never_renders_diagrams() {
