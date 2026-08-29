@@ -1972,6 +1972,7 @@ impl App {
         let Some(text) = self.lines.get(src).map(|l| l.text.as_str()) else {
             return Vec::new();
         };
+        let text = &mask_inline_code(text);
         let mut items: Vec<LinkItem> = links_on_line(text);
         items.extend(labelled_urls(text).into_iter().map(|(label, url)| {
             link_item_for_url(label, url)
@@ -1985,7 +1986,7 @@ impl App {
         if src >= self.lines.len() {
             return self.links_at_src(src);
         }
-        let text = &self.lines[src].text;
+        let text = &mask_inline_code(&self.lines[src].text);
         let mut positioned = positioned_links_on_line(text);
         positioned.extend(
             positioned_labelled_urls(text)
@@ -3809,6 +3810,32 @@ fn build_image(
 /// URL, decoration, or icon) and `#hashtag` in the current project, and
 /// `[/project/PageName]` into another project. A bare `[/project]` (the
 /// project's top page) is skipped: it is not a page.
+/// The line with every inline-code span blanked out, byte offsets intact.
+///
+/// Backticks quote notation: a line that WRITES about `[a link]` is not a
+/// line that HAS one. The renderer already knew this; link extraction did
+/// not, so a page documenting the notation was covered in links to pages
+/// nobody meant to name.
+fn mask_inline_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_code = false;
+    for ch in text.chars() {
+        if ch == '`' {
+            in_code = !in_code;
+            out.push(' ');
+            continue;
+        }
+        if in_code {
+            for _ in 0..ch.len_utf8() {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
     let mut out = Vec::new();
     let mut from = 0usize;
@@ -10192,6 +10219,36 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// Backticks quote notation. A line that WRITES about `[a link]` must
+    /// not BE one — a page documenting the syntax turned into a field of
+    /// links to pages nobody meant to name, and Enter followed them.
+    #[test]
+    fn quoted_notation_is_not_a_link() {
+        let line = "リンク付き画像 `[リンク先 画像URL]` → 画像を出し、Enter でリンク先へ";
+        let mut app = page(&["t", line]);
+        app.rebuild(80);
+        app.goto_src(1);
+        assert!(app.cursor_line_links().is_empty(), "{:?}", app.cursor_line_links());
+
+        // A quoted URL is not a link either.
+        let mut app = page(&["t", "`[https://example.com/a.png]` は画像になる"]);
+        app.rebuild(80);
+        app.goto_src(1);
+        assert!(app.cursor_line_links().is_empty());
+
+        // Outside the quotes, everything still works — including a real
+        // link on the same line as a quoted one.
+        let mut app = page(&["t", "`[quoted]` と [本物]"]);
+        app.rebuild(80);
+        app.goto_src(1);
+        assert_eq!(app.cursor_line_links(), vec![LinkItem::Page("本物".into())]);
+
+        // The masking keeps byte offsets, so mouse targets stay put.
+        let masked = mask_inline_code("`[a]` [b]");
+        assert_eq!(masked.len(), "`[a]` [b]".len());
+        assert_eq!(&masked[6..], "[b]");
     }
 
     /// A linked image (`[href imageUrl]`) is ONE link: the picture is the
