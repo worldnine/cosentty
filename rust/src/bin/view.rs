@@ -4257,49 +4257,13 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             }
             return Action::Editor;
         }
+        // `x` used to delete the cursor line (or the selection) right
+        // here, in the mode meant for reading. Deletion now lives where
+        // editing does: `^k` for a line, Shift+↑↓ then ⌫ for a range. The
+        // key is kept only to say so — a key that silently stops working
+        // is worse than one that explains itself.
         (KeyCode::Char('x'), false) => {
-            if app.time.is_some() {
-                app.status = "viewing history — read-only (Esc → NOW)".into();
-                return Action::Continue;
-            }
-            // Delete the cursor line, or every line of the selection.
-            let (a, b) = app
-                .selection
-                .map(|s| s.range())
-                .unwrap_or((app.cursor, app.cursor));
-            if a >= app.lines.len() {
-                app.status = "related rows cannot be deleted".into();
-                return Action::Continue;
-            }
-            let b = b.min(app.lines.len() - 1);
-            // Line 0 is the page title, and Cosense has no untitled page:
-            // deleting it promotes line 1 to title, which renames the page
-            // and moves its URL. That is not what one keystroke should do,
-            // so the title is skipped rather than deleted — with a
-            // selection that spans it, the body lines still go.
-            let title_skipped = a == 0;
-            let ops: Vec<EditOp> = (a.max(1)..=b)
-                .filter_map(|i| {
-                    let id = app.lines[i].id.clone();
-                    if id.is_empty() { None } else { Some(EditOp::Delete { id }) }
-                })
-                .collect();
-            if ops.is_empty() {
-                app.status = if title_skipped {
-                    "タイトル行は削除できません（e で書き換えればページ名が変わります）".into()
-                } else {
-                    "nothing deletable here".into()
-                };
-            } else {
-                let n = ops.len();
-                app.selection = None;
-                do_edit(app, ctx, "delete", ops);
-                app.status = if title_skipped {
-                    format!("✓ deleted {n} line(s)（タイトル行は残した）· ^z to undo")
-                } else {
-                    format!("✓ deleted {n} line(s) · ^z to undo")
-                };
-            }
+            app.status = "削除は編集中に — e で入って ^k（行）/ Shift+↑↓ と ⌫（範囲）".into();
         }
         (KeyCode::Char('d'), false) => {
             if let Some(i) = app.comment_at_cursor() {
@@ -4677,7 +4641,63 @@ fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
     app.laid_width = 0;
 }
 
-/// `^k` inside the session — the emacs contract, one line at a time:
+/// Shift+↑/↓ inside the session: carry the caret one line and grow the
+/// selection with it (anchored where it started). The caret line commits
+/// on the way, exactly as a plain ↑/↓ does — selecting must never be the
+/// thing that loses a keystroke.
+fn session_select_line(app: &mut App, ctx: &Ctx, delta: i32) {
+    let Some(s) = app.session.as_ref() else { return };
+    let anchor = app.selection.map(|sel| sel.anchor).unwrap_or(s.line);
+    session_move_line(app, ctx, delta);
+    let Some(s) = app.session.as_ref() else { return };
+    app.selection = Some(Selection { anchor, cursor: s.line });
+    let (a, b) = (anchor.min(s.line), anchor.max(s.line));
+    app.status = format!("selected {} line(s) · ⌫ delete · Esc clear", b - a + 1);
+}
+
+/// ⌫ / Del with a selection: delete every selected line at once. This is
+/// the range delete READ's `x` was carrying — now available where the
+/// editing happens.
+///
+/// The title line is skipped for the same reason `x` skips it: deleting it
+/// renames the page and moves its URL.
+fn session_delete_selection(app: &mut App, ctx: &Ctx) {
+    let Some(sel) = app.selection else { return };
+    let (a, b) = sel.range();
+    let b = b.min(app.lines.len().saturating_sub(1));
+    let title_skipped = a == 0;
+    let ids: Vec<String> = (a.max(1)..=b).map(|i| app.lines[i].id.clone()).collect();
+    app.selection = None;
+    if ids.is_empty() {
+        app.status = "タイトル行は削除できません".into();
+        return;
+    }
+    // The caret line may be inside the range; commit its text first so undo
+    // gives back the lines as they were on screen.
+    session_commit_dirty(app, ctx);
+    let n = ids.len();
+    let ops: Vec<EditOp> = ids.into_iter().map(|id| EditOp::Delete { id }).collect();
+    do_edit(app, ctx, "delete lines", ops);
+    // Seat the caret where the range was, as `^k` does for one line.
+    let seat = a.max(1).min(app.lines.len().saturating_sub(1));
+    let text = app.lines[seat].text.clone();
+    if let Some(s) = app.session.as_mut() {
+        s.line = seat;
+        s.input = Input { buf: text.clone(), cur: 0 };
+        s.orig = text;
+        s.want_col = None;
+    }
+    app.cursor = seat;
+    app.follow = true;
+    app.laid_width = 0;
+    app.status = if title_skipped {
+        format!("✓ deleted {n} line(s)（タイトル行は残した）· ^z to undo")
+    } else {
+        format!("✓ deleted {n} line(s) · ^z to undo")
+    };
+}
+
+/// `^k` inside the session/// `^k` inside the session — the emacs contract, one line at a time:
 /// kill to the end of the line, and when there is nothing left to kill,
 /// kill the line itself. So `^k^k` deletes a line without leaving EDIT,
 /// which is what makes deletion an editing gesture rather than a READ-mode
@@ -4968,6 +4988,21 @@ fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
 /// type, arrows move the caret, Enter makes lines, Esc leaves.
 fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    // Anything that is not extending or acting on the selection drops it:
+    // a range that outlives the keystroke it was made for is a trap.
+    if app.selection.is_some()
+        && !matches!(
+            (k.code, shift),
+            (KeyCode::Up, true)
+                | (KeyCode::Down, true)
+                | (KeyCode::Backspace, _)
+                | (KeyCode::Delete, _)
+                | (KeyCode::Esc, _)
+        )
+    {
+        app.selection = None;
+    }
     // Any horizontal edit resets the sticky ↑/↓ column.
     let reset_col = |app: &mut App| {
         if let Some(s) = app.session.as_mut() {
@@ -4983,8 +5018,21 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         app.follow = true;
     };
     match (k.code, ctrl) {
-        (KeyCode::Esc, _) => leave_session(app, ctx),
+        (KeyCode::Esc, _) => {
+            // One Esc at a time: a selection is dropped first, so Esc never
+            // both un-selects and leaves.
+            if app.selection.is_some() {
+                app.selection = None;
+                app.status = "selection cleared".into();
+            } else {
+                leave_session(app, ctx);
+            }
+        }
         (KeyCode::Enter, _) => session_split(app, ctx),
+        // Shift+↑/↓ grows a LINE range from the caret — the one thing EDIT
+        // could not do, and the reason range deletion still lived in READ.
+        (KeyCode::Up, _) if shift => session_select_line(app, ctx, -1),
+        (KeyCode::Down, _) if shift => session_select_line(app, ctx, 1),
         (KeyCode::Up, _) => session_move_line(app, ctx, -1),
         (KeyCode::Down, _) => session_move_line(app, ctx, 1),
         (KeyCode::Left, _) | (KeyCode::Char('b'), true) => edit_input(app, Input::left),
@@ -5000,6 +5048,8 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         // and this viewer has no suspend of its own to lose.
         (KeyCode::Char('z'), true) => session_history(app, ctx, true),
         (KeyCode::Char('r'), true) => session_history(app, ctx, false),
+        (KeyCode::Backspace, _) if app.selection.is_some() => session_delete_selection(app, ctx),
+        (KeyCode::Delete, _) if app.selection.is_some() => session_delete_selection(app, ctx),
         (KeyCode::Backspace, _) => {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
@@ -9270,6 +9320,71 @@ mod tests {
         assert_eq!(drain_jobs(&mut app).len(), 1, "content makes it real");
     }
 
+    fn shift(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    /// The last thing READ's `x` was still needed for: deleting a RANGE.
+    /// Shift+↑↓ grows one in EDIT, ⌫ deletes it, `^z` brings it back.
+    #[test]
+    fn shift_arrows_select_lines_and_backspace_deletes_them() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three", "four"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        let sel = app.selection.expect("a range");
+        assert_eq!(sel.range(), (1, 3), "anchored where it started");
+        assert_eq!(app.session.as_ref().unwrap().line, 3, "the caret came along");
+
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        assert_eq!(
+            app.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["title", "four"],
+            "the whole range went",
+        );
+        assert!(app.selection.is_none(), "and the range with it");
+        let s = app.session.as_ref().expect("still editing");
+        assert_eq!(s.line, 1, "the caret took the range's place");
+        assert_eq!(s.input.buf, "four");
+
+        handle_session_key(&mut app, &ctx, ctrl('z'));
+        assert_eq!(app.lines.len(), 5, "^z brings the lines back");
+    }
+
+    /// A selection must not outlive the keystroke it was made for, and it
+    /// must never take the title line with it.
+    #[test]
+    fn a_session_selection_is_dropped_by_anything_else_and_spares_the_title() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+
+        // Typing drops it (and does not delete anything).
+        enter_session(&mut app, &ctx, 1, 0);
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        assert!(app.selection.is_some());
+        type_str(&mut app, &ctx, "x");
+        assert!(app.selection.is_none(), "typing drops the range");
+        assert_eq!(app.lines.len(), 3, "and deletes nothing");
+
+        // Esc drops the range before it leaves the session.
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Up));
+        assert!(app.selection.is_some());
+        handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.selection.is_none());
+        assert!(app.session.is_some(), "one Esc, one job");
+
+        // A range that starts at the title deletes the body only.
+        enter_session(&mut app, &ctx, 0, 0);
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Delete));
+        assert_eq!(app.lines[0].text, "title", "the title stayed");
+        assert!(app.status.contains("タイトル行は残した"), "status: {}", app.status);
+    }
+
     /// A page nobody has written yet: Cosense answers 200 for any title,
     /// so the viewer opens a template. Editing it must CREATE the page,
     /// which is a different request (no pageId) — and it must go out
@@ -9490,28 +9605,26 @@ mod tests {
         assert!(app.session.is_some(), "and the session stays open");
     }
 
-    /// `x` is gate-free by design (undo is the net), but the title line is
-    /// not just another line: deleting it renames the page and moves its
-    /// URL. One keystroke must not do that.
+    /// READ is for reading. `x` no longer deletes anything; it points at
+    /// the keys that do, in the session where editing happens.
     #[test]
-    fn x_never_deletes_the_title_line() {
+    fn x_no_longer_deletes_and_says_where_deletion_lives() {
         let ctx = test_ctx();
         let mut app = page(&["title", "one", "two"]);
         app.rebuild(40);
-        app.cursor = 0;
+        app.cursor = 1;
 
         handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
         assert_eq!(app.lines.len(), 3, "nothing was deleted");
-        assert_eq!(app.lines[0].text, "title");
-        assert!(app.status.contains("タイトル行"), "status: {}", app.status);
         assert!(drain_jobs(&mut app).is_empty(), "and nothing was committed");
+        assert!(app.status.contains("^k"), "status: {}", app.status);
+        assert!(app.status.contains("⌫"), "status: {}", app.status);
 
-        // A selection that spans the title still deletes the body lines.
-        app.selection = Some(Selection { anchor: 0, cursor: 2 });
+        // Not even with a selection: that range belongs to `c` (comment)
+        // in READ, and to ⌫ in EDIT.
+        app.selection = Some(Selection { anchor: 1, cursor: 2 });
         handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
-        assert_eq!(app.lines.len(), 1, "the two body lines went");
-        assert_eq!(app.lines[0].text, "title", "the title stayed");
-        assert!(app.status.contains("タイトル行は残した"), "status: {}", app.status);
+        assert_eq!(app.lines.len(), 3);
     }
 
     /// A web-side edit elsewhere on the page must not take the redo stack
