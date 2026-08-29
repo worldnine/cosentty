@@ -15,6 +15,7 @@ unicode-width = "0.2"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 libc = "0.2"
+tempfile = "3"
 tungstenite = { version = "0.29", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [lib]
@@ -36,6 +37,10 @@ path = "src/bin/view.rs"
 [[bin]]
 name = "edit_smoke"
 path = "src/bin/edit_smoke.rs"
+
+[[bin]]
+name = "web_smoke"
+path = "src/bin/web_smoke.rs"
 
 [[bin]]
 name = "ws_smoke"

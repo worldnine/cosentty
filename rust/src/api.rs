@@ -250,6 +250,12 @@ pub struct RelatedPages {
 pub struct Page {
     pub id: String,
     pub title: String,
+    /// The page's current commit. Reported by the `web_smoke` binary as
+    /// page metadata. NOT part of any diagram's cache key: Cosense commits
+    /// on every keystroke-level edit, so keying on it re-rendered every
+    /// diagram on a page whenever any line was touched (see HANDOFF.md §2).
+    #[serde(default, rename = "commitId")]
+    pub commit_id: String,
     #[serde(default)]
     pub lines: Vec<PageLine>,
     #[serde(default)]
@@ -556,6 +562,29 @@ impl Client {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .ok_or_else(|| "projects/<name>: no theme in response".into())
+    }
+
+    /// Whether the project can be read with no credential at all.
+    ///
+    /// Deliberately ANONYMOUS: no cookie, no PAT, no service account. The
+    /// question is "what would a browser with no session see", so attaching
+    /// one of our credentials would answer a different question — and would
+    /// hand a credential to a call that has no need of it.
+    ///
+    /// Measured against the live API: 200 on a public project, 401 on a
+    /// private one, 404 for a name that is not there. 404 and transport
+    /// failures both stay `Unknown`, which every caller treats as "do not
+    /// assume".
+    pub fn probe_visibility(&self, project: &str) -> crate::capability::Visibility {
+        let url = format!("{}/projects/{}", self.cfg.base(), urlencoding(project));
+        let status = self
+            .http
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .ok()
+            .map(|r| r.status().as_u16());
+        crate::capability::Visibility::from_anonymous_status(status)
     }
 
     /// The project's immutable id, for the websocket room (the page API's

@@ -556,6 +556,57 @@ fn is_light_rgb((r, g, b): (u8, u8, u8)) -> bool {
     (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) > 128.0
 }
 
+/// A block the web renderer is still working on: a band of brightness runs
+/// down its rows so the reader can see that something is happening, without
+/// the text moving or being replaced by a spinner they cannot read around.
+///
+/// `pos` is the row's index inside the block, `len` the block's row count,
+/// and `elapsed` seconds since the animation started. The result is a
+/// brightness in `0.55..=1.0` — dimmed enough to read as provisional, never
+/// so dim the code becomes unreadable.
+pub fn shimmer_level(pos: u16, len: u16, elapsed: f32) -> f32 {
+    /// Rows per second the band travels. Slow enough to read as a sweep
+    /// rather than a flicker at the viewer's ~8–16 frames per second.
+    const SPEED: f32 = 6.0;
+    /// Rows the band fades out over on each side.
+    const HALF_WIDTH: f32 = 2.0;
+    /// Rows of quiet after the band leaves the block, so a short block
+    /// pulses instead of strobing.
+    const TAIL: f32 = 3.0;
+
+    let span = len.max(1) as f32 + TAIL;
+    let head = (elapsed.max(0.0) * SPEED).rem_euclid(span);
+    let intensity = (1.0 - (head - pos as f32).abs() / HALF_WIDTH).max(0.0);
+    0.55 + 0.45 * intensity
+}
+
+/// Apply `shimmer_level` to one span's style: an RGB foreground is mixed
+/// toward the terminal background, which is the only way to modulate
+/// brightness without inventing a color the theme never chose.
+///
+/// A named or indexed color has no components to mix, so it falls back to
+/// the DIM attribute — coarser, but the same signal. (In the viewer, code
+/// rows are syntax-highlighted and therefore RGB.)
+pub fn shimmer_style(base: Style, terminal_bg: (u8, u8, u8), level: f32) -> Style {
+    if level >= 0.995 {
+        return base;
+    }
+    match base.fg {
+        Some(Color::Rgb(r, g, b)) => {
+            let mix = |fg: u8, bg: u8| -> u8 {
+                (bg as f32 + (fg as f32 - bg as f32) * level).round().clamp(0.0, 255.0) as u8
+            };
+            base.fg(Color::Rgb(
+                mix(r, terminal_bg.0),
+                mix(g, terminal_bg.1),
+                mix(b, terminal_bg.2),
+            ))
+        }
+        _ if level < 0.75 => base.add_modifier(Modifier::DIM),
+        _ => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,5 +767,64 @@ mod tests {
                 assert_ne!(c, p.hashtag);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shimmer_tests {
+    use super::*;
+
+    #[test]
+    fn the_band_sweeps_the_block_and_repeats() {
+        // At t=0 the band is on the first row and nowhere near the last.
+        assert!(shimmer_level(0, 6, 0.0) > 0.99);
+        assert_eq!(shimmer_level(5, 6, 0.0), 0.55, "far from the band = the floor");
+        // A third of a second later (6 rows/s) it has moved two rows down.
+        assert!(shimmer_level(2, 6, 2.0 / 6.0) > 0.99);
+        assert!(shimmer_level(0, 6, 2.0 / 6.0) < shimmer_level(0, 6, 0.0));
+        // The cycle (block + tail) brings it back to the top.
+        let period = (6.0 + 3.0) / 6.0;
+        assert!((shimmer_level(0, 6, period) - shimmer_level(0, 6, 0.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn brightness_stays_inside_a_readable_band() {
+        for len in [1u16, 2, 7, 40] {
+            for step in 0..200 {
+                for pos in 0..len {
+                    let v = shimmer_level(pos, len, step as f32 / 40.0);
+                    assert!((0.55..=1.0).contains(&v), "len={len} pos={pos} -> {v}");
+                }
+            }
+        }
+        // A degenerate (empty) block must not divide by zero or spin.
+        assert!((0.55..=1.0).contains(&shimmer_level(0, 0, 1.0)));
+    }
+
+    #[test]
+    fn rgb_is_mixed_toward_the_terminal_background() {
+        let bg = (0, 0, 0);
+        let base = Style::default().fg(Color::Rgb(200, 100, 50));
+        // Full brightness leaves the theme's color exactly alone.
+        assert_eq!(shimmer_style(base, bg, 1.0).fg, Some(Color::Rgb(200, 100, 50)));
+        // Half way to the background is half the distance on every channel.
+        assert_eq!(shimmer_style(base, bg, 0.5).fg, Some(Color::Rgb(100, 50, 25)));
+        // …and the mix is toward the ACTUAL background, not toward black.
+        assert_eq!(
+            shimmer_style(base, (100, 100, 100), 0.0).fg,
+            Some(Color::Rgb(100, 100, 100))
+        );
+    }
+
+    #[test]
+    fn a_named_color_falls_back_to_the_dim_attribute() {
+        let base = Style::default().fg(Color::DarkGray);
+        assert_eq!(shimmer_style(base, (0, 0, 0), 1.0), base, "untouched at full");
+        assert!(!shimmer_style(base, (0, 0, 0), 0.9).add_modifier.contains(Modifier::DIM));
+        assert!(shimmer_style(base, (0, 0, 0), 0.55).add_modifier.contains(Modifier::DIM));
+        // A span with no foreground at all is still safe to pass through.
+        assert!(shimmer_style(Style::default(), (0, 0, 0), 0.55)
+            .add_modifier
+            .contains(Modifier::DIM));
     }
 }

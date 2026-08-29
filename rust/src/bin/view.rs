@@ -30,10 +30,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
+use cosense::capability::{self, RenderCapability, SyncState};
 use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
+use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::highlight::Highlighter;
 use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
@@ -75,6 +77,24 @@ struct ImageInfo {
     sliced: SlicedProtocol,
     /// Display height in cells (from the sliced size), used for layout.
     cells_h: u16,
+    /// Display width in cells, and the column cap this was encoded for. A
+    /// diagram is re-encoded from its cached PNG when the pane crosses that
+    /// cap, so it never paints past the text column (the draw clips to the
+    /// pane, so an over-wide image simply loses its right-hand side).
+    cells_w: u16,
+    built_for: u16,
+}
+
+/// Widest an inline image may be drawn, in cells. Images are capped at a
+/// fixed 64 columns regardless of the pane — that is long-standing
+/// behaviour and is left alone. A DIAGRAM additionally has to fit the pane:
+/// a clipped photo is still a photo, a clipped flowchart has lost its right
+/// half.
+const IMAGE_MAX_COLS: u16 = 64;
+
+/// Column cap for a diagram in a pane whose text area is `text_w` wide.
+fn diagram_max_cols(text_w: u16) -> u16 {
+    text_w.min(IMAGE_MAX_COLS).max(1)
 }
 
 /// Rows reserved for an image that is still downloading. The real height
@@ -89,6 +109,359 @@ type ImageMsg = (String, Result<ImageInfo, String>);
 /// A finished background file download: the label shown to the user and
 /// where it landed, or why it failed.
 type FileMsg = (String, Result<std::path::PathBuf, String>);
+
+/// One batch of web renders: everything on ONE page, so the worker can serve
+/// them with a single browser navigation. `gen` is the App's page generation
+/// at the time of the request.
+enum WebJob {
+    /// Draw these in a browser (or serve them from the disk cache), encoded
+    /// for a pane whose text area is `max_cols` wide.
+    Render {
+        gen: u64,
+        reqs: Vec<WebRequest>,
+        max_cols: u16,
+        /// The source epoch this batch was built from. Re-checked on the
+        /// worker before the browser is asked and again before anything is
+        /// written to the cache.
+        src_epoch: u64,
+        /// `Some` lets the batch reach a browser, in that credential state.
+        /// `None` is cache-only: serve what is on disk and answer every
+        /// miss with `Missing`. That is the default page-load pass, and it
+        /// is also what a project we may not render gets.
+        auth: Option<RenderCapability>,
+    },
+    /// Re-encode an artifact already on disk at a new column cap, because
+    /// the pane was resized. No browser is involved: this is a decode plus
+    /// a resize, done on the worker so the UI thread never stalls on it.
+    Rescale { gen: u64, key: String, max_cols: u16 },
+    /// Quit. Sent once, on the way out, so the worker can be joined.
+    Stop,
+}
+
+impl WebJob {
+    /// The page generation this job belongs to. `Stop` belongs to none.
+    fn gen(&self) -> Option<u64> {
+        match self {
+            WebJob::Render { gen, .. } | WebJob::Rescale { gen, .. } => Some(*gen),
+            WebJob::Stop => None,
+        }
+    }
+}
+
+/// A finished web render, already decoded and protocol-encoded on the
+/// worker. `gen` and `key` together decide whether it is still wanted.
+struct WebMsg {
+    gen: u64,
+    key: String,
+    /// True when this answers a `Rescale`. A failed rescale is not a failed
+    /// diagram: the artifact already on screen stays, and the reader is
+    /// told nothing.
+    rescale: bool,
+    /// What this reply was produced with. A refusal has to be attributed to
+    /// a credential state, not guessed from session flags: one browser
+    /// batch refuses EVERY key in it at once, and the whole batch has to be
+    /// judged as the single event it was.
+    attempted: Option<RenderCapability>,
+    res: WebOutcome,
+}
+
+/// What became of one request. Typed because the three failures are NOT
+/// interchangeable: a cache miss must leave the artifact renderable later,
+/// a refusal must retune the session's capabilities, and only a genuine
+/// failure is worth telling the reader about.
+enum WebOutcome {
+    Drawn(ImageInfo),
+    /// Nothing on disk, and this pass was not allowed to draw. Not an
+    /// error: it must not land in `web_errors`, or `m` could never draw it.
+    Missing,
+    /// The browser was refused (login wall). The session decides what to do
+    /// with that — it says nothing about the REST credential.
+    Denied,
+    Failed(String),
+    /// The page source moved while this was in flight, so the picture (if
+    /// there is one) describes different text than the key naming it. The
+    /// block simply goes back to source: it is NOT a miss and NOT a failure,
+    /// and the pass that follows the new source picks it up.
+    Stale,
+}
+
+impl WebOutcome {
+    /// Did this produce a picture?
+    #[cfg(test)]
+    fn is_drawn(&self) -> bool {
+        matches!(self, WebOutcome::Drawn(_))
+    }
+}
+
+/// The web-render worker: the ONLY thread that talks to a browser. It takes
+/// whole batches, answers the on-disk cache without launching anything, and
+/// hands back terminal-ready images. The UI thread never waits on it — it
+/// only sends and later drains.
+fn spawn_web_worker(
+    jobs: mpsc::Receiver<WebJob>,
+    out: mpsc::Sender<WebMsg>,
+    backend: Arc<dyn WebBackend>,
+    picker: Picker,
+    // `current_gen` is the App's page generation: work queued for a page the
+    // reader has already left is dropped BEFORE it costs a decode or a
+    // browser navigation.
+    cache: ArtifactCache,
+    current_gen: Arc<std::sync::atomic::AtomicU64>,
+    // The App's source epoch: a render whose source has moved is discarded
+    // rather than written to the cache under a key it no longer matches.
+    current_src: Arc<std::sync::atomic::AtomicU64>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        // Idle window. The backend keeps a browser warm between batches (a
+        // re-render in a warm browser is roughly twice as fast), but a
+        // viewer nobody is editing should not hold a browser process.
+        // 15 s is short enough that a reader who has finished with a page
+        // is not paying for a resident Chrome, and long enough to cover the
+        // pause between "the diagram appeared" and "I edited it again".
+        let idle = idle_window();
+        let reap_at_once = idle.is_zero();
+        let live = |gen: u64| gen == current_gen.load(std::sync::atomic::Ordering::SeqCst);
+        loop {
+            let first = match jobs.recv_timeout(if reap_at_once {
+                // A zero window still needs a real block here; the browser
+                // is already gone (reaped below), so waking is free.
+                Duration::from_secs(3600)
+            } else {
+                idle
+            }) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    backend.idle();
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            // Take everything already queued behind it. A burst of jobs for
+            // the page the reader has moved on from must not make the
+            // current page wait through several browser navigations.
+            let mut batch = vec![first];
+            let mut stop = false;
+            while let Ok(job) = jobs.try_recv() {
+                batch.push(job);
+            }
+            // Stale-generation jobs are never ACCEPTED, so they owe no
+            // reply: `set_page` clears `web_pending`/`web_rescaling` for the
+            // page being left, which is what keeps this from leaking. See
+            // `set_page_clears_the_state_a_dropped_job_would_have_answered`.
+            batch.retain(|job| match job.gen() {
+                None => {
+                    stop = true;
+                    false
+                }
+                Some(g) => live(g),
+            });
+
+            // Every same-generation render is merged into ONE batch, so a
+            // page's diagrams still cost a single navigation however many
+            // passes queued them.
+            let mut merged: Vec<WebRequest> = Vec::new();
+            let mut merged_cols: Option<u16> = None;
+            let mut merged_auth: Option<RenderCapability> = None;
+            let mut merged_src = 0u64;
+            let mut merged_gen = 0u64;
+            for job in batch {
+                match job {
+                    WebJob::Stop => {}
+                    WebJob::Rescale { gen, key, max_cols } => {
+                        // A rescale is answered from the disk cache. If the
+                        // PNG is gone, the answer is an error so the viewer
+                        // stops waiting — it keeps the size it has.
+                        let res = match cache.get(&key) {
+                            Some(png) => match decode_web_png(&picker, &png, max_cols) {
+                                Ok(info) => WebOutcome::Drawn(info),
+                                Err(e) => WebOutcome::Failed(e),
+                            },
+                            None => WebOutcome::Failed("no cached artifact to resize".into()),
+                        };
+                        let _ = out.send(WebMsg { gen, key, rescale: true, attempted: None, res });
+                    }
+                    WebJob::Render { gen, src_epoch, reqs, max_cols, auth } => {
+                        // Freshness is judged PER JOB, before merging. The
+                        // checks around the browser below are per batch, so
+                        // a job built against the old source that merged
+                        // with a fresh one would ride in on its freshness —
+                        // and be filed under a hash it no longer matches.
+                        if src_epoch
+                            != current_src.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            for req in &reqs {
+                                let _ = out.send(WebMsg {
+                                    gen,
+                                    key: req.cache_key(),
+                                    rescale: false,
+                                    attempted: None,
+                                    res: WebOutcome::Stale,
+                                });
+                            }
+                            continue;
+                        }
+                        merged_gen = gen;
+                        merged_src = src_epoch;
+                        merged_cols = Some(max_cols);
+                        // Coalescing several passes: the most permissive
+                        // one wins, so an explicit `m` arriving behind a
+                        // page-load probe is not silently downgraded to
+                        // cache-only.
+                        merged_auth = merged_auth.or(auth);
+                        for req in reqs {
+                            if !merged.iter().any(|r| r.cache_key() == req.cache_key()) {
+                                merged.push(req);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(max_cols) = merged_cols {
+                run_render_batch(
+                    &*backend,
+                    &picker,
+                    &cache,
+                    &out,
+                    merged_gen,
+                    merged_src,
+                    &current_src,
+                    merged,
+                    max_cols,
+                    merged_auth,
+                );
+            }
+            if reap_at_once {
+                // `COSENSE_WEB_IDLE_SECS=0`: hold no browser between
+                // batches at all. Every page then pays the cold-start cost.
+                backend.idle();
+            }
+            if stop {
+                break;
+            }
+        }
+    })
+}
+
+/// How long a browser is kept warm between batches.
+/// `COSENSE_WEB_IDLE_SECS`, clamped to 0..=300; 0 reaps after every batch.
+fn idle_window() -> Duration {
+    let secs = std::env::var("COSENSE_WEB_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s <= 300)
+        .unwrap_or(15);
+    Duration::from_secs(secs)
+}
+
+/// Serve one page's worth of requests: the disk cache first, the browser for
+/// whatever is left. EVERY request gets exactly one reply, including cache
+/// misses and decode failures — a request with no reply would leave the
+/// viewer pulsing a diagram forever.
+fn run_render_batch(
+    backend: &dyn WebBackend,
+    picker: &Picker,
+    cache: &ArtifactCache,
+    out: &mpsc::Sender<WebMsg>,
+    gen: u64,
+    // The source this batch was built from. A render captures what the
+    // SERVER shows when the browser looks, so if the source has moved since,
+    // the picture belongs to different text than the key naming it.
+    src_epoch: u64,
+    current_src: &std::sync::atomic::AtomicU64,
+    reqs: Vec<WebRequest>,
+    max_cols: u16,
+    // `None` means this pass may not launch a browser: hits are served,
+    // misses are answered `Missing`.
+    auth: Option<RenderCapability>,
+) {
+    let mut to_render: Vec<WebRequest> = Vec::new();
+    for req in reqs {
+        let key = req.cache_key();
+        match cache.get(&key).map(|png| decode_web_png(picker, &png, max_cols)) {
+            Some(Ok(info)) => {
+                let _ = out.send(WebMsg {
+                    gen,
+                    key,
+                    rescale: false,
+                    attempted: None, // served from disk; no credential was used
+                    res: WebOutcome::Drawn(info),
+                });
+            }
+            // On disk but unreadable: truncated by a crash, or corrupted
+            // underneath us. That must not become a permanent failure for
+            // this artifact — drop the entry and let the browser produce
+            // it again.
+            Some(Err(_)) => {
+                cache.remove(&key);
+                to_render.push(req);
+            }
+            None => to_render.push(req),
+        }
+    }
+    if to_render.is_empty() {
+        return;
+    }
+    let fresh = || src_epoch == current_src.load(std::sync::atomic::Ordering::SeqCst);
+    let Some(auth) = auth else {
+        // Cache-only pass. Every miss still owes exactly one reply, or the
+        // viewer would pulse those blocks forever.
+        for req in &to_render {
+            let key = req.cache_key();
+            let _ = out.send(WebMsg {
+                gen,
+                key,
+                rescale: false,
+                attempted: None,
+                res: WebOutcome::Missing,
+            });
+        }
+        return;
+    };
+    // Checked here, before the browser is asked: the source may have moved
+    // while this job sat in the queue behind another batch.
+    if !fresh() {
+        for req in &to_render {
+            let key = req.cache_key();
+            let _ = out.send(WebMsg {
+                gen,
+                key,
+                rescale: false,
+                attempted: None,
+                res: WebOutcome::Stale,
+            });
+        }
+        return;
+    }
+    let results = backend.render_batch(&to_render, auth);
+    // ...and again here. A page of diagrams takes seconds to draw, which is
+    // exactly long enough for a commit to land underneath it. Writing that
+    // PNG under this key would poison the cache for a week.
+    let still_fresh = fresh();
+    for (req, res) in to_render.iter().zip(results) {
+        let key = req.cache_key();
+        let res = match res {
+            _ if !still_fresh => WebOutcome::Stale,
+            Ok(png) => match decode_web_png(picker, &png, max_cols) {
+                Ok(info) => {
+                    cache.put(&key, &png);
+                    WebOutcome::Drawn(info)
+                }
+                Err(e) => WebOutcome::Failed(e),
+            },
+            Err(WebError::NotAuthorized) => WebOutcome::Denied,
+            Err(e) => WebOutcome::Failed(e.to_string()),
+        };
+        let _ = out.send(WebMsg { gen, key, rescale: false, attempted: Some(auth), res });
+    }
+}
+
+/// PNG bytes -> terminal image. Only image decoding happens here: no SVG or
+/// HTML from the browser is ever interpreted in this process.
+fn decode_web_png(picker: &Picker, png: &[u8], max_cols: u16) -> Result<ImageInfo, String> {
+    let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
+    build_image(picker, img, max_cols)
+}
 
 /// Something Enter/f can act on from the cursor line.
 #[derive(Clone, Debug, PartialEq)]
@@ -228,6 +601,56 @@ struct App {
     file_tx: mpsc::Sender<FileMsg>,
     file_rx: mpsc::Receiver<FileMsg>,
 
+    // --- web renderer (Mermaid today; see cosense::webrender) -------------
+    /// Bumped on every page install. Shared with the render worker, which
+    /// drops queued work for a page the reader has left before spending a
+    /// decode or a browser navigation on it. A result that comes back for
+    /// an older generation is dropped even if its key were to collide.
+    web_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// Terminal background is dark (picks the browser's color scheme).
+    web_dark: bool,
+    /// Render keys currently in flight.
+    web_pending: HashSet<String>,
+    /// Why a key failed, for the status line. Its block falls back to code.
+    web_errors: HashMap<String, String>,
+    /// Source lines whose code block is being rendered right now, each with
+    /// `(row's position in the block, block row count)`. The draw pass runs
+    /// a band of brightness down them so the reader can see the renderer
+    /// working — rebuilt with the layout, empty whenever nothing is pending.
+    web_shimmer: HashMap<usize, (u16, u16)>,
+    /// Clock the shimmer animates against.
+    web_anim: std::time::Instant,
+    /// Column cap the on-screen diagrams are encoded for — `text_w` capped
+    /// at `IMAGE_MAX_COLS`. Updated by the layout; a change re-encodes the
+    /// artifacts from their cached PNGs (no browser).
+    web_cols: u16,
+    /// Rescales in flight, so a resize does not queue the same key twice.
+    web_rescaling: HashSet<String>,
+    /// The local page may no longer match the server: a commit was refused
+    /// or never left the machine. The browser can only ever show what the
+    /// SERVER has, so while this is set no diagram is rendered — a render
+    /// would capture the server's version of a block and file it under the
+    /// LOCAL text's hash, quietly attaching the wrong picture to the source
+    /// the reader is looking at. Cleared only when an authoritative page
+    /// install proves the two agree again (see `mark_desynced`).
+    web_unsynced: bool,
+    /// A diagram-failure note, and when it stops being worth showing.
+    ///
+    /// It lives in its OWN slot rather than in `app.status`, and ranks
+    /// BELOW it: a commit failure, an auth error or a resync notice must
+    /// never be overwritten — or worse, wiped when the diagram note times
+    /// out — by something as minor as a picture that did not draw. It ranks
+    /// above the key hints, and gives the line back after a few seconds so
+    /// the hints return.
+    web_notice: Option<(String, std::time::Instant)>,
+    /// Jobs into the render worker, results back. Artifacts land in
+    /// `images` (they are images), so drawing needs no special case.
+    web_job_tx: mpsc::Sender<WebJob>,
+    /// Held until `main` spawns the worker; tests keep it and inspect jobs.
+    web_jobs_rx: Option<mpsc::Receiver<WebJob>>,
+    web_tx: mpsc::Sender<WebMsg>,
+    web_rx: mpsc::Receiver<WebMsg>,
+
     rows: Vec<Row>,
     laid_width: u16,
     /// Viewport height (text rows) as of the last frame; movement keys use
@@ -315,6 +738,73 @@ struct App {
     poll_rx: mpsc::Receiver<PolledPage>,
     /// The poller's sender (kept for the spawn call in `main`).
     poll_tx: mpsc::Sender<PolledPage>,
+    /// Retunes the poller's interval while it sleeps. The push channel's
+    /// state is what drives it (see `sync_state`).
+    poll_ctrl_tx: mpsc::Sender<Duration>,
+    poll_ctrl_rx: Option<mpsc::Receiver<Duration>>,
+    /// What this session may do for the current project: sid presence,
+    /// project visibility, and whatever the renderer has been refused.
+    /// Never a single "authenticated" flag — see `cosense::capability`.
+    caps: capability::Capabilities,
+    /// When diagrams may be drawn (`COSENSE_WEB_RENDER`).
+    render_policy: capability::RenderPolicy,
+    /// Visibility answers from the background probe (project, verdict).
+    vis_rx: mpsc::Receiver<(String, capability::Visibility)>,
+    vis_tx: mpsc::Sender<(String, capability::Visibility)>,
+    /// The project the probe was last asked about, so a page move inside
+    /// the same project does not re-ask.
+    vis_asked: Option<String>,
+    /// Blocks whose diagram has been drawn on THIS page, identified by the
+    /// id of the block's `code:` HEADER line. A block in here is one the
+    /// reader is actually looking at, so when its source changes the picture
+    /// must follow — even under the manual policy. The browser cost was
+    /// already accepted for this page; making the reader press `m` again
+    /// after every edit is not "manual", it is broken.
+    ///
+    /// The header line is the anchor because it is the one line an edit to
+    /// the diagram does NOT move. Keying this on the block's LAST line —
+    /// which is what the render request itself is keyed on — meant that
+    /// pressing Enter inside the block moved the anchor too, and the
+    /// refresh silently stopped firing for the most ordinary edit there is.
+    web_drawn_blocks: HashSet<String>,
+    /// Artifacts a cache-only pass looked for and did not find. They are
+    /// NOT failures: they stay code blocks, stop shimmering, and `m` can
+    /// still draw them.
+    web_missing: HashSet<String>,
+    /// `m` was pressed while the page-load cache probe was still out. The
+    /// probe owns those keys until it answers, so the keypress cannot queue
+    /// anything yet — it is remembered here and served the moment the
+    /// misses come back. Cleared per page.
+    web_manual_wanted: bool,
+    /// The "you need a cookie" notice has been shown for THIS page already.
+    /// Reset by `set_page`, so it is said once per page and not per block.
+    web_notice_shown: bool,
+
+    /// Monotonic counter of the page SOURCE as the app holds it. Deliberately
+    /// separate from `server_epoch`: that one guards poll responses against
+    /// local progress, this one guards a render in flight against the source
+    /// moving underneath it. Folding them together would either throw away
+    /// good poll snapshots on every keystroke or good renders on every poll.
+    ///
+    /// A render captures whatever the SERVER is showing at the moment the
+    /// browser looks. If the source has moved since the job was queued, that
+    /// screenshot belongs to a different text than the key it would be filed
+    /// under — and the artifact cache keeps it for a week.
+    src_epoch: Arc<std::sync::atomic::AtomicU64>,
+
+    /// Monotonic counter of everything that makes the server's state newer
+    /// than a poll already in flight: a local commit landing, a websocket
+    /// commit applied, a page installed. A poller stamps this when it
+    /// starts a GET; if it has moved by the time the response arrives, that
+    /// response is a photograph of the past and is dropped.
+    server_epoch: Arc<std::sync::atomic::AtomicU64>,
+
+    /// The push channel's state, TYPED. The status line renders this; the
+    /// poller's interval follows it. Nothing reads the status text.
+    sync_state: capability::SyncState,
+    /// Whether a push channel is being attempted at all (a sid exists).
+    /// A session without one shows `poll`, not `reconnecting`.
+    ws_attempted: bool,
 
     /// Websocket push events (commit payloads, resyncs, status notes).
     ws_rx: mpsc::Receiver<ws::WsEvent>,
@@ -493,6 +983,12 @@ struct PolledPage {
     project: String,
     title: String,
     page: cosense::api::Page,
+    /// The server-state epoch when this fetch was STARTED. If anything has
+    /// advanced the epoch since — a local commit, an applied websocket
+    /// commit, a page install — then this snapshot predates it and would
+    /// roll the reader back. `commitId` cannot be used for this: it is not
+    /// safely ordered from the client's side.
+    epoch: u64,
 }
 
 /// The web-edit poller: refetches the CURRENT page every few seconds on
@@ -504,23 +1000,89 @@ fn spawn_web_poller(
     client: Client,
     target: Arc<std::sync::Mutex<(String, String)>>,
     tx: mpsc::Sender<PolledPage>,
+    ctrl: mpsc::Receiver<Duration>,
+    epoch: Arc<std::sync::atomic::AtomicU64>,
     interval: Duration,
 ) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(interval);
-        let (project, title) = match target.lock() {
-            Ok(t) => t.clone(),
-            Err(_) => return,
-        };
-        if project.is_empty() || title.is_empty() {
-            continue;
-        }
-        if let Ok(page) = client.get_page_in(&project, &title) {
-            if tx.send(PolledPage { project, title, page }).is_err() {
-                return; // app gone
+    std::thread::spawn(move || {
+        let mut interval = interval;
+        loop {
+            // The sleep IS the control channel: a push channel that dies
+            // 2 s into a 60 s nap must not leave the reader waiting out the
+            // other 58. `recv_timeout` wakes on either.
+            let fetch_now = match absorb_interval(&ctrl, interval) {
+                Some((next, urgent)) => {
+                    interval = next;
+                    urgent
+                }
+                None => return, // app gone
+            };
+            if !fetch_now {
+                continue;
+            }
+            let (project, title) = match target.lock() {
+                Ok(t) => t.clone(),
+                Err(_) => return,
+            };
+            if project.is_empty() || title.is_empty() {
+                continue;
+            }
+            // Stamped BEFORE the request goes out: everything that happens
+            // while it is in flight makes the answer stale.
+            let started_at = epoch.load(std::sync::atomic::Ordering::SeqCst);
+            if let Ok(page) = client.get_page_in(&project, &title) {
+                if tx.send(PolledPage { project, title, page, epoch: started_at }).is_err() {
+                    return; // app gone
+                }
             }
         }
     });
+}
+
+/// Ask, off the UI thread, whether a project is readable with no credential
+/// at all. One anonymous request per project, and only when the answer could
+/// change a decision.
+fn spawn_visibility_probe(
+    client: Client,
+    project: String,
+    tx: mpsc::Sender<(String, capability::Visibility)>,
+) {
+    std::thread::spawn(move || {
+        let verdict = client.probe_visibility(&project);
+        let _ = tx.send((project, verdict));
+    });
+}
+
+/// Wait out `current`, or wake early on a new interval from the control
+/// channel. Returns the interval to use next and whether to fetch right now;
+/// `None` means the channel is gone and the poller should stop.
+///
+/// Speeding up fetches immediately — that transition means "the push channel
+/// just stopped being trustworthy", and the point of the switch is to close
+/// the gap, not to open a fresh one. Slowing down does not: the push channel
+/// went live and just delivered a catch-up, so there is nothing to catch.
+fn absorb_interval(
+    ctrl: &mpsc::Receiver<Duration>,
+    current: Duration,
+) -> Option<(Duration, bool)> {
+    match ctrl.recv_timeout(current) {
+        // Timed out: an ordinary tick.
+        Err(mpsc::RecvTimeoutError::Timeout) => Some((current, true)),
+        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        Ok(first) => {
+            // Several state changes can pile up while we slept; only the
+            // last one describes the world.
+            let mut next = first;
+            loop {
+                match ctrl.try_recv() {
+                    Ok(d) => next = d,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return None,
+                }
+            }
+            Some((next, next < current))
+        }
+    }
 }
 
 /// The serial commit worker: one job in flight at a time, in queue order —
@@ -609,9 +1171,13 @@ impl App {
     fn new(project: String) -> Self {
         let (image_tx, image_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
+        let (web_job_tx, web_jobs_rx) = mpsc::channel();
+        let (web_tx, web_rx) = mpsc::channel();
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
         let (poll_tx, poll_rx) = mpsc::channel();
+        let (poll_ctrl_tx, poll_ctrl_rx) = mpsc::channel();
+        let (vis_tx, vis_rx) = mpsc::channel();
         let (ws_tx, ws_rx) = mpsc::channel();
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         App {
@@ -647,6 +1213,20 @@ impl App {
             history: Vec::new(),
             forward: Vec::new(),
             overlay: None,
+            web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            web_dark: true,
+            web_pending: HashSet::new(),
+            web_errors: HashMap::new(),
+            web_shimmer: HashMap::new(),
+            web_anim: std::time::Instant::now(),
+            web_cols: IMAGE_MAX_COLS,
+            web_rescaling: HashSet::new(),
+            web_unsynced: false,
+            web_notice: None,
+            web_job_tx,
+            web_jobs_rx: Some(web_jobs_rx),
+            web_tx,
+            web_rx,
             read_at: None,
             members: HashMap::new(),
             time: None,
@@ -666,6 +1246,21 @@ impl App {
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
             poll_rx,
             poll_tx,
+            poll_ctrl_tx,
+            poll_ctrl_rx: Some(poll_ctrl_rx),
+            caps: capability::Capabilities::default(),
+            render_policy: capability::RenderPolicy::from_env(),
+            vis_rx,
+            vis_tx,
+            vis_asked: None,
+            web_missing: HashSet::new(),
+            web_drawn_blocks: HashSet::new(),
+            web_manual_wanted: false,
+            web_notice_shown: false,
+            src_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            server_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sync_state: capability::SyncState::Polling,
+            ws_attempted: false,
             ws_rx,
             ws_tx,
             ws_req_tx,
@@ -711,16 +1306,30 @@ impl App {
     /// downloads. Loading is folded in here so no navigation path can forget
     /// it (back/forward included).
     fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
+        self.bump_server_epoch();
         self.time = None; // installing a live page always exits history
         // A page install ends any edit session and cuts the undo lineage:
         // undo ops reference THIS page's line ids.
         self.session = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        // A different project is a different set of capabilities: what we
+        // learned about the old one (visibility, a refused browser) says
+        // nothing here. The sid is a property of the SESSION and survives.
+        if self.project != l.project {
+            self.caps = self.caps.for_new_project();
+            self.vis_asked = None;
+        }
         self.project = l.project;
         self.title = l.title;
         self.header_colors = l.header_colors;
         self.page_id = l.page_id;
+        self.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Navigating leaves the joined room. Until the thread has re-joined
+        // the new one AND caught it up, there is no push channel here, so
+        // the fast poll covers the gap — and `absorb_interval` fetches at
+        // once on the way down rather than waiting out a 60 s nap.
+        self.set_sync_state(SyncState::Polling);
         self.lines = l.lines;
         self.blocks = l.blocks;
         self.srcs = l.srcs;
@@ -745,12 +1354,24 @@ impl App {
         self.images.clear();
         self.image_errors.clear();
         self.pending.clear();
+        self.web_pending.clear();
+        self.web_errors.clear();
+        self.web_rescaling.clear();
+        self.web_missing.clear();
+        self.web_drawn_blocks.clear();
+        self.web_manual_wanted = false;
+        // Once per page, not once per diagram.
+        self.web_notice_shown = false;
+        // A freshly fetched page IS the server's state.
+        self.mark_synced();
         self.laid_width = 0; // force rebuild
         self.scroll = 0;
         self.cursor = 0;
         self.selection = None;
         self.follow = true;
+        self.web_dark = !ctx.light;
         self.start_image_loads(ctx);
+        self.start_web_renders(capability::Trigger::Auto);
     }
 
     /// Kick off background downloads for every image on the page. Each
@@ -781,10 +1402,529 @@ impl App {
                 let res = fetcher
                     .fetch(&url)
                     .map_err(|e| e.to_string())
-                    .and_then(|img| build_image(&picker, img));
+                    .and_then(|img| build_image(&picker, img, IMAGE_MAX_COLS));
                 let _ = tx.send((url, res));
             });
         }
+    }
+
+    /// The render order for one Mermaid block, or `None` when the block
+    /// cannot be rendered from the live web page: a historical snapshot (the
+    /// browser only ever shows the current page), a line Cosense has not
+    /// given an id yet, or a layout that has not happened.
+    fn web_request(
+        &self,
+        kind: cosense::webrender::WebKind,
+        code: &str,
+        last_src: usize,
+    ) -> Option<WebRequest> {
+        if self.time.is_some() {
+            return None;
+        }
+        let line_id = self.lines.get(last_src)?.id.clone();
+        if line_id.is_empty() {
+            return None;
+        }
+        Some(WebRequest {
+            kind,
+            project: self.project.clone(),
+            title: self.title.clone(),
+            page_id: self.page_id.clone(),
+            line_id,
+            code_hash: cosense::webrender::hash_code(code),
+            dark: self.web_dark,
+        })
+    }
+
+    /// Queue every not-yet-rendered diagram on the page as ONE batch. Returns
+    /// immediately: the worker owns the browser, and the code block stays on
+    /// screen until an artifact arrives.
+    fn start_web_renders(&mut self, trigger: capability::Trigger) -> bool {
+        // The browser can only ever show what the SERVER has, so nothing is
+        // requested while a commit is still on its way there, or while a
+        // commit is known to have failed. Both are whole-page gates: any
+        // queued or lost commit could be the one that changes a diagram,
+        // and `inflight == 0` alone only means "nothing in flight", not
+        // "everything landed".
+        if self.inflight > 0 || self.web_unsynced {
+            return false;
+        }
+        // A historical snapshot is not what the server is showing now, so a
+        // screenshot of the live page would be filed under the snapshot's
+        // source hash — the same poisoning `src_epoch` guards against.
+        if self.time.is_some() {
+            return false;
+        }
+        // A block whose picture is already on screen and whose source has
+        // just moved is a REFRESH, not a first draw: the reader is watching
+        // that diagram and expects it to keep up. Refreshes are treated as
+        // explicit, so `manual` does not mean "press m after every edit".
+        // One navigation draws the whole page anyway, so the other diagrams
+        // on it ride along for free.
+        let trigger = if trigger == capability::Trigger::Auto && self.has_stale_diagram() {
+            capability::Trigger::Manual
+        } else {
+            trigger
+        };
+        // What this session may do, right now, for this project.
+        let decision = capability::decide(&self.caps, self.render_policy, trigger);
+        let auth = match decision {
+            capability::Decision::Nothing => return false,
+            capability::Decision::Render(cap) => Some(cap),
+            capability::Decision::CacheOnly { notice } => {
+                // Said once per page: repeating it per diagram, per pass,
+                // would bury every other status the reader needs.
+                if let Some(text) = notice {
+                    if !self.web_notice_shown {
+                        self.web_notice_shown = true;
+                        self.note_web_failure(text.to_string());
+                    }
+                }
+                None
+            }
+        };
+        // The one anonymous attempt on an Unknown project is spent HERE,
+        // when it is dispatched — not when it answers, or a second `m`
+        // pressed while the first is in flight would spend it twice.
+        if auth == Some(RenderCapability::Anonymous)
+            && self.caps.visibility != capability::Visibility::Public
+        {
+            self.caps.anonymous_spent = true;
+        }
+        let mut reqs: Vec<WebRequest> = Vec::new();
+        for b in &self.blocks {
+            let Block::WebRender { kind, code, rows, last_src } = b else { continue };
+            // An open session does NOT hold up the rest of the page: only
+            // the block under the caret waits, because that one line's
+            // buffer has not been committed yet (every caret MOVE commits
+            // the dirty line first, so leaving a block releases it).
+            if self.caret_is_inside(rows) {
+                continue;
+            }
+            let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
+            let key = req.cache_key();
+            if self.images.contains_key(&key) {
+                // On screen: if this block's source later moves, that is a
+                // refresh rather than a first draw.
+                if let Some(anchor) = self.block_anchor(rows) {
+                    self.web_drawn_blocks.insert(anchor);
+                }
+            }
+            if self.images.contains_key(&key)
+                || self.web_errors.contains_key(&key)
+                || self.web_pending.contains(&key)
+                || reqs.iter().any(|r| r.cache_key() == key)
+            {
+                continue;
+            }
+            // A cache-only pass already looked at this one and found
+            // nothing. Asking again would just re-answer `Missing`; only a
+            // pass that may actually draw is worth sending.
+            if self.web_missing.contains(&key) && auth.is_none() {
+                continue;
+            }
+            reqs.push(req);
+        }
+        if reqs.is_empty() {
+            return false;
+        }
+        let queued = auth.is_some();
+        let keys: Vec<String> = reqs.iter().map(|r| r.cache_key()).collect();
+        for k in &keys {
+            self.web_pending.insert(k.clone());
+            self.web_missing.remove(k);
+        }
+        // Those blocks now shimmer; the map is rebuilt with the layout.
+        self.laid_width = 0;
+        self.web_anim = std::time::Instant::now();
+        if self
+            .web_job_tx
+            .send(WebJob::Render {
+                gen: self.gen_now(),
+                src_epoch: self.src_epoch_now(),
+                reqs,
+                max_cols: self.web_cols,
+                auth,
+            })
+            .is_err()
+        {
+            // The worker is gone (shutting down). Nothing will ever answer,
+            // so un-mark them: the code block stays, and it stops pulsing.
+            for k in &keys {
+                self.web_pending.remove(k);
+            }
+            return false;
+        }
+        queued
+    }
+
+    /// The browser hit a login wall. This says something about the COOKIE,
+    /// never about the PAT that is reading and committing this page — so
+    /// nothing here touches `editable`, the credential, or the status.
+    fn note_denied(&mut self, denied: Vec<(String, Option<RenderCapability>)>) {
+        // Every key in the batch goes back to being drawable: whatever we
+        // decide below, none of these is a FAILURE of the diagram.
+        for (key, _) in &denied {
+            self.web_missing.insert(key.clone());
+        }
+        // The batch was one request with one credential state. If any key
+        // in it names the state, that is the state that was refused.
+        let attempted = denied
+            .iter()
+            .find_map(|(_, a)| *a)
+            .unwrap_or(RenderCapability::Anonymous);
+        // A refused cookie is a refused cookie whatever we do next: from
+        // here it counts as absent, so no later pass presents it again.
+        // (Without this, a private page would retry the same dead cookie on
+        // every `m`, forever.)
+        if attempted == RenderCapability::Authenticated {
+            self.caps.cookie_rejected = true;
+        }
+        match capability::on_not_authorized(&self.caps, attempted) {
+            // A public page that refused a cookie refused a STALE cookie.
+            // Anonymous is a different request, and usually works — and it
+            // retries EVERY key the batch lost, in one more batch.
+            capability::Denial::RetryAnonymous => {
+                // `cookie_rejected` above is what makes this retry genuinely
+                // cookie-free, and it retries EVERY key the batch lost in
+                // one more batch.
+                self.start_web_renders(capability::Trigger::Manual);
+            }
+            capability::Denial::GiveUp => {
+                // Only an attempt that carried no cookie can prove the
+                // browser has nothing left to offer.
+                if attempted == RenderCapability::Anonymous {
+                    self.caps.browser_denied = true;
+                }
+                if !self.web_notice_shown {
+                    self.web_notice_shown = true;
+                    let msg = if self.caps.sid {
+                        capability::SID_REJECTED
+                    } else {
+                        capability::NEEDS_SID
+                    };
+                    self.note_web_failure(msg.to_string());
+                }
+            }
+        }
+    }
+
+    /// Start the anonymous visibility probe for the current project, once.
+    ///
+    /// Free evidence first: if this session resolved NO credential for the
+    /// project and still read the page, it is public by demonstration and
+    /// no request is needed.
+    fn ensure_visibility(&mut self, ctx: &Ctx) {
+        if self.project.is_empty() || self.vis_asked.as_deref() == Some(&self.project) {
+            return;
+        }
+        self.vis_asked = Some(self.project.clone());
+        if ctx.client.credential_for(&self.project).is_none() {
+            self.caps.visibility = capability::Visibility::Public;
+            return;
+        }
+        spawn_visibility_probe(ctx.client.clone(), self.project.clone(), self.vis_tx.clone());
+    }
+
+    /// Take whatever the visibility probe learned. Pure bookkeeping: the
+    /// verdict only ever widens or narrows what a LATER render pass may do.
+    fn drain_visibility(&mut self) {
+        while let Ok((project, verdict)) = self.vis_rx.try_recv() {
+            if project == self.project {
+                self.caps.visibility = verdict;
+            }
+        }
+    }
+
+    /// The poller's end of the control channel, for tests: `main` normally
+    /// takes it when the poller is spawned.
+    #[cfg(test)]
+    fn poll_ctrl_rx_for_test(&mut self) -> &mpsc::Receiver<Duration> {
+        self.poll_ctrl_rx.as_ref().expect("still held in tests")
+    }
+
+    /// Adopt the push channel's new state: retune the poller and, when the
+    /// status line is showing the session summary, refresh its `sync:` tag.
+    ///
+    /// The retune is what makes a stale sid cheap. The old code picked 60 s
+    /// from the mere existence of a cookie; now the interval is a function
+    /// of a state the websocket thread has actually demonstrated.
+    fn set_sync_state(&mut self, st: SyncState) {
+        if self.sync_state == st {
+            return;
+        }
+        self.sync_state = st;
+        // A dead channel just means the poller is gone (shutdown).
+        let _ = self.poll_ctrl_tx.send(st.poll_interval());
+        self.refresh_sync_tag();
+    }
+
+    /// The `sync:` word inside the session summary, kept truthful as the
+    /// state moves. Only that summary is rewritten — a live status message
+    /// (a commit result, an auth note) is left alone.
+    fn refresh_sync_tag(&mut self) {
+        let Some(at) = self.status.find("sync: ") else { return };
+        let Some(rest) = self.status.get(at + "sync: ".len()..) else { return };
+        let end = rest.find(' ').map(|i| at + "sync: ".len() + i).unwrap_or(self.status.len());
+        self.status.replace_range(at + "sync: ".len()..end, self.sync_label());
+    }
+
+    /// What to call the live-update channel. A session with no sid is not
+    /// "reconnecting" — it never had a push channel to lose.
+    fn sync_label(&self) -> &'static str {
+        if self.ws_attempted {
+            self.sync_state.label()
+        } else {
+            SyncState::Polling.label()
+        }
+    }
+
+    /// Does the page hold a diagram that HAD a picture and no longer does,
+    /// because its own source changed? That is the edit loop, and it must
+    /// not wait for a keypress.
+    fn has_stale_diagram(&self) -> bool {
+        self.blocks.iter().any(|b| {
+            let Block::WebRender { kind, code, rows, last_src } = b else { return false };
+            if self.caret_is_inside(rows) {
+                return false;
+            }
+            let Some(anchor) = self.block_anchor(rows) else { return false };
+            if !self.web_drawn_blocks.contains(&anchor) {
+                return false;
+            }
+            let Some(req) = self.web_request(*kind, code, *last_src) else { return false };
+            let key = req.cache_key();
+            !self.images.contains_key(&key) && !self.web_errors.contains_key(&key)
+        })
+    }
+
+    /// A stable name for a diagram block: the id of its `code:` header line.
+    /// Every other line in the block can be added, removed or retyped by an
+    /// ordinary edit; the header is what stays put.
+    fn block_anchor(&self, rows: &[(usize, Line<'static>)]) -> Option<String> {
+        let (src, _) = rows.first()?;
+        self.lines.get(*src).map(|l| l.id.clone())
+    }
+
+    /// Is the edit session's caret on one of these source lines? Such a
+    /// line is being typed into, so `app.lines` still holds the committed
+    /// text while the session's buffer holds the reader's — the block is not
+    /// renderable until the caret leaves and the commit lands.
+    fn caret_is_inside(&self, rows: &[(usize, Line<'static>)]) -> bool {
+        let Some(s) = &self.session else { return false };
+        rows.iter().any(|(src, _)| *src == s.line)
+    }
+
+    /// Source lines belonging to a diagram that is being rendered right now,
+    /// mapped to their position in the block. Derived from the blocks rather
+    /// than the laid-out rows, so wrapped continuation rows of one source
+    /// line pulse together.
+    fn web_shimmer_rows(&self) -> HashMap<usize, (u16, u16)> {
+        let mut out = HashMap::new();
+        // Source mode shows the raw notation and never a picture, so there
+        // is nothing there for the pulse to be about.
+        if self.web_pending.is_empty() || self.mode == Mode::Source {
+            return out;
+        }
+        for b in &self.blocks {
+            let Block::WebRender { kind, code, rows, last_src } = b else { continue };
+            let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
+            if !self.web_pending.contains(&req.cache_key()) {
+                continue;
+            }
+            let len = rows.len() as u16;
+            for (i, (src, _)) in rows.iter().enumerate() {
+                out.insert(*src, (i as u16, len));
+            }
+        }
+        out
+    }
+
+    /// Re-encode any diagram that was built for a different column cap than
+    /// the pane now has. The picture keeps its place on screen — the old,
+    /// wrongly-sized one stays up until the new encoding lands, which beats
+    /// flickering back to source. Costs a PNG decode on the worker; the
+    /// browser is not involved.
+    fn rescale_diagrams(&mut self) {
+        let want = self.web_cols;
+        let mut keys: Vec<String> = Vec::new();
+        for b in &self.blocks {
+            let Block::WebRender { kind, code, last_src, .. } = b else { continue };
+            let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
+            let key = req.cache_key();
+            let Some(info) = self.images.get(&key) else { continue };
+            if info.built_for != want && !self.web_rescaling.contains(&key) {
+                keys.push(key);
+            }
+        }
+        for key in keys {
+            self.web_rescaling.insert(key.clone());
+            if self
+                .web_job_tx
+                .send(WebJob::Rescale { gen: self.gen_now(), key: key.clone(), max_cols: want })
+                .is_err()
+            {
+                self.web_rescaling.remove(&key);
+            }
+        }
+    }
+
+    /// Note that a diagram did not draw. This never touches `app.status`,
+    /// so it cannot overwrite — or, on expiry, erase — a commit, auth or
+    /// resync message.
+    fn note_web_failure(&mut self, msg: String) {
+        const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+        self.web_notice = Some((msg, std::time::Instant::now() + SHOWN_FOR));
+    }
+
+    /// Drop the diagram note once it has had its seconds, so the key hints
+    /// come back. Returns whether anything changed.
+    fn expire_web_notice(&mut self) -> bool {
+        let Some((_, until)) = self.web_notice.as_ref() else { return false };
+        if std::time::Instant::now() < *until {
+            return false;
+        }
+        self.web_notice = None;
+        true
+    }
+
+    /// What the bottom row should say, in priority order: the edit
+    /// session's keys, then the links on the cursor line, then whatever
+    /// wrote to `status` (commits, auth, resync — the things a reader must
+    /// not miss), then a diagram note, and finally the key hints.
+    fn hint_text(&self, cursor_links: &[LinkItem]) -> String {
+        if let Some(s) = self.session.as_ref() {
+            let dirty = s.input.buf != s.orig;
+            return format!(
+                "{}↑↓ move · Enter new line · ⌫@行頭 join · Tab indent · Esc done",
+                if dirty { "● " } else { "" }
+            );
+        }
+        if !cursor_links.is_empty() {
+            let listed: Vec<String> = cursor_links
+                .iter()
+                .take(9)
+                .enumerate()
+                .map(|(i, l)| format!("{}:{}", i + 1, l.label()))
+                .collect();
+            return format!("Enter/f open → {}", listed.join("  "));
+        }
+        if !self.status.is_empty() {
+            return self.status.clone();
+        }
+        if let Some((msg, _)) = self.web_notice.as_ref() {
+            return msg.clone();
+        }
+        if self.editable {
+            "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit".into()
+        } else {
+            "j/k move  Enter link  w browser  ? help  q quit  · read-only".into()
+        }
+    }
+
+    /// The local model may have drifted from the server. Deliberately
+    /// sticky: a later commit succeeding says nothing about the edit that
+    /// did not, so only an authoritative page install clears it.
+    fn mark_desynced(&mut self) {
+        self.web_unsynced = true;
+    }
+
+    /// A whole page arrived from the server and replaced the local lines,
+    /// so whatever had drifted is gone. This is the ONLY way the flag
+    /// clears; it must never be called on a partial or local-only update,
+    /// which would re-open the window it exists to close.
+    fn mark_synced(&mut self) {
+        self.web_unsynced = false;
+    }
+
+    /// The page source has changed: any render queued before this moment
+    /// would be filed under a hash it no longer matches.
+    fn bump_src_epoch(&self) {
+        self.src_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn src_epoch_now(&self) -> u64 {
+        self.src_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The server's state has moved on: any poll response fetched before
+    /// this moment is stale.
+    fn bump_server_epoch(&self) {
+        self.server_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn server_epoch_now(&self) -> u64 {
+        self.server_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn gen_now(&self) -> u64 {
+        self.web_gen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Install finished web renders. A result from an older page generation
+    /// is dropped WITHOUT touching any state: the reader has moved on, and
+    /// the same key can legitimately be pending again for the current page
+    /// (navigate away and back), so clearing by key alone would cancel the
+    /// live request and leave the diagram pulsing forever.
+    fn drain_web_renders(&mut self) -> bool {
+        let mut changed = false;
+        // Refusals from this drain, judged together once the loop ends.
+        let mut denied: Vec<(String, Option<RenderCapability>)> = Vec::new();
+        while let Ok(msg) = self.web_rx.try_recv() {
+            if msg.gen != self.gen_now() {
+                continue;
+            }
+            let WebMsg { key, rescale, attempted, res, .. } = msg;
+            if rescale {
+                // A rescale only ever changes the SIZE of a picture that is
+                // already on screen. If it failed, the reader keeps the
+                // size they had: no error, no notice, no lost diagram.
+                self.web_rescaling.remove(&key);
+                if let WebOutcome::Drawn(info) = res {
+                    self.images.insert(key, info);
+                    changed = true;
+                }
+                continue;
+            }
+            self.web_pending.remove(&key);
+            match res {
+                WebOutcome::Drawn(info) => {
+                    self.images.insert(key, info);
+                }
+                // Not on disk, and this pass could not draw. The block goes
+                // back to being source, silently — `m` will pick it up.
+                WebOutcome::Missing => {
+                    self.web_missing.insert(key);
+                }
+                // The BROWSER was refused. The REST credential is untouched:
+                // edits and reads carry on exactly as before. Collected
+                // rather than handled here — one batch refuses every key in
+                // it at once, and handling them one at a time made the
+                // second key see the first key's bookkeeping and give up.
+                WebOutcome::Denied => {
+                    denied.push((key, attempted));
+                }
+                // Nothing is recorded: not an image, not a miss, not an
+                // error. The next pass sees the new source and asks again.
+                WebOutcome::Stale => {}
+                WebOutcome::Failed(e) => {
+                    self.note_web_failure(format!("diagram: {e} (showing source)"));
+                    self.web_errors.insert(key, e);
+                }
+            }
+            changed = true;
+        }
+        if !denied.is_empty() {
+            self.note_denied(denied);
+        }
+        // An `m` that arrived while the cache probe was out: now that the
+        // misses are known, serve it. Once — the flag is cleared whether or
+        // not there turned out to be anything to draw.
+        if self.web_manual_wanted && self.web_pending.is_empty() {
+            self.web_manual_wanted = false;
+            self.start_web_renders(capability::Trigger::Manual);
+        }
+        changed
     }
 
     /// Install images that finished loading. Returns true if anything
@@ -1104,7 +2244,9 @@ impl App {
         let mut content: Vec<Row> = Vec::new();
         for (b, &src) in self.blocks.iter().zip(self.srcs.iter()) {
             if let Some((eline, ebuf)) = edit {
-                if src == eline && !matches!(b, Block::Table(_)) {
+                if src == eline
+                    && !matches!(b, Block::Table(_) | Block::WebRender { .. })
+                {
                     raw_rows(&mut content, ebuf, src);
                     continue;
                 }
@@ -1134,6 +2276,45 @@ impl App {
                             }
                         }
                         content.push(Row::Line { line, src: row_src });
+                    }
+                }
+                Block::WebRender { kind, code, rows, last_src } => {
+                    let key = self
+                        .web_request(*kind, code, *last_src)
+                        .map(|r| r.cache_key());
+                    // While the edit session is inside this block the reader
+                    // is working on the raw source, so the picture steps
+                    // aside — the existing source-editing contract wins.
+                    let editing_here = edit
+                        .map(|(eline, _)| rows.iter().any(|(rsrc, _)| *rsrc == eline))
+                        .unwrap_or(false);
+                    let art = if editing_here {
+                        None
+                    } else {
+                        key.as_ref().and_then(|k| self.images.get(k).map(|i| (k, i)))
+                    };
+                    if let Some((k, info)) = art {
+                        content.push(Row::Image {
+                            url: k.clone(),
+                            height: info.cells_h.max(1),
+                            src: *last_src,
+                        });
+                        continue;
+                    }
+                    // No artifact (yet, or ever): the plain code block, with
+                    // the session's caret row swapped to raw source.
+                    for (rsrc, line) in rows {
+                        if let Some((eline, ebuf)) = edit {
+                            if *rsrc == eline {
+                                raw_rows(&mut content, ebuf, *rsrc);
+                                continue;
+                            }
+                        }
+                        for wrapped in
+                            wrap_line_continued(line, text_w, &hanging_prefix(line))
+                        {
+                            content.push(Row::Line { line: wrapped, src: *rsrc });
+                        }
                     }
                 }
                 Block::Image { url } => {
@@ -1209,6 +2390,11 @@ impl App {
     /// attribution) plus inline comment cards inserted after each comment's
     /// anchor block. Called on resize and whenever comments change.
     fn rebuild(&mut self, width: u16) {
+        // Diagrams must fit the pane: the draw clips to the text column, so
+        // an image encoded wider than the pane loses its right-hand side.
+        // Recorded here (the layout is the only place the width is known)
+        // and acted on by `rescale_diagrams`.
+        self.web_cols = diagram_max_cols(Self::text_width(self.mode, width) as u16);
         // 1. Page rows and related rows are separate visual regions. The
         // page is boxed; related sections are appended after its FrameEnd.
         // The edit session (and source mode) hides the related sections:
@@ -1269,6 +2455,7 @@ impl App {
         rows.push(Row::FrameEnd);
         rows.extend(related);
         self.rows = rows;
+        self.web_shimmer = self.web_shimmer_rows();
         self.laid_width = width;
         self.clamp_cursor();
     }
@@ -1290,11 +2477,35 @@ impl App {
         if self.cursor_rows().is_some() {
             return;
         }
+        // A drawn diagram collapses its whole source span into ONE image
+        // row, owned by the block's last line. A cursor anywhere else in
+        // that span owns no row — and the generic search below goes UP,
+        // landing the reader on the line BEFORE the diagram rather than on
+        // the diagram they were just editing. Send it to the row the block
+        // actually has, which is also where it visually already is.
+        if let Some(owner) = self.diagram_row_owner(self.cursor) {
+            self.cursor = owner;
+            return;
+        }
         let up = (0..self.cursor).rev().find(|&s| self.src_rows(s).is_some());
         let down = (self.cursor + 1..n).find(|&s| self.src_rows(s).is_some());
         if let Some(s) = up.or(down) {
             self.cursor = s;
         }
+    }
+
+    /// If `src` lies inside a diagram block that is currently showing its
+    /// picture, the source line that owns that picture's row.
+    fn diagram_row_owner(&self, src: usize) -> Option<usize> {
+        self.blocks.iter().find_map(|b| {
+            let Block::WebRender { rows, last_src, .. } = b else { return None };
+            if !rows.iter().any(|(rsrc, _)| *rsrc == src) {
+                return None;
+            }
+            // Only when the block really is a picture right now: an undrawn
+            // one renders its source lines normally, and they own rows.
+            self.src_rows(*last_src).map(|_| *last_src)
+        })
     }
 
     /// The display rows occupied by source line `src`, as an inclusive
@@ -1982,6 +3193,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&app.gen),
         );
     }
+    // The web renderer: headless Chrome when one can be found, otherwise a
+    // backend that fails every request so diagrams simply stay code blocks.
+    // The session's `connect.sid` (never the PAT) is what a browser can use,
+    // and it is handed to the backend here and nowhere else.
+    // `COSENSE_WEB_RENDER=off` means OFF: no backend, no worker thread, and
+    // no cache directory is created or swept. Diagrams are code blocks, and
+    // nothing on disk is touched.
+    let renderer_off = app.render_policy == capability::RenderPolicy::Off;
+    let web_backend: Arc<dyn WebBackend> = if renderer_off {
+        Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser))
+    } else {
+        match cosense::chrome::ChromeBackend::detect(ctx.client.sid().map(str::to_string)) {
+            Some(b) => Arc::new(b),
+            None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
+        }
+    };
+    let web_worker = app.web_jobs_rx.take().filter(|_| !renderer_off).map(|jobs_rx| {
+        spawn_web_worker(
+            jobs_rx,
+            app.web_tx.clone(),
+            Arc::clone(&web_backend),
+            ctx.picker.clone(),
+            ArtifactCache::new(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        )
+    });
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
     // PAT while the push channel only accepts the sid), polling otherwise.
@@ -1989,12 +3227,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     // invalid sid (push stuck reconnecting forever) must degrade to
     // "web edits still land, just at the poll interval" — never silence.
     let sid = ctx.client.sid().map(str::to_string);
-    let (ws_active, poll_interval) = cosense::ws::sync_plan(sid.is_some());
+    // A sid is one capability among several: it enables push sync and lets
+    // the browser see private pages. It is NOT what makes the app usable —
+    // a PAT session without one still reads, edits and commits.
+    app.caps.sid = sid.is_some();
+    let (ws_active, initial_state) = cosense::ws::initial_plan(sid.is_some());
+    app.ws_attempted = ws_active;
+    app.sync_state = initial_state;
+    let poll_ctrl_rx = app
+        .poll_ctrl_rx
+        .take()
+        .expect("poller control receiver is only handed out once");
     spawn_web_poller(
         ctx.client.clone(),
         Arc::clone(&app.poll_target),
         app.poll_tx.clone(),
-        poll_interval,
+        poll_ctrl_rx,
+        Arc::clone(&app.server_epoch),
+        initial_state.poll_interval(),
     );
     if let Some(sid) = &sid {
         let ws_req_rx = app
@@ -2018,12 +3268,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(c) if app.editable => format!(
             "auth: {} · edit enabled · sync: {} · ? help",
             c.kind(),
-            if ws_active { "ws" } else { "poll" }
+            app.sync_label()
         ),
         Some(c) => format!(
             "auth: {} · read-only (not a project member) · sync: {} · ? help",
             c.kind(),
-            if ws_active { "ws" } else { "poll" }
+            app.sync_label()
         ),
         None => "no auth — public read-only (`cosense login` to enable edits)".into(),
     };
@@ -2040,8 +3290,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let res = run(&mut terminal, &mut app, &ctx);
+    // Shutdown contract, in this order:
+    //   1. `shutdown()` refuses further work and SIGKILLs any browser in
+    //      flight. That is also what unblocks the worker: its DevTools
+    //      socket dies, so a batch mid-navigation errors out promptly
+    //      instead of waiting out its budget.
+    //   2. give the terminal back, so a slow reap is never a black screen.
+    //   3. `Stop` ends the worker loop, and the join makes "no browser and
+    //      no worker outlive this process" a fact rather than a hope.
+    web_backend.shutdown();
     let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
+    if let Some(worker) = web_worker {
+        let _ = app.web_job_tx.send(WebJob::Stop);
+        let _ = worker.join();
+    }
     drop(app.ime_guard.take());
 
     if !app.comments.is_empty() {
@@ -2322,25 +3585,37 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
 }
 
 /// Turn a decoded image into a sliced protocol at a width-capped cell size.
-/// Runs on the image worker thread (`Picker` is a plain clone of the
-/// terminal's capabilities).
-fn build_image(picker: &Picker, dyn_img: image::DynamicImage) -> Result<ImageInfo, String> {
+/// Runs on a worker thread (`Picker` is a plain clone of the terminal's
+/// capabilities), never on the UI thread.
+fn build_image(
+    picker: &Picker,
+    dyn_img: image::DynamicImage,
+    max_cols: u16,
+) -> Result<ImageInfo, String> {
     let font = picker.font_size();
     let (px_w, px_h) = (dyn_img.width(), dyn_img.height());
     let nat_cols = (px_w as f32 / font.width as f32).ceil() as u32;
     let nat_rows = (px_h as f32 / font.height as f32).ceil() as u32;
-    let max_cols = 64u32;
-    let (cw, ch) = if nat_cols > max_cols {
-        let scale = max_cols as f32 / nat_cols as f32;
-        (max_cols, ((nat_rows as f32) * scale).ceil() as u32)
+    let cap = max_cols.max(1) as u32;
+    let (cw, ch) = if nat_cols > cap {
+        let scale = cap as f32 / nat_cols as f32;
+        (cap, ((nat_rows as f32) * scale).ceil() as u32)
     } else {
         (nat_cols.max(1), nat_rows.max(1))
     };
     let size = Size::new(cw as u16, ch as u16);
     SlicedProtocol::new(picker, dyn_img, Some(size))
         .map(|sliced| {
-            let cells_h = sliced.size().height.max(1);
-            ImageInfo { sliced, cells_h }
+            let s = sliced.size();
+            ImageInfo {
+                sliced,
+                cells_h: s.height.max(1),
+                // The protocol may round down; never report more than asked
+                // for, since the cap is what keeps the diagram inside the
+                // pane.
+                cells_w: s.width.min(max_cols.max(1)),
+                built_for: max_cols.max(1),
+            }
         })
         .map_err(|e| e.to_string())
 }
@@ -2595,9 +3870,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
             apply_remote(app, ctx, polled);
         }
         // Install any images that finished downloading, then draw.
-        if app.drain_images() {
+        if app.drain_images() | app.drain_web_renders() {
             app.laid_width = 0; // heights changed — rebuild layout
         }
+        // Both are no-ops on most frames: a diagram is only requested when
+        // its own source changed, and only re-encoded when the pane crossed
+        // the column cap it was built for.
+        app.ensure_visibility(ctx);
+        app.drain_visibility();
+        app.start_web_renders(capability::Trigger::Auto);
+        app.rescale_diagrams();
+        app.expire_web_notice();
         app.drain_downloads();
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
@@ -2605,7 +3888,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // A wheel flick — or herdr, which delivers bursts at once — queues
         // dozens of mouse events; a redraw per event (images included)
         // made scrolling crawl. akapen's event_loop does the same.
-        if !event::poll(Duration::from_millis(120))? {
+        // Idle: one wake-up per 120ms is enough to slot in arriving images.
+        // While a diagram renders, the shimmer wants smoother frames — but
+        // only then, so an idle viewer still costs ~8 wake-ups a second.
+        let tick = if app.web_shimmer.is_empty() { 120 } else { 60 };
+        if !event::poll(Duration::from_millis(tick))? {
             continue;
         }
         for _ in 0..MAX_EVENTS_PER_FRAME {
@@ -2724,9 +4011,15 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('q'), false) => return Action::Quit,
         (KeyCode::Esc, false) => {
             if app.time.is_some() {
-                app.time = None;
-                reload_page(app, ctx);
-                app.status = "NOW".into();
+                // Leaving history means the live page replaces the snapshot.
+                // If that fetch fails there is no live page to show, so we
+                // stay in history: `set_page` (which clears `time`) runs
+                // only on success. Clearing `time` first would relabel the
+                // SNAPSHOT's lines as NOW and editable, and let the renderer
+                // screenshot today's page under a historical source's hash.
+                if reload_page(app, ctx) {
+                    app.status = "NOW".into();
+                }
             } else if app.selection.is_some() {
                 app.selection = None;
                 app.status = "selection cleared".into();
@@ -2842,6 +4135,29 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 .map(|l| indent_of(&l.text).len())
                 .unwrap_or(0);
             enter_session(app, ctx, app.cursor, caret);
+        }
+
+        // ---- draw this page's diagrams (**m**ermaid) ----
+        // Rendering is manual by default: a page load only shows diagrams
+        // it already has on disk, because launching a browser is by far the
+        // most expensive thing this viewer does. This is how you ask.
+        (KeyCode::Char('m'), false) => {
+            if app.start_web_renders(capability::Trigger::Manual) {
+                // Drawing; the blocks pulse and say the rest themselves.
+            } else if app.web_pending.iter().any(|k| !app.images.contains_key(k)) {
+                // The page-load cache probe still owns these keys, so the
+                // request cannot be queued yet. Remember it and serve it the
+                // moment the probe reports its misses — pressing `m` twice
+                // should not be part of the interface.
+                app.web_manual_wanted = true;
+            } else if app.web_notice.is_none() {
+                app.note_web_failure(match app.render_policy {
+                    capability::RenderPolicy::Off => {
+                        "diagram: レンダラは off です (COSENSE_WEB_RENDER)".into()
+                    }
+                    _ => "diagram: 描画するものはありません".to_string(),
+                });
+            }
         }
 
         // ---- open in browser (moved from `e`: **w**eb) ----
@@ -3033,12 +4349,16 @@ fn finish_composer(app: &mut App, input: Input) {
 
 /// Re-render the page body from the (just mutated) local model.
 fn rerender(app: &mut App, ctx: &Ctx) {
+    // The source is about to change shape. Anything already queued against
+    // the old text must not come back and be filed under it.
+    app.bump_src_epoch();
     let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
     let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
     app.blocks = r.blocks;
     app.srcs = r.srcs;
     app.laid_width = 0;
     app.start_image_loads(ctx);
+    app.start_web_renders(capability::Trigger::Auto);
 }
 
 fn ensure_editable(app: &mut App) -> bool {
@@ -3080,6 +4400,9 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
         app.inflight += 1;
     } else {
         app.status = "commit worker gone — edits are LOCAL ONLY".into();
+        // The edit never left the machine: local lines and the server have
+        // parted ways, and every diagram on the page must stay as source.
+        app.mark_desynced();
     }
 }
 
@@ -3547,6 +4870,9 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     app.inflight = app.inflight.saturating_sub(1);
     match outcome {
         CommitOutcome::Done { label, title } => {
+            // The server now holds something a poll started before this may
+            // not know about.
+            app.bump_server_epoch();
             // Title-line edits rename the page (auto-suffix included).
             if !title.is_empty() && title != app.title {
                 app.title = title;
@@ -3561,6 +4887,7 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
         CommitOutcome::Skipped => {}
         CommitOutcome::Failed { label, msg } => {
             app.status = format!("commit failed: {label} — {msg}");
+            app.mark_desynced();
         }
         CommitOutcome::Conflict => recover_conflict(app, ctx),
     }
@@ -3583,6 +4910,11 @@ fn remote_gate_clear(app: &App) -> bool {
 /// clearing the local undo lineage (its anchors came from the old state),
 /// and re-rendering. Polled pages and websocket resyncs both land here.
 fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, status: &str) {
+    // A full page from the server replaces the local lines wholesale, so
+    // whatever a failed commit had left diverging is resolved here. This
+    // and `set_page` are the only places the desync flag clears.
+    app.bump_server_epoch();
+    app.mark_synced();
     let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
     let session_id = app
         .session
@@ -3649,6 +4981,13 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
     if polled.project != app.project || polled.title != app.title {
         return;
     }
+    // The snapshot was taken before something newer landed — a commit of
+    // ours, a websocket commit, a page install. Installing it now would
+    // undo that on screen. It is not an error; the next poll is seconds
+    // away and will carry the newer state.
+    if polled.epoch != app.server_epoch_now() {
+        return;
+    }
     if !remote_gate_clear(app) {
         return;
     }
@@ -3660,6 +4999,18 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
             .zip(&app.lines)
             .all(|(a, b)| a.id == b.id && a.text == b.text);
     if same {
+        // Identical — nothing to install. But this IS a fresh, authoritative
+        // full snapshot (the epoch guard above proved it is not stale), and
+        // it agrees with the screen line for line. So if a failed commit had
+        // left us believing the page had drifted, that belief is now
+        // demonstrably wrong: an undo, a retry or a web-side revert brought
+        // the two back together. Clearing it here is what lets diagrams
+        // render again — without it the flag is sticky for the session.
+        //
+        // Only the flag is touched: no lines, no cursor, no undo lineage.
+        if app.web_unsynced {
+            app.mark_synced();
+        }
         return;
     }
     install_remote_lines(app, ctx, &polled.page, "⟳ web側の編集を反映");
@@ -3672,6 +5023,14 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
 /// One event from the ws thread → the event loop.
 fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
     match ev {
+        // A state for the room the reader has already left says nothing
+        // about the one they are on — and a late `Live` from the old room
+        // would hold the NEW page on the 60 s poll.
+        WsEvent::State { project, title, state } => {
+            if project == app.project && title == app.title {
+                app.set_sync_state(state);
+            }
+        }
         WsEvent::Status(s) => {
             // Never clobber the session hint (EDIT — …): connection notes
             // are transient and can wait.
@@ -3766,6 +5125,8 @@ fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
             .and_then(|s| app.lines.get(s.line))
             .map(|l| l.id.clone());
         cosense::ws::apply_remote_ops(&mut app.lines, &c.ops, &c.user_id);
+        // The screen now holds a state newer than any poll already out.
+        app.bump_server_epoch();
         app.ws_head = Some(c.commit_id.clone());
         rerender(app, ctx);
         reanchor_cursor_session(app, cursor_id, session_id);
@@ -3798,10 +5159,21 @@ fn ws_send_resync_request(app: &mut App) {
 /// at the end and the session continues there.
 fn recover_conflict(app: &mut App, ctx: &Ctx) {
     app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // 409 means the server moved and our ops did not land: local and server
+    // disagree from this moment. Marked BEFORE the reload, because if the
+    // reload fails we are still divergent and must not render — a browser
+    // would screenshot the server's text and file it under ours.
+    app.mark_desynced();
     let stash = app.session.as_ref().map(|s| {
         (app.lines.get(s.line).map(|l| l.id.clone()).unwrap_or_default(), s.input.buf.clone(), s.input.cur)
     });
-    reload_page(app, ctx); // set_page clears session + undo lineage
+    if !reload_page(app, ctx) {
+        // `reload_page` already said why on the status line; saying anything
+        // else here would bury it. The reader keeps their text, the flag
+        // stays set, and the next successful install clears it.
+        return;
+    }
+    // set_page cleared session + undo lineage and marked us synced again.
     match stash {
         None => {
             app.status = "page changed by someone else — reloaded".into();
@@ -3864,9 +5236,11 @@ fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
             show_snapshot(app, ctx, pos - 1);
         }
     } else if pos + 1 >= len {
-        app.time = None;
-        reload_page(app, ctx);
-        app.status = "NOW".into();
+        // Past the newest snapshot is NOW — but only if NOW can be fetched.
+        // See the Esc path: a failed reload keeps the snapshot, read-only.
+        if reload_page(app, ctx) {
+            app.status = "NOW".into();
+        }
     } else {
         show_snapshot(app, ctx, pos + 1);
     }
@@ -3905,6 +5279,8 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.images.clear();
     app.image_errors.clear();
     app.pending.clear();
+    app.web_pending.clear();
+    app.web_errors.clear();
     app.selection = None;
     app.laid_width = 0; // rebuild (clamps the cursor)
     app.follow = true;
@@ -4396,34 +5772,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         format!("L{}/{}", cur, app.lines.len())
     };
     let cur_links = if app.session.is_some() { Vec::new() } else { app.cursor_line_links() };
-    let hint = if app.session.is_some() {
-        let dirty = app
-            .session
-            .as_ref()
-            .map(|s| s.input.buf != s.orig)
-            .unwrap_or(false);
-        format!(
-            "{}↑↓ move · Enter new line · ⌫@行頭 join · Tab indent · Esc done",
-            if dirty { "● " } else { "" }
-        )
-    } else if !cur_links.is_empty() {
-        let listed: Vec<String> = cur_links
-            .iter()
-            .take(9)
-            .enumerate()
-            .map(|(i, l)| format!("{}:{}", i + 1, l.label()))
-            .collect();
-        format!("Enter/f open → {}", listed.join("  "))
-    } else if app.status.is_empty() {
-        if app.editable {
-            "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
-                .to_string()
-        } else {
-            "j/k move  Enter link  w browser  ? help  q quit  · read-only".to_string()
-        }
-    } else {
-        app.status.clone()
-    };
+    let hint = app.hint_text(&cur_links);
     f.render_widget(
         Paragraph::new(format!(" {} {} · {}", mode_tag, pos, hint))
             .style(Style::default().fg(CHROME_DIM)),
@@ -4633,7 +5982,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         };
 
         match row {
-            Row::Line { line, .. } | Row::Card { line } => {
+            Row::Line { line, src } => {
+                if let Some(r) = one_row(screen_y) {
+                    // A diagram being rendered dims its code and lets a band
+                    // of brightness run down it: the reader sees the work
+                    // happening without the text moving under them.
+                    let painted = match app.web_shimmer.get(src) {
+                        Some((pos, len)) => shimmer(line, *pos, *len, app, ctx),
+                        None => line.clone(),
+                    };
+                    f.render_widget(Paragraph::new(painted).style(base), r);
+                }
+            }
+            Row::Card { line } => {
                 if let Some(r) = one_row(screen_y) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
@@ -4680,10 +6041,14 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         x: 1,
                         y: (screen_y + text.y as i32 - band_top) as i16,
                     };
+                    // Never hand the protocol more columns than it has, and
+                    // never more than the pane: a diagram encoded for a
+                    // wider pane (a rescale still in flight) is clipped here
+                    // rather than painting over the frame.
                     let img_area = Rect::new(
                         text.x,
                         band_top as u16,
-                        text.width,
+                        info.cells_w.min(text.width),
                         band_h,
                     );
                     f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
@@ -4789,6 +6154,23 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
 }
 
+/// One row of a block the web renderer is still working on, with the
+/// brightness band applied to every span.
+fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: &Ctx) -> Line<'static> {
+    let level = cosense::theme::shimmer_level(pos, len, app.web_anim.elapsed().as_secs_f32());
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .map(|s| {
+            Span::styled(
+                s.content.clone(),
+                cosense::theme::shimmer_style(s.style, ctx.terminal_bg, level),
+            )
+        })
+        .collect();
+    Line::from(spans)
+}
+
 /// Draw the open overlay as a centered panel.
 fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     let (title, items, cursor): (String, Vec<String>, usize) = match app.overlay.as_ref() {
@@ -4879,6 +6261,14 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "time      ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
                 "comment   v select · c add · d delete · ^n/^p jump".into(),
                 "detail    t who/when edited this line".into(),
+                "diagram   code:mmd / code:mermaid / code:<name>.mmd draw as pictures,".into(),
+                "          screenshotted from the real Cosense page by headless Chrome".into(),
+                "          (COSENSE_CHROME to point at it). No browser, a private page".into(),
+                "          without COSENSE_SID, or a Mermaid error → the code block stays.".into(),
+                "          m draws this page's diagrams. Opening a page only shows the".into(),
+                "          ones already cached: a browser is expensive, so it starts".into(),
+                "          when you ask. COSENSE_WEB_RENDER=auto|off changes that;".into(),
+                "          COSENSE_WEB_IDLE_SECS is how long the browser stays warm.".into(),
                 "output    y copy all comments".into(),
                 "list      l comments · ? help".into(),
                 "quit      q  (Esc cancels; comments print to stdout)".into(),
@@ -5002,10 +6392,37 @@ mod tests {
         }
     }
 
+    /// A Ctx whose every network call fails, fast and offline: `.invalid`
+    /// is reserved by RFC 2606 and cannot resolve. Used to exercise the
+    /// "the fetch did not work" branches without touching the network.
+    fn offline_ctx() -> Ctx {
+        let cfg = Config {
+            project: "proj".into(),
+            auth: AuthStore::default(),
+            api_domain: "cosense-tui-test.invalid".into(),
+        };
+        Ctx { client: Client::new(cfg).unwrap(), ..test_ctx() }
+    }
+
+    /// A page parked on a historical snapshot.
+    fn in_history(app: &mut App) {
+        app.time = Some(TimeMachine {
+            points: vec![cosense::api::SnapshotStamp { id: "s1".into(), created: 1 }],
+            pos: 0,
+            cache: HashMap::new(),
+        });
+    }
+
     fn page(texts: &[&str]) -> App {
         let mut app = App::new("proj".into());
         app.title = "t".into();
         app.editable = true;
+        // Most tests predate the capability split and care about the render
+        // pipeline, not the gate: give them a session that may draw. The
+        // gate's own behaviour is tested explicitly further down.
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.caps.sid = true;
+        app.caps.visibility = capability::Visibility::Private;
         app.lines = texts
             .iter()
             .enumerate()
@@ -5022,6 +6439,2084 @@ mod tests {
         app.blocks = r.blocks;
         app.srcs = r.srcs;
         app
+    }
+
+    // ---------------------------------------------------------------
+    // Live-update plan: the poller's interval follows a TYPED push state.
+    // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // A poll response is a photograph of the past.
+    // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // A fetch that fails must not be treated as one that succeeded.
+    // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // Leaving an edit inside a diagram block.
+    // ---------------------------------------------------------------
+
+    /// `mermaid_page` with the first block's picture installed, so that
+    /// block collapses to a single image row.
+    fn drawn_mermaid_page() -> App {
+        let mut app = mermaid_page();
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(key, info);
+        app
+    }
+
+    #[test]
+    fn leaving_an_edit_inside_a_diagram_lands_on_the_picture_not_before_it() {
+        // The drawn block is ONE image row, owned by its last source line.
+        // A cursor left on the header or an interior line owns no row, and
+        // the generic clamp searches UP — landing the reader on the line
+        // BEFORE the diagram, which is not where they were working.
+        for (name, start) in [("header", 1usize), ("interior", 2), ("last", 3)] {
+            let mut app = drawn_mermaid_page();
+            app.cursor = start;
+            app.rebuild(80);
+            assert_eq!(
+                app.cursor, 3,
+                "a cursor on the {name} line belongs to the picture it is inside"
+            );
+            assert!(
+                app.cursor_rows().is_some(),
+                "and that line owns a row ({name})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cursor_before_a_diagram_is_left_where_it_is() {
+        // The remap must not swallow lines that merely sit near a block.
+        let mut app = drawn_mermaid_page();
+        app.cursor = 0;
+        app.rebuild(80);
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn an_undrawn_diagram_block_keeps_its_source_lines_addressable() {
+        // Without a picture the block is ordinary code rows; every line of
+        // it owns rows and nothing should be remapped.
+        let mut app = mermaid_page();
+        for start in [1usize, 2, 3] {
+            app.cursor = start;
+            app.rebuild(80);
+            assert_eq!(app.cursor, start, "source lines stay addressable");
+        }
+    }
+
+    #[test]
+    fn a_snapshot_never_renders_diagrams() {
+        // A historical page is not what the server is showing now, so a
+        // screenshot of the live page would be filed under the snapshot's
+        // source hash.
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        in_history(&mut app);
+        app.rebuild(80);
+        assert!(!app.start_web_renders(capability::Trigger::Auto));
+        assert!(app.start_web_renders(capability::Trigger::Manual) == false);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        assert!(app.web_pending.is_empty());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_reader_in_history() {
+        let ctx = offline_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        in_history(&mut app);
+        app.rebuild(80);
+        // Esc asks for NOW. The fetch fails, so there is no NOW to show.
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.time.is_some(), "the snapshot stays on screen");
+        assert_ne!(app.status, "NOW", "and it is not labelled as the live page");
+        assert!(app.status.contains("reload failed"), "the reason is shown: {}", app.status);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no diagram work");
+    }
+
+    #[test]
+    fn a_failed_reload_at_the_newest_snapshot_also_stays_put() {
+        let ctx = offline_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        in_history(&mut app);
+        app.rebuild(80);
+        // Right from the newest snapshot is the other way out of history.
+        travel(&mut app, &ctx, 1);
+        assert!(app.time.is_some());
+        assert_ne!(app.status, "NOW");
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+    }
+
+    #[test]
+    fn a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved() {
+        // 409 means our ops did not land: local and server disagree. If the
+        // recovery fetch then fails too, we are STILL divergent — rendering
+        // would screenshot the server's text and file it under ours.
+        let ctx = offline_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        app.inflight = 1;
+        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict);
+        assert!(app.web_unsynced, "a failed recovery leaves us divergent");
+        assert!(
+            app.status.contains("reload failed"),
+            "the real reason is not overwritten: {}",
+            app.status
+        );
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        assert!(!app.start_web_renders(capability::Trigger::Manual));
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        assert!(app.web_pending.is_empty());
+    }
+
+    #[test]
+    fn a_poll_that_started_before_a_websocket_commit_never_rolls_it_back() {
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        // A GET goes out now, seeing "a"/"b".
+        let in_flight =
+            polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        // While it is out, a websocket commit lands and the screen moves on.
+        app.lines[1].text = "b2".into();
+        app.bump_server_epoch();
+        // Now the old response arrives.
+        apply_remote(&mut app, &ctx, in_flight);
+        assert_eq!(
+            app.lines[1].text, "b2",
+            "a snapshot older than the applied commit must not be installed"
+        );
+    }
+
+    #[test]
+    fn a_poll_that_started_before_a_local_commit_never_rolls_it_back() {
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        let in_flight =
+            polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        // The reader's own edit commits while the GET is out.
+        app.lines[1].text = "mine".into();
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 2".into(), title: String::new() },
+        );
+        apply_remote(&mut app, &ctx, in_flight);
+        assert_eq!(app.lines[1].text, "mine", "the server has our commit; the snapshot predates it");
+    }
+
+    #[test]
+    fn an_undo_that_restores_agreement_lets_diagrams_render_again() {
+        // A failed commit leaves local and server divergent, and diagrams
+        // stop rendering so the browser cannot screenshot the server's old
+        // text and file it under the local source. Undoing the edit makes
+        // the two agree again — but nothing was telling the app so, and the
+        // flag stayed set for the rest of the session.
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        app.lines[1].text = "typo".into();
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Failed { label: "line 2".into(), msg: "500".into() },
+        );
+        assert!(app.web_unsynced, "the page is known to have drifted");
+
+        // The reader undoes it: the screen is back to what the server has.
+        app.lines[1].text = "b".into();
+        // A fresh poll now agrees with the screen, line for line.
+        let agreeing =
+            polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        apply_remote(&mut app, &ctx, agreeing);
+        assert!(
+            !app.web_unsynced,
+            "an authoritative snapshot that MATCHES proves the drift is over"
+        );
+        assert_eq!(app.lines[1].text, "b", "and it changed nothing else");
+        assert_eq!(app.cursor, 0);
+
+        // ...so the next frame can render again.
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+    }
+
+    #[test]
+    fn a_stale_equal_poll_does_not_clear_the_drift() {
+        // Agreement only counts when the snapshot is CURRENT. An old
+        // response that happens to match says nothing about now.
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        app.web_unsynced = true;
+        let stale = polled_at(&[("id0", "a"), ("id1", "b")], app.server_epoch_now());
+        app.bump_server_epoch();
+        apply_remote(&mut app, &ctx, stale);
+        assert!(app.web_unsynced, "a photograph of the past proves nothing");
+    }
+
+    #[test]
+    fn a_fresh_poll_still_applies_web_edits() {
+        // The guard must not turn into "polling stopped working".
+        let ctx = test_ctx();
+        let mut app = page(&["a", "b"]);
+        app.page_id = "pid".into();
+        let fresh =
+            polled_at(&[("id0", "a"), ("id1", "web edit")], app.server_epoch_now());
+        apply_remote(&mut app, &ctx, fresh);
+        assert_eq!(app.lines[1].text, "web edit");
+    }
+
+    #[test]
+    fn a_stale_sid_polls_fast_from_the_first_second() {
+        let mut app = page(&["a"]);
+        app.ws_attempted = true; // a sid exists...
+        app.status = "auth: pat · edit enabled · sync: poll · ? help".into();
+        // ...but nothing has joined a room, so the plan is still the fast one.
+        assert_eq!(app.sync_state, SyncState::Polling);
+        assert_eq!(app.sync_state.poll_interval(), Duration::from_secs(3));
+        // A sid that never works keeps failing; each failure re-asserts fast.
+        app.set_sync_state(SyncState::Reconnecting);
+        assert_eq!(
+            app.poll_ctrl_rx_for_test().recv().unwrap(),
+            Duration::from_secs(3)
+        );
+        assert!(app.status.contains("sync: reconnecting"));
+    }
+
+    #[test]
+    fn only_a_proven_room_relaxes_the_poll_and_a_drop_tightens_it_again() {
+        let mut app = page(&["a"]);
+        app.ws_attempted = true;
+        app.status = "auth: sid · edit enabled · sync: poll · ? help".into();
+        app.set_sync_state(SyncState::Live);
+        assert!(app.status.contains("sync: ws"));
+        app.set_sync_state(SyncState::Reconnecting);
+        assert!(app.status.contains("sync: reconnecting"));
+        let rx = app.poll_ctrl_rx_for_test();
+        assert_eq!(rx.recv().unwrap(), Duration::from_secs(60));
+        // The drop is delivered as its own message, so the sleeping poller
+        // wakes on it instead of finishing a 60 s nap in silence.
+        assert_eq!(rx.recv().unwrap(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
+        let ctx = test_ctx();
+        let mut app = page(&["a"]);
+        app.title = "t".into();
+        app.ws_attempted = true;
+        app.status = "auth: sid · edit enabled · sync: poll · ? help".into();
+        handle_ws_event(
+            &mut app,
+            &ctx,
+            WsEvent::State {
+                project: "proj".into(),
+                title: "t".into(),
+                state: SyncState::Live,
+            },
+        );
+        assert_eq!(app.sync_state, SyncState::Live);
+        assert!(app.status.contains("sync: ws"));
+
+        // The reader moves to another page. The old room is gone; nothing
+        // has joined the new one yet, so the insurance poll must be fast.
+        app.set_page(
+            Loaded {
+                project: "proj".into(),
+                title: "other".into(),
+                page_id: "P2".into(),
+                header_colors: HeaderColors::fallback(),
+                lines: Vec::new(),
+                blocks: Vec::new(),
+                srcs: Vec::new(),
+                related: Vec::new(),
+                read_at: None,
+                editable: true,
+            },
+            &ctx,
+        );
+        assert_eq!(app.sync_state, SyncState::Polling);
+        let rx = app.poll_ctrl_rx_for_test();
+        let mut last = None;
+        while let Ok(d) = rx.try_recv() {
+            last = Some(d);
+        }
+        assert_eq!(last, Some(Duration::from_secs(3)), "the poller is retuned at once");
+    }
+
+    #[test]
+    fn a_live_from_the_room_the_reader_left_is_ignored() {
+        let ctx = test_ctx();
+        let mut app = page(&["a"]);
+        app.title = "other".into();
+        app.ws_attempted = true;
+        // Still in the channel from before the navigation.
+        handle_ws_event(
+            &mut app,
+            &ctx,
+            WsEvent::State {
+                project: "proj".into(),
+                title: "t".into(),
+                state: SyncState::Live,
+            },
+        );
+        assert_eq!(
+            app.sync_state,
+            SyncState::Polling,
+            "a Live for the old page must not hold the new one on the 60 s poll"
+        );
+        // The new room's own Live is honoured.
+        handle_ws_event(
+            &mut app,
+            &ctx,
+            WsEvent::State {
+                project: "proj".into(),
+                title: "other".into(),
+                state: SyncState::Live,
+            },
+        );
+        assert_eq!(app.sync_state, SyncState::Live);
+    }
+
+    #[test]
+    fn a_rejoin_that_stalls_leaves_the_reader_on_the_fast_poll() {
+        let ctx = test_ctx();
+        let mut app = page(&["a"]);
+        app.title = "other".into();
+        app.ws_attempted = true;
+        app.status = "auth: sid · edit enabled · sync: ws · ? help".into();
+        app.sync_state = SyncState::Live;
+        // The rejoin fails, repeatedly. Every failure edge says so.
+        for _ in 0..3 {
+            handle_ws_event(
+                &mut app,
+                &ctx,
+                WsEvent::State {
+                    project: "proj".into(),
+                    title: "other".into(),
+                    state: SyncState::Reconnecting,
+                },
+            );
+        }
+        assert_eq!(app.sync_state.poll_interval(), Duration::from_secs(3));
+        assert!(app.status.contains("sync: reconnecting"));
+    }
+
+    #[test]
+    fn a_session_without_a_sid_is_never_called_reconnecting() {
+        let mut app = page(&["a"]);
+        app.ws_attempted = false;
+        app.set_sync_state(SyncState::Reconnecting);
+        assert_eq!(app.sync_label(), "poll");
+    }
+
+    #[test]
+    fn speeding_up_the_poll_fetches_at_once_slowing_down_does_not() {
+        let (tx, rx) = mpsc::channel::<Duration>();
+        // Slow -> fast: the push channel just died; close the gap now.
+        tx.send(Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            absorb_interval(&rx, Duration::from_secs(60)),
+            Some((Duration::from_secs(3), true))
+        );
+        // Fast -> slow: the room just delivered a catch-up; nothing to fetch.
+        tx.send(Duration::from_secs(60)).unwrap();
+        assert_eq!(
+            absorb_interval(&rx, Duration::from_secs(3)),
+            Some((Duration::from_secs(60), false))
+        );
+    }
+
+    #[test]
+    fn a_pile_of_state_changes_collapses_to_the_last_one() {
+        let (tx, rx) = mpsc::channel::<Duration>();
+        // Flap during one sleep: live, dropped, live again.
+        for d in [60, 3, 60] {
+            tx.send(Duration::from_secs(d)).unwrap();
+        }
+        // Only the world as it now IS matters; the interval ends slow and
+        // no fetch is forced, because the channel came back up.
+        assert_eq!(
+            absorb_interval(&rx, Duration::from_secs(60)),
+            Some((Duration::from_secs(60), false))
+        );
+    }
+
+    #[test]
+    fn the_poller_stops_when_the_app_is_gone() {
+        let (tx, rx) = mpsc::channel::<Duration>();
+        drop(tx);
+        assert_eq!(absorb_interval(&rx, Duration::from_secs(60)), None);
+    }
+
+    // ---------------------------------------------------------------
+    // Web renderer (Mermaid). The browser itself is never launched here:
+    // `FakeBackend` stands in at the request→artifact boundary.
+    // ---------------------------------------------------------------
+
+    /// A 4×4 PNG — the smallest thing `image` will decode for us.
+    fn tiny_png() -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    fn scratch_cache() -> cosense::webrender::ArtifactCache {
+        let dir = std::env::temp_dir().join(format!(
+            "cosense-tui-test-webcache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        cosense::webrender::ArtifactCache::at(dir)
+    }
+
+    /// The `(gen, reqs)` of a queued render job — tests only ever queue
+    /// render jobs, and a rescale would be a test bug.
+    fn render_job(job: WebJob) -> (u64, Vec<WebRequest>) {
+        match job {
+            WebJob::Render { gen, reqs, .. } => (gen, reqs),
+            WebJob::Rescale { key, .. } => panic!("expected a render job, got a rescale of {key}"),
+            WebJob::Stop => panic!("expected a render job, got Stop"),
+        }
+    }
+
+    /// A page with two Mermaid blocks and one ordinary code block.
+    fn mermaid_page() -> App {
+        let mut app = page(&[
+            "t",           // 0
+            "code:mmd",    // 1
+            " flowchart LR", // 2
+            "   A-->B",    // 3  <- preview hangs here
+            "code:js",     // 4
+            " let a = 1",  // 5
+            "code:two.mmd", // 6
+            " pie",        // 7  <- and here
+        ]);
+        app.page_id = "PAGE".into();
+        app
+    }
+
+    #[test]
+    fn each_mermaid_block_is_requested_against_its_own_cosense_line_id() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let rx = app.web_jobs_rx.take().unwrap();
+        let (gen, reqs) = render_job(rx.try_recv().expect("one batch was queued"));
+        assert_eq!(gen, app.gen_now());
+        let ids: Vec<&str> = reqs.iter().map(|r| r.line_id.as_str()).collect();
+        // The LAST content line of each block — not the `code:` header, and
+        // nothing at all for the js block.
+        assert_eq!(ids, vec!["id3", "id7"]);
+        assert_eq!(
+            reqs[0].selector(),
+            "#mermaid-preview-id3",
+            "the selector addresses Cosense's own preview element"
+        );
+        assert_ne!(reqs[0].cache_key(), reqs[1].cache_key());
+        assert!(reqs.iter().all(|r| r.page_id == "PAGE"));
+        // Asking again while they are in flight queues nothing new.
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
+    }
+
+    #[test]
+    fn only_the_diagrams_own_source_invalidates_it() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let key = |a: &App, code: &str| {
+            a.web_request(cosense::webrender::WebKind::Mermaid, code, 3).unwrap().cache_key()
+        };
+        let before = key(&app, "flowchart");
+        // Someone (or the reader) commits elsewhere on the page: pressing
+        // Enter for a new line does exactly this. The diagram is untouched,
+        // so it must NOT be re-rendered — keying on the page commit used to
+        // re-render every diagram on the page for each such edit.
+        app.ws_head = Some("COMMIT2".into());
+        assert_eq!(before, key(&app, "flowchart"), "an unrelated commit changes nothing");
+        // Editing the diagram itself does invalidate it.
+        assert_ne!(before, key(&app, "flowchart LR"));
+        // A pane resize does NOT. The viewer scales every image to a cell
+        // width of its own, so the browser viewport only decides raster
+        // quality — re-rendering (3-6s) on a window drag bought nothing and
+        // queued one batch per width crossed.
+        app.rebuild(140);
+        assert_eq!(before, key(&app, "flowchart"));
+        // With the page's diagrams already requested once, resizing queues
+        // no further work at all.
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "the initial batch");
+        for w in [60, 100, 200, 37] {
+            app.rebuild(w);
+            app.start_web_renders(capability::Trigger::Auto);
+            assert!(
+                app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+                "resizing to {w} columns must queue nothing",
+            );
+        }
+        // …and a snapshot of an older page is never rendered from the web.
+        app.time = Some(TimeMachine { points: vec![], pos: 0, cache: HashMap::new() });
+        assert!(app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3)
+            .is_none());
+    }
+
+    #[test]
+    fn an_open_session_only_holds_back_the_block_under_the_caret() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let session_on = |app: &mut App, line: usize| {
+            app.session = Some(EditSession {
+                line,
+                input: Input::new(app.lines[line].text.clone()),
+                orig: app.lines[line].text.clone(),
+                want_col: None,
+            });
+        };
+        // The caret is inside the FIRST diagram (lines 1..=3): that one is
+        // still being typed, but the second diagram has nothing to wait for.
+        session_on(&mut app, 2);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) =
+            render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes"));
+        assert_eq!(
+            reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
+            vec!["id7"],
+            "only the block the caret is NOT in",
+        );
+
+        // The caret moves off the diagram — every caret move commits the
+        // dirty line first, so the block is now renderable. (Queueing a
+        // batch invalidates the layout so the pulse can appear, and the
+        // next request goes out after the frame that rebuilds it.)
+        app.rebuild(80);
+        session_on(&mut app, 5);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        assert_eq!(
+            reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
+            vec!["id3"],
+            "the block the caret just left starts rendering, session still open",
+        );
+    }
+
+    #[test]
+    fn typing_never_launches_a_browser() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // A commit is still on its way to the server: the browser would see
+        // the pre-edit page, so nothing is requested at all.
+        app.inflight = 1;
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+        assert!(app.web_pending.is_empty());
+        // Settled: one batch goes out, against text the server now has.
+        app.inflight = 0;
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok());
+    }
+
+    #[test]
+    fn a_result_for_an_older_page_generation_is_dropped() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let req = app.web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3).unwrap();
+        let key = req.cache_key();
+        app.web_pending.insert(key.clone());
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        // The reader navigated away and back while the browser was busy.
+        let stale_gen = app.gen_now().wrapping_sub(1);
+        app.web_tx.send(WebMsg { gen: stale_gen, key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) }).unwrap();
+        assert!(!app.drain_web_renders(), "a stale result changes nothing");
+        assert!(!app.images.contains_key(&key), "yesterday's diagram is not installed");
+        // …and it touches NO state. The same key can legitimately be
+        // pending again for the current page, so clearing by key alone
+        // would cancel that live request. What keeps pending from leaking
+        // is `set_page` — see
+        // `set_page_clears_the_state_a_dropped_job_would_have_answered`.
+        assert!(app.web_pending.contains(&key));
+    }
+
+    #[test]
+    fn a_renderer_failure_leaves_the_code_block_on_screen() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        app.web_pending.insert(key.clone());
+        app.web_tx
+            .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Failed(WebError::NoBrowser.to_string()) })
+            .unwrap();
+        assert!(app.drain_web_renders());
+        app.laid_width = 0;
+        app.rebuild(80);
+        let text: Vec<String> = app
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, .. } => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(text.iter().any(|t| t.contains("code:mmd")));
+        assert!(text.iter().any(|t| t.contains("flowchart LR")));
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })));
+        assert!(
+            app.hint_text(&[]).contains("showing source"),
+            "and the reader is told: {}",
+            app.hint_text(&[]),
+        );
+    }
+
+    #[test]
+    fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) }).unwrap();
+        assert!(app.drain_web_renders());
+        app.laid_width = 0;
+        app.rebuild(80);
+        // The first block draws as a picture, the second is still code.
+        assert!(app.rows.iter().any(|r| matches!(r, Row::Image { url, src, .. } if *url == key && *src == 3)));
+        let code_rows = |app: &App| {
+            app.rows
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Line { line, .. } => {
+                        Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!code_rows(&app).iter().any(|t| t.contains("flowchart LR")));
+
+        // Opening the edit session on a line of that block hands the raw
+        // source back: editing always addresses the text, never the picture.
+        app.session = Some(EditSession {
+            line: 2,
+            input: Input::new("  flowchart LR".into()),
+            orig: "  flowchart LR".into(),
+            want_col: None,
+        });
+        app.laid_width = 0;
+        app.rebuild(80);
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })));
+        assert!(code_rows(&app).iter().any(|t| t.contains("flowchart LR")));
+    }
+
+    // ---------------------------------------------------------------
+    // Capability fallback: what a session without a usable `connect.sid`
+    // may still do. The REST side must be untouched by ALL of it.
+    // ---------------------------------------------------------------
+
+    /// Wire a page to a worker and a fake backend, and run one pass.
+    /// Returns the backend so the test can count what it was asked to do.
+    fn run_pass(
+        app: &mut App,
+        trigger: capability::Trigger,
+    ) -> Arc<cosense::webrender::FakeBackend> {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+        app.start_web_renders(trigger);
+        backend
+    }
+
+    /// The page's rendered text rows, for "the source is still on screen".
+    fn text_rows(app: &App) -> Vec<String> {
+        app.rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, .. } => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every key this page's diagrams will be filed under.
+    fn diagram_keys(app: &App) -> Vec<String> {
+        let mut out = Vec::new();
+        for b in &app.blocks {
+            if let Block::WebRender { kind, code, last_src, .. } = b {
+                if let Some(r) = app.web_request(*kind, code, *last_src) {
+                    out.push(r.cache_key());
+                }
+            }
+        }
+        out
+    }
+
+    /// Wait for one reply per key, then apply them all. Collected first
+    /// because `drain_web_renders` empties the whole channel.
+    fn settle(app: &mut App, n: usize) {
+        let mut msgs = Vec::new();
+        for _ in 0..n {
+            msgs.push(
+                app.web_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("every accepted request is answered exactly once"),
+            );
+        }
+        for m in msgs {
+            app.web_tx.send(m).unwrap();
+        }
+        app.drain_web_renders();
+    }
+
+    // ---------------------------------------------------------------
+    // Render policy: when a browser is allowed to start at all.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn by_default_opening_a_page_shows_cached_diagrams_and_starts_no_browser() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the default page load must never launch a browser"
+        );
+        // Both are misses, and misses are not failures.
+        assert_eq!(app.web_missing.len(), n);
+        assert!(app.web_errors.is_empty());
+        assert!(app.web_pending.is_empty());
+        assert!(app.web_notice.is_none(), "an empty cache is not worth a notice");
+    }
+
+    #[test]
+    fn m_draws_the_diagrams_the_page_load_could_not() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let keys = diagram_keys(&app);
+        settle(&mut app, keys.len());
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // The reader presses `m`.
+        for k in &keys {
+            backend.answer(k, Ok(tiny_png()));
+        }
+        handle_key(&mut app, &test_ctx(), key(KeyCode::Char('m')));
+        settle(&mut app, keys.len());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one batch, not one browser per diagram"
+        );
+        assert!(keys.iter().all(|k| app.images.contains_key(k)));
+        assert!(app.web_missing.is_empty(), "they are no longer missing");
+    }
+
+    #[test]
+    fn editing_a_drawn_diagram_redraws_it_without_asking_again() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let first = diagram_keys(&app);
+        // The reader pressed `m` once and got a picture.
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        for k in &first {
+            backend.answer(k, Ok(tiny_png()));
+        }
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+        // The edited artifact's key is known in advance, so the backend is
+        // scripted BEFORE the edit: `rerender` queues the job immediately,
+        // and the worker must not reach the backend first.
+        let edited = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap()
+            .cache_key();
+        backend.answer(&edited, Ok(tiny_png()));
+        app.start_web_renders(capability::Trigger::Manual);
+        settle(&mut app, first.len());
+        assert!(app.images.contains_key(&first[0]), "the diagram is on screen");
+        app.start_web_renders(capability::Trigger::Auto);
+
+        // Now they edit that block's source. The picture they were looking
+        // at is now stale, and its key has moved with the source.
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        let after = diagram_keys(&app);
+        assert_eq!(after[0], edited);
+        assert_ne!(after[0], first[0], "the edit is a different artifact");
+        settle(&mut app, 1);
+        assert!(
+            app.images.contains_key(&after[0]),
+            "a diagram the reader is watching must follow its source without a second `m`"
+        );
+    }
+
+    #[test]
+    fn a_committed_edit_redraws_the_diagram_the_reader_was_watching() {
+        // The shape the app actually runs: leaving the block COMMITS it, so
+        // the re-render that `rerender` attempts happens while the commit is
+        // still in flight and is refused. Whatever redraws the diagram has
+        // to happen after the commit lands, on an ordinary frame.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let first = diagram_keys(&app);
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(first[0].clone(), info);
+        // One ordinary frame notices the diagram is on screen.
+        app.start_web_renders(capability::Trigger::Auto);
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+
+        // The reader edits the block and moves the caret off it: the line is
+        // committed, and the re-render lands mid-flight.
+        app.lines[3].text = "   A-->C".into();
+        app.inflight = 1;
+        rerender(&mut app, &ctx);
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "nothing may be rendered while the server has not got the edit yet"
+        );
+
+        // The commit lands. From here the server agrees with the screen.
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 4".into(), title: String::new() },
+        );
+        assert_eq!(app.inflight, 0);
+        app.start_web_renders(capability::Trigger::Auto);
+
+        let after = diagram_keys(&app);
+        assert_ne!(after[0], first[0], "the edit is a different artifact");
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the edited diagram must be redrawn once the commit lands");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
+        assert!(auth.is_some(), "a refresh must be allowed to reach the browser");
+    }
+
+    #[test]
+    fn adding_a_line_to_a_drawn_diagram_still_redraws_it() {
+        // Pressing Enter inside a Mermaid block is the ordinary edit. It
+        // moves the block's LAST line, which is the line the request is
+        // keyed on.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let first = diagram_keys(&app);
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(first[0].clone(), info);
+        app.start_web_renders(capability::Trigger::Auto);
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+
+        // A new line at the end of the block.
+        app.lines.insert(
+            4,
+            PageLine {
+                id: "id-new".into(),
+                text: "   B-->C".into(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            },
+        );
+        app.inflight = 1;
+        rerender(&mut app, &ctx);
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 5".into(), title: String::new() },
+        );
+        app.start_web_renders(capability::Trigger::Auto);
+
+        let after = diagram_keys(&app);
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("adding a line to a diagram must redraw it too");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
+        assert!(auth.is_some());
+    }
+
+    #[test]
+    fn m_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        // The page-load probe is in flight and owns both keys.
+        app.start_web_renders(capability::Trigger::Auto);
+        assert_eq!(app.web_pending.len(), keys.len());
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+
+        // The reader presses `m` now. It cannot queue anything yet, and it
+        // must NOT report "nothing to draw".
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.web_manual_wanted);
+        assert!(app.web_notice.is_none(), "a request in flight is not 'nothing to draw'");
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "no duplicate batch while the probe owns the keys"
+        );
+
+        // The probe reports misses. The remembered `m` is served, once.
+        for k in &keys {
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: k.clone(),
+                    rescale: false,
+                    attempted: None,
+                    res: WebOutcome::Missing,
+                })
+                .unwrap();
+        }
+        app.drain_web_renders();
+        assert!(!app.web_manual_wanted);
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the remembered m is served without a second keypress");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(auth.is_some(), "this one may reach the browser");
+        assert_eq!(reqs.len(), keys.len());
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "exactly one batch, not one per key"
+        );
+    }
+
+    #[test]
+    fn a_cache_miss_never_blocks_the_later_m() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        // A miss is recorded...
+        app.web_pending.insert(keys[0].clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: keys[0].clone(),
+                rescale: false,
+                attempted: None,
+                res: WebOutcome::Missing,
+            })
+            .unwrap();
+        app.drain_web_renders();
+        assert!(!app.web_errors.contains_key(&keys[0]), "a miss is not an error");
+        // ...and `m` still asks for it.
+        app.start_web_renders(capability::Trigger::Manual);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
+        assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
+    }
+
+    #[test]
+    fn auto_draws_on_load_and_off_draws_never() {
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
+        assert_eq!(reqs.len(), 2, "auto renders both on load");
+
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Off;
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        app.start_web_renders(capability::Trigger::Manual);
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "off queues no work at all — not even a cache lookup"
+        );
+        assert!(app.web_pending.is_empty());
+    }
+
+    #[test]
+    fn m_is_an_ordinary_character_while_editing() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        enter_session(&mut app, &ctx, 0, 1);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        let s = app.session.as_ref().expect("still editing");
+        assert!(s.input.buf.contains('m'), "m typed a character, not a render");
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+    }
+
+    #[test]
+    fn no_sid_on_a_public_project_renders_anonymously_and_leaves_rest_alone() {
+        let mut app = mermaid_page();
+        app.editable = true;
+        app.caps = capability::Capabilities {
+            sid: false,
+            visibility: capability::Visibility::Public,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        // The browser WAS used, with no cookie.
+        assert!(backend.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert_eq!(
+            *backend.last_auth.lock().unwrap(),
+            Some(RenderCapability::Anonymous)
+        );
+        // ...and nothing about the missing sid touched the REST side.
+        assert!(app.editable, "no sid is not a reason to stop editing");
+        assert_eq!(app.sync_label(), "poll");
+    }
+
+    #[test]
+    fn no_sid_on_a_private_project_serves_the_cache_and_never_launches_a_browser() {
+        let mut app = mermaid_page();
+        app.editable = true; // a PAT / service account is reading this page
+        app.caps = capability::Capabilities {
+            sid: false,
+            visibility: capability::Visibility::Private,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        // One diagram is already on disk from an earlier, authenticated
+        // session. Reaching this page needed REST access, so showing it is
+        // not a leak — the cache itself is 0700/0600.
+        let cache = scratch_cache();
+        cache.put(&keys[0], &tiny_png());
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache,
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+        app.start_web_renders(capability::Trigger::Auto);
+        settle(&mut app, keys.len());
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a private project with no sid must not start a browser"
+        );
+        assert!(app.images.contains_key(&keys[0]), "the cached diagram still shows");
+        // The uncached one is a miss, NOT a failure: it stays source and
+        // stays drawable.
+        assert!(app.web_missing.contains(&keys[1]));
+        assert!(!app.web_errors.contains_key(&keys[1]));
+        assert!(app.web_pending.is_empty(), "nothing is left pulsing");
+        assert!(app.hint_text(&[]).contains("connect.sid"));
+        assert!(app.editable, "the renderer's limits never reach the editor");
+    }
+
+    #[test]
+    fn the_private_notice_is_said_once_per_page_not_once_per_diagram() {
+        let mut app = mermaid_page();
+        app.caps.sid = false;
+        app.caps.visibility = capability::Visibility::Private;
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_notice_shown);
+        app.web_notice = None;
+        // A second pass over the same page says nothing more.
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_notice.is_none());
+    }
+
+    #[test]
+    fn unknown_visibility_waits_for_an_explicit_m() {
+        let mut app = mermaid_page();
+        app.caps.sid = false;
+        app.caps.visibility = capability::Visibility::Unknown;
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let backend = run_pass(&mut app, capability::Trigger::Auto);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an automatic pass never gambles a browser on an unknown project"
+        );
+        // The reader asks explicitly: one anonymous attempt is allowed.
+        app.start_web_renders(capability::Trigger::Manual);
+        let n = diagram_keys(&app).len();
+        settle(&mut app, n);
+        assert!(backend.calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert_eq!(
+            *backend.last_auth.lock().unwrap(),
+            Some(RenderCapability::Anonymous)
+        );
+        assert!(app.caps.anonymous_spent);
+    }
+
+    #[test]
+    fn a_stale_cookie_on_a_public_page_retries_without_it() {
+        let mut app = mermaid_page();
+        app.caps = capability::Capabilities {
+            sid: true,
+            visibility: capability::Visibility::Public,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        app.web_pending.insert(keys[0].clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: keys[0].clone(),
+                rescale: false,
+                attempted: Some(RenderCapability::Authenticated),
+                res: WebOutcome::Denied,
+            })
+            .unwrap();
+        app.drain_web_renders();
+        // The refusal was about the COOKIE. A second, cookie-free attempt
+        // is queued, and the REST credential is not touched.
+        assert!(app.caps.cookie_rejected, "the cookie is what was refused");
+        assert!(!app.caps.browser_denied, "no anonymous attempt has been made yet");
+        let job = app.web_jobs_rx.as_ref().unwrap().recv().unwrap();
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(reqs.iter().any(|r| r.cache_key() == keys[0]));
+        assert_eq!(
+            *auth,
+            Some(RenderCapability::Anonymous),
+            "retrying with the SAME rejected cookie just fails again"
+        );
+    }
+
+    #[test]
+    fn a_stale_job_merged_with_a_fresh_one_is_still_thrown_away() {
+        // Coalescing is per BATCH, so a job queued against the old source
+        // that happens to be drained alongside a job queued against the new
+        // one would ride in on its freshness — and A's key would be filed
+        // with a screenshot of B's text.
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let req_a = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        let req_b = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap();
+        let (key_a, key_b) = (req_a.cache_key(), req_b.cache_key());
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        // Only the CURRENT source has an answer; A must never be asked for.
+        backend.answer(&key_b, Ok(tiny_png()));
+        let cache = scratch_cache();
+
+        // Both jobs are waiting before the worker starts, so they are
+        // guaranteed to be drained together.
+        let gen = app.gen_now();
+        app.web_job_tx
+            .send(WebJob::Render {
+                gen,
+                src_epoch: 0,
+                reqs: vec![req_a],
+                max_cols: 64,
+                auth: Some(RenderCapability::Authenticated),
+            })
+            .unwrap();
+        app.web_job_tx
+            .send(WebJob::Render {
+                gen,
+                src_epoch: 1,
+                reqs: vec![req_b],
+                max_cols: 64,
+                auth: Some(RenderCapability::Authenticated),
+            })
+            .unwrap();
+        app.src_epoch.store(1, std::sync::atomic::Ordering::SeqCst);
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache.clone(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+
+        let mut stale_a = false;
+        let mut drawn_b = false;
+        for _ in 0..2 {
+            let msg = app
+                .web_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("both jobs are answered");
+            if msg.key == key_a {
+                assert!(
+                    matches!(msg.res, WebOutcome::Stale),
+                    "the old source's request must be abandoned, not drawn"
+                );
+                stale_a = true;
+            } else if msg.key == key_b {
+                assert!(msg.res.is_drawn());
+                drawn_b = true;
+            }
+        }
+        assert!(stale_a && drawn_b);
+        assert!(
+            cache.get(&key_a).is_none(),
+            "nothing may be filed under the source that moved"
+        );
+        assert!(cache.get(&key_b).is_some(), "the current source is cached normally");
+    }
+
+    #[test]
+    fn a_render_whose_source_moved_is_never_filed_under_the_old_hash() {
+        // A page of diagrams takes seconds to draw. If a commit lands in
+        // that window, the browser screenshots the NEW text — but the job
+        // is keyed on the old hash, and the artifact cache keeps what it is
+        // given for a week. The next reader of the old text would be served
+        // a picture of something else.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let key_a = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        backend.answer(&key_a, Ok(tiny_png()));
+        let cache = scratch_cache();
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache.clone(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+
+        // Pin the backend so the job is provably still mid-render...
+        let held = backend.gate.lock().unwrap();
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_pending.contains(&key_a));
+        // ...and commit B underneath it.
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        drop(held);
+
+        // Every request still gets exactly one reply, so nothing pulses on.
+        let mut replies = 0;
+        while replies < 2 {
+            let msg = app
+                .web_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("an accepted request is always answered");
+            app.web_tx.send(msg).unwrap();
+            replies += 1;
+        }
+        app.drain_web_renders();
+
+        assert!(
+            cache.get(&key_a).is_none(),
+            "B's picture must never be written under A's hash"
+        );
+        assert!(!app.images.contains_key(&key_a));
+        // Stale is not a failure and not a miss: B is simply asked for.
+        assert!(app.web_errors.is_empty());
+        assert!(!app.web_missing.contains(&key_a));
+        assert!(!app.web_pending.contains(&key_a), "the abandoned key stopped pulsing");
+
+        // ...and B is what gets asked for instead.
+        let key_b = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap()
+            .cache_key();
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(
+            app.web_pending.contains(&key_b),
+            "the new source is what gets rendered next"
+        );
+    }
+
+    #[test]
+    fn a_whole_refused_batch_is_retried_anonymously_in_one_go() {
+        // Chrome refuses a BATCH, not a key: one navigation, one login
+        // wall, N replies. Handling those one at a time made the first key
+        // start the anonymous retry and the second key — seeing the
+        // bookkeeping the first had just written — declare the browser
+        // dead. Two diagrams is the smallest page that shows it.
+        let mut app = mermaid_page();
+        app.caps = capability::Capabilities {
+            sid: true,
+            visibility: capability::Visibility::Public,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        assert_eq!(keys.len(), 2, "this test needs two diagrams to mean anything");
+        for k in &keys {
+            app.web_pending.insert(k.clone());
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: k.clone(),
+                    rescale: false,
+                    attempted: Some(RenderCapability::Authenticated),
+                    res: WebOutcome::Denied,
+                })
+                .unwrap();
+        }
+        app.drain_web_renders();
+
+        assert!(app.caps.cookie_rejected);
+        assert!(
+            !app.caps.browser_denied,
+            "only an anonymous attempt that was itself refused may end the browser"
+        );
+        // ONE retry batch, cookie-free, carrying BOTH keys.
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the refused batch is retried");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert_eq!(*auth, Some(RenderCapability::Anonymous));
+        let retried: Vec<String> = reqs.iter().map(|r| r.cache_key()).collect();
+        for k in &keys {
+            assert!(retried.contains(k), "every diagram the batch lost is retried");
+        }
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "one retry batch, not one per diagram"
+        );
+
+        // Now the anonymous attempt is refused too. THAT ends it.
+        for k in &keys {
+            app.web_tx
+                .send(WebMsg {
+                    gen: app.gen_now(),
+                    key: k.clone(),
+                    rescale: false,
+                    attempted: Some(RenderCapability::Anonymous),
+                    res: WebOutcome::Denied,
+                })
+                .unwrap();
+        }
+        app.drain_web_renders();
+        assert!(app.caps.browser_denied);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no third attempt");
+        // ...and none of it is a diagram failure.
+        assert!(app.web_errors.is_empty());
+    }
+
+    #[test]
+    fn a_refused_private_render_falls_back_to_source_without_disabling_edits() {
+        let mut app = mermaid_page();
+        app.editable = true;
+        app.caps = capability::Capabilities {
+            sid: true,
+            visibility: capability::Visibility::Private,
+            ..Default::default()
+        };
+        app.render_policy = capability::RenderPolicy::Auto;
+        app.rebuild(80);
+        let keys = diagram_keys(&app);
+        app.web_pending.insert(keys[0].clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: keys[0].clone(),
+                rescale: false,
+                attempted: Some(RenderCapability::Authenticated),
+                res: WebOutcome::Denied,
+            })
+            .unwrap();
+        app.drain_web_renders();
+        assert!(app.caps.cookie_rejected, "the cookie is what was refused");
+        assert!(app.editable, "...and nothing else stops working");
+        assert!(!app.web_errors.contains_key(&keys[0]));
+        app.rebuild(80);
+        assert!(
+            text_rows(&app).iter().any(|t| t.contains("flowchart LR")),
+            "the source is what the reader sees"
+        );
+        // No further BROWSER work is queued for this project: even an
+        // explicit `m` can now only consult the disk cache.
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+        app.start_web_renders(capability::Trigger::Manual);
+        if let Ok(WebJob::Render { auth, .. }) = app.web_jobs_rx.as_ref().unwrap().try_recv() {
+            assert_eq!(auth, None, "a denied project never reaches a browser again");
+        }
+    }
+
+    #[test]
+    fn moving_to_another_project_forgets_the_old_one_s_verdict() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.caps.visibility = capability::Visibility::Private;
+        app.caps.browser_denied = true;
+        app.caps.sid = true;
+        app.set_page(
+            Loaded {
+                project: "other".into(),
+                title: "t".into(),
+                page_id: "P2".into(),
+                header_colors: HeaderColors::fallback(),
+                lines: Vec::new(),
+                blocks: Vec::new(),
+                srcs: Vec::new(),
+                related: Vec::new(),
+                read_at: None,
+                editable: true,
+            },
+            &ctx,
+        );
+        assert_eq!(app.caps.visibility, capability::Visibility::Unknown);
+        assert!(!app.caps.browser_denied);
+        assert!(app.caps.sid, "the session's cookie did not go anywhere");
+    }
+
+    #[test]
+    fn the_ui_thread_never_waits_for_the_browser() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        backend.answer(&key, Ok(tiny_png()));
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+        // Pin the backend mid-render: the worker cannot make progress while
+        // this guard is held.
+        let held = backend.gate.lock().unwrap();
+        let t0 = std::time::Instant::now();
+        app.start_web_renders(capability::Trigger::Auto);
+        // …and the UI thread still lays out and would draw, immediately.
+        app.laid_width = 0;
+        app.rebuild(80);
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "queueing a render must not block the UI (took {elapsed:?})"
+        );
+        assert!(app.web_pending.contains(&key));
+        assert!(app.images.is_empty(), "nothing is drawn until the browser answers");
+        // Let the worker through; the artifact arrives on the channel.
+        drop(held);
+        let msg = app
+            .web_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the worker answered");
+        assert_eq!(msg.gen, app.gen_now());
+        assert_eq!(msg.key, key);
+        assert!(msg.res.is_drawn());
+    }
+
+    #[test]
+    fn a_rendering_diagram_pulses_its_code_and_stops_when_it_lands() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        app.rebuild(80);
+        // Every row of both Mermaid blocks pulses — header and body — and
+        // nothing else on the page does.
+        let mut srcs: Vec<usize> = app.web_shimmer.keys().copied().collect();
+        srcs.sort();
+        assert_eq!(srcs, vec![1, 2, 3, 6, 7]);
+        assert_eq!(app.web_shimmer[&1], (0, 3), "the code: header leads its block");
+        assert_eq!(app.web_shimmer[&3], (2, 3));
+        assert_eq!(app.web_shimmer[&7], (1, 2), "the second block counts from its own top");
+
+        let dim_cells = |app: &mut App, ctx: &Ctx| {
+            let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+            terminal.draw(|f| ui(f, app, ctx)).unwrap();
+            terminal.draw(|f| ui(f, app, ctx)).unwrap();
+            let buf = terminal.backend().buffer();
+            (0..buf.area.width)
+                .flat_map(|x| (0..buf.area.height).map(move |y| (x, y)))
+                .filter(|(x, y)| {
+                    buf.cell((*x, *y)).unwrap().modifier.contains(Modifier::DIM)
+                })
+                .count()
+        };
+        assert!(dim_cells(&mut app, &ctx) > 0, "the reader can see the renderer working");
+
+        // The renders land: the pulse stops and the page goes back to normal.
+        let keys: Vec<String> = app.web_pending.iter().cloned().collect();
+        for key in keys {
+            app.web_pending.remove(&key);
+        }
+        app.laid_width = 0;
+        app.rebuild(80);
+        assert!(app.web_shimmer.is_empty());
+        assert_eq!(dim_cells(&mut app, &ctx), 0, "nothing pulses once nothing is pending");
+    }
+
+    /// A wide PNG, like a real Mermaid capture (they come back ~1500px).
+    fn wide_png() -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(1500, 300, |x, _| {
+            image::Rgb([if x > 1400 { 255 } else { 40 }, 40, 40])
+        }));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    /// Run the worker against a scripted backend and hand back everything
+    /// it replies with, using the channel itself as the synchronisation —
+    /// no sleeps, no wall-clock assumptions.
+    fn worker_replies(
+        app: &mut App,
+        backend: Arc<cosense::webrender::FakeBackend>,
+        cache: cosense::webrender::ArtifactCache,
+        jobs: Vec<WebJob>,
+        expect: usize,
+    ) -> Vec<WebMsg> {
+        let handle = spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache,
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+        for job in jobs {
+            app.web_job_tx.send(job).unwrap();
+        }
+        let mut out = Vec::new();
+        for _ in 0..expect {
+            out.push(
+                app.web_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("the worker owes a reply"),
+            );
+        }
+        app.web_job_tx.send(WebJob::Stop).unwrap();
+        handle.join().expect("the worker joins on Stop");
+        out
+    }
+
+    #[test]
+    fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_source() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // The reader changes the diagram A -> B locally. The key follows
+        // the LOCAL text…
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        app.rebuild(80);
+        let key_b = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap()
+            .cache_key();
+        // Clear whatever the re-render already queued, and forget it was
+        // ever pending: the question is what happens from here on.
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+        // …but the commit is refused, so the SERVER still has A. Rendering
+        // now would screenshot A and store it under B's key.
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Failed { label: "line 4".into(), msg: "500".into() },
+        );
+        assert_eq!(app.inflight, 0, "the job is no longer in flight…");
+        assert!(app.web_unsynced, "…but the page is known to have drifted");
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "inflight == 0 is not enough: nothing may be rendered while desynced",
+        );
+        assert!(!app.images.contains_key(&key_b));
+        assert!(app.web_pending.is_empty());
+
+        // A later commit succeeding says nothing about the one that failed.
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 9".into(), title: String::new() },
+        );
+        assert!(app.web_unsynced, "one success does not prove the page agrees");
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+
+        // Only a whole page from the server settles it.
+        let mut page = cosense::api::Page {
+            id: app.page_id.clone(),
+            title: app.title.clone(),
+            commit_id: String::new(),
+            lines: vec![],
+            links: vec![],
+            project_links: vec![],
+            related: None,
+            updated: 0,
+            created: 0,
+            lines_count: 0,
+            last_accessed: None,
+        };
+        page.lines = app
+            .lines
+            .iter()
+            .map(|l| PageLine {
+                id: l.id.clone(),
+                text: l.text.clone(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            })
+            .collect();
+        install_remote_lines(&mut app, &ctx, &page, "⟳ resync");
+        assert!(!app.web_unsynced, "an authoritative install resolves the drift");
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "rendering resumes");
+    }
+
+    #[test]
+    fn an_edit_that_never_reached_the_commit_worker_also_desyncs() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // The worker is gone, so the send fails exactly as it does at exit.
+        drop(app.commit_jobs_rx.take());
+        queue_commit(&mut app, "line 4", vec![]);
+        assert_eq!(app.inflight, 0, "nothing is in flight — it never left");
+        assert!(app.web_unsynced);
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+    }
+
+    #[test]
+    fn the_worker_joins_on_stop_and_answers_every_accepted_job() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        backend.answer(&key, Ok(tiny_png()));
+        let gen = app.gen_now();
+        let req = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        let msgs = worker_replies(
+            &mut app,
+            Arc::clone(&backend),
+            scratch_cache(),
+            vec![
+                WebJob::Render {
+                    gen,
+                    src_epoch: 0,
+                    reqs: vec![req],
+                    max_cols: 64,
+                    auth: Some(RenderCapability::Authenticated),
+                },
+                // A rescale with nothing on disk STILL owes a reply, or the
+                // viewer would wait on it forever.
+                WebJob::Rescale { gen, key: "web:mermaid:absent".into(), max_cols: 20 },
+            ],
+            2,
+        );
+        assert_eq!(msgs.len(), 2, "one reply per accepted job");
+        let render = msgs.iter().find(|m| m.key == key).unwrap();
+        assert!(!render.rescale && render.res.is_drawn());
+        let rescale = msgs.iter().find(|m| m.key == "web:mermaid:absent").unwrap();
+        assert!(rescale.rescale && !rescale.res.is_drawn(), "a cache miss is answered, not dropped");
+    }
+
+    #[test]
+    fn a_rescale_that_cannot_be_served_keeps_the_diagram_it_has() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(key.clone(), info);
+        app.web_rescaling.insert(key.clone());
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key: key.clone(),
+                rescale: true,
+                attempted: None,
+                res: WebOutcome::Failed("no cached artifact to resize".into()),
+            })
+            .unwrap();
+        app.drain_web_renders();
+        assert!(!app.web_rescaling.contains(&key), "it stops being in flight");
+        assert!(app.images.contains_key(&key), "the picture on screen survives");
+        assert!(app.web_errors.is_empty(), "a resize failure is not a diagram failure");
+        assert!(app.web_notice.is_none(), "and the reader is not told about it");
+    }
+
+    #[test]
+    fn a_stale_result_never_cancels_the_live_request_for_the_same_key() {
+        // Navigate away and back: the same diagram is pending again under
+        // the same key, but for a NEW generation. The old page's result
+        // must not clear that.
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (old_gen, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        app.web_pending.insert(key.clone());
+        app.web_rescaling.insert(key.clone());
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.web_tx
+            .send(WebMsg { gen: old_gen, key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) })
+            .unwrap();
+        assert!(!app.drain_web_renders(), "yesterday's answer changes nothing");
+        assert!(app.web_pending.contains(&key), "the live request is still in flight");
+        assert!(app.web_rescaling.contains(&key));
+        assert!(!app.images.contains_key(&key), "and no stale picture is installed");
+    }
+
+    #[test]
+    fn set_page_clears_the_state_a_dropped_job_would_have_answered() {
+        // The worker drops stale-generation jobs without replying, which is
+        // only safe because installing a page clears what those replies
+        // would have cleared. This pins that invariant.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        app.web_rescaling.insert("web:mermaid:whatever".into());
+        assert!(!app.web_pending.is_empty());
+        app.set_page(
+            Loaded {
+                project: "proj".into(),
+                title: "next".into(),
+                header_colors: HeaderColors::fallback(),
+                page_id: "p2".into(),
+                lines: vec![],
+                blocks: vec![],
+                srcs: vec![],
+                read_at: None,
+                editable: true,
+                related: Vec::new(),
+            },
+            &ctx,
+        );
+        assert!(app.web_pending.is_empty(), "no request outlives the page it was for");
+        assert!(app.web_rescaling.is_empty());
+    }
+
+    #[test]
+    fn work_queued_for_a_page_the_reader_left_never_reaches_the_browser() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let stale_gen = app.gen_now();
+        // The reader moves on before the worker gets to it.
+        app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let live_gen = app.gen_now();
+        let req = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        backend.answer(&req.cache_key(), Ok(tiny_png()));
+        let msgs = worker_replies(
+            &mut app,
+            Arc::clone(&backend),
+            scratch_cache(),
+            vec![
+                WebJob::Render { gen: stale_gen, src_epoch: 0, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
+                WebJob::Rescale { gen: stale_gen, key: "web:mermaid:old".into(), max_cols: 20 },
+                WebJob::Render { gen: live_gen, src_epoch: 0, reqs: vec![req.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) },
+            ],
+            1,
+        );
+        assert_eq!(msgs.len(), 1, "only the live page is answered");
+        assert_eq!(msgs[0].gen, live_gen);
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the abandoned page cost no browser navigation",
+        );
+    }
+
+    #[test]
+    fn several_passes_over_one_page_cost_a_single_browser_batch() {
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let gen = app.gen_now();
+        let a = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        let b = app.web_request(cosense::webrender::WebKind::Mermaid, "pie", 7).unwrap();
+        backend.answer(&a.cache_key(), Ok(tiny_png()));
+        backend.answer(&b.cache_key(), Ok(tiny_png()));
+        // Hold the worker until BOTH jobs are queued, so it sees them
+        // together — the gate, not a sleep, is what makes this repeatable.
+        let held = backend.gate.lock().unwrap();
+        let handle = spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+        app.web_job_tx
+            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
+            .unwrap();
+        app.web_job_tx
+            .send(WebJob::Render { gen, src_epoch: 0, reqs: vec![b.clone(), a.clone()], max_cols: 64, auth: Some(RenderCapability::Authenticated) })
+            .unwrap();
+        drop(held);
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            keys.push(
+                app.web_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap()
+                    .key,
+            );
+        }
+        app.web_job_tx.send(WebJob::Stop).unwrap();
+        handle.join().unwrap();
+        keys.sort();
+        let mut want = vec![a.cache_key(), b.cache_key()];
+        want.sort();
+        assert_eq!(keys, want, "each request answered exactly once, no duplicates");
+    }
+
+    #[test]
+    fn a_send_to_a_dead_worker_stops_the_pulse_instead_of_hanging_it() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // No worker was ever spawned and the receiver is dropped: every
+        // send fails, exactly as it does once the worker has stopped.
+        drop(app.web_jobs_rx.take());
+        app.start_web_renders(capability::Trigger::Auto);
+        assert!(app.web_pending.is_empty(), "nothing waits on a reply that cannot come");
+        app.rebuild(80);
+        assert!(app.web_shimmer.is_empty(), "so nothing pulses");
+
+        // Same for a resize.
+        let key = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap()
+            .cache_key();
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(key.clone(), info);
+        app.laid_width = 0;
+        app.rebuild(30);
+        app.rescale_diagrams();
+        assert!(app.web_rescaling.is_empty());
+    }
+
+    #[test]
+    fn a_diagram_is_never_encoded_wider_than_the_pane() {
+        // The cap itself: the pane wins while it is narrower than the
+        // image ceiling, and never goes to zero.
+        assert_eq!(diagram_max_cols(120), IMAGE_MAX_COLS);
+        assert_eq!(diagram_max_cols(IMAGE_MAX_COLS), IMAGE_MAX_COLS);
+        assert_eq!(diagram_max_cols(35), 35);
+        assert_eq!(diagram_max_cols(14), 14);
+        assert_eq!(diagram_max_cols(0), 1);
+
+        // …and the encoder honours it for an image far wider than any pane.
+        let picker = Picker::halfblocks();
+        for cap in [IMAGE_MAX_COLS, 35, 14, 5, 1] {
+            let info = decode_web_png(&picker, &wide_png(), cap).unwrap();
+            assert!(
+                info.cells_w <= cap,
+                "cap {cap} produced {} cells wide",
+                info.cells_w
+            );
+            assert_eq!(info.built_for, cap);
+            assert!(info.cells_h >= 1);
+        }
+    }
+
+    #[test]
+    fn narrowing_the_pane_re_encodes_the_diagram_from_its_cached_png() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        // The artifact arrives sized for the wide pane.
+        let wide = decode_web_png(&Picker::halfblocks(), &wide_png(), app.web_cols).unwrap();
+        assert_eq!(app.web_cols, IMAGE_MAX_COLS, "80 columns leaves room for the ceiling");
+        app.web_pending.insert(key.clone());
+        app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(wide) }).unwrap();
+        assert!(app.drain_web_renders());
+
+        // Two narrow panes, well under the 64-column image ceiling.
+        for (cols, want_cap) in [(40u16, 34u16), (20, 14)] {
+            app.laid_width = 0;
+            app.rebuild(cols);
+            assert_eq!(app.web_cols, want_cap, "text width at {cols} columns");
+            app.rescale_diagrams();
+            // The UI thread only queued work; nothing was decoded here.
+            let job = app.web_jobs_rx.as_ref().unwrap().try_recv().expect("a rescale was queued");
+            let WebJob::Rescale { key: k, max_cols, gen } = job else {
+                panic!("a resize must never send the browser a render job")
+            };
+            assert_eq!((k.as_str(), max_cols, gen), (key.as_str(), want_cap, app.gen_now()));
+            // Asking again while it is in flight queues nothing.
+            app.rescale_diagrams();
+            assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+
+            // The worker answers; the diagram now fits the pane.
+            let info = decode_web_png(&Picker::halfblocks(), &wide_png(), max_cols).unwrap();
+            app.web_tx
+                .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: true, attempted: None, res: WebOutcome::Drawn(info) })
+                .unwrap();
+            assert!(app.drain_web_renders());
+            let shown_w = app.images[&key].cells_w;
+            assert!(shown_w <= want_cap, "{shown_w} cells in a {cols}-column pane");
+
+            // And the frame really does keep it inside the text column.
+            app.laid_width = 0;
+            let mut t = Terminal::new(TestBackend::new(cols, 16)).unwrap();
+            t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+            t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+            assert!(app.text_rect.width >= shown_w, "image fits the text column");
+        }
+    }
+
+    #[test]
+    fn a_diagram_failure_gives_the_key_hints_back() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        app.start_web_renders(capability::Trigger::Auto);
+        let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
+        let key = reqs[0].cache_key();
+        app.web_pending.insert(key.clone());
+        assert!(app.hint_text(&[]).contains("? help"), "hints by default");
+        app.web_tx
+            .send(WebMsg {
+                gen: app.gen_now(),
+                key,
+                rescale: false,
+                attempted: None,
+                res: WebOutcome::Failed(WebError::NoBrowser.to_string()),
+            })
+            .unwrap();
+        assert!(app.drain_web_renders());
+        // It never touches the status line — it has its own slot.
+        assert!(app.status.is_empty());
+        assert!(app.hint_text(&[]).contains("showing source"), "the reader is told once");
+        // It holds the line for its few seconds…
+        assert!(!app.expire_web_notice());
+        // …and then hands the row back to the key hints.
+        let (msg, _) = app.web_notice.clone().unwrap();
+        app.web_notice = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_web_notice());
+        assert!(app.web_notice.is_none());
+        assert!(app.hint_text(&[]).contains("? help"), "hints are visible again");
+        assert!(!app.expire_web_notice(), "and it stays gone");
+    }
+
+    #[test]
+    fn a_diagram_note_never_hides_or_erases_a_commit_or_auth_message() {
+        let mut app = mermaid_page();
+        // Something the reader must not miss is already on the status line.
+        app.status = "commit failed: line 4 — 500".into();
+        app.note_web_failure("diagram: no Chrome found (showing source)".into());
+        assert_eq!(
+            app.hint_text(&[]),
+            "commit failed: line 4 — 500",
+            "status outranks a diagram note",
+        );
+        // When the note times out it takes only itself with it.
+        let (msg, _) = app.web_notice.clone().unwrap();
+        app.web_notice = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_web_notice());
+        assert_eq!(app.status, "commit failed: line 4 — 500", "the real message survives");
+        assert_eq!(app.hint_text(&[]), "commit failed: line 4 — 500");
+
+        // And with the status line free, the note would have shown.
+        app.note_web_failure("diagram: browser timed out (showing source)".into());
+        app.status.clear();
+        assert!(app.hint_text(&[]).contains("browser timed out"));
+        // The edit session and cursor links still outrank both.
+        let links = vec![LinkItem::Page("Somewhere".into())];
+        assert!(app.hint_text(&links).contains("Enter/f open"));
     }
 
     #[test]
@@ -5253,6 +8748,7 @@ mod tests {
         let page = Page {
             id: String::new(),
             title: "me".into(),
+            commit_id: String::new(),
             lines: vec![],
             links: vec!["Hub1".into(), "Hub2".into()],
             project_links: vec!["/other/Page".into(), "/bare".into()],
@@ -5482,12 +8978,19 @@ mod tests {
 
     /// A server page shaped like the poller would deliver it.
     fn polled(texts: &[(&str, &str)]) -> PolledPage {
+        polled_at(texts, 0)
+    }
+
+    /// A poll response, stamped with the epoch its fetch started at.
+    fn polled_at(texts: &[(&str, &str)], epoch: u64) -> PolledPage {
         PolledPage {
+            epoch,
             project: "proj".into(),
             title: "t".into(),
             page: cosense::api::Page {
                 id: "pid".into(),
                 title: "t".into(),
+                commit_id: String::new(),
                 lines: texts
                     .iter()
                     .map(|(id, t)| PageLine {
@@ -6112,7 +9615,7 @@ mod tests {
         // The real sliced image uses a different widget path from its text
         // placeholder and must reclaim the same row.
         let pixels = image::RgbaImage::from_pixel(16, 16, image::Rgba([255, 0, 0, 255]));
-        let info = build_image(&ctx.picker, image::DynamicImage::ImageRgba8(pixels)).unwrap();
+        let info = build_image(&ctx.picker, image::DynamicImage::ImageRgba8(pixels), IMAGE_MAX_COLS).unwrap();
         app.images.insert("https://example.com/a.png".into(), info);
         app.rebuild(42);
         app.scroll = 1;
@@ -6471,3 +9974,5 @@ mod tests {
         assert_eq!(app.cursor_fraction(), 0.5);
     }
 }
+
+
