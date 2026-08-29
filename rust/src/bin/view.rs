@@ -4561,13 +4561,11 @@ fn dispatch_create(app: &mut App) {
     if app.create_state != CreateState::Needed || !page_is_uncreated(app) || app.inflight > 0 {
         return;
     }
-    // Opening a name from the picker lands you in EDIT on an empty line;
-    // walking away from that must leave no trace, exactly as on the web.
-    // But a page whose TITLE was typed is a page: the web creates those
-    // too, so only an untouched title with an empty body is held back.
-    let has_body = app.lines.iter().skip(1).any(|l| !l.text.trim().is_empty());
-    let title_typed = app.lines.first().map(|l| l.text != app.title).unwrap_or(false);
-    if !has_body && !title_typed {
+    // A title and nothing else is not a page. Opening a name from the
+    // picker lands you in EDIT on an empty line, and renaming that title
+    // while you think about it is still just thinking: walking away must
+    // leave no trace either way. Content is what makes a page.
+    if !app.lines.iter().skip(1).any(|l| !l.text.trim().is_empty()) {
         return;
     }
     app.create_state = CreateState::Sent;
@@ -9640,10 +9638,10 @@ mod tests {
         assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "body more"));
     }
 
-    /// Typing only a TITLE is a page too — the web creates those. Only an
-    /// untouched title with an empty body is held back.
+    /// A title with no body is not a page — not even a title that was
+    /// typed over. Only content brings a page into being.
     #[test]
-    fn a_typed_title_alone_creates_the_page() {
+    fn a_title_alone_never_creates_the_page() {
         let ctx = test_ctx();
         let mut app = page(&["Untitled"]);
         app.title = "Untitled".into();
@@ -9651,14 +9649,23 @@ mod tests {
         app.rebuild(40);
 
         enter_session(&mut app, &ctx, 0, "Untitled".len());
-        type_str(&mut app, &ctx, " for real");
+        type_str(&mut app, &ctx, " for real"); // renaming, still no body
+        leave_session(&mut app, &ctx);
+        dispatch_create(&mut app);
+        assert!(drain_jobs(&mut app).is_empty(), "a title is not content");
+
+        // The moment there is a body, the page is real — with that title.
+        app.cursor = 0;
+        open_line(&mut app, &ctx, false);
+        type_str(&mut app, &ctx, "body");
         leave_session(&mut app, &ctx);
         dispatch_create(&mut app);
         let jobs = drain_jobs(&mut app);
-        assert_eq!(jobs.len(), 1, "the title was typed, so the page is real");
+        assert_eq!(jobs.len(), 1);
         match &jobs[0].1[0] {
             EditOp::Insert { lines, .. } => {
-                assert_eq!(lines[0].1, "Untitled for real");
+                let texts: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
+                assert_eq!(texts, vec!["Untitled for real", "body"]);
             }
             other => panic!("expected an insert, got {other:?}"),
         }
