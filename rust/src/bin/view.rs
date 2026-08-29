@@ -677,12 +677,19 @@ struct App {
     /// The project the probe was last asked about, so a page move inside
     /// the same project does not re-ask.
     vis_asked: Option<String>,
-    /// Cosense line ids whose diagram has been drawn on THIS page. A block
-    /// in here is one the reader is actually looking at, so when its source
-    /// changes the picture must follow — even under the manual policy. The
-    /// browser cost was already accepted for this page; making the reader
-    /// press `m` again after every edit is not "manual", it is broken.
-    web_drawn_lines: HashSet<String>,
+    /// Blocks whose diagram has been drawn on THIS page, identified by the
+    /// id of the block's `code:` HEADER line. A block in here is one the
+    /// reader is actually looking at, so when its source changes the picture
+    /// must follow — even under the manual policy. The browser cost was
+    /// already accepted for this page; making the reader press `m` again
+    /// after every edit is not "manual", it is broken.
+    ///
+    /// The header line is the anchor because it is the one line an edit to
+    /// the diagram does NOT move. Keying this on the block's LAST line —
+    /// which is what the render request itself is keyed on — meant that
+    /// pressing Enter inside the block moved the anchor too, and the
+    /// refresh silently stopped firing for the most ordinary edit there is.
+    web_drawn_blocks: HashSet<String>,
     /// Artifacts a cache-only pass looked for and did not find. They are
     /// NOT failures: they stay code blocks, stop shimmering, and `m` can
     /// still draw them.
@@ -1135,7 +1142,7 @@ impl App {
             vis_tx,
             vis_asked: None,
             web_missing: HashSet::new(),
-            web_drawn_lines: HashSet::new(),
+            web_drawn_blocks: HashSet::new(),
             web_notice_shown: false,
             sync_state: capability::SyncState::Polling,
             ws_attempted: false,
@@ -1224,7 +1231,7 @@ impl App {
         self.web_errors.clear();
         self.web_rescaling.clear();
         self.web_missing.clear();
-        self.web_drawn_lines.clear();
+        self.web_drawn_blocks.clear();
         // Once per page, not once per diagram.
         self.web_notice_shown = false;
         // A freshly fetched page IS the server's state.
@@ -1365,7 +1372,9 @@ impl App {
             if self.images.contains_key(&key) {
                 // On screen: if this block's source later moves, that is a
                 // refresh rather than a first draw.
-                self.web_drawn_lines.insert(req.line_id.clone());
+                if let Some(anchor) = self.block_anchor(rows) {
+                    self.web_drawn_blocks.insert(anchor);
+                }
             }
             if self.images.contains_key(&key)
                 || self.web_errors.contains_key(&key)
@@ -1521,11 +1530,22 @@ impl App {
             if self.caret_is_inside(rows) {
                 return false;
             }
+            let Some(anchor) = self.block_anchor(rows) else { return false };
+            if !self.web_drawn_blocks.contains(&anchor) {
+                return false;
+            }
             let Some(req) = self.web_request(*kind, code, *last_src) else { return false };
-            self.web_drawn_lines.contains(&req.line_id)
-                && !self.images.contains_key(&req.cache_key())
-                && !self.web_errors.contains_key(&req.cache_key())
+            let key = req.cache_key();
+            !self.images.contains_key(&key) && !self.web_errors.contains_key(&key)
         })
+    }
+
+    /// A stable name for a diagram block: the id of its `code:` header line.
+    /// Every other line in the block can be added, removed or retyped by an
+    /// ordinary edit; the header is what stays put.
+    fn block_anchor(&self, rows: &[(usize, Line<'static>)]) -> Option<String> {
+        let (src, _) = rows.first()?;
+        self.lines.get(*src).map(|l| l.id.clone())
     }
 
     /// Is the edit session's caret on one of these source lines? Such a
@@ -6612,6 +6632,104 @@ mod tests {
             app.images.contains_key(&after[0]),
             "a diagram the reader is watching must follow its source without a second `m`"
         );
+    }
+
+    #[test]
+    fn a_committed_edit_redraws_the_diagram_the_reader_was_watching() {
+        // The shape the app actually runs: leaving the block COMMITS it, so
+        // the re-render that `rerender` attempts happens while the commit is
+        // still in flight and is refused. Whatever redraws the diagram has
+        // to happen after the commit lands, on an ordinary frame.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let first = diagram_keys(&app);
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(first[0].clone(), info);
+        // One ordinary frame notices the diagram is on screen.
+        app.start_web_renders(capability::Trigger::Auto);
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+
+        // The reader edits the block and moves the caret off it: the line is
+        // committed, and the re-render lands mid-flight.
+        app.lines[3].text = "   A-->C".into();
+        app.inflight = 1;
+        rerender(&mut app, &ctx);
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "nothing may be rendered while the server has not got the edit yet"
+        );
+
+        // The commit lands. From here the server agrees with the screen.
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 4".into(), title: String::new() },
+        );
+        assert_eq!(app.inflight, 0);
+        app.start_web_renders(capability::Trigger::Auto);
+
+        let after = diagram_keys(&app);
+        assert_ne!(after[0], first[0], "the edit is a different artifact");
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the edited diagram must be redrawn once the commit lands");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
+        assert!(auth.is_some(), "a refresh must be allowed to reach the browser");
+    }
+
+    #[test]
+    fn adding_a_line_to_a_drawn_diagram_still_redraws_it() {
+        // Pressing Enter inside a Mermaid block is the ordinary edit. It
+        // moves the block's LAST line, which is the line the request is
+        // keyed on.
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let first = diagram_keys(&app);
+        let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+        app.images.insert(first[0].clone(), info);
+        app.start_web_renders(capability::Trigger::Auto);
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+
+        // A new line at the end of the block.
+        app.lines.insert(
+            4,
+            PageLine {
+                id: "id-new".into(),
+                text: "   B-->C".into(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            },
+        );
+        app.inflight = 1;
+        rerender(&mut app, &ctx);
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 5".into(), title: String::new() },
+        );
+        app.start_web_renders(capability::Trigger::Auto);
+
+        let after = diagram_keys(&app);
+        let job = app
+            .web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("adding a line to a diagram must redraw it too");
+        let WebJob::Render { reqs, auth, .. } = &job else { panic!("expected a render job") };
+        assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
+        assert!(auth.is_some());
     }
 
     #[test]
