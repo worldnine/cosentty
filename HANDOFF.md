@@ -318,7 +318,7 @@ New coverage, against the acceptance list:
 | a stale room never holds the new page slow | `view::navigating_away_from_a_live_room_goes_back_to_the_fast_poll`, `view::a_live_from_the_room_the_reader_left_is_ignored`, `view::a_rejoin_that_stalls_leaves_the_reader_on_the_fast_poll` |
 | a late poll never rolls the page back | `view::a_poll_that_started_before_a_websocket_commit_never_rolls_it_back`, `view::a_poll_that_started_before_a_local_commit_never_rolls_it_back`, `view::a_fresh_poll_still_applies_web_edits` |
 | blankness alone is not a refusal | `chrome::a_blank_page_is_only_a_refusal_when_the_api_refuses` |
-| a render whose source moved is discarded | `view::a_render_whose_source_moved_is_never_filed_under_the_old_hash` (gated backend, A→B commit; nothing is written under A's key and B is queued) |
+| a render whose source moved is discarded | `view::a_render_whose_source_moved_is_never_filed_under_the_old_hash` (gated backend, A→B commit; nothing is written under A's key and B is queued), `view::a_stale_job_merged_with_a_fresh_one_is_still_thrown_away` (two jobs drained together; the older is abandoned rather than carried in on the newer's freshness) |
 | a failed reload is not a successful one | `view::a_failed_reload_keeps_the_reader_in_history`, `view::a_failed_reload_at_the_newest_snapshot_also_stays_put`, `view::a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved`, `view::a_snapshot_never_renders_diagrams` |
 | agreement clears the drift, staleness does not | `view::an_undo_that_restores_agreement_lets_diagrams_render_again`, `view::a_stale_equal_poll_does_not_clear_the_drift` |
 | `m` during the cache probe is not lost | `view::m_pressed_while_the_cache_probe_is_out_is_served_when_it_answers` |
@@ -599,11 +599,17 @@ good poll snapshots on every keystroke, or good renders on every poll.
 | guards | a poll response already in flight | a render already in flight |
 | stamped by | the poller, immediately before its GET | `start_web_renders`, onto the job |
 | advanced by | commit `Done`, an applied websocket commit, any page install | `rerender()` — i.e. any change to the local source |
-| checked | `apply_remote`, before anything else | the worker, before the browser AND before `cache.put` |
+| checked | `apply_remote`, before anything else | the worker: per job before merging, then per batch before the browser AND before `cache.put` |
 | on mismatch | drop the snapshot; the next poll carries the newer state | reply `Stale`; free the pending mark, record nothing |
 
 `commitId` is deliberately not used for either: it is not safely ordered from
 the client's side.
+
+The per-job check matters as much as the two batch checks. Coalescing merges
+everything drained together into one browser navigation, so a job built against
+the old source that arrives alongside a fresh one would be judged by the batch's
+freshness and ride in — filing the new text's screenshot under the old text's
+hash, which is the exact poisoning this guards against.
 
 `WebOutcome::Stale` is neither a miss nor a failure. It must not enter
 `web_missing` (that would muddy the manual policy's cache-only pass and block

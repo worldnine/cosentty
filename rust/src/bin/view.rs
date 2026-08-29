@@ -281,10 +281,27 @@ fn spawn_web_worker(
                         let _ = out.send(WebMsg { gen, key, rescale: true, attempted: None, res });
                     }
                     WebJob::Render { gen, src_epoch, reqs, max_cols, auth } => {
+                        // Freshness is judged PER JOB, before merging. The
+                        // checks around the browser below are per batch, so
+                        // a job built against the old source that merged
+                        // with a fresh one would ride in on its freshness —
+                        // and be filed under a hash it no longer matches.
+                        if src_epoch
+                            != current_src.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            for req in &reqs {
+                                let _ = out.send(WebMsg {
+                                    gen,
+                                    key: req.cache_key(),
+                                    rescale: false,
+                                    attempted: None,
+                                    res: WebOutcome::Stale,
+                                });
+                            }
+                            continue;
+                        }
                         merged_gen = gen;
-                        // Coalesced batches take the NEWEST source they were
-                        // built from; anything older is re-checked out below.
-                        merged_src = merged_src.max(src_epoch);
+                        merged_src = src_epoch;
                         merged_cols = Some(max_cols);
                         // Coalescing several passes: the most permissive
                         // one wins, so an explicit `m` arriving behind a
@@ -7613,6 +7630,84 @@ mod tests {
             Some(RenderCapability::Anonymous),
             "retrying with the SAME rejected cookie just fails again"
         );
+    }
+
+    #[test]
+    fn a_stale_job_merged_with_a_fresh_one_is_still_thrown_away() {
+        // Coalescing is per BATCH, so a job queued against the old source
+        // that happens to be drained alongside a job queued against the new
+        // one would ride in on its freshness — and A's key would be filed
+        // with a screenshot of B's text.
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        let req_a = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+            .unwrap();
+        let req_b = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap();
+        let (key_a, key_b) = (req_a.cache_key(), req_b.cache_key());
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        // Only the CURRENT source has an answer; A must never be asked for.
+        backend.answer(&key_b, Ok(tiny_png()));
+        let cache = scratch_cache();
+
+        // Both jobs are waiting before the worker starts, so they are
+        // guaranteed to be drained together.
+        let gen = app.gen_now();
+        app.web_job_tx
+            .send(WebJob::Render {
+                gen,
+                src_epoch: 0,
+                reqs: vec![req_a],
+                max_cols: 64,
+                auth: Some(RenderCapability::Authenticated),
+            })
+            .unwrap();
+        app.web_job_tx
+            .send(WebJob::Render {
+                gen,
+                src_epoch: 1,
+                reqs: vec![req_b],
+                max_cols: 64,
+                auth: Some(RenderCapability::Authenticated),
+            })
+            .unwrap();
+        app.src_epoch.store(1, std::sync::atomic::Ordering::SeqCst);
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            cache.clone(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        );
+
+        let mut stale_a = false;
+        let mut drawn_b = false;
+        for _ in 0..2 {
+            let msg = app
+                .web_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("both jobs are answered");
+            if msg.key == key_a {
+                assert!(
+                    matches!(msg.res, WebOutcome::Stale),
+                    "the old source's request must be abandoned, not drawn"
+                );
+                stale_a = true;
+            } else if msg.key == key_b {
+                assert!(msg.res.is_drawn());
+                drawn_b = true;
+            }
+        }
+        assert!(stale_a && drawn_b);
+        assert!(
+            cache.get(&key_a).is_none(),
+            "nothing may be filed under the source that moved"
+        );
+        assert!(cache.get(&key_b).is_some(), "the current source is cached normally");
     }
 
     #[test]
