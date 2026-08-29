@@ -3630,7 +3630,7 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         project: project.to_string(),
         title: title.to_string(),
         header_colors: HeaderColors { fg: header_fg, bg: header_bg },
-        page_id: page.id.clone(),
+        page_id: live_page_id(&page),
         lines,
         blocks: rendered.blocks,
         srcs: rendered.srcs,
@@ -4528,6 +4528,22 @@ fn edit_focus(
     }
 }
 
+/// The page id to edit against, or empty when there is nothing to edit
+/// against yet.
+///
+/// Cosense answers 200 for a title that does not exist AND hands out an
+/// id with it — a provisional one, for a page it has not made. Committing
+/// against that id writes into nothing: the viewer looks like it saved and
+/// the web shows an empty page. `persistent` is the only field that says
+/// whether the page is real, so it is the one to read.
+fn live_page_id(page: &cosense::api::Page) -> String {
+    if page.persistent {
+        page.id.clone()
+    } else {
+        String::new()
+    }
+}
+
 /// How far an uncreated page has got toward existing.
 ///
 /// The distinction that matters is `Sent`: the create carries the whole
@@ -5368,11 +5384,8 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
 /// until a poll happens to notice, and losing them if the viewer quits
 /// first. A failure is not fatal — the poller adopts it later.
 fn adopt_after_create(app: &mut App, ctx: &Ctx) {
-    match ctx.client.get_page_in(&app.project, &app.title) {
-        Ok(page) if page.persistent && !page.id.is_empty() => {
-            adopt_created_page(app, ctx, &page);
-        }
-        _ => {}
+    if let Ok(page) = ctx.client.get_page_in(&app.project, &app.title) {
+        adopt_created_page(app, ctx, &page);
     }
 }
 
@@ -5383,6 +5396,9 @@ fn adopt_after_create(app: &mut App, ctx: &Ctx) {
 /// The lines come back with the ids WE generated (the create names its own
 /// lines), so the cursor, the session and the telomere all survive this.
 fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::Page) {
+    if !page.persistent {
+        return; // a provisional id is not a page (see `live_page_id`)
+    }
     let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
     let session_id =
         app.session.as_ref().and_then(|s| app.lines.get(s.line)).map(|l| l.id.clone());
@@ -5507,9 +5523,7 @@ fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
     if page_is_uncreated(app) {
         // Until the create lands, every poll is the same empty template.
         // Installing it would wipe the page being typed.
-        if polled.page.persistent && !polled.page.id.is_empty() {
-            adopt_created_page(app, ctx, &polled.page);
-        }
+        adopt_created_page(app, ctx, &polled.page);
         return;
     }
     // The snapshot was taken before something newer landed — a commit of
@@ -6996,6 +7010,16 @@ mod tests {
             pos: 0,
             cache: HashMap::new(),
         });
+    }
+
+    /// A page that does not exist yet: the template Cosense returns for an
+    /// unwritten title (its provisional id is deliberately NOT kept).
+    fn page_uncreated(texts: &[&str]) -> App {
+        let mut app = page(texts);
+        app.title = texts[0].to_string();
+        app.page_id = String::new();
+        app.rebuild(40);
+        app
     }
 
     fn page(texts: &[&str]) -> App {
@@ -9573,6 +9597,31 @@ mod tests {
         handle_session_key(&mut app, &ctx, key(KeyCode::Delete));
         assert_eq!(app.lines[0].text, "title", "the title stayed");
         assert!(app.status.contains("タイトル行は残した"), "status: {}", app.status);
+    }
+
+    /// The bug that made a new page look saved and arrive empty: Cosense
+    /// hands out an id for a page it has NOT made, and committing against
+    /// that id writes into nothing. Only `persistent` says a page is real.
+    #[test]
+    fn a_provisional_id_is_not_a_page_id() {
+        let mut page = polled(&[("prov0", "a title")]).page;
+        page.id = "6a92b6a60000000000000c05".into(); // the API really does send one
+        page.persistent = false;
+        assert_eq!(live_page_id(&page), "", "nothing to edit against yet");
+
+        page.persistent = true;
+        assert_eq!(live_page_id(&page), "6a92b6a60000000000000c05");
+
+        // And a non-persistent page is never adopted, however real its id
+        // looks: adopting it would resume committing into nothing.
+        let ctx = test_ctx();
+        let mut app = page_uncreated(&["a title", "typed"]);
+        let mut ghost = polled(&[("prov0", "a title")]).page;
+        ghost.id = "6a92b6a60000000000000c05".into();
+        ghost.persistent = false;
+        adopt_created_page(&mut app, &ctx, &ghost);
+        assert_eq!(app.page_id, "", "still uncreated");
+        assert_eq!(app.lines[1].text, "typed", "and the local text is untouched");
     }
 
     /// A page nobody has written yet: Cosense answers 200 for any title,
