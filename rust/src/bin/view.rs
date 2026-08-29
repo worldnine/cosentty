@@ -4167,8 +4167,24 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
         input.insert_str(&clean);
         return;
     }
+    // The page picker is a text field too: pasting a title into it is the
+    // fastest way to reach a page someone sent you. Only the first line —
+    // a filter is one line by definition.
+    if let Some(Overlay::Pages { filter, cursor, .. }) = app.overlay.as_mut() {
+        if let Some(first) = clean.lines().next() {
+            filter.push_str(first);
+            *cursor = 0;
+        }
+        return;
+    }
     if app.session.is_some() {
         session_paste(app, ctx, &clean);
+        return;
+    }
+    // READ has nowhere to put it. Silence here reads as "paste is broken",
+    // so say where it does go.
+    if !clean.trim().is_empty() {
+        app.status = "貼り付けは編集中に — e / i / o で入ってから".into();
     }
 }
 
@@ -9795,6 +9811,39 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// Paste is the TERMINAL's paste (bracketed paste), so the only
+    /// question is where it lands. Everywhere text is being typed — and a
+    /// word about it where none is.
+    #[test]
+    fn paste_lands_where_text_is_being_typed() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+
+        // READ: nowhere to put it, so say where it goes.
+        handle_paste(&mut app, &ctx, "hello");
+        assert!(app.status.contains("編集中"), "status: {}", app.status);
+        assert_eq!(app.lines.len(), 2, "and nothing is written");
+
+        // The page picker filters by what you paste (first line only).
+        app.overlay = Some(Overlay::Pages { all: vec![], filter: String::new(), cursor: 3 });
+        handle_paste(&mut app, &ctx, "Some Page\nsecond line");
+        match &app.overlay {
+            Some(Overlay::Pages { filter, cursor, .. }) => {
+                assert_eq!(filter, "Some Page", "a filter is one line");
+                assert_eq!(*cursor, 0, "and the list starts from the top again");
+            }
+            _ => panic!("expected the picker to still be open"),
+        }
+
+        // EDIT: real lines, as before.
+        app.overlay = None;
+        enter_session(&mut app, &ctx, 1, 3);
+        handle_paste(&mut app, &ctx, "X\r\nY");
+        assert_eq!(app.lines[1].text, "oneX");
+        assert_eq!(app.lines[2].text, "Y", "CRLF is normalised on the way in");
     }
 
     /// A note app has to be able to hand its text to something else. What
