@@ -719,6 +719,9 @@ struct App {
     /// Undo stack: (label, ops that revert the corresponding commit).
     undo_stack: Vec<(String, Vec<EditOp>)>,
     redo_stack: Vec<(String, Vec<EditOp>)>,
+    /// A server refresh threw away history that could no longer be
+    /// replayed. Only used to explain an empty stack instead of shrugging.
+    history_dropped: bool,
     /// Commit queue into the serial worker, and its outcomes back.
     commit_tx: mpsc::Sender<CommitJob>,
     commit_res_rx: mpsc::Receiver<CommitOutcome>,
@@ -1224,6 +1227,7 @@ impl App {
             session: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            history_dropped: false,
             commit_tx,
             commit_res_rx,
             commit_jobs_rx: Some(commit_jobs_rx),
@@ -1299,6 +1303,7 @@ impl App {
         self.session = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.history_dropped = false;
         // A different project is a different set of capabilities: what we
         // learned about the old one (visibility, a refused browser) says
         // nothing here. The sid is a property of the SESSION and survives.
@@ -4304,6 +4309,15 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     app.start_web_renders(capability::Trigger::Auto);
 }
 
+/// Can these ops still be applied to the page as it now stands? Every id
+/// they name has to be there — `_end` always is.
+fn ops_replayable(ops: &[EditOp], live: &std::collections::HashSet<&str>) -> bool {
+    ops.iter().all(|op| match op {
+        EditOp::Insert { anchor, .. } => anchor == "_end" || live.contains(anchor.as_str()),
+        EditOp::Replace { id, .. } | EditOp::Delete { id } => live.contains(id.as_str()),
+    })
+}
+
 fn ensure_editable(app: &mut App) -> bool {
     if app.editable {
         true
@@ -4326,6 +4340,9 @@ fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
         app.undo_stack.remove(0);
     }
     app.redo_stack.clear();
+    // A fresh edit starts a fresh lineage: an older drop no longer
+    // explains anything.
+    app.history_dropped = false;
     queue_commit(app, label, ops);
     rerender(app, ctx);
 }
@@ -4356,7 +4373,7 @@ fn undo(app: &mut App, ctx: &Ctx) {
         return;
     }
     let Some((label, ops)) = app.undo_stack.pop() else {
-        app.status = "nothing to undo".into();
+        app.status = empty_history_reason(app, "undo");
         return;
     };
     let redo = invert_ops(&app.lines, &ops);
@@ -4367,13 +4384,24 @@ fn undo(app: &mut App, ctx: &Ctx) {
     app.status = format!("undid {label} ({} more)", app.undo_stack.len());
 }
 
+/// Why is there nothing to undo/redo? "Never had any" and "the server
+/// moved and took the lineage with it" are different answers, and silence
+/// makes the second look like a broken key.
+fn empty_history_reason(app: &App, what: &str) -> String {
+    if app.history_dropped {
+        format!("{what} 履歴は web 側の更新で失効しました")
+    } else {
+        format!("nothing to {what}")
+    }
+}
+
 /// `^r`: re-apply the newest undone commit.
 fn redo(app: &mut App, ctx: &Ctx) {
     if !ensure_editable(app) {
         return;
     }
     let Some((label, ops)) = app.redo_stack.pop() else {
-        app.status = "nothing to redo".into();
+        app.status = empty_history_reason(app, "redo");
         return;
     };
     let undo_ops = invert_ops(&app.lines, &ops);
@@ -4935,9 +4963,18 @@ fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, sta
         .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
         .collect();
     app.lines = page.lines.clone();
-    // Remote lineage: local undo anchors may no longer exist.
-    app.undo_stack.clear();
-    app.redo_stack.clear();
+    // Remote lineage: an entry whose anchor line the server no longer has
+    // cannot be replayed, but the rest still can. Dropping the WHOLE
+    // history here is what made `^r` look dead: a single web-side edit (or
+    // one 3 s poll that differed) silently took the redo stack with it.
+    let live: std::collections::HashSet<&str> =
+        app.lines.iter().map(|l| l.id.as_str()).collect();
+    let before = app.undo_stack.len() + app.redo_stack.len();
+    app.undo_stack.retain(|(_, ops)| ops_replayable(ops, &live));
+    app.redo_stack.retain(|(_, ops)| ops_replayable(ops, &live));
+    if app.undo_stack.len() + app.redo_stack.len() < before {
+        app.history_dropped = true;
+    }
     rerender(app, ctx);
     reanchor_cursor_session(app, cursor_id, session_id);
     app.follow = true;
@@ -8854,6 +8891,57 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// A web-side edit elsewhere on the page must not take the redo stack
+    /// with it. Wiping the whole lineage on every remote refresh is what
+    /// made `^r` look like a dead key: with 3 s polling, a single edit in
+    /// the browser was enough to silently empty it.
+    #[test]
+    fn a_remote_edit_keeps_the_history_it_can_still_replay() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        do_edit(&mut app, &ctx, "line 2", vec![EditOp::Replace { id: "id1".into(), text: "ONE".into() }]);
+        undo(&mut app, &ctx);
+        assert_eq!(app.redo_stack.len(), 1);
+
+        // Someone edits an UNRELATED line in the browser.
+        let remote = polled(&[("id0", "title"), ("id1", "one"), ("id2", "TWO")]);
+        install_remote_lines(&mut app, &ctx, &remote.page, "⟳ remote");
+        assert_eq!(app.redo_stack.len(), 1, "the entry still names a live line");
+        assert!(!app.history_dropped);
+
+        redo(&mut app, &ctx);
+        assert_eq!(app.lines[1].text, "ONE", "^r still works after the refresh");
+        assert_eq!(app.lines[2].text, "TWO", "and the remote edit survived it");
+    }
+
+    /// When the line an entry names is gone, that entry really cannot be
+    /// replayed — but then the empty stack has to say so instead of
+    /// looking like a broken key.
+    #[test]
+    fn history_that_cannot_be_replayed_is_dropped_with_a_reason() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        do_edit(&mut app, &ctx, "line 2", vec![EditOp::Replace { id: "id1".into(), text: "ONE".into() }]);
+        undo(&mut app, &ctx);
+
+        // The browser deletes that very line.
+        let remote = polled(&[("id0", "title"), ("id2", "two")]);
+        install_remote_lines(&mut app, &ctx, &remote.page, "⟳ remote");
+        assert!(app.redo_stack.is_empty());
+        assert!(app.history_dropped);
+
+        redo(&mut app, &ctx);
+        assert!(app.status.contains("失効"), "status: {}", app.status);
+
+        // A new edit starts a clean lineage, and the excuse expires with it.
+        do_edit(&mut app, &ctx, "line 3", vec![EditOp::Replace { id: "id2".into(), text: "x".into() }]);
+        assert!(!app.history_dropped);
+        redo(&mut app, &ctx);
+        assert_eq!(app.status, "nothing to redo");
     }
 
     /// The undo reflex must not depend on which mode you are in: `^z`
