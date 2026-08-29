@@ -6118,6 +6118,10 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
     let mut carets: Vec<(u16, Style)> = Vec::new();
+    // Rows inside a `code:` block. Painted LAST, as a background-only pass:
+    // the band has to run to the frame, and the telomere, the thumb and the
+    // padding columns are all drawn after the rows.
+    let mut wash_rows: Vec<u16> = Vec::new();
 
     // Which rows are code: a `code:` block reads as one surface, so its
     // rows carry a wash. Computed once per frame from the text the screen
@@ -6157,17 +6161,10 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         // stronger signals and paint over it.
         if in_code && !in_sel && !is_cursor {
             base = base.bg(wash);
-            let left = body.x.saturating_add(1);
-            let right = body.x.saturating_add(body.width).saturating_sub(1);
-            let buf = f.buffer_mut();
             for k in 0..h {
                 let y = text.y as i32 + screen_y + k;
                 if y >= band_top && y <= band_bot {
-                    for x in left..right {
-                        if let Some(c) = buf.cell_mut((x, y as u16)) {
-                            c.set_bg(wash);
-                        }
-                    }
+                    wash_rows.push(y as u16);
                 }
             }
         }
@@ -6343,6 +6340,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             if let Some(c) = buf.cell_mut((bar.x, bar.y + i as u16)) {
                 c.set_symbol("▐");
                 c.set_style(thumb);
+            }
+        }
+    }
+
+    // The code wash, run to the frame on both sides. Only the background
+    // is touched, so the telomere glyph, the scrollbar thumb and the text
+    // keep their own colors and simply sit on the block's surface.
+    let left = body.x.saturating_add(1);
+    let right = body.x.saturating_add(body.width).saturating_sub(1);
+    for sy in wash_rows {
+        for x in left..right {
+            if let Some(c) = buf.cell_mut((x, sy)) {
+                c.set_bg(wash);
             }
         }
     }
