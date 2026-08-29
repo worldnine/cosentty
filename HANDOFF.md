@@ -189,6 +189,81 @@ later, so presence is not readiness — we poll for a `<svg>` child with a non-z
 * If the browser is redirected to a login URL the batch reports `NotAuthorized`;
   the viewer shows the code block and a one-line status.
 
+## 5b. Capability state machine
+
+Auth is **not one boolean**. A session that has a PAT but no (or a stale) `connect.sid`
+can still read, edit and commit — it just cannot push-sync and cannot render a *private*
+diagram. The four capabilities are tracked separately so a missing sid never degrades
+into an app-wide "auth failure":
+
+| capability | source | what it gates |
+|---|---|---|
+| REST | `AuthStore::resolve` (none / PAT / SA / sid) | reads, edits, commits |
+| push sync | `connect.sid` **plus** a joined room | live updates vs. polling |
+| browser render | sid **and/or** project visibility | whether Chrome may launch |
+| visibility | anonymous `GET /api/projects/<name>` | Public / Private / Unknown |
+
+### Live updates (`capability::SyncState`)
+
+The state is typed and comes from the websocket thread as `WsEvent::State`; nothing
+parses the human-readable status string. The poller's interval follows the state
+through a control channel, so it switches **during** a 60 s sleep.
+
+| state | when | poll interval |
+|---|---|---|
+| `Polling` | no sid, or sid present but not yet joined (**startup**) | 3 s |
+| `Live` | room joined **and** the post-join catch-up fetch succeeded | 60 s (insurance) |
+| `Reconnecting` | connect / join / catch-up failure, disconnect, half-open socket | 3 s |
+
+A stale sid therefore costs 0 s, not 60 s: the fast poll runs from startup and is only
+relaxed once the push channel has actually proven itself. Every failure edge sends
+`Reconnecting` **unthrottled** — a swallowed one would leave the poller at 60 s, which
+is the exact silence this replaces. Switching slow→fast fetches immediately.
+
+### Browser render (`capability::decide`)
+
+`Trigger::Auto` is a page load; `Trigger::Manual` is the `m` key. `browser_denied` is
+set for the rest of the session (per project) once the renderer has been refused.
+
+| policy | trigger | sid | visibility | decision |
+|---|---|---|---|---|
+| `off` | — | — | — | `Nothing` (no worker, no cache I/O, always source) |
+| `manual` | Auto | — | — | `CacheOnly` (hit shows, miss stays source, no notice) |
+| `manual` | Manual | — | — | ↓ as `auto` |
+| `auto` | Auto/Manual | yes | any | `Render(Authenticated)` |
+| `auto` | Auto/Manual | no | Public | `Render(Anonymous)` |
+| `auto` | Auto/Manual | no | Private | `CacheOnly` + notice「非公開の図を描画するには connect.sid が必要です」(once per page) |
+| `auto` | Auto | no | Unknown | `CacheOnly`, silent — conservative |
+| `auto` | Manual | no | Unknown | `Render(Anonymous)`, one attempt |
+| any | — | — | — | `browser_denied` ⇒ `CacheOnly` |
+
+`NotAuthorized` from the browser never touches the REST credential:
+
+| sid | visibility | on `NotAuthorized` |
+|---|---|---|
+| yes | Public | drop the session (Chrome dies with its profile) and retry **once** with no cookie |
+| yes | Private | `browser_denied` — renderer only; edits keep working |
+| no | any | `browser_denied` |
+
+A private PNG already in the cache is still shown: reaching it required reading the
+page over REST, and the cache is 0700/0600 (§7e).
+
+### Visibility, and why `Unknown` is a real state
+
+Measured anonymously against the live API:
+
+| response | meaning |
+|---|---|
+| 200 | `Public` (`help-jp`) |
+| 401 / 403 | `Private` (`my-sandbox`) |
+| 404 | `Unknown` — Cosense returns it both for a missing project and for some hidden ones |
+| network error | `Unknown` |
+
+A session whose REST reads resolved **no credential** and succeeded is `Public` with
+zero extra requests. The probe is anonymous by construction (no header is attached),
+so neither the sid nor the PAT is ever handed to a visibility lookup, and it runs on
+the render worker — never on the UI thread.
+
 ## 6. Tests and build
 
 * `cargo test`: **174 green** — lib **105** (78 baseline + 27 new) and view **69**

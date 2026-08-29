@@ -1,4 +1,5 @@
 pub mod api;
+pub mod capability;
 pub mod chrome;
 pub mod comment;
 pub mod editops;
