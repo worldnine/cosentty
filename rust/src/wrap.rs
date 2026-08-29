@@ -76,8 +76,30 @@ pub fn wrap_line_continued(line: &Line<'static>, width: usize, prefix: &[Span<'s
         // the hanging indent
         let limit = if rows.is_empty() { width } else { width - hang };
         if cw > 0 && col + cw > limit && !cur.is_empty() {
+            // 禁則処理: a row may not BEGIN with a closing bracket or a
+            // full stop, nor END with an opening one. When the break would
+            // do that, the character before it goes down too (追い出し) —
+            // pushing it down is the only option in a terminal, where
+            // hanging it past the edge would land outside the pane.
+            let last = cur.last().map(|(c, _)| *c);
+            let pull = if no_line_start(ch) {
+                // Moving punctuation down only helps if what goes with it
+                // can end a row. In a RUN of stops it cannot, and pulling
+                // one down per row would leave a column of single
+                // characters — so the rule yields instead.
+                last.map(|c| !no_line_start(c)).unwrap_or(false)
+            } else {
+                last.map(no_line_end).unwrap_or(false)
+            };
+            let mut carried: Vec<(char, Style)> = Vec::new();
+            // Never empty a row to satisfy a rule: a row of nothing helps
+            // no one.
+            if pull && cur.len() > 1 {
+                carried.push(cur.pop().expect("checked"));
+            }
             rows.push(std::mem::take(&mut cur));
-            col = 0;
+            col = carried.iter().map(|(c, _)| c.width().unwrap_or(0)).sum();
+            cur = carried;
         }
         cur.push((ch, st));
         col += cw;
@@ -103,7 +125,32 @@ pub fn wrap_line_continued(line: &Line<'static>, width: usize, prefix: &[Span<'s
         .collect()
 }
 
-/// Leading markers a wrapped continuation should hang under, each followed
+/// Characters that may not open a row (行頭禁則): closing brackets, the
+/// punctuation that ends a sentence or separates clauses, sound marks and
+/// small kana — all of them belong to the character before them.
+fn no_line_start(c: char) -> bool {
+    matches!(
+        c,
+        '。' | '、' | '．' | '，' | '・' | '：' | '；' | '？' | '！'
+            | 'ー' | '〜' | '々' | 'ゝ' | 'ゞ' | 'ヽ' | 'ヾ'
+            | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ'
+            | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ'
+            | '）' | '］' | '｝' | '」' | '』' | '】' | '〉' | '》' | '〕' | '〙' | '〗'
+            | ')' | ']' | '}' | '>' | ',' | '.' | ':' | ';' | '?' | '!'
+    )
+}
+
+/// Characters that may not close a row (行末禁則): opening brackets, which
+/// belong to whatever follows them.
+fn no_line_end(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '［' | '｛' | '「' | '『' | '【' | '〈' | '《' | '〔' | '〘' | '〖'
+            | '(' | '[' | '{' | '<'
+    )
+}
+
+/// Leading markers a wrapped continuation should hang under/// Leading markers a wrapped continuation should hang under, each followed
 /// by a space in the rendered line, and whether the marker itself is
 /// REPEATED on continuation rows (a quote bar is; a bullet is replaced by
 /// blank space of the same width).
@@ -307,5 +354,41 @@ mod tests {
             r.spans.iter().any(|s| s.style.fg == Some(Color::Red))
         });
         assert!(red_found);
+    }
+
+    /// 禁則処理: a row must not open with a full stop or a closing
+    /// bracket, nor close with an opening one. The character before the
+    /// break goes down with it — a terminal cannot hang punctuation past
+    /// the pane, so pushing it down is the only move.
+    #[test]
+    fn wrapping_does_not_strand_punctuation_at_a_row_edge() {
+        let rows = |text: &str, w: usize| -> Vec<String> {
+            wrap_line(&Line::from(text.to_string()), w)
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect()
+        };
+
+        // Without the rule this breaks as "あいうえお" / "かきくけこ" / "。"
+        let got = rows("あいうえおかきくけこ。", 10);
+        assert_eq!(got, vec!["あいうえお", "かきくけ", "こ。"], "the stop takes its character with it");
+
+        // Closing brackets and small kana follow the same rule.
+        assert_eq!(rows("あいうえおかきくけこ」", 10).last().unwrap(), "こ」");
+        assert_eq!(rows("あいうえおかきくけこゃ", 10).last().unwrap(), "こゃ");
+
+        // An opening bracket may not be left at the end of a row.
+        let got = rows("あいうえ「かきくけこ", 10);
+        assert_eq!(got[0], "あいうえ", "the bracket goes down to what it opens");
+        assert!(got[1].starts_with('「'));
+
+        // A row is never emptied to satisfy the rule, and a run of stops
+        // does not cascade into one character per row.
+        let got = rows("あ。。。。。。", 4);
+        assert!(got.iter().all(|r| !r.is_empty()), "{got:?}");
+        assert!(got.len() <= 4, "{got:?}");
+
+        // Plain text is untouched.
+        assert_eq!(rows("abcdefgh", 4), vec!["abcd", "efgh"]);
     }
 }
