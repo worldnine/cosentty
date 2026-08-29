@@ -4174,19 +4174,33 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 return Action::Continue;
             }
             let b = b.min(app.lines.len() - 1);
-            let ops: Vec<EditOp> = (a..=b)
+            // Line 0 is the page title, and Cosense has no untitled page:
+            // deleting it promotes line 1 to title, which renames the page
+            // and moves its URL. That is not what one keystroke should do,
+            // so the title is skipped rather than deleted — with a
+            // selection that spans it, the body lines still go.
+            let title_skipped = a == 0;
+            let ops: Vec<EditOp> = (a.max(1)..=b)
                 .filter_map(|i| {
                     let id = app.lines[i].id.clone();
                     if id.is_empty() { None } else { Some(EditOp::Delete { id }) }
                 })
                 .collect();
             if ops.is_empty() {
-                app.status = "nothing deletable here".into();
+                app.status = if title_skipped {
+                    "タイトル行は削除できません（e で書き換えればページ名が変わります）".into()
+                } else {
+                    "nothing deletable here".into()
+                };
             } else {
                 let n = ops.len();
                 app.selection = None;
                 do_edit(app, ctx, "delete", ops);
-                app.status = format!("✓ deleted {n} line(s) · u to undo");
+                app.status = if title_skipped {
+                    format!("✓ deleted {n} line(s)（タイトル行は残した）· ^z to undo")
+                } else {
+                    format!("✓ deleted {n} line(s) · ^z to undo")
+                };
             }
         }
         (KeyCode::Char('d'), false) => {
@@ -8891,6 +8905,30 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// `x` is gate-free by design (undo is the net), but the title line is
+    /// not just another line: deleting it renames the page and moves its
+    /// URL. One keystroke must not do that.
+    #[test]
+    fn x_never_deletes_the_title_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        app.cursor = 0;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
+        assert_eq!(app.lines.len(), 3, "nothing was deleted");
+        assert_eq!(app.lines[0].text, "title");
+        assert!(app.status.contains("タイトル行"), "status: {}", app.status);
+        assert!(drain_jobs(&mut app).is_empty(), "and nothing was committed");
+
+        // A selection that spans the title still deletes the body lines.
+        app.selection = Some(Selection { anchor: 0, cursor: 2 });
+        handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
+        assert_eq!(app.lines.len(), 1, "the two body lines went");
+        assert_eq!(app.lines[0].text, "title", "the title stayed");
+        assert!(app.status.contains("タイトル行は残した"), "status: {}", app.status);
     }
 
     /// A web-side edit elsewhere on the page must not take the redo stack
