@@ -722,9 +722,8 @@ struct App {
     /// A server refresh threw away history that could no longer be
     /// replayed. Only used to explain an empty stack instead of shrugging.
     history_dropped: bool,
-    /// The page does not exist yet (`page_id` empty) and local edits are
-    /// waiting to bring it into being. Cleared when the create job is sent.
-    needs_create: bool,
+    /// Where an uncreated page stands with the server (see `CreateState`).
+    create_state: CreateState,
     /// Commit queue into the serial worker, and its outcomes back.
     commit_tx: mpsc::Sender<CommitJob>,
     commit_res_rx: mpsc::Receiver<CommitOutcome>,
@@ -1243,7 +1242,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             history_dropped: false,
-            needs_create: false,
+            create_state: CreateState::Idle,
             commit_tx,
             commit_res_rx,
             commit_jobs_rx: Some(commit_jobs_rx),
@@ -1321,7 +1320,7 @@ impl App {
         self.redo_stack.clear();
         self.history_dropped = false;
         // Whatever the last page was waiting to become, it is not this one.
-        self.needs_create = false;
+        self.create_state = CreateState::Idle;
         // A different project is a different set of capabilities: what we
         // learned about the old one (visibility, a refused browser) says
         // nothing here. The sid is a property of the SESSION and survives.
@@ -3991,6 +3990,10 @@ fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &C
     if app.session.is_some() {
         leave_session(app, ctx);
     }
+    // Leaving the session may have been the edit that owes the server a
+    // page. Nothing dispatches it after this point, so quitting straight
+    // after writing a new page would have thrown the whole page away.
+    dispatch_create(app);
     let deadline = Instant::now() + Duration::from_secs(15);
     while app.inflight > 0 && Instant::now() < deadline {
         app.status = format!("…flushing {} edit(s)", app.inflight);
@@ -4446,8 +4449,12 @@ fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
     if page_is_uncreated(app) {
         // Nothing to commit against yet. The edit lives locally and the
         // whole page goes up as one create instead — sending these ops
-        // would need a pageId that does not exist.
-        app.needs_create = true;
+        // would need a pageId that does not exist. Once the create is out,
+        // later edits wait for the page to come back rather than sending a
+        // second create, which would make a second page.
+        if app.create_state != CreateState::Sent {
+            app.create_state = CreateState::Needed;
+        }
     } else {
         queue_commit(app, label, ops);
     }
@@ -4521,6 +4528,23 @@ fn edit_focus(
     }
 }
 
+/// How far an uncreated page has got toward existing.
+///
+/// The distinction that matters is `Sent`: the create carries the whole
+/// page, so once it is out, a second one must never follow. The server
+/// answers a second create with a SECOND page (same title, auto-suffixed),
+/// and the writing splits between them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CreateState {
+    /// The page exists, or nothing has been typed into it yet.
+    Idle,
+    /// Local edits are waiting to bring the page into being.
+    Needed,
+    /// The create is out. Later edits stay local until the page comes back
+    /// with an id, and `adopt_created_page` commits them as a diff.
+    Sent,
+}
+
 /// Does this page exist on the server yet? Cosense answers 200 for any
 /// title, so a link to an uncreated page opens as a template with just its
 /// title line; it becomes real on the first commit.
@@ -4534,16 +4558,19 @@ fn page_is_uncreated(app: &App) -> bool {
 /// race two creates (which the server would answer with two pages, the
 /// second auto-suffixed).
 fn dispatch_create(app: &mut App) {
-    if !app.needs_create || !page_is_uncreated(app) || app.inflight > 0 {
+    if app.create_state != CreateState::Needed || !page_is_uncreated(app) || app.inflight > 0 {
         return;
     }
-    // A title and nothing else is not a page yet. Opening a name from the
-    // picker lands you in EDIT on an empty line; walking away from that
-    // must leave no trace, exactly as it does on the web.
-    if !app.lines.iter().skip(1).any(|l| !l.text.trim().is_empty()) {
+    // Opening a name from the picker lands you in EDIT on an empty line;
+    // walking away from that must leave no trace, exactly as on the web.
+    // But a page whose TITLE was typed is a page: the web creates those
+    // too, so only an untouched title with an empty body is held back.
+    let has_body = app.lines.iter().skip(1).any(|l| !l.text.trim().is_empty());
+    let title_typed = app.lines.first().map(|l| l.text != app.title).unwrap_or(false);
+    if !has_body && !title_typed {
         return;
     }
-    app.needs_create = false;
+    app.create_state = CreateState::Sent;
     let lines: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     queue_commit(app, "create page", vec![EditOp::Insert { anchor: "_end".into(), lines }]);
@@ -5316,13 +5343,38 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
             if app.status.is_empty() || app.status.starts_with('✓') || app.status.starts_with("EDIT") {
                 app.status = format!("✓ {label}");
             }
+            // A page that just came into being has an id we do not know
+            // yet, and every edit until we do has to wait. Waiting for the
+            // next poll means up to 3 s (60 s on websocket sync) of held
+            // edits that a quit would take with it — so fetch it now.
+            if page_is_uncreated(app) && app.create_state == CreateState::Sent {
+                adopt_after_create(app, ctx);
+            }
         }
         CommitOutcome::Skipped => {}
         CommitOutcome::Failed { label, msg } => {
             app.status = format!("commit failed: {label} — {msg}");
             app.mark_desynced();
+            if app.create_state == CreateState::Sent && page_is_uncreated(app) {
+                // The page was never made. Let the next edit try again
+                // rather than retrying in a loop against a dead network.
+                app.create_state = CreateState::Idle;
+            }
         }
         CommitOutcome::Conflict => recover_conflict(app, ctx),
+    }
+}
+
+/// Fetch the page we just created and take its id. One blocking request,
+/// once per created page: the alternative is holding every later edit
+/// until a poll happens to notice, and losing them if the viewer quits
+/// first. A failure is not fatal — the poller adopts it later.
+fn adopt_after_create(app: &mut App, ctx: &Ctx) {
+    match ctx.client.get_page_in(&app.project, &app.title) {
+        Ok(page) if page.persistent && !page.id.is_empty() => {
+            adopt_created_page(app, ctx, &page);
+        }
+        _ => {}
     }
 }
 
@@ -5341,6 +5393,7 @@ fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::Page) {
         page.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     app.page_id = page.id.clone();
     app.lines = page.lines.clone();
+    app.create_state = CreateState::Idle;
     app.bump_server_epoch();
     app.mark_synced();
     let ops = cosense::editops::diff_to_ops(&server, &local);
@@ -9407,12 +9460,13 @@ mod tests {
     fn an_empty_new_page_is_never_created() {
         let ctx = test_ctx();
         let mut app = page(&["just a title"]);
+        app.title = "just a title".into(); // the template's title line
         app.page_id = String::new();
         app.rebuild(40);
 
         app.cursor = 0;
         open_line(&mut app, &ctx, false); // the picker's "create" landing
-        assert!(app.needs_create, "the edit registered…");
+        assert_eq!(app.create_state, CreateState::Needed, "the edit registered…");
         dispatch_create(&mut app);
         assert!(drain_jobs(&mut app).is_empty(), "…but an empty page is not sent");
 
@@ -9531,6 +9585,7 @@ mod tests {
     fn an_uncreated_page_is_created_by_the_first_edit() {
         let ctx = test_ctx();
         let mut app = page(&["new title"]);
+        app.title = "new title".into();
         app.page_id = String::new(); // the page does not exist yet
         app.rebuild(40);
 
@@ -9539,7 +9594,7 @@ mod tests {
         type_str(&mut app, &ctx, "body");
         leave_session(&mut app, &ctx);
         assert!(drain_jobs(&mut app).is_empty(), "nothing can be committed yet");
-        assert!(app.needs_create, "…but the page owes the server its existence");
+        assert_eq!(app.create_state, CreateState::Needed, "…but the page owes the server its existence");
 
         dispatch_create(&mut app);
         let jobs = drain_jobs(&mut app);
@@ -9554,11 +9609,113 @@ mod tests {
             other => panic!("expected an insert, got {other:?}"),
         }
 
-        // A second dispatch while the first is in flight would make a
-        // SECOND page (the server auto-suffixes the title).
-        app.needs_create = true;
+        // A SECOND create would make a second page (same title, auto-
+        // suffixed), and the writing would split between them.
+        assert_eq!(app.create_state, CreateState::Sent);
         dispatch_create(&mut app);
         assert!(drain_jobs(&mut app).is_empty(), "not while one is in flight");
+
+        // Even after it lands, further typing waits for the page to come
+        // back with an id instead of creating a second one.
+        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Done {
+            label: "create page".into(),
+            title: "new title".into(),
+        });
+        assert_eq!(app.inflight, 0);
+        enter_session(&mut app, &ctx, 1, 4);
+        type_str(&mut app, &ctx, " more");
+        leave_session(&mut app, &ctx);
+        dispatch_create(&mut app);
+        assert!(drain_jobs(&mut app).is_empty(), "one page, one create");
+        assert_eq!(app.create_state, CreateState::Sent);
+
+        // The page comes back: its id is adopted and the extra typing goes
+        // up as an ordinary edit.
+        let mut server = polled(&[("id0", "new title"), ("id1", "body")]).page;
+        server.id = "PID".into();
+        adopt_created_page(&mut app, &ctx, &server);
+        assert_eq!(app.create_state, CreateState::Idle);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "the typing that the create missed");
+        assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "body more"));
+    }
+
+    /// Typing only a TITLE is a page too — the web creates those. Only an
+    /// untouched title with an empty body is held back.
+    #[test]
+    fn a_typed_title_alone_creates_the_page() {
+        let ctx = test_ctx();
+        let mut app = page(&["Untitled"]);
+        app.title = "Untitled".into();
+        app.page_id = String::new();
+        app.rebuild(40);
+
+        enter_session(&mut app, &ctx, 0, "Untitled".len());
+        type_str(&mut app, &ctx, " for real");
+        leave_session(&mut app, &ctx);
+        dispatch_create(&mut app);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "the title was typed, so the page is real");
+        match &jobs[0].1[0] {
+            EditOp::Insert { lines, .. } => {
+                assert_eq!(lines[0].1, "Untitled for real");
+            }
+            other => panic!("expected an insert, got {other:?}"),
+        }
+    }
+
+    /// Quitting straight after writing a new page must still create it:
+    /// nothing dispatches the create once the run loop is gone.
+    #[test]
+    fn quitting_dispatches_a_pending_create() {
+        let ctx = test_ctx();
+        let mut app = page(&["new title"]);
+        app.title = "new title".into();
+        app.page_id = String::new();
+        app.rebuild(40);
+
+        app.cursor = 0;
+        open_line(&mut app, &ctx, false);
+        type_str(&mut app, &ctx, "written and quit");
+        // What `flush_commits` does before draining the queue.
+        leave_session(&mut app, &ctx);
+        dispatch_create(&mut app);
+
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "the page goes up before the viewer exits");
+        match &jobs[0].1[0] {
+            EditOp::Insert { lines, .. } => {
+                let texts: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
+                assert_eq!(texts, vec!["new title", "written and quit"]);
+            }
+            other => panic!("expected an insert, got {other:?}"),
+        }
+    }
+
+    /// A create that failed leaves the page uncreated: the next edit must
+    /// be able to try again, without retrying in a loop meanwhile.
+    #[test]
+    fn a_failed_create_can_be_retried_by_the_next_edit() {
+        let ctx = test_ctx();
+        let mut app = page(&["new title", "body"]);
+        app.title = "new title".into();
+        app.page_id = String::new();
+        app.rebuild(40);
+        do_edit(&mut app, &ctx, "edit", vec![EditOp::Replace { id: "id1".into(), text: "body!".into() }]);
+        dispatch_create(&mut app);
+        drain_jobs(&mut app);
+
+        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Failed {
+            label: "create page".into(),
+            msg: "500".into(),
+        });
+        assert_eq!(app.create_state, CreateState::Idle, "not stuck as sent");
+        dispatch_create(&mut app);
+        assert!(drain_jobs(&mut app).is_empty(), "and not retrying by itself");
+
+        do_edit(&mut app, &ctx, "edit", vec![EditOp::Replace { id: "id1".into(), text: "body!!".into() }]);
+        dispatch_create(&mut app);
+        assert_eq!(drain_jobs(&mut app).len(), 1, "the next edit tries again");
     }
 
     /// Once the page exists, the viewer adopts its id and commits whatever
@@ -9567,6 +9724,7 @@ mod tests {
     fn adopting_a_created_page_commits_what_the_create_missed() {
         let ctx = test_ctx();
         let mut app = page(&["new title", "body"]);
+        app.title = "new title".into();
         app.page_id = String::new();
         app.rebuild(40);
         // Typed while the create was in flight.
@@ -9589,6 +9747,7 @@ mod tests {
     fn polls_never_overwrite_a_page_being_typed_into_existence() {
         let ctx = test_ctx();
         let mut app = page(&["new title", "body"]);
+        app.title = "new title".into();
         app.page_id = String::new();
         app.rebuild(40);
 
