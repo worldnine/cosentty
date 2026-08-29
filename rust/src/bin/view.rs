@@ -932,6 +932,10 @@ impl Input {
         self.buf.replace_range(..self.cur, "");
         self.cur = 0;
     }
+    /// ^k: kill to the end of the line.
+    fn kill_to_end(&mut self) {
+        self.buf.truncate(self.cur);
+    }
 }
 
 /// The modeless edit session (SPEC-edit-session.md): the caret line shows
@@ -4543,6 +4547,54 @@ fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
     app.laid_width = 0;
 }
 
+/// `^k` inside the session — the emacs contract, one line at a time:
+/// kill to the end of the line, and when there is nothing left to kill,
+/// kill the line itself. So `^k^k` deletes a line without leaving EDIT,
+/// which is what makes deletion an editing gesture rather than a READ-mode
+/// keystroke.
+///
+/// Deleting is structural, so it commits at once (as joins and splits do).
+/// The dirty text commits first: undo has to give back the line you were
+/// looking at, not the last version the server happened to hold.
+fn session_kill(app: &mut App, ctx: &Ctx) {
+    let Some(s) = app.session.as_ref() else { return };
+    let (line, at_eol) = (s.line, s.input.cur == s.input.buf.len());
+    if !at_eol {
+        if let Some(s) = app.session.as_mut() {
+            s.input.kill_to_end();
+            s.want_col = None;
+        }
+        app.laid_width = 0;
+        app.follow = true;
+        return;
+    }
+    // Line 0 is the page title: deleting it renames the page (same reason
+    // `x` refuses). Emptying it is still allowed — that is a rename you
+    // typed on purpose.
+    if line == 0 {
+        app.status = "タイトル行は削除できません".into();
+        return;
+    }
+    session_commit_dirty(app, ctx);
+    let id = app.lines[line].id.clone();
+    do_edit(app, ctx, "delete line", vec![EditOp::Delete { id }]);
+    // The caret takes the place the line left behind: the line that slid
+    // up into this index, or the one above when we killed the last line.
+    let seat = line.min(app.lines.len().saturating_sub(1));
+    let text = app.lines[seat].text.clone();
+    let caret = if seat < line { text.len() } else { 0 };
+    if let Some(s) = app.session.as_mut() {
+        s.line = seat;
+        s.input = Input { buf: text.clone(), cur: caret };
+        s.orig = text;
+        s.want_col = None;
+    }
+    app.cursor = seat;
+    app.follow = true;
+    app.laid_width = 0;
+    app.status = "✓ deleted line · ^z to undo".into();
+}
+
 /// ↑/↓ inside the session: commit the dirty line, carry the caret to the
 /// next/previous BODY line, keeping the display column (sticky).
 fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
@@ -4761,6 +4813,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::End, _) | (KeyCode::Char('e'), true) => edit_input(app, Input::end),
         (KeyCode::Char('w'), true) => edit_input(app, Input::delete_word),
         (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
+        (KeyCode::Char('k'), true) => session_kill(app, ctx),
         // `u` is a printable key in a modeless session, so undo takes the
         // key everyone already presses to undo text: `^z`. Raw mode turns
         // ISIG off, so it never reached the terminal as SIGTSTP anyway,
@@ -8905,6 +8958,47 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// Deletion belongs to EDIT: `^k` kills to the end of the line, and
+    /// again on an exhausted line kills the line itself — all without
+    /// leaving the session.
+    #[test]
+    fn ctrl_k_kills_to_end_then_kills_the_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one two", "three"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3); // caret after "one"
+
+        handle_session_key(&mut app, &ctx, ctrl('k'));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "one", "tail killed");
+        assert_eq!(app.lines.len(), 3, "still just a dirty line");
+
+        handle_session_key(&mut app, &ctx, ctrl('k'));
+        assert_eq!(app.lines.len(), 2, "the exhausted line went");
+        assert_eq!(app.lines[1].text, "three");
+        let s = app.session.as_ref().expect("still editing");
+        assert_eq!(s.line, 1, "caret took the place the line left behind");
+        assert_eq!(s.input.buf, "three");
+
+        // Undo gives back what was on screen, not the pre-edit server text.
+        handle_session_key(&mut app, &ctx, ctrl('z'));
+        assert_eq!(app.lines[1].text, "one", "the line comes back as it looked");
+    }
+
+    /// The title line renames the page, so `^k` will not delete it either
+    /// — the same rule `x` follows in READ.
+    #[test]
+    fn ctrl_k_never_deletes_the_title_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 0, 5); // caret at end of the title
+
+        handle_session_key(&mut app, &ctx, ctrl('k'));
+        assert_eq!(app.lines.len(), 2, "nothing deleted");
+        assert!(app.status.contains("タイトル行"), "status: {}", app.status);
+        assert!(app.session.is_some(), "and the session stays open");
     }
 
     /// `x` is gate-free by design (undo is the net), but the title line is
