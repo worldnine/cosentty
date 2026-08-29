@@ -66,7 +66,7 @@ PAT / Service Account のみの環境では従来どおり `sync: poll` の3秒�
 | file 一覧 | `^o` ファイル一覧 | ページピッカー（最近更新順・打鍵で絞り込み） | `^o` |
 | edit | `e` ファイル編集 | **モードレス編集セッション**（akapen 本来の意味に復帰。SPEC-edit-session.md） | `e`（行末） `i`（行頭） |
 | mode | `Tab` view⇄source | 同じ（生 Scrapbox 記法を行番号付きで表示） | `Tab` |
-| comment | `v` select · `c` add · `d` delete · `^n`/`^p` jump | 同じ | `v` `c` `d` `^n` `^p` |
+| comment | `v` select · `c` add · `d` delete · `^n`/`^p` jump | 同じ。範囲選択は `v` のほか **Shift+`↑`/`↓`** でも始められる（EDIT と同じ指。選択には `y` コピーと `c` コメントが効く） | `v` `c` `d` `^n` `^p` `S-↑` `S-↓` |
 | output | `y` copy · `s` send | `y`=カーソル行（選択があれば範囲）· `Y`=ページ全体。EDIT 中は `^y`（`s` は将来） | `y` `Y` `^y` |
 | list | `l` comments · `?` help | 同じ | `l` `?` |
 | undo | — | **全コミットの逆演算 undo/redo**（確認ゲートの代わりの安全網）。undo は READ でも EDIT でも `^z` が使える（READ では akapen 互換の `u` も従来どおり。EDIT では `u` が印字キーなので `^z` のみ）。redo はどちらも `^r` | `u` · `^z` · `^r` |

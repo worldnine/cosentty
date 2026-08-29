@@ -4338,6 +4338,7 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     }
 
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     match (k.code, ctrl) {
         // ---- quit ---- (akapen default: q quits, Esc only cancels)
         (KeyCode::Char('q'), false) => return Action::Quit,
@@ -4365,6 +4366,11 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Right, _) => travel(app, ctx, 1),
 
         // ---- move (akapen parity) ----
+        // Shift+↑/↓ selects, in READ as in EDIT: the same fingers, the same
+        // result. `v` then j/k (akapen) still works — this is the version
+        // people try first.
+        (KeyCode::Down, _) if shift => read_select_line(app, true),
+        (KeyCode::Up, _) if shift => read_select_line(app, false),
         (KeyCode::Char('j'), false) | (KeyCode::Down, _) => app.move_cursor(true),
         (KeyCode::Char('k'), false) | (KeyCode::Up, _) => app.move_cursor(false),
         (KeyCode::Char('g'), false) => {
@@ -5084,7 +5090,20 @@ fn session_cut_span(app: &mut App) -> bool {
     true
 }
 
-/// Shift+←/→: grow (or start) the character selection as the caret moves.
+/// Shift+↑/↓ in READ: grow a line range from wherever the cursor is.
+/// Anchors on the first press; after that the ordinary cursor move carries
+/// the far end (`after_cursor_move`).
+fn read_select_line(app: &mut App, down: bool) {
+    if app.selection.is_none() {
+        app.selection = Some(Selection::new(app.cursor));
+    }
+    app.move_cursor(down);
+    if let Some((a, b)) = app.selection.map(|s| s.range()) {
+        app.status = format!("selected {} line(s) · y copy · c comment · Esc clear", b - a + 1);
+    }
+}
+
+/// Shift+←/→: grow (or start) the character selection/// Shift+←/→: grow (or start) the character selection as the caret moves.
 fn session_select_char(app: &mut App, right: bool) {
     if let Some(s) = app.session.as_mut() {
         if s.sel_from.is_none() {
@@ -10163,6 +10182,36 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+    }
+
+    /// Shift+↑↓ selects in READ too. `v` then j/k is the akapen way and
+    /// still works; this is the one people try first, and it has to reach
+    /// the same selection — the one `y` and `c` act on.
+    #[test]
+    fn shift_arrows_select_lines_in_read_too() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three"]);
+        app.rebuild(40);
+        app.cursor = 1;
+
+        handle_key(&mut app, &ctx, shift(KeyCode::Down));
+        handle_key(&mut app, &ctx, shift(KeyCode::Down));
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
+        assert_eq!(app.cursor, 3, "the cursor carries the far end");
+        assert!(app.status.contains("3 line(s)"), "status: {}", app.status);
+
+        // It is the same selection the rest of READ acts on.
+        assert_eq!(copy_payload(&app, false).unwrap().0, "one\ntwo\nthree");
+
+        // Shrinking works the same way, and Esc clears it.
+        handle_key(&mut app, &ctx, shift(KeyCode::Up));
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)));
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.selection.is_none());
+
+        // A plain arrow moves without selecting.
+        handle_key(&mut app, &ctx, key(KeyCode::Down));
+        assert!(app.selection.is_none());
     }
 
     /// ↑/↓ mean "the row above / the row below" — the movement the eye
