@@ -317,7 +317,8 @@ New coverage, against the acceptance list:
 | a refused batch is retried as one | `view::a_whole_refused_batch_is_retried_anonymously_in_one_go` (two diagrams; one anonymous batch carries both, and only an anonymous refusal sets `browser_denied`), `capability::a_stale_cookie_on_a_public_page_is_retried_without_it` |
 | a stale room never holds the new page slow | `view::navigating_away_from_a_live_room_goes_back_to_the_fast_poll`, `view::a_live_from_the_room_the_reader_left_is_ignored`, `view::a_rejoin_that_stalls_leaves_the_reader_on_the_fast_poll` |
 | a late poll never rolls the page back | `view::a_poll_that_started_before_a_websocket_commit_never_rolls_it_back`, `view::a_poll_that_started_before_a_local_commit_never_rolls_it_back`, `view::a_fresh_poll_still_applies_web_edits` |
-| blankness alone is not a refusal | `chrome::a_blank_page_is_only_a_refusal_when_the_api_refuses` |
+| blankness alone is not a refusal | `chrome::a_readable_page_is_never_called_unauthorised` |
+| a title called `auth` is not a login wall | `chrome::an_ordinary_page_whose_title_is_auth_is_not_a_login_wall` (`auth`, `login`, `authentication`, `my-login`, and a project named `auth`), `chrome::a_real_redirect_to_an_auth_route_is_a_login_wall`, `chrome::a_slow_page_titled_auth_times_out_rather_than_blaming_the_cookie` (the reported path end to end) |
 | a render whose source moved is discarded | `view::a_render_whose_source_moved_is_never_filed_under_the_old_hash` (gated backend, A→B commit; nothing is written under A's key and B is queued), `view::a_stale_job_merged_with_a_fresh_one_is_still_thrown_away` (two jobs drained together; the older is abandoned rather than carried in on the newer's freshness) |
 | a failed reload is not a successful one | `view::a_failed_reload_keeps_the_reader_in_history`, `view::a_failed_reload_at_the_newest_snapshot_also_stays_put`, `view::a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved`, `view::a_snapshot_never_renders_diagrams` |
 | agreement clears the drift, staleness does not | `view::an_undo_that_restores_agreement_lets_diagrams_render_again`, `view::a_stale_equal_poll_does_not_clear_the_drift` |
@@ -659,9 +660,33 @@ was wrong in the two cases that matter to a reader on a bad connection.
 
 When the blank grace expires the browser is asked, **once**, what the page API
 says in its own cookie state (an in-page `fetch` with `credentials: 'include'`).
-Only 401/403 is a refusal; anything else — including no answer at all — falls
-back to the ordinary budget and reports `Timeout`/`NotRendered`. The mapping is
-the pure `chrome::blank_verdict`.
+
+The same applies to the address bar. `href.contains("/login") || href.contains("/auth")`
+is a substring test on a whole URL, and it condemns perfectly ordinary Cosense
+pages — `/<project>/auth`, `/<project>/login`, `/<project>/my-login` all match.
+On a page like that, a slow SPA or a single broken Mermaid block was reported as
+an authentication failure.
+
+A Cosense page is `/<project>/<title>`; an auth route lives at the **root**. So
+`chrome::redirected_to_auth` compares the requested `page_url()` with the current
+location as URLs — host, then first path segment against the project actually
+requested — and never looks at the title, which the reader may call anything:
+
+| requested | current | verdict |
+|---|---|---|
+| `/proj/auth`, `/proj/login`, `/proj/my-login` | unchanged | page (no redirect) |
+| `/auth/index` | `/auth/other-page` | page (the project is named `auth`) |
+| `/proj/Mermaid` | `/login`, `/login/google`, `/auth/…` | **wall** |
+| `/auth/Mermaid` | `/login` | **wall** (root route, whatever the project) |
+| any | another host with an auth segment | **wall** |
+
+The two signals are combined by the pure `chrome::auth_verdict(api, redirected)`,
+and **the API outranks the URL**: a 200 means this browser can read this page, so
+whatever the address looks like, the missing picture is not an authentication
+problem — and calling it one would send the viewer down the cookie-retry path for
+a page that is merely slow. Only 401/403 is a refusal; anything else — including
+no answer at all, with no redirect — falls back to the ordinary budget and
+reports `Timeout`/`NotRendered`. A redirect with no API evidence still counts.
 
 ## 8. Known limits, security, distribution
 

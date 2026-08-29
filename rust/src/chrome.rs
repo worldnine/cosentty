@@ -427,6 +427,8 @@ impl ChromeBackend {
         deadline: Instant,
     ) -> Result<Vec<bool>, WebError> {
         let ready_child = reqs[0].kind.ready_child();
+        // The page we asked for, to compare the browser's location against.
+        let requested_url = reqs[0].page_url();
         let expr = format!(
             r#"(function(){{
                 var sels = {sels};
@@ -451,6 +453,8 @@ impl ChromeBackend {
         let mut last = vec![false; reqs.len()];
         let mut ever_loaded = false;
         let mut login_wall = false;
+        // What the page API told this browser, if we have asked.
+        let mut api_status: Option<u16> = None;
         // When the document has finished loading and Cosense has still put
         // NO page body on screen, we are not looking at a slow page — we
         // are looking at a page this browser may not see. Measured: an
@@ -475,7 +479,7 @@ impl ChromeBackend {
                 login_wall |= v
                     .get("href")
                     .and_then(|h| h.as_str())
-                    .map(|h| h.contains("/login") || h.contains("/auth"))
+                    .map(|h| redirected_to_auth(&requested_url, h))
                     .unwrap_or(false);
                 if let Some(arr) = v.get("ready").and_then(|r| r.as_array()) {
                     for (i, b) in arr.iter().enumerate() {
@@ -495,7 +499,8 @@ impl ChromeBackend {
                     // the blankness itself.
                     if since.elapsed() > BLANK_GRACE && !asked_api {
                         asked_api = true;
-                        if let Some(e) = blank_verdict(self.page_api_status(cdp, reqs, deadline)) {
+                        api_status = self.page_api_status(cdp, reqs, deadline);
+                        if let Some(e) = auth_verdict(api_status, false) {
                             return Err(e);
                         }
                         // Not a refusal: it is just slow. Keep waiting for
@@ -507,9 +512,16 @@ impl ChromeBackend {
             }
             let stalled = ever_loaded && last_progress.elapsed() > quiet;
             if stalled || Instant::now() >= deadline || self.stopped.load(Ordering::Relaxed) {
-                if login_wall {
-                    // Redirected away from the page: no sid, or a stale one.
-                    return Err(WebError::NotAuthorized);
+                // A redirect is a suspicion, not a finding. Corroborate it
+                // with the one thing that actually knows — and only once,
+                // so this cannot extend the batch's budget.
+                // (Every path out of this block returns, so there is nothing
+                // left to guard against a second ask.)
+                if login_wall && !asked_api && !self.stopped.load(Ordering::Relaxed) {
+                    api_status = self.page_api_status(cdp, reqs, deadline);
+                }
+                if let Some(e) = auth_verdict(api_status, login_wall) {
+                    return Err(e);
                 }
                 if !ever_loaded {
                     return Err(WebError::Timeout { seconds: budget().as_secs() });
@@ -682,21 +694,74 @@ fn capture(
 }
 
 /// `Runtime.evaluate` an expression that returns a JSON string, and parse it.
-/// What a page that never drew its body actually means.
+/// Path segments that name an authentication route at the ROOT of a site.
+const AUTH_ROUTES: [&str; 5] = ["login", "auth", "logout", "signin", "sign-in"];
+
+/// `(host, path)` of an absolute URL, with query and fragment dropped.
+fn url_parts(u: &str) -> Option<(&str, &str)> {
+    let rest = u.split_once("://").map(|(_, r)| r)?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (host, tail) = rest.split_at(end);
+    let path = tail.split(['?', '#']).next().unwrap_or("");
+    Some((host, path))
+}
+
+fn segments(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+/// Was the browser moved off the page we asked for and onto an
+/// authentication route?
 ///
-/// A blank page is NOT evidence of anything on its own: a slow SPA, a
-/// throttled CPU and a page we may not read all look identical from the
-/// outside, and the previous version of this called every one of them
-/// `NotAuthorized`. So we ask the browser, in its own cookie state, what
-/// the page API says — and only a refusal counts as a refusal.
+/// This used to be `href.contains("/login") || href.contains("/auth")`, which
+/// is a substring test on a whole URL and therefore condemns perfectly
+/// ordinary Cosense pages: `/<project>/auth`, `/<project>/login`,
+/// `/<project>/my-login` all contain those strings. A slow SPA or a single
+/// broken Mermaid block on such a page was reported as a login failure.
 ///
-/// `status` is the HTTP status the in-page fetch saw, or `None` if the
-/// fetch itself could not be made. `None` verdict means "keep waiting":
+/// A Cosense page is `/<project>/<title>`; an auth route lives at the root
+/// (`/login`, `/auth/…`). So the question is about the FIRST path segment,
+/// compared against the project we actually requested — never about
+/// substrings, and never about the title, which the user may call anything.
+fn redirected_to_auth(requested: &str, current: &str) -> bool {
+    let (Some((rhost, rpath)), Some((chost, cpath))) =
+        (url_parts(requested), url_parts(current))
+    else {
+        return false;
+    };
+    let csegs = segments(cpath);
+    let Some(first) = csegs.first() else { return false };
+    if !AUTH_ROUTES.iter().any(|r| first.eq_ignore_ascii_case(r)) {
+        return false;
+    }
+    // Off the site entirely, onto something calling itself login: a wall.
+    if chost != rhost {
+        return true;
+    }
+    // Same host. `/<project>/<title>` where the PROJECT is named "auth" is
+    // an ordinary page of that project, not a wall — but a bare `/auth` is
+    // the root route however the project is named.
+    let project = segments(rpath).first().copied();
+    csegs.len() < 2 || project.map(|p| !p.eq_ignore_ascii_case(first)).unwrap_or(true)
+}
+
+/// Why a page that did not finish drawing failed.
+///
+/// `api` is the status the page API gave THIS browser, in its own cookie
+/// state; `redirected` is [`redirected_to_auth`]. `None` means "no verdict":
 /// the ordinary budget then decides between `Timeout` and `NotRendered`.
-fn blank_verdict(status: Option<u16>) -> Option<WebError> {
-    match status {
+///
+/// The API outranks the URL deliberately. A 200 means this browser can read
+/// this page, so whatever the address bar looks like, the reason the picture
+/// is missing is not authentication — and calling it authentication would
+/// send the viewer down the cookie-retry path for a page that is merely slow.
+fn auth_verdict(api: Option<u16>, redirected: bool) -> Option<WebError> {
+    match api {
         Some(401) | Some(403) => Some(WebError::NotAuthorized),
-        _ => None,
+        // The API answered us. Not an auth problem, whatever the URL says.
+        Some(_) => None,
+        // No evidence either way: the redirect is all we have to go on.
+        None => redirected.then_some(WebError::NotAuthorized),
     }
 }
 
@@ -881,22 +946,101 @@ mod tests {
         }
     }
 
+    /// The URL of a real Cosense page in `proj`, as the request builds it.
+    fn page_url_for(project: &str, title: &str) -> String {
+        WebRequest {
+            kind: crate::webrender::WebKind::Mermaid,
+            project: project.into(),
+            title: title.into(),
+            page_id: "P".into(),
+            line_id: "L".into(),
+            code_hash: 0,
+            dark: true,
+        }
+        .page_url()
+    }
+
     #[test]
-    fn a_blank_page_is_only_a_refusal_when_the_api_refuses() {
-        // The evidence that matters.
-        assert!(matches!(blank_verdict(Some(401)), Some(WebError::NotAuthorized)));
-        assert!(matches!(blank_verdict(Some(403)), Some(WebError::NotAuthorized)));
-        // Everything else is "keep waiting": a slow SPA whose lines take
-        // more than the grace period to appear must NOT be called a login
-        // failure. The ordinary budget decides those.
-        for s in [200u16, 204, 404, 429, 500, 503] {
+    fn an_ordinary_page_whose_title_is_auth_is_not_a_login_wall() {
+        // The reason this exists: the old check was
+        // `href.contains("/login") || href.contains("/auth")`, and every one
+        // of these titles contains one of those. On a slow SPA, or a page
+        // with one broken Mermaid block, they were reported as auth
+        // failures — for a page the reader can plainly read.
+        for title in ["auth", "login", "authentication", "my-login", "auth/notes"] {
+            let requested = page_url_for("proj", title);
             assert!(
-                blank_verdict(Some(s)).is_none(),
-                "HTTP {s} is not evidence that we are unauthenticated"
+                !redirected_to_auth(&requested, &requested),
+                "{title}: the page we asked for is never a redirect"
             );
         }
-        // No status at all is no evidence either.
-        assert!(blank_verdict(None).is_none());
+        // ...and a project NAMED auth is an ordinary project.
+        let requested = page_url_for("auth", "index");
+        assert!(!redirected_to_auth(&requested, &requested));
+        assert!(
+            !redirected_to_auth(&requested, "https://scrapbox.io/auth/other-page"),
+            "moving within the `auth` project is not a wall"
+        );
+    }
+
+    #[test]
+    fn a_real_redirect_to_an_auth_route_is_a_login_wall() {
+        let requested = page_url_for("proj", "Mermaid");
+        for current in [
+            "https://scrapbox.io/login",
+            "https://scrapbox.io/login/google",
+            "https://scrapbox.io/auth",
+            "https://scrapbox.io/auth/google?next=%2Fproj",
+            "https://accounts.google.com/signin/oauth",
+        ] {
+            assert!(
+                redirected_to_auth(&requested, current),
+                "{current} is a wall"
+            );
+        }
+        // A bare root, or another page, is not.
+        assert!(!redirected_to_auth(&requested, "https://scrapbox.io/"));
+        assert!(!redirected_to_auth(&requested, "https://scrapbox.io/proj/Other"));
+        // Even for a project named `auth`, the ROOT route still counts.
+        let from_auth_project = page_url_for("auth", "Mermaid");
+        assert!(redirected_to_auth(&from_auth_project, "https://scrapbox.io/login"));
+    }
+
+    #[test]
+    fn a_readable_page_is_never_called_unauthorised() {
+        // The API outranks the URL: if this browser can read the page, the
+        // missing picture is not an authentication problem.
+        assert!(auth_verdict(Some(200), true).is_none(), "200 beats a redirect guess");
+        assert!(auth_verdict(Some(200), false).is_none());
+        // A refusal is a refusal either way.
+        assert!(matches!(auth_verdict(Some(401), false), Some(WebError::NotAuthorized)));
+        assert!(matches!(auth_verdict(Some(403), true), Some(WebError::NotAuthorized)));
+        // Slow, blank, or odd statuses: keep waiting, then time out.
+        for st in [204u16, 404, 429, 500, 503] {
+            assert!(auth_verdict(Some(st), false).is_none(), "HTTP {st} is not a refusal");
+        }
+        // No evidence at all: the redirect is all we have.
+        assert!(matches!(auth_verdict(None, true), Some(WebError::NotAuthorized)));
+        assert!(auth_verdict(None, false).is_none());
+    }
+
+    #[test]
+    fn a_slow_page_titled_auth_times_out_rather_than_blaming_the_cookie() {
+        // The whole production path for the reported case: the title makes
+        // the URL look like an auth route to a substring test, the API says
+        // the page is readable, and the body simply has not drawn yet.
+        let requested = page_url_for("proj", "auth");
+        let redirected = redirected_to_auth(&requested, &requested);
+        assert!(!redirected);
+        assert!(
+            auth_verdict(Some(200), redirected).is_none(),
+            "this must fall through to Timeout/NotRendered, not NotAuthorized"
+        );
+        // Contrast: a genuine wall on the same page still reports one.
+        let wall = redirected_to_auth(&requested, "https://scrapbox.io/login");
+        assert!(wall);
+        assert!(matches!(auth_verdict(None, wall), Some(WebError::NotAuthorized)));
+        assert!(matches!(auth_verdict(Some(401), false), Some(WebError::NotAuthorized)));
     }
 
     #[test]
