@@ -453,7 +453,14 @@ fn decorate_bold(
 /// star landed on the smallest heading, whose structural style is italic,
 /// and the most common emphasis in the wiki came out un-bolded.
 fn star_style(stars: usize, pal: &Palette) -> Style {
-    pal.heading_style_for(stars).add_modifier(Modifier::BOLD)
+    // Italic is NOT borrowed. In Cosense italic is its own flag (`[/ x]`),
+    // so italics appearing without one is a false signal — and the theme's
+    // smallest markdown heading is italic, which is exactly the level one
+    // star lands on. Colour (and the top level's underline) carry the
+    // level; bold carries the emphasis.
+    pal.heading_style_for(stars)
+        .remove_modifier(Modifier::ITALIC)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// Byte index of the `]` that closes the `[` at `open`, counting nesting./// Byte index of the `]` that closes the `[` at `open`, counting nesting.
@@ -1485,11 +1492,21 @@ mod tests {
             assert!(st.add_modifier.contains(Modifier::BOLD), "{st:?}");
         }
 
-        // `/` still italicises, on top of the level.
+        // Italic comes from the `/` flag and NOWHERE else: borrowing the
+        // theme's italic markdown heading made `[* x]` look like `[/ x]`.
+        for st in [one.last().unwrap(), two.last().unwrap(), three.last().unwrap()] {
+            assert!(!st.add_modifier.contains(Modifier::ITALIC), "{st:?}");
+        }
         let slash = *styles("→ [*/ 斜体]").last().unwrap();
         assert!(slash.add_modifier.contains(Modifier::ITALIC));
         assert!(slash.add_modifier.contains(Modifier::BOLD));
         assert_eq!(slash.fg, star_style(1, &pal).fg, "and keeps its level");
+
+        // A decorated link: link colour, still underlined, bold — and not
+        // italic, which was what "bold link" actually looked like.
+        let deco = *styles("[[[改善案]]]").last().unwrap();
+        assert!(deco.add_modifier.contains(Modifier::BOLD));
+        assert!(!deco.add_modifier.contains(Modifier::ITALIC));
 
         // A link inside a decoration is REGISTERED as a link (so Enter can
         // follow it) and keeps the link colour.
