@@ -615,13 +615,33 @@ fn image_in_bracket(inner: &str) -> Option<String> {
 fn line_images(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = body;
-    while let Some(start) = rest.find('[') {
-        let Some(end_rel) = rest[start + 1..].find(']') else { break };
-        let end = start + 1 + end_rel;
-        if let Some(u) = image_in_bracket(&rest[start + 1..end]) {
-            out.push(u);
+    loop {
+        // Inline code quotes its contents: `[url]` inside backticks is a
+        // line ABOUT the notation, not an image. Skip those spans, the
+        // same way `decorate_inline` does when it draws them.
+        let tick = rest.find('`');
+        let open = rest.find('[');
+        match (tick, open) {
+            (Some(t), Some(o)) if t < o => {
+                let after = &rest[t + 1..];
+                match after.find('`') {
+                    Some(close) => {
+                        rest = &after[close + 1..];
+                        continue;
+                    }
+                    None => break, // an unclosed backtick quotes the rest
+                }
+            }
+            (_, Some(o)) => {
+                let Some(end_rel) = rest[o + 1..].find(']') else { break };
+                let end = o + 1 + end_rel;
+                if let Some(u) = image_in_bracket(&rest[o + 1..end]) {
+                    out.push(u);
+                }
+                rest = &rest[end + 1..];
+            }
+            _ => break,
         }
-        rest = &rest[end + 1..];
     }
     out
 }
@@ -630,6 +650,9 @@ fn line_images(body: &str) -> Vec<String> {
 /// else, which is the case that becomes a picture on its own row.
 fn standalone_image(body: &str) -> Option<String> {
     let inner = body.trim();
+    if inner.contains('`') {
+        return None; // quoted notation is text about notation
+    }
     let inner = inner.strip_prefix('[')?.strip_suffix(']')?;
     if inner.contains('[') || inner.contains(']') {
         return None;
@@ -1337,6 +1360,13 @@ mod tests {
         assert_eq!(after.len(), 2, "{after:?}");
         assert!(after[0].contains("後ろのテキスト"), "{after:?}");
         assert_eq!(after[1], "image:https://example.com/a.png");
+
+        // Quoted notation is a line ABOUT the picture, not a picture: a
+        // documentation page must be able to show what it is describing.
+        let quoted = shape("`[https://example.com/a.png]` → 画像になる");
+        assert_eq!(quoted.len(), 1, "{quoted:?}");
+        assert!(quoted[0].starts_with("text:"), "{quoted:?}");
+        assert_eq!(shape("`[https://example.com/a.png]`").len(), 1);
 
         // Two pictures on one line: both, in the order written.
         let two = shape("[https://example.com/a.png] と [https://example.com/b.png]");
