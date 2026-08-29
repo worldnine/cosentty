@@ -466,6 +466,14 @@ struct App {
     web_cols: u16,
     /// Rescales in flight, so a resize does not queue the same key twice.
     web_rescaling: HashSet<String>,
+    /// The local page may no longer match the server: a commit was refused
+    /// or never left the machine. The browser can only ever show what the
+    /// SERVER has, so while this is set no diagram is rendered — a render
+    /// would capture the server's version of a block and file it under the
+    /// LOCAL text's hash, quietly attaching the wrong picture to the source
+    /// the reader is looking at. Cleared only when an authoritative page
+    /// install proves the two agree again (see `mark_desynced`).
+    web_unsynced: bool,
     /// A diagram-failure note and when it stops being worth the status line.
     /// The status line doubles as the key-hint bar, so a message left there
     /// forever costs the reader their hints; a render failure is worth a
@@ -908,6 +916,7 @@ impl App {
             web_anim: std::time::Instant::now(),
             web_cols: IMAGE_MAX_COLS,
             web_rescaling: HashSet::new(),
+            web_unsynced: false,
             web_status: None,
             web_job_tx,
             web_jobs_rx: Some(web_jobs_rx),
@@ -1009,6 +1018,8 @@ impl App {
         self.web_pending.clear();
         self.web_errors.clear();
         self.web_rescaling.clear();
+        // A freshly fetched page IS the server's state.
+        self.mark_synced();
         self.laid_width = 0; // force rebuild
         self.scroll = 0;
         self.cursor = 0;
@@ -1086,10 +1097,12 @@ impl App {
     /// screen until an artifact arrives.
     fn start_web_renders(&mut self) {
         // The browser can only ever show what the SERVER has, so nothing is
-        // requested while a commit is still on its way there. This is a
-        // whole-page gate: any queued commit could be the one that changes
-        // a diagram.
-        if self.inflight > 0 {
+        // requested while a commit is still on its way there, or while a
+        // commit is known to have failed. Both are whole-page gates: any
+        // queued or lost commit could be the one that changes a diagram,
+        // and `inflight == 0` alone only means "nothing in flight", not
+        // "everything landed".
+        if self.inflight > 0 || self.web_unsynced {
             return;
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
@@ -1222,6 +1235,21 @@ impl App {
         }
         self.web_status = None;
         ours
+    }
+
+    /// The local model may have drifted from the server. Deliberately
+    /// sticky: a later commit succeeding says nothing about the edit that
+    /// did not, so only an authoritative page install clears it.
+    fn mark_desynced(&mut self) {
+        self.web_unsynced = true;
+    }
+
+    /// A whole page arrived from the server and replaced the local lines,
+    /// so whatever had drifted is gone. This is the ONLY way the flag
+    /// clears; it must never be called on a partial or local-only update,
+    /// which would re-open the window it exists to close.
+    fn mark_synced(&mut self) {
+        self.web_unsynced = false;
     }
 
     fn gen_now(&self) -> u64 {
@@ -3654,6 +3682,9 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
         app.inflight += 1;
     } else {
         app.status = "commit worker gone — edits are LOCAL ONLY".into();
+        // The edit never left the machine: local lines and the server have
+        // parted ways, and every diagram on the page must stay as source.
+        app.mark_desynced();
     }
 }
 
@@ -4135,6 +4166,7 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
         CommitOutcome::Skipped => {}
         CommitOutcome::Failed { label, msg } => {
             app.status = format!("commit failed: {label} — {msg}");
+            app.mark_desynced();
         }
         CommitOutcome::Conflict => recover_conflict(app, ctx),
     }
@@ -4157,6 +4189,10 @@ fn remote_gate_clear(app: &App) -> bool {
 /// clearing the local undo lineage (its anchors came from the old state),
 /// and re-rendering. Polled pages and websocket resyncs both land here.
 fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, status: &str) {
+    // A full page from the server replaces the local lines wholesale, so
+    // whatever a failed commit had left diverging is resolved here. This
+    // and `set_page` are the only places the desync flag clears.
+    app.mark_synced();
     let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
     let session_id = app
         .session
@@ -6027,6 +6063,98 @@ mod tests {
         app.web_job_tx.send(WebJob::Stop).unwrap();
         handle.join().expect("the worker joins on Stop");
         out
+    }
+
+    #[test]
+    fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_source() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // The reader changes the diagram A -> B locally. The key follows
+        // the LOCAL text…
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        app.rebuild(80);
+        let key_b = app
+            .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->C", 3)
+            .unwrap()
+            .cache_key();
+        // Clear whatever the re-render already queued, and forget it was
+        // ever pending: the question is what happens from here on.
+        while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+        app.web_pending.clear();
+        // …but the commit is refused, so the SERVER still has A. Rendering
+        // now would screenshot A and store it under B's key.
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Failed { label: "line 4".into(), msg: "500".into() },
+        );
+        assert_eq!(app.inflight, 0, "the job is no longer in flight…");
+        assert!(app.web_unsynced, "…but the page is known to have drifted");
+        app.start_web_renders();
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "inflight == 0 is not enough: nothing may be rendered while desynced",
+        );
+        assert!(!app.images.contains_key(&key_b));
+        assert!(app.web_pending.is_empty());
+
+        // A later commit succeeding says nothing about the one that failed.
+        app.inflight = 1;
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done { label: "line 9".into(), title: String::new() },
+        );
+        assert!(app.web_unsynced, "one success does not prove the page agrees");
+        app.start_web_renders();
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
+
+        // Only a whole page from the server settles it.
+        let mut page = cosense::api::Page {
+            id: app.page_id.clone(),
+            title: app.title.clone(),
+            commit_id: String::new(),
+            lines: vec![],
+            links: vec![],
+            project_links: vec![],
+            related: None,
+            updated: 0,
+            created: 0,
+            lines_count: 0,
+            last_accessed: None,
+        };
+        page.lines = app
+            .lines
+            .iter()
+            .map(|l| PageLine {
+                id: l.id.clone(),
+                text: l.text.clone(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            })
+            .collect();
+        install_remote_lines(&mut app, &ctx, &page, "⟳ resync");
+        assert!(!app.web_unsynced, "an authoritative install resolves the drift");
+        app.rebuild(80);
+        app.start_web_renders();
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "rendering resumes");
+    }
+
+    #[test]
+    fn an_edit_that_never_reached_the_commit_worker_also_desyncs() {
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        // The worker is gone, so the send fails exactly as it does at exit.
+        drop(app.commit_jobs_rx.take());
+        queue_commit(&mut app, "line 4", vec![]);
+        assert_eq!(app.inflight, 0, "nothing is in flight — it never left");
+        assert!(app.web_unsynced);
+        app.start_web_renders();
+        assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
     }
 
     #[test]
