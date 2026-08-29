@@ -1418,12 +1418,23 @@ impl App {
     /// finishes independently and is installed by the event loop, so the page
     /// is readable immediately and images fill in as they arrive.
     fn start_image_loads(&mut self, ctx: &Ctx) {
+        // Every picture on the page, INCLUDING the ones inside a mixed
+        // text-and-picture line. Reading only `Block::Image` meant a
+        // picture written beside text was laid out (its box reserved) and
+        // then never fetched — it simply never appeared.
         let urls: Vec<String> = self
             .blocks
             .iter()
-            .filter_map(|b| match b {
-                Block::Image { url, .. } => Some(url.clone()),
-                _ => None,
+            .flat_map(|b| match b {
+                Block::Image { url, .. } => vec![url.clone()],
+                Block::Inline { parts, .. } => parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        cosense::render::InlinePart::Image(url) => Some(url.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
             })
             .collect();
         for url in urls {
@@ -10514,6 +10525,22 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// A picture written beside text has to be FETCHED like any other.
+    /// Collecting only whole-line pictures left the inline ones with a box
+    /// reserved and nothing ever put in it.
+    #[test]
+    fn pictures_inside_a_line_are_fetched_too() {
+        let ctx = test_ctx();
+        let a = "https://example.com/a.png";
+        let b = "https://example.com/b.png";
+        let mut app = page(&["t", &format!("[{a}] と [{b}]"), &format!("[{a}]")]);
+        app.rebuild(80);
+        app.start_image_loads(&ctx);
+        for url in [a, b] {
+            assert!(app.pending.contains(url), "{url} was never asked for");
+        }
     }
 
     /// The browser lays an inline image ON the text line: its bottom edge
