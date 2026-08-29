@@ -2200,6 +2200,26 @@ impl App {
             .flatten()
     }
 
+    /// Put the caret on an edit's own location (see `edit_focus`). The
+    /// session moves with it, so undo/redo show what changed instead of
+    /// leaving the caret wherever it happened to be. Returns whether the
+    /// line was still there to stand on.
+    fn focus_edit(&mut self, focus: Option<(String, usize)>) -> bool {
+        let Some((id, caret)) = focus else { return false };
+        let Some(line) = self.lines.iter().position(|l| l.id == id) else { return false };
+        let text = self.lines[line].text.clone();
+        self.cursor = line;
+        self.follow = true;
+        self.laid_width = 0;
+        if let Some(s) = self.session.as_mut() {
+            s.line = line;
+            s.input = Input { buf: text.clone(), cur: caret.min(text.len()) };
+            s.orig = text;
+            s.want_col = None;
+        }
+        true
+    }
+
     /// Convenience for the places that only care whether it is code.
     #[cfg(test)]
     fn line_in_code(&self, line: usize) -> bool {
@@ -4217,8 +4237,12 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         // ---- undo / redo (the safety net; no confirmation gates) ----
         // `u` is the akapen/vim seat; `^z` is the same key the session
         // uses, so the reflex works whichever mode you happen to be in.
-        (KeyCode::Char('u'), false) | (KeyCode::Char('z'), true) => undo(app, ctx),
-        (KeyCode::Char('r'), true) => redo(app, ctx),
+        (KeyCode::Char('u'), false) | (KeyCode::Char('z'), true) => {
+            undo(app, ctx);
+        }
+        (KeyCode::Char('r'), true) => {
+            redo(app, ctx);
+        }
 
         // ---- comments (akapen parity) ----
         (KeyCode::Char('v'), false) => {
@@ -4430,6 +4454,73 @@ fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
     rerender(app, ctx);
 }
 
+
+/// Byte offset just past the text an edit changed: everything before the
+/// common prefix and after the common suffix is what moved, so the caret
+/// belongs at the end of the new middle. Typing lands after what you
+/// typed; taking it away lands where it was.
+fn changed_end(old: &str, new: &str) -> usize {
+    let mut prefix = 0usize;
+    for ((i, a), b) in old.char_indices().zip(new.chars()) {
+        if a != b {
+            break;
+        }
+        prefix = i + a.len_utf8();
+    }
+    let mut suffix = 0usize;
+    let mut o = old.char_indices().rev();
+    let mut n = new.char_indices().rev();
+    while let (Some((oi, a)), Some((ni, b))) = (o.next(), n.next()) {
+        if a != b || oi < prefix || ni < prefix {
+            break;
+        }
+        suffix += a.len_utf8();
+    }
+    new.len().saturating_sub(suffix).max(prefix)
+}
+
+/// Where an applied edit leaves the caret: on the line it changed, just
+/// after the change — which is the whole point of undo/redo. Being
+/// returned to where the caret happened to be says nothing about what
+/// moved; being taken to the change shows it.
+///
+/// `before` is the page as it stood before the ops were applied.
+fn edit_focus(
+    lines: &[PageLine],
+    ops: &[EditOp],
+    before: &[(String, String)],
+) -> Option<(String, usize)> {
+    let old_text = |id: &str| -> &str {
+        before.iter().find(|(i, _)| i == id).map(|(_, t)| t.as_str()).unwrap_or("")
+    };
+    // A line that still exists is the better place to stand.
+    for op in ops {
+        match op {
+            EditOp::Insert { lines: ins, .. } => {
+                if let Some((id, text)) = ins.last() {
+                    return Some((id.clone(), text.len()));
+                }
+            }
+            EditOp::Replace { id, text } => {
+                return Some((id.clone(), changed_end(old_text(id), text)));
+            }
+            EditOp::Delete { .. } => continue,
+        }
+    }
+    // Nothing but deletions: stand where the first deleted line was — the
+    // line that slid up into its place, at its start. When nothing slid up
+    // (the page ends there), the deletion happened at the END of the line
+    // above, so that is where the caret belongs.
+    let first = ops.iter().find_map(|op| match op {
+        EditOp::Delete { id } => before.iter().position(|(i, _)| i == id),
+        _ => None,
+    })?;
+    match lines.get(first) {
+        Some(l) => Some((l.id.clone(), 0)),
+        None => lines.last().map(|l| (l.id.clone(), l.text.len())),
+    }
+}
+
 /// Does this page exist on the server yet? Cosense answers 200 for any
 /// title, so a link to an uncreated page opens as a template with just its
 /// title line; it becomes real on the first commit.
@@ -4480,20 +4571,25 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
 
 /// `u`: revert the newest commit (locally at once, on the server via the
 /// queue). Ids of replaced lines survive; re-inserted lines get fresh ids.
-fn undo(app: &mut App, ctx: &Ctx) {
+fn undo(app: &mut App, ctx: &Ctx) -> bool {
     if !ensure_editable(app) {
-        return;
+        return false;
     }
     let Some((label, ops)) = app.undo_stack.pop() else {
         app.status = empty_history_reason(app, "undo");
-        return;
+        return false;
     };
     let redo = invert_ops(&app.lines, &ops);
+    let before: Vec<(String, String)> =
+        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     apply_ops(&mut app.lines, &ops);
     app.redo_stack.push((label.clone(), redo));
+    let focus = edit_focus(&app.lines, &ops, &before);
     queue_commit(app, &format!("undo {label}"), ops);
     rerender(app, ctx);
+    let seated = app.focus_edit(focus);
     app.status = format!("undid {label} ({} more)", app.undo_stack.len());
+    seated
 }
 
 /// Why is there nothing to undo/redo? "Never had any" and "the server
@@ -4508,20 +4604,25 @@ fn empty_history_reason(app: &App, what: &str) -> String {
 }
 
 /// `^r`: re-apply the newest undone commit.
-fn redo(app: &mut App, ctx: &Ctx) {
+fn redo(app: &mut App, ctx: &Ctx) -> bool {
     if !ensure_editable(app) {
-        return;
+        return false;
     }
     let Some((label, ops)) = app.redo_stack.pop() else {
         app.status = empty_history_reason(app, "redo");
-        return;
+        return false;
     };
     let undo_ops = invert_ops(&app.lines, &ops);
+    let before: Vec<(String, String)> =
+        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     apply_ops(&mut app.lines, &ops);
     app.undo_stack.push((label.clone(), undo_ops));
+    let focus = edit_focus(&app.lines, &ops, &before);
     queue_commit(app, &format!("redo {label}"), ops);
     rerender(app, ctx);
+    let seated = app.focus_edit(focus);
     app.status = format!("redid {label}");
+    seated
 }
 
 // ---------------------------------------------------------------------------
@@ -4611,13 +4712,14 @@ fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
     let fallback = s.line.checked_sub(1).map(|i| app.lines[i].id.clone());
     let col = s.want_col.unwrap_or_else(|| str_width(&s.input.buf[..s.input.cur]));
     let stack_was_empty = if back { app.undo_stack.is_empty() } else { app.redo_stack.is_empty() };
-    if back {
-        undo(app, ctx);
-    } else {
-        redo(app, ctx);
-    }
+    let seated = if back { undo(app, ctx) } else { redo(app, ctx) };
     if stack_was_empty {
         return; // nothing happened; the status line already says so
+    }
+    // undo/redo put the caret on what they changed. Only when that line is
+    // gone (nothing to stand on) does the session need placing by hand.
+    if seated {
+        return;
     }
     let (line, col) = match app.lines.iter().position(|l| l.id == id) {
         Some(line) => (line, col),
@@ -9322,6 +9424,42 @@ mod tests {
 
     fn shift(code: KeyCode) -> event::KeyEvent {
         event::KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    /// Undo and redo take the caret to what they changed — not back to
+    /// wherever it happened to be, and not to the start of the line.
+    #[test]
+    fn undo_and_redo_land_the_caret_on_the_change() {
+        assert_eq!(changed_end("x", "xabc"), 4, "typing: after what was typed");
+        assert_eq!(changed_end("xabc", "x"), 1, "removing: where it was");
+        assert_eq!(
+            changed_end("hello world", "hello brave world"),
+            "hello brave ".len(),
+            "middle edit: after the inserted run (the shared space stays with the prefix)",
+        );
+        assert_eq!(changed_end("あい", "あうえい"), "あうえ".len(), "utf-8 safe");
+
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3);
+        type_str(&mut app, &ctx, "!!");
+
+        handle_session_key(&mut app, &ctx, ctrl('z'));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.buf.as_str()), (1, "one"));
+        assert_eq!(s.input.cur, 3, "undo: where the text was taken from");
+
+        handle_session_key(&mut app, &ctx, ctrl('r'));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "one!!");
+        assert_eq!(s.input.cur, 5, "redo: after what came back — NOT the line start");
+
+        // From READ, the cursor follows the change too.
+        leave_session(&mut app, &ctx);
+        app.cursor = 0;
+        handle_key(&mut app, &ctx, ctrl('z'));
+        assert_eq!(app.cursor, 1, "the cursor went to the line that changed");
     }
 
     /// The last thing READ's `x` was still needed for: deleting a RANGE.
