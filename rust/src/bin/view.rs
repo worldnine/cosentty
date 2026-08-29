@@ -530,12 +530,13 @@ struct RelEntry {
 enum Row {
     Line { line: Line<'static>, src: usize },
     Blank { src: usize },
-    /// `indent`: display column the picture starts at, so a picture that
-    /// hangs off a bullet lines up with that item's text.
-    Image { url: String, height: u16, src: usize, indent: usize },
+    /// `indent`: display column the picture starts at, so it lines up with
+    /// the text of its level. `item`: the picture IS the list item (it gets
+    /// the bullet) rather than hanging under a line of text.
+    Image { url: String, height: u16, src: usize, indent: usize, item: bool },
     /// Space reserved for an image still downloading in the background.
-    ImageLoading { src: usize, indent: usize },
-    ImageError { msg: String, src: usize, indent: usize },
+    ImageLoading { src: usize, indent: usize, item: bool },
+    ImageError { msg: String, src: usize, indent: usize, item: bool },
     Card { line: Line<'static> },
     FrameEnd,
 }
@@ -2430,6 +2431,7 @@ impl App {
                             height: info.cells_h.max(1),
                             src: *last_src,
                             indent: 0,
+                            item: false,
                         });
                         continue;
                     }
@@ -2449,7 +2451,7 @@ impl App {
                         }
                     }
                 }
-                Block::Image { url, indent } => {
+                Block::Image { url, indent, item } => {
                     let indent = (*indent).min(text_w.saturating_sub(4));
                     if let Some(info) = self.images.get(url) {
                         content.push(Row::Image {
@@ -2457,13 +2459,19 @@ impl App {
                             height: info.cells_h.max(1),
                             src,
                             indent,
+                            item: *item,
                         });
                     } else if let Some(msg) = self.image_errors.get(url) {
-                        content.push(Row::ImageError { msg: msg.clone(), src, indent });
+                        content.push(Row::ImageError {
+                            msg: msg.clone(),
+                            src,
+                            indent,
+                            item: *item,
+                        });
                     } else {
                         // still downloading — reserve space so the page is
                         // readable now and the image slots in when it lands
-                        content.push(Row::ImageLoading { src, indent });
+                        content.push(Row::ImageLoading { src, indent, item: *item });
                     }
                 }
             }
@@ -7242,18 +7250,18 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new("").style(base), r);
                 }
             }
-            Row::ImageError { msg, indent, .. } => {
+            Row::ImageError { msg, indent, item, .. } => {
                 if let Some(r) = one_row(screen_y) {
-                    let pad = bullet_pad(*indent);
+                    let pad = bullet_pad(*indent, *item);
                     f.render_widget(
                         Paragraph::new(format!("{pad} {msg}")).style(base.fg(Color::Red)),
                         r,
                     );
                 }
             }
-            Row::ImageLoading { indent, .. } => {
+            Row::ImageLoading { indent, item, .. } => {
                 if let Some(r) = one_row(screen_y) {
-                    let pad = bullet_pad(*indent);
+                    let pad = bullet_pad(*indent, *item);
                     f.render_widget(
                         Paragraph::new(format!("{pad} □ loading image…"))
                             .style(base.fg(Color::DarkGray)),
@@ -7261,8 +7269,8 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     );
                 }
             }
-            Row::Image { url, indent, .. } => {
-                if *indent >= 2 {
+            Row::Image { url, indent, item, .. } => {
+                if *item && *indent >= 2 {
                     let y = text.y as i32 + screen_y;
                     if y >= band_top && y <= band_bot {
                         image_bullets.push((y as u16, text.x + *indent as u16 - 2));
@@ -7282,13 +7290,15 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     // the unscrolled text anchor (`text.y`) one row below it.
                     // Adding that one-cell delta lets a partially scrolled
                     // image paint the reclaimed top row too.
+                    // The picture starts exactly at the text column of its
+                    // level, so it lines up with the lines around it. (The
+                    // protocol's own one-column inset used to add itself on
+                    // top of the indent and pushed indented pictures right.)
+                    let off = (*indent as u16).min(text.width.saturating_sub(2));
                     let pos = SignedPosition {
-                        x: 1,
+                        x: 0,
                         y: (screen_y + text.y as i32 - band_top) as i16,
                     };
-                    // A picture hanging off a bullet starts where that
-                    // item's text starts.
-                    let off = (*indent as u16).min(text.width.saturating_sub(2));
                     // Never hand the protocol more columns than it has, and
                     // never more than the pane: a diagram encoded for a
                     // wider pane (a rescale still in flight) is clipped here
@@ -7424,8 +7434,8 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
 
 /// The lead-in for an indented image placeholder: the bullet where the
 /// picture's own bullet goes, then the space the picture would start at.
-fn bullet_pad(indent: usize) -> String {
-    if indent >= 2 {
+fn bullet_pad(indent: usize, item: bool) -> String {
+    if item && indent >= 2 {
         format!("{}{BULLET} ", " ".repeat(indent - 2))
     } else {
         " ".repeat(indent)
@@ -10349,10 +10359,27 @@ mod tests {
         let col = bulleted[0].find(BULLET).unwrap();
         assert!(col >= 3, "at the item's own indent: {:?}", bulleted[0]);
 
+        // A picture UNDER a line of text is that line's continuation, not
+        // an item of its own: the text row already carries the bullet.
+        let mut app = page(&["t", &format!(" [{url}]と本文が続く")]);
+        app.images
+            .insert(url.to_string(), decode_web_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap());
+        app.rebuild(40);
+        let rows = app.content_view(40);
+        let img = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Image { item, indent, .. } => Some((*item, *indent)),
+                _ => None,
+            })
+            .expect("a picture row");
+        assert_eq!(img, (false, 2), "hangs at the text column, without a bullet");
+
         // The placeholder shown before it lands wears the same lead-in.
-        assert_eq!(bullet_pad(2), format!("{BULLET} "));
-        assert_eq!(bullet_pad(4), format!("  {BULLET} "));
-        assert_eq!(bullet_pad(0), "", "a flush picture has no bullet");
+        assert_eq!(bullet_pad(2, true), format!("{BULLET} "));
+        assert_eq!(bullet_pad(4, true), format!("  {BULLET} "));
+        assert_eq!(bullet_pad(0, true), "", "a flush picture has no bullet");
+        assert_eq!(bullet_pad(4, false), "    ", "a hanging picture has none either");
     }
 
     /// Everything in Cosense is written in brackets, so the closing half
@@ -11975,7 +12002,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
 
         let mut app = page(&["image"]);
-        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into(), indent: 0 }];
+        app.blocks = vec![Block::Image { url: "https://example.com/a.png".into(), indent: 0, item: false }];
         app.srcs = vec![0];
         let ctx = test_ctx();
         let mut terminal = Terminal::new(TestBackend::new(42, 8)).unwrap();

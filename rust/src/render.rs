@@ -15,10 +15,12 @@ pub enum Block {
     Blank,
     /// An image to be fetched and rendered inline (gyazo or scrapbox files).
     ///
-    /// `indent` is the display column the picture starts at. Cosense hangs
-    /// pictures off bullets too — an indented image line belongs to the
-    /// item above it, and drawing it flush left broke that reading.
-    Image { url: String, indent: usize },
+    /// `indent` is the display column the picture starts at, and `item` is
+    /// whether the picture IS the list item (a line that holds nothing
+    /// else) or hangs under one. Cosense hangs pictures off bullets, and a
+    /// picture that is its own item wears the bullet; a picture under a
+    /// line of text is that line's continuation and wears none.
+    Image { url: String, indent: usize, item: bool },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
     /// A code block Cosense draws as a picture in the browser (today: only
@@ -918,7 +920,7 @@ pub fn render_lines_with(
         // either of them is worse than stacking them.
         if let Some(url) = standalone_image(body) {
             ex.images.push(url.clone());
-            emit!(Block::Image { url, indent: text_column(level) });
+            emit!(Block::Image { url, indent: text_column(level), item: level > 0 });
             i += 1;
             continue;
         }
@@ -929,7 +931,9 @@ pub fn render_lines_with(
             line_spans.extend(spans);
             emit!(Block::Text(Line::from(line_spans)));
             for url in embedded {
-                emit!(Block::Image { url, indent: text_column(level) });
+                // The text row above is the item; these pictures belong to
+                // it, so they hang without a bullet of their own.
+                emit!(Block::Image { url, indent: text_column(level), item: false });
             }
             i += 1;
             continue;
@@ -1425,7 +1429,9 @@ mod tests {
                 .iter()
                 .skip(1) // the title row
                 .map(|b| match b {
-                    Block::Image { url, indent } => format!("image:{indent}:{url}"),
+                    Block::Image { url, indent, item } => {
+                        format!("image:{indent}{}:{url}", if *item { "*" } else { "" })
+                    }
                     Block::Text(l) => {
                         format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                     }
@@ -1465,13 +1471,13 @@ mod tests {
         // text starts instead of flush left.
         assert_eq!(
             shape(" [https://example.com/a.png]"),
-            vec!["image:2:https://example.com/a.png".to_string()],
-            "one level in = the column after `• `",
+            vec!["image:2*:https://example.com/a.png".to_string()],
+            "one level in = the column after `• `, and the picture IS the item",
         );
         assert_eq!(
             shape("  [https://example.com/a.png] と本文")[1],
             "image:4:https://example.com/a.png",
-            "deeper still, and the text row keeps its own indent",
+            "a picture under text hangs off that line — no bullet of its own",
         );
 
         // Quoted notation is a line ABOUT the picture, not a picture: a
