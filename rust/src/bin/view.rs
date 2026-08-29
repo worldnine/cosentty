@@ -677,6 +677,12 @@ struct App {
     /// The project the probe was last asked about, so a page move inside
     /// the same project does not re-ask.
     vis_asked: Option<String>,
+    /// Cosense line ids whose diagram has been drawn on THIS page. A block
+    /// in here is one the reader is actually looking at, so when its source
+    /// changes the picture must follow — even under the manual policy. The
+    /// browser cost was already accepted for this page; making the reader
+    /// press `m` again after every edit is not "manual", it is broken.
+    web_drawn_lines: HashSet<String>,
     /// Artifacts a cache-only pass looked for and did not find. They are
     /// NOT failures: they stay code blocks, stop shimmering, and `m` can
     /// still draw them.
@@ -1129,6 +1135,7 @@ impl App {
             vis_tx,
             vis_asked: None,
             web_missing: HashSet::new(),
+            web_drawn_lines: HashSet::new(),
             web_notice_shown: false,
             sync_state: capability::SyncState::Polling,
             ws_attempted: false,
@@ -1217,6 +1224,7 @@ impl App {
         self.web_errors.clear();
         self.web_rescaling.clear();
         self.web_missing.clear();
+        self.web_drawn_lines.clear();
         // Once per page, not once per diagram.
         self.web_notice_shown = false;
         // A freshly fetched page IS the server's state.
@@ -1306,6 +1314,17 @@ impl App {
         if self.inflight > 0 || self.web_unsynced {
             return;
         }
+        // A block whose picture is already on screen and whose source has
+        // just moved is a REFRESH, not a first draw: the reader is watching
+        // that diagram and expects it to keep up. Refreshes are treated as
+        // explicit, so `manual` does not mean "press m after every edit".
+        // One navigation draws the whole page anyway, so the other diagrams
+        // on it ride along for free.
+        let trigger = if trigger == capability::Trigger::Auto && self.has_stale_diagram() {
+            capability::Trigger::Manual
+        } else {
+            trigger
+        };
         // What this session may do, right now, for this project.
         let decision = capability::decide(&self.caps, self.render_policy, trigger);
         let auth = match decision {
@@ -1343,6 +1362,11 @@ impl App {
             }
             let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
             let key = req.cache_key();
+            if self.images.contains_key(&key) {
+                // On screen: if this block's source later moves, that is a
+                // refresh rather than a first draw.
+                self.web_drawn_lines.insert(req.line_id.clone());
+            }
             if self.images.contains_key(&key)
                 || self.web_errors.contains_key(&key)
                 || self.web_pending.contains(&key)
@@ -1486,6 +1510,22 @@ impl App {
         } else {
             SyncState::Polling.label()
         }
+    }
+
+    /// Does the page hold a diagram that HAD a picture and no longer does,
+    /// because its own source changed? That is the edit loop, and it must
+    /// not wait for a keypress.
+    fn has_stale_diagram(&self) -> bool {
+        self.blocks.iter().any(|b| {
+            let Block::WebRender { kind, code, rows, last_src } = b else { return false };
+            if self.caret_is_inside(rows) {
+                return false;
+            }
+            let Some(req) = self.web_request(*kind, code, *last_src) else { return false };
+            self.web_drawn_lines.contains(&req.line_id)
+                && !self.images.contains_key(&req.cache_key())
+                && !self.web_errors.contains_key(&req.cache_key())
+        })
     }
 
     /// Is the edit session's caret on one of these source lines? Such a
@@ -6533,6 +6573,45 @@ mod tests {
         );
         assert!(keys.iter().all(|k| app.images.contains_key(k)));
         assert!(app.web_missing.is_empty(), "they are no longer missing");
+    }
+
+    #[test]
+    fn editing_a_drawn_diagram_redraws_it_without_asking_again() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.render_policy = capability::RenderPolicy::Manual;
+        app.rebuild(80);
+        let first = diagram_keys(&app);
+        // The reader pressed `m` once and got a picture.
+        let backend = Arc::new(cosense::webrender::FakeBackend::new());
+        for k in &first {
+            backend.answer(k, Ok(tiny_png()));
+        }
+        spawn_web_worker(
+            app.web_jobs_rx.take().unwrap(),
+            app.web_tx.clone(),
+            Arc::clone(&backend) as Arc<dyn WebBackend>,
+            Picker::halfblocks(),
+            scratch_cache(),
+            Arc::clone(&app.web_gen),
+        );
+        app.start_web_renders(capability::Trigger::Manual);
+        settle(&mut app, first.len());
+        assert!(app.images.contains_key(&first[0]), "the diagram is on screen");
+        app.start_web_renders(capability::Trigger::Auto);
+
+        // Now they edit that block's source. The picture they were looking
+        // at is now stale, and its key has moved with the source.
+        app.lines[3].text = "   A-->C".into();
+        rerender(&mut app, &ctx);
+        let after = diagram_keys(&app);
+        assert_ne!(after[0], first[0], "the edit is a different artifact");
+        backend.answer(&after[0], Ok(tiny_png()));
+        settle(&mut app, 1);
+        assert!(
+            app.images.contains_key(&after[0]),
+            "a diagram the reader is watching must follow its source without a second `m`"
+        );
     }
 
     #[test]

@@ -270,7 +270,7 @@ the render worker — never on the UI thread.
 
 ## 6. Tests and build
 
-* `cargo test`: **203 green** — lib **116** and view **87**. No test launches a browser or touches the network, and none
+* `cargo test`: **204 green** — lib **116** and view **88**. No test launches a browser or touches the network, and none
   of them sleeps: the job channel and the fake backend's gate are the synchronisation.
 * `cargo build --release`: succeeds, **no new warnings**.
 
@@ -312,6 +312,7 @@ New coverage, against the acceptance list:
 | `m` draws the missing ones in one batch | `view::m_draws_the_diagrams_the_page_load_could_not` |
 | a cache miss is not a failure | `view::a_cache_miss_never_blocks_the_later_m` |
 | auto / off | `capability::off_touches_nothing_at_all`, `view::auto_draws_on_load_and_off_draws_never` |
+| an edit redraws a diagram already on screen | `view::editing_a_drawn_diagram_redraws_it_without_asking_again` |
 | `m` types a character while editing | `view::m_is_an_ordinary_character_while_editing` |
 
 ## 7. Live smoke results
@@ -539,6 +540,16 @@ every page load, for a reader who may only be passing through, is not a good tra
 | `manual` | disk cache only — hits draw, misses stay source, no browser, no notice | draws every missing diagram in **one** batch |
 | `auto` | draws every renderable miss | same |
 | `off` | nothing: no worker thread, no backend, no cache directory is created or swept | says the renderer is off |
+
+**A diagram already on screen keeps up with its source by itself.** `manual` governs the
+*first* draw, not the edit loop: a block whose picture is showing and whose own source has
+just moved is treated as an explicit request, because the reader is watching that picture
+and the browser cost for this page was already accepted. Without this, editing a `code:mmd`
+block made the diagram vanish and stay vanished until `m` — which is what the policy change
+actually did, and it read as a broken renderer rather than a deliberate default.
+Tracked per Cosense line id in `web_drawn_lines` (cleared by `set_page`), and since one
+navigation draws the whole page, the other diagrams on it ride along at no extra cost.
+See `view::editing_a_drawn_diagram_redraws_it_without_asking_again`.
 
 `m` is READ-mode only; inside an edit session it types the letter, because session keys
 are routed before the reader's keymap (`handle_key` → `handle_session_key`).
