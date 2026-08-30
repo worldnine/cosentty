@@ -6434,25 +6434,57 @@ fn session_split(app: &mut App, ctx: &Ctx) {
     // In a `code:` block the indent is content, not list structure. Enter
     // on the HEADER opens the block's first body line (without this there
     // is no way to type a block at all: the new line would start flush and
-    // the renderer would not read it as code), and Enter on a blank line
-    // inside keeps the body indent instead of escaping the list — in code
-    // a blank line is blank CODE, and the escape would drop you out of the
-    // block you are still writing.
+    // the renderer would not read it as code). Enter on ONE blank line
+    // inside keeps the indent — blank code exists — but a second blank in
+    // a row is the writer asking out (the same bargain the empty bullet
+    // makes, delayed one line for the blank code's sake).
     let texts = app.source_texts();
     let code = cosense::render::code_span_at(&texts, line);
     let table = cosense::render::table_span_at(&texts, line);
     drop(texts);
     if let Some(span) = code.or(table) {
-        let indent = span.body_indent();
         if line == span.header {
-            session_open_below(app, ctx, line, indent, String::new());
+            session_open_below(app, ctx, line, span.body_indent(), String::new());
             return;
         }
+        // What continues onto the new line. In code it is the line's OWN
+        // leading whitespace — code sits at depths of its own past the
+        // block's base (`  if x:` under a 1-space body), and resetting to
+        // the base flattened every deeper line on Enter. A table row has
+        // no inner depth; it keeps the base.
+        let indent = if code.is_some() {
+            indent_of(&buf).to_string()
+        } else {
+            span.body_indent()
+        };
         let empty = buf.chars().all(char::is_whitespace);
-        // A table ends the way a list does: Enter on a row with nothing in
-        // it leaves. (A code block does not — see above.)
-        let escapes = empty && code.is_none();
-        if empty && !escapes {
+        // A table ends the way a list does: Enter on a row with nothing
+        // in it leaves. In code one blank line is blank CODE, so leaving
+        // takes two: Enter on a blank line directly under another blank
+        // dissolves both into true blanks — the first ends the block, the
+        // second is where writing continues, flush.
+        if empty && code.is_some() {
+            let prev_blank = app
+                .lines
+                .get(line.wrapping_sub(1))
+                .filter(|_| line > span.header + 1)
+                .map(|l| !l.text.is_empty() && l.text.chars().all(char::is_whitespace))
+                .unwrap_or(false);
+            if prev_blank {
+                let ops = vec![
+                    EditOp::Replace { id: app.lines[line - 1].id.clone(), text: String::new() },
+                    EditOp::Replace { id: app.lines[line].id.clone(), text: String::new() },
+                ];
+                do_edit(app, ctx, "leave code block", ops);
+                if let Some(s) = app.session.as_mut() {
+                    s.input = Input { buf: String::new(), cur: 0 };
+                    s.orig = String::new();
+                    s.want_col = None;
+                    s.sel_from = None;
+                }
+                app.follow = true;
+                return;
+            }
             let tail = format!("{indent}{}", buf[caret.min(buf.len())..].trim_start());
             session_open_below(app, ctx, line, indent, tail);
             return;
@@ -13524,6 +13556,48 @@ mod tests {
         assert_eq!(app.lines[4].text, " ", "and so does the next one");
         assert!(app.line_in_code(4), "still inside the block");
         assert_eq!(app.session.as_ref().unwrap().line, 4);
+    }
+
+    /// One blank line is blank code, but a second blank in a row is the
+    /// writer asking out: Enter there dissolves both blanks into true
+    /// empty lines and continues flush below the block — the table's
+    /// escape, delayed one line for the blank code's sake.
+    #[test]
+    fn a_second_blank_enter_leaves_the_code_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:x.py", " a = 1"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 6); // end of " a = 1"
+
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[3].text, " ", "one blank stays code");
+        assert_eq!(app.lines[4].text, " ", "so does a second");
+        assert!(app.line_in_code(4));
+
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.buf.as_str()), (4, ""), "the caret stays put, flush");
+        assert_eq!(app.lines[3].text, "", "both blanks dissolved — no trailing blank code");
+        assert_eq!(app.lines[4].text, "");
+        assert!(!app.line_in_code(4), "and the block is behind us");
+    }
+
+    /// Code has depths of its own past the block's base indent. Enter at
+    /// the end of `   x = 1` continues at those three spaces — resetting
+    /// to the base flattened every deeper line (改善案3).
+    #[test]
+    fn enter_in_code_keeps_the_line_s_own_depth() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:y.py", " def f():", "   x = 1"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 3, 8); // end of "   x = 1"
+
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[4].text, "   ", "the new line starts at the same depth");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (4, 3), "caret after the inherited indent");
+        assert!(app.line_in_code(4), "still inside the block");
     }
 
     /// Inside a code block the leading whitespace is content: it must not
