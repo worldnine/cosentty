@@ -27,7 +27,10 @@ pub enum Block {
     /// picture sitting ON the text line — its bottom edge level with the
     /// words — which is how a browser draws an inline image. Kept as a
     /// SEQUENCE rather than special cases so all three read the same way.
-    Inline { indent: usize, parts: Vec<InlinePart> },
+    ///
+    /// `item`: the line is an indented list item, so it wears a bullet at
+    /// its top-left like every other item at that level.
+    Inline { indent: usize, item: bool, parts: Vec<InlinePart> },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
     /// A code block Cosense draws as a picture in the browser (today: only
@@ -1001,7 +1004,7 @@ pub fn render_lines_with(
         // links — doing that speculatively would count them twice.
         if !line_images(body).is_empty() {
             let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal);
-            emit!(Block::Inline { indent: text_column(level), parts });
+            emit!(Block::Inline { indent: text_column(level), item: level > 0, parts });
             i += 1;
             continue;
         }
@@ -1509,7 +1512,7 @@ mod tests {
                     Block::Image { url, indent, item } => {
                         format!("image:{indent}{}:{url}", if *item { "*" } else { "" })
                     }
-                    Block::Inline { indent, parts } => {
+                    Block::Inline { indent, item, parts } => {
                         let shape: Vec<String> = parts
                             .iter()
                             .map(|p| match p {
@@ -1520,7 +1523,7 @@ mod tests {
                                 ),
                             })
                             .collect();
-                        format!("inline:{indent}:{}", shape.join("|"))
+                        format!("inline:{indent}{}:{}", if *item { "*" } else { "" }, shape.join("|"))
                     }
                     Block::Text(l) => {
                         format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
@@ -1566,11 +1569,14 @@ mod tests {
             "one level in = the column after `• `, and the picture IS the item",
         );
         // Indented, opening with the picture: the same block, carrying the
-        // column its level starts at.
+        // column its level starts at — and marked as a list ITEM, so the
+        // bullet is not lost just because text was mixed in.
         let indented = shape("  [https://example.com/a.png] と本文");
         assert_eq!(indented.len(), 1, "{indented:?}");
-        assert!(indented[0].starts_with("inline:4:img("), "{indented:?}");
+        assert!(indented[0].starts_with("inline:4*:img("), "{indented:?}");
         assert!(indented[0].contains("txt( と本文)"), "{indented:?}");
+        // Flush against the margin there is no item and no bullet.
+        assert!(shape("[https://example.com/a.png] と本文")[0].starts_with("inline:0:"));
 
         // Quoted notation is a line ABOUT the picture, not a picture: a
         // documentation page must be able to show what it is describing.

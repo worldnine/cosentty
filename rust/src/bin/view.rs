@@ -542,6 +542,11 @@ enum Row {
     Inline {
         src: usize,
         height: u16,
+        /// The column its level's text starts at, and whether that level
+        /// makes it a list item (it then wears a bullet at its top-left,
+        /// like every other item).
+        indent: usize,
+        item: bool,
         images: Vec<(u16, u16, String)>,
         texts: Vec<(u16, u16, Line<'static>)>,
     },
@@ -2474,9 +2479,9 @@ impl App {
                         }
                     }
                 }
-                Block::Inline { indent, parts } => {
+                Block::Inline { indent, item, parts } => {
                     let indent = (*indent).min(text_w.saturating_sub(4));
-                    content.push(self.inline_row(parts, indent, text_w, src));
+                    content.push(self.inline_row(parts, indent, *item, text_w, src));
                 }
                 Block::Image { url, indent, item } => {
                     let indent = (*indent).min(text_w.saturating_sub(4));
@@ -2513,6 +2518,7 @@ impl App {
         &self,
         parts: &[cosense::render::InlinePart],
         indent: usize,
+        item: bool,
         text_w: usize,
         src: usize,
     ) -> Row {
@@ -2534,6 +2540,8 @@ impl App {
         Row::Inline {
             src,
             height,
+            indent,
+            item,
             images: images.into_iter().map(|p| (p.row, p.col, p.what)).collect(),
             texts: texts.into_iter().map(|p| (p.row, p.col, p.what)).collect(),
         }
@@ -7329,7 +7337,15 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     );
                 }
             }
-            Row::Inline { images, texts, .. } => {
+            Row::Inline { images, texts, indent, item, .. } => {
+                // The bullet belongs at the item's TOP-left: the line
+                // starts there, however tall the pictures on it are.
+                if *item && *indent >= 2 {
+                    let y = text.y as i32 + screen_y;
+                    if y >= band_top && y <= band_bot {
+                        image_bullets.push((y as u16, text.x + *indent as u16 - 2));
+                    }
+                }
                 // Text first: a picture paints its own cells over the top,
                 // and nothing here may write into them.
                 for (row_off, col, line) in texts {
@@ -10525,6 +10541,39 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// Mixing text into an indented line must not cost it its bullet: it
+    /// is still an item at that level, whatever it holds.
+    #[test]
+    fn an_indented_line_keeps_its_bullet_when_it_holds_a_picture() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let url = "https://example.com/a.png";
+        let mut app = page(&["t", &format!(" [{url}]ワイワイ")]);
+        app.images
+            .insert(url.to_string(), decode_web_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap());
+        app.rebuild(40);
+        // The row knows it is an item, at its level's column.
+        let row = app
+            .content_view(40)
+            .into_iter()
+            .find_map(|r| match r {
+                Row::Inline { item, indent, .. } => Some((item, indent)),
+                _ => None,
+            })
+            .expect("an inline row");
+        assert_eq!(row, (true, 2));
+
+        // …and the bullet really is drawn.
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        let has_bullet = (0..12).any(|y| {
+            (0..40).any(|x| buf.cell((x, y)).map(|c| c.symbol() == BULLET).unwrap_or(false))
+        });
+        assert!(has_bullet, "the item lost its bullet");
     }
 
     /// A picture written beside text has to be FETCHED like any other.
