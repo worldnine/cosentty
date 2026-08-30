@@ -2356,11 +2356,17 @@ impl App {
             // view — while the underlying data stays whitespace.
             let disp = session_display(buf, edit_code);
             let prefix = if edit_code.is_some() { 0 } else { display_prefix_bytes(buf) };
+            let wrapped = SessionWrap::new(&disp, text_w, session_hang(buf, edit_code));
             let mut at = 0usize; // byte offset of this segment within `disp`
-            for (k, seg) in wrap_plain_columns(&disp, text_w).into_iter().enumerate() {
+            for (k, seg) in wrapped.segs.iter().cloned().enumerate() {
                 let seg_start = at;
                 at += seg.len();
                 let mut spans: Vec<Span<'static>> = Vec::new();
+                if wrapped.indent_of(k) > 0 {
+                    // The continuation hangs under the text, not under the
+                    // bullet — the same shape READ has always had.
+                    spans.push(Span::raw(" ".repeat(wrapped.indent_of(k))));
+                }
                 let mut push = |text: &str, selected: bool, dim: bool| {
                     if text.is_empty() {
                         return;
@@ -3088,50 +3094,88 @@ fn floor_boundary(s: &str, i: usize) -> usize {
     i
 }
 
-fn wrap_plain_columns(s: &str, w: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthChar;
-    let w = w.max(1);
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if used + cw > w && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-            used = 0;
-        }
-        cur.push(ch);
-        used += cw;
-    }
-    out.push(cur);
-    out
+
+/// The caret line, wrapped the way it is drawn: the first row uses the
+/// whole width, continuation rows are pushed in by `hang` so the text
+/// lines up under its own first character instead of under the bullet.
+///
+/// READ has always wrapped like this; EDIT wrapped flat, so a long
+/// bullet's continuation jumped back to the margin the moment you started
+/// editing it. Every piece of caret arithmetic — the hardware cursor, a
+/// click, ↑/↓, the selection highlight — has to agree with the drawing,
+/// so they all read this one structure.
+struct SessionWrap {
+    segs: Vec<String>,
+    hang: usize,
 }
 
-/// (row, column) of byte offset `caret` within `wrap_plain_columns(s, w)`.
-/// A caret exactly at a segment boundary sits at the START of the next
-/// segment (that is where the next typed char will appear).
-fn caret_row_col(s: &str, caret: usize, w: usize) -> (usize, usize) {
-    let segs = wrap_plain_columns(s, w);
-    let mut off = 0usize;
-    for (i, seg) in segs.iter().enumerate() {
-        let end = off + seg.len();
-        if caret < end || (caret == end && i + 1 == segs.len()) {
-            return (i, str_width(&seg[..caret - off]));
+impl SessionWrap {
+    fn new(disp: &str, width: usize, hang: usize) -> Self {
+        let width = width.max(1);
+        // A continuation narrower than this is worse than no hanging at
+        // all (`wrap.rs` draws the same line).
+        let hang = if hang > 0 && width.saturating_sub(hang) >= 8 { hang } else { 0 };
+        let mut segs: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut used = 0usize;
+        for ch in disp.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            let limit = if segs.is_empty() { width } else { width - hang };
+            if cw > 0 && used + cw > limit && !cur.is_empty() {
+                segs.push(std::mem::take(&mut cur));
+                used = 0;
+            }
+            cur.push(ch);
+            used += cw;
         }
-        off = end;
+        segs.push(cur);
+        Self { segs, hang }
     }
-    (segs.len().saturating_sub(1), str_width(segs.last().map(String::as_str).unwrap_or("")))
+
+    /// The indent drawn before row `i`.
+    fn indent_of(&self, row: usize) -> usize {
+        if row == 0 { 0 } else { self.hang }
+    }
+
+    /// (row, column ON SCREEN) of a display byte offset.
+    fn row_col(&self, disp_byte: usize) -> (usize, usize) {
+        let mut off = 0usize;
+        for (i, seg) in self.segs.iter().enumerate() {
+            let end = off + seg.len();
+            if disp_byte < end || (disp_byte == end && i + 1 == self.segs.len()) {
+                let within = str_width(&seg[..disp_byte - off]);
+                return (i, self.indent_of(i) + within);
+            }
+            off = end;
+        }
+        let last = self.segs.len().saturating_sub(1);
+        let w = str_width(self.segs.last().map(String::as_str).unwrap_or(""));
+        (last, self.indent_of(last) + w)
+    }
+
+    /// Display byte offset at a row and an on-screen column.
+    fn offset_at(&self, row: usize, col: usize) -> usize {
+        let row = row.min(self.segs.len().saturating_sub(1));
+        let before: usize = self.segs.iter().take(row).map(String::len).sum();
+        let col = col.saturating_sub(self.indent_of(row));
+        before + self.segs.get(row).map(|s| byte_at_col(s, col)).unwrap_or(0)
+    }
 }
 
-/// Byte offset in the wrapped display string for display row `row`,
-/// column `col`. The inverse of `caret_row_col`, and what both the mouse
-/// and ↑/↓ need on a line that wraps: without the row, every continuation
-/// row collapses onto the first one.
-fn display_offset_at(segs: &[String], row: usize, col: usize) -> usize {
-    let row = row.min(segs.len().saturating_sub(1));
-    let before: usize = segs.iter().take(row).map(String::len).sum();
-    before + segs.get(row).map(|s| byte_at_col(s, col)).unwrap_or(0)
+/// How far the caret line's continuation rows hang: the column its text
+/// starts at, which is the bullet's width for an outline row and the code
+/// gutter inside a `code:` block.
+fn session_hang(buf: &str, code: Option<CodeSpan>) -> usize {
+    match code {
+        Some(span) => span.gutter_cols(),
+        None => {
+            let n = indent_of(buf).chars().count();
+            if n == 0 { 0 } else { bullet_indent_width(n) + 2 }
+        }
+    }
 }
+
+
 
 /// Byte offset in `s` whose display column is closest to `col` (used by/// Byte offset in `s` whose display column is closest to `col` (used by
 /// sticky-column ↑/↓ and by mouse clicks).
@@ -5504,16 +5548,16 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let code = app.code_span_at_line(line);
     let width = app.session_wrap_width();
     let disp = session_display(&buf, code);
-    let segs = wrap_plain_columns(&disp, width);
-    let (row, col_now) = caret_row_col(&disp, display_caret(&buf, cur, code), width);
+    let wrapped = SessionWrap::new(&disp, width, session_hang(&buf, code));
+    let (row, col_now) = wrapped.row_col(display_caret(&buf, cur, code));
     let want = s.want_col.unwrap_or(col_now);
 
     // A wrapped line owns several display rows, and ↑/↓ mean "the row
     // above/below" — the same movement the eye makes. Only at the top or
     // bottom row of a line does the caret cross into the next SOURCE line.
     let target_row = row as i32 + delta;
-    if target_row >= 0 && (target_row as usize) < segs.len() {
-        let off = display_offset_at(&segs, target_row as usize, want);
+    if target_row >= 0 && (target_row as usize) < wrapped.segs.len() {
+        let off = wrapped.offset_at(target_row as usize, want);
         if let Some(s) = app.session.as_mut() {
             s.input.cur = raw_caret_from_display(&buf, off, code);
             s.want_col = Some(want);
@@ -5538,9 +5582,9 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     // the line below, the LAST row of the line above.
     let code = app.code_span_at_line(line);
     let disp = session_display(&text, code);
-    let segs = wrap_plain_columns(&disp, width);
-    let landing = if delta < 0 { segs.len().saturating_sub(1) } else { 0 };
-    let caret = raw_caret_from_display(&text, display_offset_at(&segs, landing, want), code);
+    let wrapped = SessionWrap::new(&disp, width, session_hang(&text, code));
+    let landing = if delta < 0 { wrapped.segs.len().saturating_sub(1) } else { 0 };
+    let caret = raw_caret_from_display(&text, wrapped.offset_at(landing, want), code);
     if let Some(s) = app.session.as_mut() {
         s.line = line;
         s.input = Input { buf: text.clone(), cur: caret };
@@ -6574,15 +6618,15 @@ fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
     // continuation row maps onto the first one, and the caret jumps to the
     // wrong place (and a drag selects the wrong run).
     let width = app.session_wrap_width();
-    let segs = wrap_plain_columns(&disp, width);
+    let wrapped = SessionWrap::new(&disp, width, session_hang(&text, code));
     let seg_index = app
         .src_rows(line)
         .map(|(first, _)| {
             let clicked = (app.scroll as i32 + screen_row).max(0) as usize;
-            clicked.saturating_sub(first).min(segs.len().saturating_sub(1))
+            clicked.saturating_sub(first).min(wrapped.segs.len().saturating_sub(1))
         })
         .unwrap_or(0);
-    raw_caret_from_display(&text, display_offset_at(&segs, seg_index, col), code)
+    raw_caret_from_display(&text, wrapped.offset_at(seg_index, col), code)
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
@@ -7512,7 +7556,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             let code = app.code_span_at_line(s.line);
             let disp = session_display(&s.input.buf, code);
             let dcaret = display_caret(&s.input.buf, s.input.cur, code);
-            let (crow, ccol) = caret_row_col(&disp, dcaret, text_w);
+            let wrapped =
+                SessionWrap::new(&disp, text_w, session_hang(&s.input.buf, code));
+            let (crow, ccol) = wrapped.row_col(dcaret);
             let y = text.y as i32 + (app.row_top(first) as i32 + crow as i32) - app.scroll as i32;
             let x = text.x as i32 + (ccol as i32).min(text.width.saturating_sub(1) as i32);
             if y >= band_top && y <= band_bot {
@@ -12158,12 +12204,62 @@ mod tests {
         // 10-wide: "あいうえお" is 10 cols → caret after う = row0 col6;
         // after お = boundary → next row col0 when more text follows.
         let s = "あいうえおxy";
-        assert_eq!(caret_row_col(s, 9, 10), (0, 6));
-        assert_eq!(caret_row_col(s, 15, 10), (1, 0));
-        assert_eq!(caret_row_col(s, 17, 10), (1, 2));
+        let flat = SessionWrap::new(s, 10, 0);
+        assert_eq!(flat.row_col(9), (0, 6));
+        assert_eq!(flat.row_col(15), (1, 0));
+        assert_eq!(flat.row_col(17), (1, 2));
         assert_eq!(byte_at_col("あいう", 4), 6, "col 4 → third kana");
         // segments carry every char: display and math agree
-        assert_eq!(wrap_plain_columns(s, 10).join(""), s);
+        assert_eq!(flat.segs.join(""), s);
+        // …and a click comes back to where the caret was.
+        for byte in [0, 3, 9, 15, 17] {
+            let (row, col) = flat.row_col(byte);
+            assert_eq!(flat.offset_at(row, col), byte, "byte {byte}");
+        }
+    }
+
+    /// EDIT wrapped flat while READ hung its continuations, so editing a
+    /// long bullet made its text jump back to the margin. The caret math
+    /// has to move with the drawing: a click, ↑/↓ and the hardware cursor
+    /// all read the same wrap.
+    #[test]
+    fn the_caret_line_hangs_its_continuations_like_the_view() {
+        let ctx = test_ctx();
+        // A bullet at level 2: its text starts at column 4 ("  • ").
+        let long = format!("  {}", "あ".repeat(30));
+        let mut app = page(&["t", &long]);
+        app.rebuild(46);
+        let width = App::text_width(app.mode, app.laid_width);
+        app.text_rect = Rect::new(1, 2, width as u16, 8);
+        enter_session(&mut app, &ctx, 1, long.len());
+
+        let disp = session_display(&long, None);
+        let hang = session_hang(&long, None);
+        assert_eq!(hang, 4, "under the text, not under the bullet");
+        let wrapped = SessionWrap::new(&disp, width, hang);
+        assert!(wrapped.segs.len() > 1, "it really wraps");
+        assert_eq!(wrapped.indent_of(0), 0);
+        assert_eq!(wrapped.indent_of(1), hang);
+
+        // The drawn rows carry that indent…
+        let rows: Vec<String> = app
+            .content_view(46)
+            .iter()
+            .filter_map(|r| match r {
+                Row::Line { line, src } if *src == 1 => {
+                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(rows[1].starts_with("    "), "continuation hangs: {:?}", rows[1]);
+
+        // …and the caret math agrees with them, in both directions.
+        let last = display_caret(&long, long.len(), None);
+        let (row, col) = wrapped.row_col(last);
+        assert!(row > 0);
+        assert!(col >= hang, "the caret is inside the hanging body: {col}");
+        assert_eq!(wrapped.offset_at(row, col), last);
     }
 
     #[test]
