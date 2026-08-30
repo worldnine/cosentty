@@ -2767,9 +2767,13 @@ impl App {
             return Vec::new();
         }
         let dim = Style::default().fg(CHROME_DIM);
-        let link_style = Style::default()
-            .fg(CHROME_CARET)
-            .add_modifier(Modifier::UNDERLINED);
+        // No underline here. The rule is that underlining marks what can be
+        // pressed — but that is a rule for finding the pressable thing IN A
+        // LINE OF PROSE. These rows are nothing but links, one per line,
+        // under a heading that says so; underlining every one of them just
+        // draws a line under every row. The index's list is read the same
+        // way, and reads better for it.
+        let link_style = Style::default().fg(CHROME_CARET);
         let mut vsrc = self.lines.len();
         let mut rows = vec![Row::Card { line: Line::from("") }];
         for sec in &self.related {
@@ -3035,10 +3039,9 @@ impl App {
         // A related-page row (a virtual line below the page) has exactly
         // one target and no notation to speak of.
         if *src >= self.lines.len() {
-            let underlined = line.spans.iter().any(|sp| {
-                sp.style.add_modifier.contains(Modifier::UNDERLINED)
-            });
-            if !underlined {
+            // One target per row, and the whole row is it — there is no
+            // prose here to click past.
+            if line.spans.iter().all(|sp| sp.content.trim().is_empty()) {
                 return None;
             }
             return self.links_at_src(*src).into_iter().next().map(|item| (*src, item));
@@ -14571,16 +14574,13 @@ mod tests {
             Some((1, LinkItem::Page("ABCDEFGHIJK".into())))
         );
 
-        // Related-page labels remain clickable after visual truncation.
+        // Related-page rows stay clickable after visual truncation — and
+        // without an underline to look for: those rows are drawn plain
+        // (the row IS the link), so the row itself is the target.
         let related_src = wrapped.lines.len();
         wrapped.virtual_items = vec![LinkItem::Page("Very long related page".into())];
         wrapped.rows = vec![Row::Line {
-            line: Line::from(Span::styled(
-                "Very…",
-                Style::default()
-                    .fg(CHROME_CARET)
-                    .add_modifier(Modifier::UNDERLINED),
-            )),
+            line: Line::from(Span::styled("Very…", Style::default().fg(CHROME_CARET))),
             src: related_src,
             start: 0,
             hang: 0,
@@ -14589,6 +14589,14 @@ mod tests {
             wrapped.link_at_screen_position(0, 2),
             Some((related_src, LinkItem::Page("Very long related page".into())))
         );
+        // …but empty space below the list is not a target.
+        wrapped.rows = vec![Row::Line {
+            line: Line::from("   "),
+            src: related_src,
+            start: 0,
+            hang: 0,
+        }];
+        assert_eq!(wrapped.link_at_screen_position(0, 2), None);
 
         // Pressing records the target, but dragging cancels activation and
         // keeps the existing line-selection gesture available.
