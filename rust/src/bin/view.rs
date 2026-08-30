@@ -486,6 +486,14 @@ enum LinkItem {
     File { label: String, url: String },
     /// Any other http(s) URL (`[title https://…]`, bare URL) — the browser's.
     Url { label: String, url: String },
+    /// A `code:` or `table:` block, saved from the page in hand.
+    ///
+    /// Cosense does serve both as files, but only to a session cookie:
+    /// `/api/code/…` answers 401 to the token this viewer authenticates
+    /// with. The page is already here, so the file is written from it — no
+    /// second credential, no round trip, and what lands is exactly what is
+    /// on screen.
+    Export { label: String, src: usize, csv: bool },
 }
 
 impl LinkItem {
@@ -494,6 +502,7 @@ impl LinkItem {
             LinkItem::Page(t) => t.clone(),
             LinkItem::ProjectPage { project, title } => format!("/{project}/{title}"),
             LinkItem::File { label, .. } => format!("↓ {label}"),
+            LinkItem::Export { label, .. } => format!("↓ {label}"),
             LinkItem::Url { label, .. } => format!("↗ {label}"),
         }
     }
@@ -506,6 +515,7 @@ impl LinkItem {
             LinkItem::Page(t) => vec![t.clone(), format!("#{t}")],
             LinkItem::ProjectPage { project, title } => vec![format!("/{project}/{title}")],
             LinkItem::File { label, .. } => vec![label.clone()],
+            LinkItem::Export { label, .. } => vec![label.clone()],
             LinkItem::Url { label, .. } => vec![label.clone(), format!("[{label}]")],
         }
     }
@@ -2013,7 +2023,7 @@ impl App {
         let text = &mask_inline_code(text);
         let mut items: Vec<LinkItem> = Vec::new();
         // A code block or a table is a file Cosense will hand over.
-        if let Some(item) = block_export_link(&self.project, &self.title, text) {
+        if let Some(item) = block_export_link(text, src) {
             items.push(item);
         }
         items.extend(links_on_line(text));
@@ -2031,7 +2041,7 @@ impl App {
         }
         let text = &mask_inline_code(&self.lines[src].text);
         let mut positioned = positioned_links_on_line(text);
-        if let Some(item) = block_export_link(&self.project, &self.title, text) {
+        if let Some(item) = block_export_link(text, src) {
             positioned.push((0, item));
         }
         positioned.extend(
@@ -2878,6 +2888,8 @@ impl App {
                 LinkItem::File { .. } | LinkItem::Url { .. } => {
                     clicked_fg == Some(pal.url) || clicked_fg == Some(Color::Magenta)
                 }
+                // A block header wears the notation label colour.
+                LinkItem::Export { .. } => clicked_fg == Some(pal.code_fence),
             }
         };
         // Prefer exact labels. If two targets render with the same label,
@@ -4215,28 +4227,69 @@ fn labelled_urls(text: &str) -> Vec<(String, String)> {
 /// `/api/table/<project>/<title>/<name>.csv` — so the header line can be a
 /// link like any other, and `Enter` saves it the way it saves an
 /// attachment. No new key, no invented download path.
-fn block_export_link(project: &str, title: &str, text: &str) -> Option<LinkItem> {
+fn block_export_link(text: &str, src: usize) -> Option<LinkItem> {
     let body = text.trim_start();
-    let (kind, name) = if let Some(n) = body.strip_prefix("code:") {
-        ("code", n.trim())
+    let (csv, name) = if let Some(n) = body.strip_prefix("code:") {
+        (false, n.trim())
     } else if let Some(n) = body.strip_prefix("table:") {
-        ("table", n.trim())
+        (true, n.trim())
     } else {
         return None;
     };
     if name.is_empty() {
         return None;
     }
-    let file = if kind == "table" { format!("{name}.csv") } else { name.to_string() };
-    Some(LinkItem::File {
-        label: file.clone(),
-        url: format!(
-            "https://scrapbox.io/api/{kind}/{}/{}/{}",
-            urlencode_component(project),
-            urlencode_component(title),
-            urlencode_component(&file)
-        ),
-    })
+    let label = if csv { format!("{name}.csv") } else { name.to_string() };
+    Some(LinkItem::Export { label, src, csv })
+}
+
+/// The text of the block whose header is at `src`: the code as it is
+/// written, or the table as CSV.
+///
+/// A Cosense table is tab-separated cells, so the conversion is
+/// mechanical; only a cell holding a comma, a quote or a newline needs
+/// quoting (RFC 4180), and that is decided per cell rather than guessed.
+fn block_export_body(lines: &[PageLine], src: usize, csv: bool) -> String {
+    let Some(header) = lines.get(src) else { return String::new() };
+    let indent = indent_of(&header.text).chars().count();
+    let mut out: Vec<String> = Vec::new();
+    for line in lines.iter().skip(src + 1) {
+        let depth = line.text.chars().take_while(|c| c.is_whitespace()).count();
+        if depth <= indent && !line.text.trim().is_empty() {
+            break;
+        }
+        if depth <= indent {
+            if csv {
+                break; // a blank line ends a table
+            }
+            out.push(String::new());
+            continue;
+        }
+        let body: String = line.text.chars().skip(indent + 1).collect();
+        out.push(if csv { csv_row(&body) } else { body });
+    }
+    // Trailing blank lines belong to the page, not to the block.
+    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+/// One table row as CSV (RFC 4180 quoting).
+fn csv_row(row: &str) -> String {
+    row.split('\t')
+        .map(|cell| {
+            let cell = cell.trim_end();
+            if cell.contains([',', '"', '\n']) {
+                format!("\"{}\"", cell.replace('"', "\"\""))
+            } else {
+                cell.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn link_item_for_url(label: String, url: String) -> LinkItem {
@@ -4297,6 +4350,21 @@ fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
         }
         LinkItem::ProjectPage { project, title } => navigate_to(app, ctx, &project, &title),
         LinkItem::File { label, url } => app.start_download(ctx, label, url),
+        LinkItem::Export { label, src, csv } => {
+            let body = block_export_body(&app.lines, src, csv);
+            let dest = download_path(&label, "");
+            app.status = match std::fs::write(&dest, body) {
+                Ok(()) => {
+                    let shown = dest.display().to_string();
+                    if open_in_browser(&shown) {
+                        format!("saved {shown} · opened")
+                    } else {
+                        format!("saved {shown}")
+                    }
+                }
+                Err(e) => format!("save failed: {label} — {e}"),
+            };
+        }
         LinkItem::Url { url, .. } => {
             app.status = if open_in_browser(&url) {
                 format!("opened {url}")
@@ -11259,11 +11327,11 @@ mod tests {
         assert_eq!(app.session.as_ref().unwrap().input.buf, "５人", "out of the table");
     }
 
-    /// Cosense serves a code block and a table as files, so their header
-    /// lines are links: `Enter` saves them, with no new key and no
-    /// download path of our own.
+    /// A code block and a table are files: `Enter` saves them, written
+    /// from the page in hand (Cosense's own endpoints answer 401 to the
+    /// token this viewer holds — they want a session cookie).
     #[test]
-    fn a_code_or_table_header_is_a_link_to_its_file() {
+    fn a_code_or_table_header_saves_the_block() {
         let mut app = page(&["t", "code:sample.py", " print(1)", "table:売上", " a\tb"]);
         app.project = "proj".into();
         app.title = "ページ".into();
@@ -11271,27 +11339,37 @@ mod tests {
 
         app.goto_src(1);
         match app.cursor_line_links().first() {
-            Some(LinkItem::File { label, url }) => {
+            Some(LinkItem::Export { label, csv, .. }) => {
                 assert_eq!(label, "sample.py");
-                assert_eq!(url, "https://scrapbox.io/api/code/proj/%E3%83%9A%E3%83%BC%E3%82%B8/sample.py");
+                assert!(!csv);
             }
             other => panic!("expected the code file, got {other:?}"),
         }
+        assert_eq!(
+            block_export_body(&app.lines, 1, false),
+            "print(1)\n",
+            "the code as written, without the block's own indent",
+        );
 
         app.goto_src(3);
         match app.cursor_line_links().first() {
-            Some(LinkItem::File { label, url }) => {
+            Some(LinkItem::Export { label, csv, .. }) => {
                 assert_eq!(label, "売上.csv", "a table comes back as CSV");
-                assert!(url.contains("/api/table/proj/"), "{url}");
-                assert!(url.ends_with(".csv"), "{url}");
+                assert!(csv);
             }
             other => panic!("expected the table file, got {other:?}"),
         }
+        assert_eq!(block_export_body(&app.lines, 3, true), "a,b\n");
+
+        // Cells that need quoting get it, and nothing else does.
+        assert_eq!(csv_row("a\tb"), "a,b");
+        assert_eq!(csv_row("a,b\tc"), "\"a,b\",c");
+        assert_eq!(csv_row("say \"hi\"\tx"), "\"say \"\"hi\"\"\",x");
 
         // Body lines are not links, and a nameless block offers nothing.
         app.goto_src(2);
         assert!(app.cursor_line_links().is_empty());
-        assert!(block_export_link("p", "t", "code:").is_none());
+        assert!(block_export_link("code:", 0).is_none());
     }
 
     /// A table ends the way a list does: Enter on a row with nothing in it
