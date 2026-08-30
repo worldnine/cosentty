@@ -541,6 +541,41 @@ impl Client {
         Ok(true)
     }
 
+    /// The ids of the pages that link to `project/title`.
+    ///
+    /// For a title nobody has written, the page endpoint still answers
+    /// with its back links (`persistent: false` and a `relatedPages`
+    /// block), which is how "is this word used anywhere else?" is
+    /// answered without an index of the whole project. A title nothing
+    /// points at answers 404 — no back links, and no error.
+    pub fn backlink_ids(&self, project: &str, title: &str) -> Result<Vec<String>, Box<dyn Error>> {
+        #[derive(Deserialize)]
+        struct Backlinks {
+            #[serde(default, rename = "relatedPages")]
+            related: RelatedPages,
+        }
+        let url = format!(
+            "{}/pages/{}/{}",
+            self.cfg.base(),
+            urlencoding(project),
+            urlencoding(title)
+        );
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send()?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        let b: Backlinks = res.json()?;
+        Ok(b.related.links1hop.into_iter().map(|p| p.id).collect())
+    }
+
     /// Project members, for resolving line author ids to display names.
     pub fn list_members(&self) -> Result<Vec<Member>, Box<dyn Error>> {
         self.list_members_in(&self.cfg.project)

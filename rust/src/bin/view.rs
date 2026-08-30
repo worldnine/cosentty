@@ -725,7 +725,7 @@ struct App {
     link_scan_at: Instant,
     /// To the lookup worker (`spawn_link_prober`); `None` in tests, which
     /// makes `probe_unknown_links` a no-op.
-    link_probe_tx: Option<mpsc::Sender<(String, String)>>,
+    link_probe_tx: Option<mpsc::Sender<LinkProbe>>,
     link_probe_rx: mpsc::Receiver<(String, String, bool)>,
     link_probe_res_tx: mpsc::Sender<(String, String, bool)>,
     /// Scroll the viewport to the cursor on the next frame. Set by keyboard
@@ -2058,7 +2058,11 @@ impl App {
                 if !self.link_pending.insert(key) {
                     continue;
                 }
-                let _ = tx.send((self.project.clone(), title));
+                let _ = tx.send(LinkProbe {
+                    project: self.project.clone(),
+                    title,
+                    asked_by: self.page_id.clone(),
+                });
             }
         }
     }
@@ -4063,18 +4067,34 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
     })
 }
 
-/// What this page's own response says about the pages it links to.
+/// What this page's own response says about the pages it links to — by
+/// Cosense's rule, which is not "does the page exist".
 ///
-/// `relatedPages.links1hop` is "the pages one hop from here THAT EXIST"
-/// (links out and back links together), so a link the page has that is
-/// absent from it was never written. Measured on scrapbox.io: on this
-/// project's own `改善案` the three absentees were exactly the three
-/// `#issue` tags, and on villagepump's `井戸端` (35 links, 234 back
-/// links) the four absentees all answered `persistent: false`. Nothing is
-/// truncated at the sizes that matter either: `書いてけ` has 512 back
-/// links and 517 1-hop entries.
+/// Read out of its client (`compileRelatedPages` in the related-page
+/// store, and `isPageExists` where a link is drawn), a link is drawn as
+/// live when ANY of these hold:
 ///
-/// This costs no extra request, and it answers every link the page was
+/// * it is a 1-hop or 2-hop neighbour — a page that exists;
+/// * it is the page being read;
+/// * **another page links to the same title**, written or not.
+///
+/// That last rule is not an accident: the index the web client builds
+/// walks every page's links and marks each target live *unless the only
+/// page writing it is the one on screen*
+/// (`P !== p.Page.id && n.set(te, !0)`). So the red does not mean "no
+/// page here"; it means "nobody but this page has ever said this word".
+/// A tag two pages share is already a hub, and Cosense stops calling it
+/// empty the moment the second page uses it.
+///
+/// The same answer is computable from the response already in hand: a
+/// page that links to one of OUR targets shares that target with us, so
+/// it is in our own 1-hop or 2-hop list with the target in its `linksLc`.
+/// Checked against scrapbox.io: on villagepump's `井戸端` the naive "not
+/// in links1hop" reading calls four titles empty, Cosense calls three,
+/// and the one it spares is `実況` — unwritten, but linked from other
+/// pages. This reproduces that exactly.
+///
+/// It costs no extra request, and it answers every link the page was
 /// SAVED with. Links written since — the ones a reader is most likely to
 /// be looking at — are not in it at all, and `probe_unknown_links` goes
 /// and asks about those one at a time.
@@ -4082,10 +4102,18 @@ fn link_truth(page: &cosense::api::Page) -> LinkTruth {
     // No related-pages block, no reading: every link keeps its ordinary
     // colour rather than all of them turning red at once.
     let Some(r) = page.related.as_ref() else { return LinkTruth::default() };
-    let mut existing: Vec<&str> = r.links1hop.iter().map(|p| p.title.as_str()).collect();
-    // 2-hop neighbours exist too (that is how the API builds them), and
-    // they are often exactly what a page links to next.
-    existing.extend(r.links2hop.iter().map(|p| p.title.as_str()));
+    let neighbours = || r.links1hop.iter().chain(r.links2hop.iter());
+    let mut existing: Vec<&str> = neighbours().map(|p| p.title.as_str()).collect();
+    // Titles this page links to that a neighbour ALSO links to: shared
+    // words, live whether or not anyone wrote the page.
+    let ours: HashSet<String> =
+        page.links.iter().map(|l| cosense::render::title_lc(l)).collect();
+    existing.extend(
+        neighbours()
+            .flat_map(|p| p.links_lc.iter())
+            .filter(|c| ours.contains(c.as_str()))
+            .map(|c| c.as_str()),
+    );
     let mut truth = LinkTruth::seed(page.links.iter().map(|s| s.as_str()), existing);
     // And this page itself, which is not in its own 1-hop list. Reading a
     // page is the most direct answer there is about it — including the
@@ -4097,27 +4125,52 @@ fn link_truth(page: &cosense::api::Page) -> LinkTruth {
 
 /// The lookup worker: one title in, one answer out.
 ///
+/// The question is Cosense's, not "does the page exist" (see
+/// `link_truth`): a title is live when somebody wrote it, OR when some
+/// page other than the one asking links to it. The cheap half is asked
+/// first — a HEAD that says "written" ends it — so only a title nobody
+/// wrote costs the second request, which is also the small one (an
+/// unwritten page's response is its back links, not a body).
+///
 /// Serial on purpose. Unknown links are rare (a page arrives with all of
 /// its links already answered), so this is a trickle — and a trickle down
 /// one thread cannot turn a page full of new links into a burst of
 /// requests.
 fn spawn_link_prober(
     client: Client,
-    rx: mpsc::Receiver<(String, String)>,
+    rx: mpsc::Receiver<LinkProbe>,
     tx: mpsc::Sender<(String, String, bool)>,
 ) {
     std::thread::spawn(move || {
-        while let Ok((project, title)) = rx.recv() {
+        while let Ok(LinkProbe { project, title, asked_by }) = rx.recv() {
             // A failed lookup answers nothing, and is not retried (see
             // `App::link_pending`): the title stays unknown and keeps its
             // ordinary colour, which is the safe direction.
-            if let Ok(exists) = client.page_exists(&project, &title) {
-                if tx.send((project, title, exists)).is_err() {
-                    return; // app gone
+            let Ok(written) = client.page_exists(&project, &title) else { continue };
+            let live = if written {
+                true
+            } else {
+                match client.backlink_ids(&project, &title) {
+                    // The asking page's own link does not make a word
+                    // shared — that is the whole point of the rule.
+                    Ok(ids) => ids.iter().any(|id| *id != asked_by),
+                    Err(_) => continue,
                 }
+            };
+            if tx.send((project, title, live)).is_err() {
+                return; // app gone
             }
         }
     });
+}
+
+/// One question for the lookup worker: is this title live? Asked from a
+/// page whose own links must not count towards the answer.
+#[derive(Debug, PartialEq, Eq)]
+struct LinkProbe {
+    project: String,
+    title: String,
+    asked_by: String,
 }
 
 /// How pictures get onto the screen.
@@ -10814,7 +10867,9 @@ mod tests {
         app.session = None;
         app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
         app.probe_unknown_links();
-        assert_eq!(rx.try_recv().unwrap(), ("proj".to_string(), "いま打った".to_string()));
+        let asked = rx.try_recv().unwrap();
+        assert_eq!((asked.project.as_str(), asked.title.as_str()), ("proj", "いま打った"));
+        assert_eq!(asked.asked_by, app.page_id, "the asking page cannot vouch for itself");
         assert!(rx.try_recv().is_err(), "a known link is not asked about");
 
         // Not asked twice while the answer is out.
@@ -10887,6 +10942,29 @@ mod tests {
         );
         assert!(!m.missing("改善案"), "a page exists while you are reading it");
         assert_eq!(m.exists("何も知らないページ"), None, "no reading, no claim");
+
+        // The rule is not "does the page exist". A title nobody wrote is
+        // still live once a SECOND page uses it — Cosense's index marks
+        // every link target live except where the only page writing it is
+        // the one on screen. Shaped after villagepump/井戸端, where `実況`
+        // is unwritten yet drawn as an ordinary link because other pages
+        // link to it too.
+        let shared = Page {
+            links: vec!["実況".into(), "だれも書いていない".into()],
+            related: Some(RelatedPages {
+                links1hop: vec![RelatedPage { links_lc: vec!["実況".into()], ..rp("日記") }],
+                links2hop: vec![],
+                has_back_links_or_icons: true,
+            }),
+            ..page
+        };
+        let m = link_truth(&shared);
+        assert!(
+            !m.missing("実況"),
+            "another page writes the same word: a shared word is not empty"
+        );
+        assert!(m.missing("だれも書いていない"), "this page is the only one saying it");
+        let page = shared;
 
         // Opening a link to an uncreated page answers the question about
         // THAT title too — in the negative. Recording it as existing (it
