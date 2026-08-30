@@ -95,6 +95,58 @@ fn budget() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// The exact modified-arrow chord sent by the disposable outline protocol
+/// probe. A chord is represented as ONE arrow key event carrying the Ctrl or
+/// Alt modifier; separate modifier key-down events would be a different input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutlineProbeKey {
+    CtrlUp,
+    CtrlDown,
+    CtrlLeft,
+    CtrlRight,
+    AltUp,
+    AltDown,
+    AltLeft,
+    AltRight,
+}
+
+impl std::str::FromStr for OutlineProbeKey {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "ctrl-up" => Ok(Self::CtrlUp),
+            "ctrl-down" => Ok(Self::CtrlDown),
+            "ctrl-left" => Ok(Self::CtrlLeft),
+            "ctrl-right" => Ok(Self::CtrlRight),
+            "alt-up" => Ok(Self::AltUp),
+            "alt-down" => Ok(Self::AltDown),
+            "alt-left" => Ok(Self::AltLeft),
+            "alt-right" => Ok(Self::AltRight),
+            _ => Err(format!(
+                "invalid key {value:?}; expected ctrl-up|ctrl-down|ctrl-left|ctrl-right|alt-up|alt-down|alt-left|alt-right"
+            )),
+        }
+    }
+}
+
+impl OutlineProbeKey {
+    /// CDP's modifier bitmask plus DOM key/code and virtual-key value.
+    fn cdp(self) -> (u8, &'static str, u16) {
+        let modifier = match self {
+            Self::CtrlUp | Self::CtrlDown | Self::CtrlLeft | Self::CtrlRight => 2,
+            Self::AltUp | Self::AltDown | Self::AltLeft | Self::AltRight => 1,
+        };
+        let (key, virtual_key) = match self {
+            Self::CtrlUp | Self::AltUp => ("ArrowUp", 38),
+            Self::CtrlDown | Self::AltDown => ("ArrowDown", 40),
+            Self::CtrlLeft | Self::AltLeft => ("ArrowLeft", 37),
+            Self::CtrlRight | Self::AltRight => ("ArrowRight", 39),
+        };
+        (modifier, key, virtual_key)
+    }
+}
+
 pub struct ChromeBackend {
     exe: PathBuf,
     /// Browser `connect.sid` for private projects. Passed to Chrome only via
@@ -204,6 +256,50 @@ impl ChromeBackend {
             }
         }
         out
+    }
+
+    /// Open one authenticated Cosense page, focus `line_id` with a native
+    /// mouse click, then dispatch exactly one Ctrl/Alt+arrow chord through
+    /// CDP. This deliberately exposes no general-purpose CDP handle: it is a
+    /// narrow diagnostic seam for `outline_probe`, not an editing API.
+    ///
+    /// The backend must have been created with a sid. The sid is handed to
+    /// Chrome only through `Network.setCookie`; it is never included in this
+    /// result or an error message.
+    pub fn dispatch_outline_probe_key(
+        &self,
+        project: &str,
+        title: &str,
+        line_id: &str,
+        key: OutlineProbeKey,
+    ) -> Result<(), WebError> {
+        self.check_running()?;
+        if self.sid.is_none() {
+            return Err(WebError::NotAuthorized);
+        }
+
+        let mut held = self.session.lock().unwrap();
+        if held
+            .as_ref()
+            .is_some_and(|session| session.auth != RenderCapability::Authenticated)
+        {
+            *held = None;
+            *self.live_pid.lock().unwrap() = None;
+        }
+        if held.is_none() {
+            *held = Some(self.launch(RENDER_WIDTH_PX, RenderCapability::Authenticated)?);
+        }
+
+        let deadline = Instant::now() + budget();
+        let url = cosense_page_url(project, title);
+        let result = self.drive_outline_probe(held.as_mut().unwrap(), &url, line_id, key, deadline);
+        if result.is_err() {
+            // As with rendering, a failed CDP exchange can leave unread
+            // responses on the socket. Never reuse that browser.
+            *held = None;
+            *self.live_pid.lock().unwrap() = None;
+        }
+        result
     }
 
     /// Refuse to do anything once the app is quitting. Checked on the way
@@ -316,57 +412,8 @@ impl ChromeBackend {
         let auth = session.auth;
         let cdp = &mut session.cdp;
         let t1 = Instant::now();
-        // Re-applied every batch: the pane may have been resized, and the
-        // cookie is idempotent.
-        cdp.call("Page.enable", serde_json::json!({}), deadline)?;
-        cdp.call(
-            "Emulation.setDeviceMetricsOverride",
-            serde_json::json!({
-                "width": width, "height": 1400,
-                "deviceScaleFactor": 1, "mobile": false,
-            }),
-            deadline,
-        )?;
-        cdp.call(
-            "Emulation.setEmulatedMedia",
-            serde_json::json!({
-                "features": [{
-                    "name": "prefers-color-scheme",
-                    "value": if dark { "dark" } else { "light" },
-                }]
-            }),
-            deadline,
-        )
-        .ok(); // cosmetic; an old Chrome without it is still usable
-
-        // Anonymous is a real mode, not "no cookie configured": a public
-        // page renders fine without one, and it is the retry when the
-        // server has told us this cookie is stale.
-        let cookie = match auth {
-            RenderCapability::Authenticated => self.sid.as_ref(),
-            RenderCapability::Anonymous => None,
-        };
-        if let Some(sid) = cookie {
-            cdp.call("Network.enable", serde_json::json!({}), deadline)?;
-            // The ONLY place the credential is handed over. Chrome stores it
-            // in the throwaway profile, which is deleted with the batch.
-            cdp.call(
-                "Network.setCookie",
-                serde_json::json!({
-                    "name": "connect.sid",
-                    "value": sid,
-                    "domain": ".scrapbox.io",
-                    "path": "/",
-                    "secure": true,
-                    "httpOnly": true,
-                }),
-                deadline,
-            )
-            .map_err(|_| WebError::NotAuthorized)?;
-        }
-
         let url = reqs[0].page_url();
-        cdp.call("Page.navigate", serde_json::json!({ "url": url }), deadline)?;
+        self.prepare_navigation(cdp, width, dark, auth, &url, deadline)?;
 
         phase!("setup+navigate", t1);
         let t2 = Instant::now();
@@ -392,6 +439,157 @@ impl ChromeBackend {
         }
         phase!("capture", t3);
         Ok(out)
+    }
+
+    /// Apply the common viewport/cookie setup and navigate. Both normal web
+    /// rendering and the outline diagnostic go through this path, so the
+    /// probe cannot drift into a second browser client or credential path.
+    fn prepare_navigation(
+        &self,
+        cdp: &mut Cdp,
+        width: u32,
+        dark: bool,
+        auth: RenderCapability,
+        url: &str,
+        deadline: Instant,
+    ) -> Result<(), WebError> {
+        cdp.call("Page.enable", serde_json::json!({}), deadline)?;
+        cdp.call(
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({
+                "width": width, "height": 1400,
+                "deviceScaleFactor": 1, "mobile": false,
+            }),
+            deadline,
+        )?;
+        cdp.call(
+            "Emulation.setEmulatedMedia",
+            serde_json::json!({
+                "features": [{
+                    "name": "prefers-color-scheme",
+                    "value": if dark { "dark" } else { "light" },
+                }]
+            }),
+            deadline,
+        )
+        .ok();
+
+        let cookie = match auth {
+            RenderCapability::Authenticated => self.sid.as_ref(),
+            RenderCapability::Anonymous => None,
+        };
+        if let Some(sid) = cookie {
+            cdp.call("Network.enable", serde_json::json!({}), deadline)?;
+            cdp.call(
+                "Network.setCookie",
+                serde_json::json!({
+                    "name": "connect.sid",
+                    "value": sid,
+                    "domain": ".scrapbox.io",
+                    "path": "/",
+                    "secure": true,
+                    "httpOnly": true,
+                }),
+                deadline,
+            )
+            .map_err(|_| WebError::NotAuthorized)?;
+        }
+        cdp.call("Page.navigate", serde_json::json!({ "url": url }), deadline)?;
+        Ok(())
+    }
+
+    /// Drive the one destructive browser gesture used by `outline_probe`.
+    fn drive_outline_probe(
+        &self,
+        session: &mut Session,
+        url: &str,
+        line_id: &str,
+        key: OutlineProbeKey,
+        deadline: Instant,
+    ) -> Result<(), WebError> {
+        let cdp = &mut session.cdp;
+        self.prepare_navigation(
+            cdp,
+            RENDER_WIDTH_PX,
+            false,
+            RenderCapability::Authenticated,
+            url,
+            deadline,
+        )?;
+
+        let line_dom_id = format!("L{line_id}");
+        let expression = format!(
+            r#"(function(){{
+                var line = document.getElementById({line_dom_id});
+                if (!line) return JSON.stringify(null);
+                line.scrollIntoView({{block: 'center', inline: 'nearest'}});
+                var target = line.querySelector('.text') || line;
+                var r = target.getBoundingClientRect();
+                var lr = line.getBoundingClientRect();
+                if (lr.width <= 1 || lr.height <= 1) return JSON.stringify(null);
+                var x = r.width > 1 ? r.left + Math.min(8, r.width / 2) : lr.left + 32;
+                var y = lr.top + lr.height / 2;
+                return JSON.stringify({{x: x, y: y}});
+            }})()"#,
+            line_dom_id = serde_json::to_string(&line_dom_id).unwrap(),
+        );
+
+        let (x, y) = loop {
+            if let Ok(value) = eval_json(cdp, &expression, deadline) {
+                if let (Some(x), Some(y)) = (
+                    value.get("x").and_then(|n| n.as_f64()),
+                    value.get("y").and_then(|n| n.as_f64()),
+                ) {
+                    break (x, y);
+                }
+            }
+            self.tick(deadline, Duration::from_millis(100))?;
+        };
+
+        // A real mouse click is important here. Calling HTMLElement.click()
+        // would not carry coordinates through Cosense's editor hit-testing,
+        // and could leave the requested line unfocused.
+        cdp.call(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({ "type": "mouseMoved", "x": x, "y": y }),
+            deadline,
+        )?;
+        cdp.call(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mousePressed", "x": x, "y": y,
+                "button": "left", "clickCount": 1,
+            }),
+            deadline,
+        )?;
+        cdp.call(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mouseReleased", "x": x, "y": y,
+                "button": "left", "clickCount": 1,
+            }),
+            deadline,
+        )?;
+        self.tick(deadline, Duration::from_millis(150))?;
+
+        let (modifiers, dom_key, virtual_key) = key.cdp();
+        let params = serde_json::json!({
+            "key": dom_key,
+            "code": dom_key,
+            "windowsVirtualKeyCode": virtual_key,
+            "nativeVirtualKeyCode": virtual_key,
+            "modifiers": modifiers,
+            "autoRepeat": false,
+            "isKeypad": false,
+            "isSystemKey": modifiers == 1,
+        });
+        let mut down = params.clone();
+        down["type"] = serde_json::json!("rawKeyDown");
+        cdp.call("Input.dispatchKeyEvent", down, deadline)?;
+        let mut up = params;
+        up["type"] = serde_json::json!("keyUp");
+        cdp.call("Input.dispatchKeyEvent", up, deadline)?;
+        Ok(())
     }
 
     /// Chrome writes the port it actually bound into `DevToolsActivePort`.
@@ -880,6 +1078,24 @@ impl Cdp {
     }
 }
 
+/// Build the same percent-encoded Cosense page URL as `WebRequest::page_url`
+/// without manufacturing a screenshot request for this diagnostic.
+fn cosense_page_url(project: &str, title: &str) -> String {
+    fn segment(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for byte in value.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(byte as char)
+                }
+                _ => out.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        out
+    }
+    format!("https://scrapbox.io/{}/{}", segment(project), segment(title))
+}
+
 fn kill(child: &mut Child) {
     child.kill().ok();
     // Reap it: an unwaited child would sit as a zombie for the life of the
@@ -1070,6 +1286,44 @@ mod tests {
             }
             other => panic!("expected a launch failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn outline_probe_keys_map_to_one_exact_modified_arrow() {
+        use std::str::FromStr as _;
+
+        let cases = [
+            ("ctrl-up", OutlineProbeKey::CtrlUp, (2, "ArrowUp", 38)),
+            ("ctrl-down", OutlineProbeKey::CtrlDown, (2, "ArrowDown", 40)),
+            ("ctrl-left", OutlineProbeKey::CtrlLeft, (2, "ArrowLeft", 37)),
+            (
+                "ctrl-right",
+                OutlineProbeKey::CtrlRight,
+                (2, "ArrowRight", 39),
+            ),
+            ("alt-up", OutlineProbeKey::AltUp, (1, "ArrowUp", 38)),
+            ("alt-down", OutlineProbeKey::AltDown, (1, "ArrowDown", 40)),
+            ("alt-left", OutlineProbeKey::AltLeft, (1, "ArrowLeft", 37)),
+            (
+                "alt-right",
+                OutlineProbeKey::AltRight,
+                (1, "ArrowRight", 39),
+            ),
+        ];
+        for (text, parsed, cdp) in cases {
+            assert_eq!(OutlineProbeKey::from_str(text).unwrap(), parsed);
+            assert_eq!(parsed.cdp(), cdp);
+        }
+        assert!(OutlineProbeKey::from_str("up").is_err());
+        assert!(OutlineProbeKey::from_str("ctrl-shift-up").is_err());
+    }
+
+    #[test]
+    fn outline_probe_page_url_encodes_each_path_segment() {
+        assert_eq!(
+            cosense_page_url("project name", "日本語/notes"),
+            "https://scrapbox.io/project%20name/%E6%97%A5%E6%9C%AC%E8%AA%9E%2Fnotes"
+        );
     }
 
     #[test]
