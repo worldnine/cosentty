@@ -187,10 +187,10 @@ pub enum WebError {
 impl fmt::Display for WebError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WebError::NoBrowser => write!(f, "no Chrome found (set COSENSE_CHROME)"),
-            WebError::Timeout { seconds } => write!(f, "browser timed out after {seconds}s"),
-            WebError::NotRendered => write!(f, "diagram not drawn by Cosense"),
-            WebError::NotAuthorized => write!(f, "page not visible to this login"),
+            WebError::NoBrowser => write!(f, "Chrome が見つかりません（COSENSE_CHROME で指定できます）"),
+            WebError::Timeout { seconds } => write!(f, "ブラウザが {seconds} 秒でタイムアウトしました"),
+            WebError::NotRendered => write!(f, "Cosense 側が図を描きませんでした"),
+            WebError::NotAuthorized => write!(f, "このログインではページを見られません"),
             WebError::Backend(m) => write!(f, "{m}"),
         }
     }
@@ -827,7 +827,7 @@ mod tests {
         let out = b.render_batch(&[req(), req()], RenderCapability::Anonymous);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], Err(WebError::NoBrowser)));
-        assert_eq!(WebError::NoBrowser.to_string(), "no Chrome found (set COSENSE_CHROME)");
+        assert_eq!(WebError::NoBrowser.to_string(), "Chrome が見つかりません（COSENSE_CHROME で指定できます）");
     }
 
     #[test]

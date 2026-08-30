@@ -2,6 +2,15 @@
 // persistent line cursor, in-place range selection, inline comment cards,
 // and agent-actionable comment export.
 //
+// Message language: prose the reader is meant to READ — status line, key
+// hints, help, errors — is Japanese. What stays as written are the things
+// that are not words in a language but labels of something: key names
+// (Enter, Esc, ^z, j/k), flags and env vars (--preview, COSENSE_SID),
+// notation (`code:mmd`), protocol and product names (websocket, OSC 52,
+// Cosense, Gyazo, Chrome). The rule exists because the footer shows hints
+// and status in the SAME row: with two languages sharing that row, and
+// sometimes one string (`⌫@行頭 join`), the seam showed on every frame.
+//
 // Keys:
 //   j/k ↑/↓  move line cursor        Space/b  page down/up
 //   g/G       top/bottom             v        start/stop range selection
@@ -302,7 +311,7 @@ fn spawn_web_worker(
                                 Ok(info) => WebOutcome::Drawn(info),
                                 Err(e) => WebOutcome::Failed(e),
                             },
-                            None => WebOutcome::Failed("no cached artifact to resize".into()),
+                            None => WebOutcome::Failed("作り直せる図はありません".into()),
                         };
                         let _ = out.send(WebMsg { gen, key, rescale: true, attempted: None, res });
                     }
@@ -1817,10 +1826,10 @@ impl App {
     /// state moves. Only that summary is rewritten — a live status message
     /// (a commit result, an auth note) is left alone.
     fn refresh_sync_tag(&mut self) {
-        let Some(at) = self.status.find("sync: ") else { return };
-        let Some(rest) = self.status.get(at + "sync: ".len()..) else { return };
-        let end = rest.find(' ').map(|i| at + "sync: ".len() + i).unwrap_or(self.status.len());
-        self.status.replace_range(at + "sync: ".len()..end, self.sync_label());
+        let Some(at) = self.status.find("同期: ") else { return };
+        let Some(rest) = self.status.get(at + "同期: ".len()..) else { return };
+        let end = rest.find(' ').map(|i| at + "同期: ".len() + i).unwrap_or(self.status.len());
+        self.status.replace_range(at + "同期: ".len()..end, self.sync_label());
     }
 
     /// What to call the live-update channel. A session with no sid is not
@@ -1939,8 +1948,8 @@ impl App {
         }
         match self.sync_state {
             capability::SyncState::Live => None,
-            capability::SyncState::Polling => Some("sync: poll".into()),
-            capability::SyncState::Reconnecting => Some("sync: reconnecting".into()),
+            capability::SyncState::Polling => Some("同期: poll".into()),
+            capability::SyncState::Reconnecting => Some("同期: 再接続中".into()),
         }
     }
 
@@ -1955,7 +1964,7 @@ impl App {
         if let Some(s) = self.session.as_ref() {
             let dirty = s.input.buf != s.orig;
             return format!(
-                "{}↑↓ move · Enter new line · ⌫@行頭 join · Tab indent · Esc done",
+                "{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了",
                 if dirty { "● " } else { "" }
             );
         }
@@ -1974,7 +1983,7 @@ impl App {
                     format!("{}:{}{mark}", i + 1, l.label())
                 })
                 .collect();
-            return format!("Enter/f open → {}", listed.join("  "));
+            return format!("Enter/f で開く → {}", listed.join("  "));
         }
         if !self.status.is_empty() {
             return self.status.clone();
@@ -1983,9 +1992,9 @@ impl App {
             return msg.clone();
         }
         if self.editable {
-            "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit".into()
+            "j/k 移動  Enter リンク  e 編集  o 行追加  u 取り消し  w ブラウザ  ? ヘルプ  q 終了".into()
         } else {
-            "j/k move  Enter link  w browser  ? help  q quit  · read-only".into()
+            "j/k 移動  Enter リンク  w ブラウザ  ? ヘルプ  q 終了  · 読み取り専用".into()
         }
     }
 
@@ -2075,7 +2084,7 @@ impl App {
                 // error. The next pass sees the new source and asks again.
                 WebOutcome::Stale => {}
                 WebOutcome::Failed(e) => {
-                    self.note_web_failure(format!("diagram: {e} (showing source)"));
+                    self.note_web_failure(format!("diagram: {e}（ソースを表示します）"));
                     self.web_errors.insert(key, e);
                 }
             }
@@ -2224,7 +2233,7 @@ impl App {
         let dest = download_path_in(&ctx.download_dir, &label, &url);
         let tx = self.file_tx.clone();
         let fetcher = Arc::clone(&ctx.fetcher);
-        self.status = format!("downloading {label}…");
+        self.status = format!("ダウンロード中 {label}…");
         std::thread::spawn(move || {
             let res = fetcher.download_to(&url, &dest).map(|_| dest).map_err(|e| e.to_string());
             let _ = tx.send((label, res));
@@ -2239,12 +2248,12 @@ impl App {
                     let shown = path.display().to_string();
                     let opened = open_in_browser(&shown);
                     self.status = if opened {
-                        format!("saved {shown} · opened")
+                        format!("保存しました {shown} · 開きました")
                     } else {
-                        format!("saved {shown}")
+                        format!("保存しました {shown}")
                     };
                 }
-                Err(e) => self.status = format!("download failed: {label} — {e}"),
+                Err(e) => self.status = format!("ダウンロードに失敗しました: {label} — {e}"),
             }
         }
     }
@@ -2390,7 +2399,7 @@ impl App {
             Err(e) => {
                 // Say so: a silent empty table would look like "unknown
                 // member" and hide a permission or network problem.
-                self.status = format!("member list failed for {}: {e}", self.project);
+                self.status = format!("メンバー一覧を取得できません: {} — {e}", self.project);
                 HashMap::new()
             }
         };
@@ -3551,7 +3560,7 @@ fn card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
     let accent = Style::default().bg(CARD_BG).fg(Color::LightBlue);
     let mut out = Vec::new();
     out.push(Line::from(Span::styled(format!("  ╭{bar}╮"), accent)));
-    let head = format!("  💬 lines {}", c.range_label());
+    let head = format!("  💬 {} 行目", c.range_label());
     out.push(Line::from(vec![
         Span::styled("  │ ", accent),
         Span::styled(
@@ -3858,17 +3867,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let img = image_protocol_name(&ctx.picker);
     app.status = match ctx.client.credential_for(&project) {
         Some(c) if app.editable => format!(
-            "auth: {} · edit enabled · sync: {} · image: {img} · ? help",
+            "認証: {} · 編集可 · 同期: {} · 画像: {img} · ? ヘルプ",
             c.kind(),
             app.sync_label()
         ),
         Some(c) => format!(
-            "auth: {} · read-only (not a project member) · sync: {} · image: {img} · ? help",
+            "認証: {} · 読み取り専用（プロジェクトのメンバーではありません）· 同期: {} · 画像: {img} · ? ヘルプ",
             c.kind(),
             app.sync_label()
         ),
         None => format!(
-            "no auth — public read-only (`cosense login` to enable edits) · image: {img}"
+            "認証なし — 公開ページの読み取りのみ（編集するには `cosense login`）· 画像: {img}"
         ),
     };
     if let Some(note) = download_note {
@@ -3882,7 +3891,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 app.cursor = i;
                 app.follow = true;
             }
-            None => app.status = format!("line {id} not found on this page"),
+            None => app.status = format!("このページに行 {id} はありません"),
         }
     }
 
@@ -4184,7 +4193,7 @@ fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, bool)>) {
 fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
     let place = if back { app.history.pop() } else { app.forward.pop() };
     let Some(place) = place else {
-        app.status = if back { "no history".into() } else { "no forward history".into() };
+        app.status = if back { "戻る先の履歴はありません".into() } else { "進む先の履歴はありません".into() };
         return;
     };
     let here = app.here();
@@ -4217,7 +4226,7 @@ fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
                         } else {
                             app.forward.push(place);
                         }
-                        app.status = format!("history failed: {e}");
+                        app.status = format!("履歴の移動に失敗しました: {e}");
                     }
                 }
             }
@@ -4250,7 +4259,7 @@ fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String) {
     let (count, pages) = match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, "updated") {
         Ok(v) => v,
         Err(e) => {
-            app.status = format!("page list failed: {e}");
+            app.status = format!("ページ一覧を取得できません: {e}");
             return;
         }
     };
@@ -4888,19 +4897,19 @@ fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
                 Ok(()) => {
                     let shown = dest.display().to_string();
                     if open_in_browser(&shown) {
-                        format!("saved {shown} · opened")
+                        format!("保存しました {shown} · 開きました")
                     } else {
-                        format!("saved {shown}")
+                        format!("保存しました {shown}")
                     }
                 }
-                Err(e) => format!("save failed: {label} — {e}"),
+                Err(e) => format!("保存に失敗しました: {label} — {e}"),
             };
         }
         LinkItem::Url { url, .. } => {
             app.status = if open_in_browser(&url) {
-                format!("opened {url}")
+                format!("開きました {url}")
             } else {
-                "failed to open browser".into()
+                "ブラウザを開けません".into()
             };
         }
     }
@@ -4959,13 +4968,13 @@ fn copy_payload(app: &App, whole_page: bool) -> Option<(String, String)> {
 /// that will not take OSC 52, a copy too large to send that way).
 fn copy_and_report(app: &mut App, payload: Option<(String, String)>) {
     let Some((text, label)) = payload else {
-        app.status = "nothing to copy".into();
+        app.status = "コピーするものがありません".into();
         return;
     };
     app.status = if copy_to_clipboard(&text) {
         format!("✓ copied {label}")
     } else {
-        "copy failed — no clipboard tool and the terminal refused OSC 52".into()
+        "コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました".into()
     };
 }
 
@@ -5073,7 +5082,7 @@ fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str, from: Pla
             true
         }
         Err(e) => {
-            app.status = format!("open failed: /{project}/{title} — {e}");
+            app.status = format!("開けません: /{project}/{title} — {e}");
             false
         }
     }
@@ -5193,7 +5202,7 @@ fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &C
     dispatch_create(app);
     let deadline = Instant::now() + Duration::from_secs(15);
     while app.inflight > 0 && Instant::now() < deadline {
-        app.status = format!("…flushing {} edit(s)", app.inflight);
+        app.status = format!("…送信中の編集 {} 件", app.inflight);
         let _ = terminal.draw(|f| ui(f, app, ctx));
         match app.commit_res_rx.recv_timeout(Duration::from_millis(300)) {
             Ok(outcome) => handle_commit_outcome(app, ctx, outcome),
@@ -5353,7 +5362,7 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             (KeyCode::Esc, _) => {
                 app.composing = None;
                 app.ime_guard = None; // back to ASCII for command mode
-                app.status = "cancelled".into();
+                app.status = "キャンセルしました".into();
             }
             (KeyCode::Enter, _) => {
                 let input = app.composing.take().unwrap();
@@ -5404,11 +5413,11 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 // SNAPSHOT's lines as NOW and editable, and let the renderer
                 // screenshot today's page under a historical source's hash.
                 if reload_page(app, ctx) {
-                    app.status = "NOW".into();
+                    app.status = "最新".into();
                 }
             } else if app.selection.is_some() {
                 app.selection = None;
-                app.status = "selection cleared".into();
+                app.status = "選択を解除しました".into();
             } else {
                 app.status.clear();
             }
@@ -5453,7 +5462,7 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Enter, false) | (KeyCode::Char('f'), false) => {
             let mut links = app.cursor_line_links();
             match links.len() {
-                0 => app.status = "no link on this line".into(),
+                0 => app.status = "この行にリンクはありません".into(),
                 1 => activate_link(app, ctx, links.remove(0)),
                 _ => app.overlay = Some(Overlay::Links { items: links, cursor: 0 }),
             }
@@ -5528,9 +5537,9 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('w'), false) => {
             let url = app.cursor_url();
             app.status = if open_in_browser(&url) {
-                format!("opened {url}")
+                format!("開きました {url}")
             } else {
-                "failed to open browser".into()
+                "ブラウザを開けません".into()
             };
         }
 
@@ -5548,22 +5557,22 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('v'), false) => {
             if app.selection.is_some() {
                 app.selection = None;
-                app.status = "selection cleared".into();
+                app.status = "選択を解除しました".into();
             } else if app.cursor >= app.lines.len() {
-                app.status = "related rows cannot be selected".into();
+                app.status = "関連ページの行は選択できません".into();
             } else {
                 app.selection = Some(Selection::new(app.cursor));
-                app.status = "selecting — j/k extend, c comment".into();
+                app.status = "選択中 — j/k で広げる · c でコメント".into();
             }
         }
         (KeyCode::Char('c'), false) => {
             if app.time.is_some() {
-                app.status = "viewing history — comments need NOW (Esc)".into();
+                app.status = "履歴を表示中 — コメントは最新でのみ書けます（Esc で戻る）".into();
                 return Action::Continue;
             }
             app.composing = Some(Input::new(String::new()));
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-            app.status = "type comment, Enter save, Esc cancel".into();
+            app.status = "コメントを入力 · Enter 保存 · Esc 取消".into();
         }
 
         // ---- new lines (vim's o/O; the session opens on the new line) ----
@@ -5576,7 +5585,7 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 return Action::Continue;
             }
             if app.time.is_some() {
-                app.status = "viewing history — read-only (Esc → NOW)".into();
+                app.status = "履歴を表示中 — 読み取り専用（Esc で最新へ）".into();
                 return Action::Continue;
             }
             return Action::Editor;
@@ -5593,9 +5602,9 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
             if let Some(i) = app.comment_at_cursor() {
                 app.comments.remove(i);
                 app.laid_width = 0;
-                app.status = "comment deleted".into();
+                app.status = "コメントを削除しました".into();
             } else {
-                app.status = "no comment on this line".into();
+                app.status = "この行にコメントはありません".into();
             }
         }
         // jump between comments on this page
@@ -5667,7 +5676,7 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                     return Action::Continue;
                 }
             }
-            app.status = format!("unbound key: {:?} {:?}", k.code, k.modifiers);
+            app.status = format!("割り当てのないキー: {:?} {:?}", k.code, k.modifiers);
         }
     }
     Action::Continue
@@ -5684,14 +5693,14 @@ fn in_input(app: &mut App, f: fn(&mut Input)) {
 fn finish_composer(app: &mut App, input: Input) {
     let buf = input.buf;
     if buf.trim().is_empty() {
-        app.status = "empty comment discarded".into();
+        app.status = "空のコメントは破棄しました".into();
     } else if let Some(c) = app.make_comment(buf) {
         app.comments.push(c);
         app.selection = None;
-        app.status = format!("comment saved ({} total)", app.comments.len());
+        app.status = format!("コメントを保存しました（全 {} 件）", app.comments.len());
         app.laid_width = 0; // force rebuild to weave the card
     } else {
-        app.status = "could not anchor comment".into();
+        app.status = "コメントを行に結び付けられません".into();
     }
 }
 
@@ -5892,7 +5901,7 @@ fn dispatch_create(app: &mut App) {
     app.create_state = CreateState::Sent;
     let lines: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
-    queue_commit(app, "create page", vec![EditOp::Insert { anchor: "_end".into(), lines }]);
+    queue_commit(app, "ページの作成", vec![EditOp::Insert { anchor: "_end".into(), lines }]);
     app.status = "ページを作成しています…".into();
 }
 
@@ -5908,7 +5917,7 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
     if app.commit_tx.send(job).is_ok() {
         app.inflight += 1;
     } else {
-        app.status = "commit worker gone — edits are LOCAL ONLY".into();
+        app.status = "コミット処理が停止しました — 編集はこの画面にしか残りません".into();
         // The edit never left the machine: local lines and the server have
         // parted ways, and every diagram on the page must stay as source.
         app.mark_desynced();
@@ -5922,7 +5931,7 @@ fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((label, ops)) = app.undo_stack.pop() else {
-        app.status = empty_history_reason(app, "undo");
+        app.status = empty_history_reason(app, "取り消せる編集がありません");
         return false;
     };
     let redo = invert_ops(&app.lines, &ops);
@@ -5934,18 +5943,20 @@ fn undo(app: &mut App, ctx: &Ctx) -> bool {
     queue_commit(app, &format!("undo {label}"), ops);
     rerender(app, ctx);
     let seated = app.focus_edit(focus);
-    app.status = format!("undid {label} ({} more)", app.undo_stack.len());
+    app.status = format!("{label} を取り消しました（あと {} 件）", app.undo_stack.len());
     seated
 }
 
 /// Why is there nothing to undo/redo? "Never had any" and "the server
 /// moved and took the lineage with it" are different answers, and silence
 /// makes the second look like a broken key.
-fn empty_history_reason(app: &App, what: &str) -> String {
+fn empty_history_reason(app: &App, empty: &str) -> String {
     if app.history_dropped {
-        format!("{what} 履歴は web 側の更新で失効しました")
+        // Which of the two stacks is empty does not matter here: the web
+        // edit dropped both, and that is the whole answer.
+        "履歴は web 側の更新で失効しました".into()
     } else {
-        format!("nothing to {what}")
+        empty.into()
     }
 }
 
@@ -5955,7 +5966,7 @@ fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((label, ops)) = app.redo_stack.pop() else {
-        app.status = empty_history_reason(app, "redo");
+        app.status = empty_history_reason(app, "やり直せる編集がありません");
         return false;
     };
     let undo_ops = invert_ops(&app.lines, &ops);
@@ -5967,7 +5978,7 @@ fn redo(app: &mut App, ctx: &Ctx) -> bool {
     queue_commit(app, &format!("redo {label}"), ops);
     rerender(app, ctx);
     let seated = app.focus_edit(focus);
-    app.status = format!("redid {label}");
+    app.status = format!("{label} をやり直しました");
     seated
 }
 
@@ -5981,11 +5992,11 @@ fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
         return;
     }
     if app.time.is_some() {
-        app.status = "viewing history — read-only (Esc → NOW)".into();
+        app.status = "履歴を表示中 — 読み取り専用（Esc で最新へ）".into();
         return;
     }
     if line >= app.lines.len() {
-        app.status = "related rows cannot be edited (o adds a line at the end)".into();
+        app.status = "関連ページの行は編集できません（o でページ末尾に行を足せます）".into();
         return;
     }
     let text = app.lines[line].text.clone();
@@ -6004,7 +6015,7 @@ fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
     app.follow = true;
     app.laid_width = 0;
     app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-    app.status = "EDIT — ↑↓ move · Enter new line · ^z undo · Esc done".into();
+    app.status = "EDIT — ↑↓ 移動 · Enter 改行 · ^z 取り消し · Esc 終了".into();
 }
 
 /// Commit the caret line's text if it changed (called whenever the caret
@@ -6035,7 +6046,7 @@ fn close_session(app: &mut App) {
 fn leave_session(app: &mut App, ctx: &Ctx) {
     session_commit_dirty(app, ctx);
     close_session(app);
-    app.status = "✓ done".into();
+    app.status = "✓ 完了".into();
 }
 
 /// `^z` (undo) / `^r` (redo) inside the session — SPEC §6 says the safety
@@ -6170,7 +6181,7 @@ fn read_select_line(app: &mut App, down: bool) {
     }
     app.move_cursor(down);
     if let Some((a, b)) = app.selection.map(|s| s.range()) {
-        app.status = format!("selected {} line(s) · y copy · c comment · Esc clear", b - a + 1);
+        app.status = format!("{} 行を選択 · y コピー · c コメント · Esc 解除", b - a + 1);
     }
 }
 
@@ -6346,7 +6357,7 @@ fn session_select_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let Some(s) = app.session.as_ref() else { return };
     app.selection = Some(Selection { anchor, cursor: s.line });
     let (a, b) = (anchor.min(s.line), anchor.max(s.line));
-    app.status = format!("selected {} line(s) · ⌫ delete · Esc clear", b - a + 1);
+    app.status = format!("{} 行を選択 · ⌫ 削除 · Esc 解除", b - a + 1);
 }
 
 /// ⌫ / Del with a selection: delete every selected line at once. This is
@@ -6371,7 +6382,7 @@ fn session_delete_selection(app: &mut App, ctx: &Ctx) {
     session_commit_dirty(app, ctx);
     let n = ids.len();
     let ops: Vec<EditOp> = ids.into_iter().map(|id| EditOp::Delete { id }).collect();
-    do_edit(app, ctx, "delete lines", ops);
+    do_edit(app, ctx, "複数行の削除", ops);
     // Seat the caret where the range was, as `^k` does for one line.
     let seat = a.max(1).min(app.lines.len().saturating_sub(1));
     let text = app.lines[seat].text.clone();
@@ -6385,9 +6396,9 @@ fn session_delete_selection(app: &mut App, ctx: &Ctx) {
     app.follow = true;
     app.laid_width = 0;
     app.status = if title_skipped {
-        format!("✓ deleted {n} line(s)（タイトル行は残した）· ^z to undo")
+        format!("✓ {n} 行削除（タイトル行は残しました）· ^z で戻せます")
     } else {
-        format!("✓ deleted {n} line(s) · ^z to undo")
+        format!("✓ {n} 行削除 · ^z で戻せます")
     };
 }
 
@@ -6422,7 +6433,7 @@ fn session_kill(app: &mut App, ctx: &Ctx) {
     }
     session_commit_dirty(app, ctx);
     let id = app.lines[line].id.clone();
-    do_edit(app, ctx, "delete line", vec![EditOp::Delete { id }]);
+    do_edit(app, ctx, "行の削除", vec![EditOp::Delete { id }]);
     // The caret takes the place the line left behind: the line that slid
     // up into this index, or the one above when we killed the last line.
     let seat = line.min(app.lines.len().saturating_sub(1));
@@ -6437,7 +6448,7 @@ fn session_kill(app: &mut App, ctx: &Ctx) {
     app.cursor = seat;
     app.follow = true;
     app.laid_width = 0;
-    app.status = "✓ deleted line · ^z to undo".into();
+    app.status = "✓ 1行削除 · ^z で戻せます".into();
 }
 
 /// ↑/↓ inside the session: commit the dirty line, carry the caret to the
@@ -6473,7 +6484,7 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let last = app.lines.len().saturating_sub(1) as i32;
     let target = (cur_line + delta).clamp(0, last);
     if target == cur_line {
-        app.status = if delta < 0 { "top of page".into() } else { "end of page — Enter adds a line".into() };
+        app.status = if delta < 0 { "ページの先頭です".into() } else { "ページの末尾です — Enter で行を足せます".into() };
         return;
     }
     let line = target as usize;
@@ -6552,7 +6563,7 @@ fn session_split(app: &mut App, ctx: &Ctx) {
                     EditOp::Replace { id: app.lines[line - 1].id.clone(), text: String::new() },
                     EditOp::Replace { id: app.lines[line].id.clone(), text: String::new() },
                 ];
-                do_edit(app, ctx, "leave code block", ops);
+                do_edit(app, ctx, "コードブロックの終了", ops);
                 if let Some(s) = app.session.as_mut() {
                     s.input = Input { buf: String::new(), cur: 0 };
                     s.orig = String::new();
@@ -6585,7 +6596,7 @@ fn session_split(app: &mut App, ctx: &Ctx) {
             EditOp::Replace { id, text: String::new() },
             EditOp::Insert { anchor, lines: vec![(new_line_id(), String::new())] },
         ];
-        do_edit(app, ctx, "new line", ops);
+        do_edit(app, ctx, "改行", ops);
         if let Some(s) = app.session.as_mut() {
             s.line = line + 1;
             s.input = Input { buf: String::new(), cur: 0 };
@@ -6612,7 +6623,7 @@ fn session_split(app: &mut App, ctx: &Ctx) {
         EditOp::Replace { id, text: head },
         EditOp::Insert { anchor, lines: vec![(new_line_id(), tail.clone())] },
     ];
-    do_edit(app, ctx, "new line", ops);
+    do_edit(app, ctx, "改行", ops);
     if let Some(s) = app.session.as_mut() {
         s.line = line + 1;
         s.input = Input { buf: tail.clone(), cur: caret_new };
@@ -6642,7 +6653,7 @@ fn session_open_below(app: &mut App, ctx: &Ctx, line: usize, indent: String, tex
         }
     }
     ops.push(EditOp::Insert { anchor, lines: vec![(new_line_id(), text.clone())] });
-    do_edit(app, ctx, "new line", ops);
+    do_edit(app, ctx, "改行", ops);
     if let Some(s) = app.session.as_mut() {
         s.line = line + 1;
         s.input = Input { buf: text.clone(), cur: indent.len().min(text.len()) };
@@ -6660,7 +6671,7 @@ fn session_join_up(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line == 0 {
-        app.status = "top of page".into();
+        app.status = "ページの先頭です".into();
         return;
     }
     let prev_text = app.lines[line - 1].text.clone();
@@ -6669,7 +6680,7 @@ fn session_join_up(app: &mut App, ctx: &Ctx) {
         EditOp::Replace { id: app.lines[line - 1].id.clone(), text: merged.clone() },
         EditOp::Delete { id: app.lines[line].id.clone() },
     ];
-    do_edit(app, ctx, "join", ops);
+    do_edit(app, ctx, "行の結合", ops);
     if let Some(s) = app.session.as_mut() {
         s.line = line - 1;
         s.input = Input { buf: merged.clone(), cur: prev_text.len() };
@@ -6685,7 +6696,7 @@ fn session_join_down(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line + 1 >= app.lines.len() {
-        app.status = "end of page".into();
+        app.status = "ページの末尾です".into();
         return;
     }
     let next_text = app.lines[line + 1].text.clone();
@@ -6694,7 +6705,7 @@ fn session_join_down(app: &mut App, ctx: &Ctx) {
         EditOp::Replace { id: app.lines[line].id.clone(), text: merged.clone() },
         EditOp::Delete { id: app.lines[line + 1].id.clone() },
     ];
-    do_edit(app, ctx, "join", ops);
+    do_edit(app, ctx, "行の結合", ops);
     if let Some(s) = app.session.as_mut() {
         s.input = Input { buf: merged.clone(), cur: buf.len() };
         s.orig = merged;
@@ -6753,7 +6764,7 @@ fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
         return;
     }
     if app.time.is_some() {
-        app.status = "viewing history — read-only (Esc → NOW)".into();
+        app.status = "履歴を表示中 — 読み取り専用（Esc で最新へ）".into();
         return;
     }
     let cur = app.cursor_src();
@@ -6772,7 +6783,7 @@ fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
     };
     let new_id = new_line_id();
     let ops = vec![EditOp::Insert { anchor, lines: vec![(new_id.clone(), indent.clone())] }];
-    do_edit(app, ctx, "new line", ops);
+    do_edit(app, ctx, "改行", ops);
     if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
         enter_session(app, ctx, idx, indent.len());
     }
@@ -6833,7 +6844,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             // both un-selects and leaves.
             if app.selection.is_some() {
                 app.selection = None;
-                app.status = "selection cleared".into();
+                app.status = "選択を解除しました".into();
             } else {
                 leave_session(app, ctx);
             }
@@ -6952,7 +6963,7 @@ fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
         EditOp::Replace { id: app.lines[line].id.clone(), text: head },
         EditOp::Insert { anchor, lines: inserted },
     ];
-    do_edit(app, ctx, "paste", ops);
+    do_edit(app, ctx, "貼り付け", ops);
     if let (Some(s), Some(last_id)) = (app.session.as_mut(), last_id) {
         if let Some(idx) = app.lines.iter().position(|l| l.id == last_id) {
             s.line = idx;
@@ -6980,7 +6991,7 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
         now_secs()
     ));
     if let Err(e) = std::fs::write(&path, format!("{original}\n")) {
-        app.status = format!("temp file failed: {e}");
+        app.status = format!("一時ファイルを作れません: {e}");
         return;
     }
     let editor = std::env::var("VISUAL")
@@ -7002,28 +7013,28 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
     let edited = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     if !ok {
-        app.status = format!("editor aborted ({editor}) — nothing written");
+        app.status = format!("エディタが中断しました（{editor}）— 何も書き込んでいません");
         return;
     }
     let edited = edited.strip_suffix('\n').unwrap_or(&edited).to_string();
     if edited == original {
-        app.status = "no changes".into();
+        app.status = "変更はありません".into();
         return;
     }
     let new_lines: Vec<String> = edited.split('\n').map(str::to_string).collect();
     if new_lines.iter().all(|l| l.trim().is_empty()) {
-        app.status = "page emptied — refusing (delete pages in the browser)".into();
+        app.status = "ページが空になるため中止しました（ページの削除はブラウザで）".into();
         return;
     }
     let old: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     let ops = diff_to_ops(&old, &new_lines);
     if ops.is_empty() {
-        app.status = "no changes".into();
+        app.status = "変更はありません".into();
     } else {
         let n = ops.len();
-        do_edit(app, ctx, "editor", ops);
-        app.status = format!("✓ editor: {n} op(s) committed · u to undo");
+        do_edit(app, ctx, "エディタ", ops);
+        app.status = format!("✓ エディタの変更を {n} 件コミットしました · u で戻せます");
     }
 }
 
@@ -7061,7 +7072,7 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
         }
         CommitOutcome::Skipped => {}
         CommitOutcome::Failed { label, msg } => {
-            app.status = format!("commit failed: {label} — {msg}");
+            app.status = format!("コミットに失敗しました: {label} — {msg}");
             app.mark_desynced();
             if app.create_state == CreateState::Sent && page_is_uncreated(app) {
                 // The page was never made. Let the next edit try again
@@ -7114,7 +7125,7 @@ fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::Page) {
     } else {
         // `do_edit` applies locally, stacks the undo and queues the commit
         // — the same path any other edit takes, now that there is a page.
-        do_edit(app, ctx, "sync new page", ops);
+        do_edit(app, ctx, "新規ページの同期", ops);
         app.status = "✓ ページを作成しました".into();
     }
     reanchor_cursor_session(app, cursor_id, session_id);
@@ -7458,7 +7469,7 @@ fn recover_conflict(app: &mut App, ctx: &Ctx) {
     // set_page cleared session + undo lineage and marked us synced again.
     match stash {
         None => {
-            app.status = "page changed by someone else — reloaded".into();
+            app.status = "他の人がページを更新しました — 読み直しました".into();
         }
         Some((id, buf, caret)) => {
             if let Some(idx) = app.lines.iter().position(|l| l.id == id) {
@@ -7466,7 +7477,7 @@ fn recover_conflict(app: &mut App, ctx: &Ctx) {
                 if let Some(s) = app.session.as_mut() {
                     s.input = Input { buf: buf.clone(), cur: caret.min(buf.len()) };
                 }
-                app.status = "page changed by someone else — reloaded, your line kept".into();
+                app.status = "他の人がページを更新しました — 読み直し、編集中の行はそのままです".into();
             } else if !buf.trim().is_empty() {
                 // The line is gone: rescue the text as a fresh last line.
                 let new_id = new_line_id();
@@ -7474,13 +7485,13 @@ fn recover_conflict(app: &mut App, ctx: &Ctx) {
                     anchor: "_end".into(),
                     lines: vec![(new_id.clone(), buf.clone())],
                 }];
-                do_edit(app, ctx, "rescue", ops);
+                do_edit(app, ctx, "退避", ops);
                 if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
                     enter_session(app, ctx, idx, buf.len());
                 }
-                app.status = "your line was deleted by someone else — text rescued at the end".into();
+                app.status = "編集中の行が他の人に削除されました — 内容はページ末尾に退避しました".into();
             } else {
-                app.status = "page changed by someone else — reloaded".into();
+                app.status = "他の人がページを更新しました — 読み直しました".into();
             }
         }
     }
@@ -7493,7 +7504,7 @@ fn recover_conflict(app: &mut App, ctx: &Ctx) {
 fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     if app.time.is_none() {
         if dir > 0 {
-            app.status = "already at NOW".into();
+            app.status = "すでに最新です".into();
             return;
         }
         match ctx.client.list_snapshots(&app.project, &app.page_id) {
@@ -7502,8 +7513,8 @@ fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
                 app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
                 show_snapshot(app, ctx, last);
             }
-            Ok(_) => app.status = "no snapshots for this page".into(),
-            Err(e) => app.status = format!("snapshot list failed: {e}"),
+            Ok(_) => app.status = "このページに履歴はありません".into(),
+            Err(e) => app.status = format!("履歴一覧を取得できません: {e}"),
         }
         return;
     }
@@ -7513,7 +7524,7 @@ fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     };
     if dir < 0 {
         if pos == 0 {
-            app.status = "oldest snapshot".into();
+            app.status = "最も古い履歴です".into();
         } else {
             show_snapshot(app, ctx, pos - 1);
         }
@@ -7521,7 +7532,7 @@ fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
         // Past the newest snapshot is NOW — but only if NOW can be fetched.
         // See the Esc path: a failed reload keeps the snapshot, read-only.
         if reload_page(app, ctx) {
-            app.status = "NOW".into();
+            app.status = "最新".into();
         }
     } else {
         show_snapshot(app, ctx, pos + 1);
@@ -7546,7 +7557,7 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
                 s
             }
             Err(e) => {
-                app.status = format!("snapshot fetch failed: {e}");
+                app.status = format!("履歴を取得できません: {e}");
                 return;
             }
         },
@@ -7573,7 +7584,7 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.start_image_loads(ctx);
     app.time.as_mut().unwrap().pos = idx;
     app.status = format!(
-        "⏪ {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
+        "⏪ {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新",
         idx + 1,
         len,
         cosense::theme::format_local(created),
@@ -7594,7 +7605,7 @@ fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
             true
         }
         Err(e) => {
-            app.status = format!("reload failed: {e}");
+            app.status = format!("読み直しに失敗しました: {e}");
             false
         }
     }
@@ -7981,9 +7992,9 @@ fn jump_comment(app: &mut App, forward: bool) {
     match target {
         Some(src) => {
             app.goto_src(src);
-            app.status = format!("comment at line {}", src + 1);
+            app.status = format!("{} 行目のコメント", src + 1);
         }
-        None => app.status = "no more comments".into(),
+        None => app.status = "これ以上コメントはありません".into(),
     }
 }
 
@@ -8015,11 +8026,11 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         KeyCode::Char('y') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
             let text = format_all(&app.comments);
             app.status = if app.comments.is_empty() {
-                "no comments to copy".into()
+                "コピーするコメントがありません".into()
             } else if copy_to_clipboard(&text) {
-                format!("✓ copied {} comment(s)", app.comments.len())
+                format!("✓ コメント {} 件をコピーしました", app.comments.len())
             } else {
-                "copy failed — no clipboard tool and the terminal refused OSC 52".into()
+                "コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました".into()
             };
             Act::None
         }
@@ -8259,9 +8270,9 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
     let hint = match (layout.preview.is_some(), ix.focus) {
-        (true, Pane::List) => "j/k · type filter · Enter open · Tab excerpt · Esc/[ back · ] forward",
-        (true, Pane::Preview) => "j/k scroll · Tab list · Enter open · Esc/[ back · ] forward",
-        (false, _) => "j/k · type filter · Enter open · Esc/[ back · ] forward",
+        (true, Pane::List) => "j/k · 文字で絞り込み · Enter 開く · Tab 抜粋 · Esc/[ 戻る · ] 進む",
+        (true, Pane::Preview) => "j/k 抜粋をスクロール · Tab 一覧 · Enter 開く · Esc/[ 戻る · ] 進む",
+        (false, _) => "j/k · 文字で絞り込み · Enter 開く · Esc/[ 戻る · ] 進む",
     };
     // Where in the list the reader is — the footer's job here as on the
     // page (`L12/205`), which is why the list needs no scrollbar.
@@ -8271,7 +8282,7 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         format!("{}/{}", cursor + 1, row_count)
     };
     f.render_widget(
-        Paragraph::new(format!(" index {pos} · {hint}")).style(Style::default().fg(CHROME_DIM)),
+        Paragraph::new(format!(" 一覧 {pos} · {hint}")).style(Style::default().fg(CHROME_DIM)),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 }
@@ -8358,14 +8369,14 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         .selection
         .map(|s| {
             let (a, b) = s.range();
-            format!("  [sel {}-{}]", a + 1, b + 1)
+            format!("  [選択 {}-{}]", a + 1, b + 1)
         })
         .unwrap_or_default();
     // Unread badge: first visit anywhere, or how many lines changed since.
     let unread = match (app.read_at, app.unread_count()) {
-        (None, _) => "  · first visit".to_string(),
+        (None, _) => "  · 初回".to_string(),
         (Some(_), 0) => String::new(),
-        (Some(_), n) => format!("  · {n} new"),
+        (Some(_), n) => format!("  · 未読 {n}"),
     };
     // `project/title`, the same shape as the page's URL — so a cross-project
     // hop changes both the label and the Cosense-site-derived header color.
@@ -8384,12 +8395,12 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         .unwrap_or_default();
     f.render_widget(
         Paragraph::new(Line::from(format!(
-            " {}/{}{}{}{}  ({} comment(s)){}{} ",
+            " {}/{}{}{}{}  （コメント {}）{}{} ",
             app.project,
             app.title,
             time_badge,
-            if app.mode == Mode::Source { "  [source]" } else { "" },
-            if app.editable { "" } else { "  [read-only]" },
+            if app.mode == Mode::Source { "  [ソース]" } else { "" },
+            if app.editable { "" } else { "  [読み取り専用]" },
             app.comments.len(),
             unread,
             sel_info
@@ -8877,9 +8888,9 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         f.render_widget(Clear, r);
         let (a, b) = app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor));
         let label = if a == b {
-            format!(" comment on line {} ", a + 1)
+            format!(" {} 行目へのコメント ", a + 1)
         } else {
-            format!(" comment on lines {}-{} ", a + 1, b + 1)
+            format!(" {}-{} 行目へのコメント ", a + 1, b + 1)
         };
         let (before, after) = input.parts();
         f.render_widget(
@@ -9042,7 +9053,7 @@ fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: &Ctx) -> Li
 fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     let (title, items, cursor): (String, Vec<String>, usize) = match app.overlay.as_ref() {
         Some(Overlay::Links { items, cursor }) => (
-            "links on this line".into(),
+            "この行のリンク".into(),
             items.iter().map(LinkItem::label).collect(),
             *cursor,
         ),
@@ -9070,61 +9081,64 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                     // and its id is only needed by `e` (browser deep-link),
                     // so neither is repeated here.
                     vec![
-                        format!("line      {}", s + 1),
+                        format!("行        {}", s + 1),
                         format!(
-                            "updated   {}  ({} ago)   {}",
+                            "更新      {}  （{}前）  {}",
                             cosense::theme::format_local(l.updated),
                             relative_age(l.updated),
                             name_of(&l.user_id)
                         ),
                         format!(
-                            "created   {}  ({} ago)",
+                            "作成      {}  （{}前）",
                             cosense::theme::format_local(l.created),
                             relative_age(l.created)
                         ),
                     ]
                 }
-                None => vec!["no line under the cursor".into()],
+                None => vec!["カーソルの下に行がありません".into()],
             };
-            ("line detail".into(), items, usize::MAX)
+            ("行の詳細".into(), items, usize::MAX)
         }
         Some(Overlay::Help) => {
+            // The label column is 12 display cells wide. Japanese labels
+            // are two cells per character, so they are padded to the same
+            // width here rather than by a `{:<10}` that counts bytes.
             let mut keys: Vec<String> = vec![
-                "move      j/k · g/G · ^u/^d · PgUp/PgDn".into(),
-                "link      Enter/f open: page · 📎 file → download dir · ↗ URL → browser".into(),
-                "mouse     click link/open · click row/move · drag/select · wheel/scroll".into(),
-                "history   [ back · ] forward".into(),
-                "mode      Tab view⇄source".into(),
-                "index     ^o list + excerpt · Esc/[ back · ] forward".into(),
+                "移動        j/k · g/G · ^u/^d · PgUp/PgDn".into(),
+                "リンク      Enter/f で開く: ページ · 📎 ファイル → 保存先 · ↗ URL → ブラウザ".into(),
+                "マウス      クリックでリンク/行移動 · ドラッグで選択 · ホイールでスクロール".into(),
+                "移動履歴    [ 戻る · ] 進む".into(),
+                "表示切替    Tab 表示⇄ソース".into(),
+                "ページ一覧  ^o 一覧＋抜粋 · Esc/[ 戻る · ] 進む".into(),
             ];
             if app.editable {
                 keys.extend([
-                    "edit      e line end · i line start · o/O new line · double-click — modeless session".into(),
-                    "          in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done".into(),
-                    "          x delete line/selection · ^e whole page in $EDITOR · commits are automatic".into(),
-                    "undo      u undo · ^r redo (every commit is reversible)".into(),
+                    "編集        e 行末 · i 行頭 · o/O 行を追加 · ダブルクリック — モードレスな編集".into(),
+                    "            編集中: そのまま入力 · ↑↓ 行移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Esc 終了".into(),
+                    "            x 行/選択を削除 · ^e ページ全体を $EDITOR で編集 · コミットは自動".into(),
+                    "取り消し    u 取り消し · ^r やり直し（どのコミットも戻せます）".into(),
                 ]);
             } else {
-                keys.push("edit      unavailable — this account is not a project member".into());
+                keys.push("編集        できません — このアカウントはプロジェクトのメンバーではありません".into());
             }
             keys.extend([
-                "browser   w open page at cursor line".into(),
-                "time      ← older snapshot · → newer · Esc back to NOW (read-only while back)".into(),
-                "comment   v select · c add · d delete · ^n/^p jump".into(),
-                "detail    t who/when edited this line".into(),
-                "diagram   code:mmd / code:mermaid / code:<name>.mmd draw as pictures,".into(),
-                "          screenshotted from the real Cosense page by headless Chrome".into(),
-                "          (COSENSE_CHROME to point at it). No browser, a private page".into(),
-                "          without COSENSE_SID, or a Mermaid error → the code block stays.".into(),
-                "          R renders this page's missing web artifacts. Opening a page".into(),
-                "          only shows cached ones: a browser is expensive, so it starts".into(),
-                "          when you ask. COSENSE_WEB_RENDER=auto|off changes that;".into(),
-                "          COSENSE_WEB_IDLE_SECS is how long the browser stays warm.".into(),
-                "output    y copy all comments".into(),
-                "list      l comments · ? help".into(),
-                "quit      q  (Esc cancels; comments print to stdout)".into(),
+                "ブラウザ    w カーソル行でページを開く".into(),
+                "ページ履歴  ← 古い履歴 · → 新しい · Esc 最新へ戻る（履歴中は読み取り専用）".into(),
+                "コメント    v 選択 · c 追加 · d 削除 · ^n/^p 移動".into(),
+                "行の詳細    t この行をいつ誰が更新したか".into(),
+                "図          code:mmd / code:mermaid / code:<名前>.mmd を図として描く。".into(),
+                "            ヘッドレス Chrome で実際の Cosense ページを撮って切り出す".into(),
+                "            （場所は COSENSE_CHROME）。ブラウザが無い、COSENSE_SID 無しで".into(),
+                "            非公開ページ、Mermaid のエラーのときはコードブロックのまま。".into(),
+                "            R でこのページの未生成分を描く。ページを開いただけでは".into(),
+                "            キャッシュ済みしか出ない（ブラウザは高価なので、頼んだときに".into(),
+                "            起動する）。COSENSE_WEB_RENDER=auto|off で振る舞いを変えられ、".into(),
+                "            COSENSE_WEB_IDLE_SECS でブラウザを残す長さを決められる。".into(),
+                "出力        y コメントを全件コピー".into(),
+                "画面        l コメント一覧 · ? ヘルプ".into(),
+                "終了        q（Esc で取消。コメントは標準出力へ）".into(),
             ]);
-            ("keys".into(), keys, usize::MAX)
+            ("キー割り当て".into(), keys, usize::MAX)
         }
         None => return,
     };
@@ -9165,7 +9179,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(format!("{marker}{it}"), style)));
     }
     lines.push(Line::from(Span::styled(
-        " ↑/↓ move · Enter open · Esc close ",
+        " ↑/↓ 移動 · Enter 開く · Esc 閉じる ",
         Style::default().fg(CHROME_DIM),
     )));
     f.render_widget(
@@ -9397,8 +9411,8 @@ mod tests {
         // Esc asks for NOW. The fetch fails, so there is no NOW to show.
         handle_key(&mut app, &ctx, key(KeyCode::Esc));
         assert!(app.time.is_some(), "the snapshot stays on screen");
-        assert_ne!(app.status, "NOW", "and it is not labelled as the live page");
-        assert!(app.status.contains("reload failed"), "the reason is shown: {}", app.status);
+        assert_ne!(app.status, "最新", "and it is not labelled as the live page");
+        assert!(app.status.contains("読み直しに失敗"), "the reason is shown: {}", app.status);
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no diagram work");
     }
 
@@ -9412,7 +9426,7 @@ mod tests {
         // Right from the newest snapshot is the other way out of history.
         travel(&mut app, &ctx, 1);
         assert!(app.time.is_some());
-        assert_ne!(app.status, "NOW");
+        assert_ne!(app.status, "最新");
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
     }
 
@@ -9429,7 +9443,7 @@ mod tests {
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict);
         assert!(app.web_unsynced, "a failed recovery leaves us divergent");
         assert!(
-            app.status.contains("reload failed"),
+            app.status.contains("読み直しに失敗"),
             "the real reason is not overwritten: {}",
             app.status
         );
@@ -9544,7 +9558,7 @@ mod tests {
     fn a_stale_sid_polls_fast_from_the_first_second() {
         let mut app = page(&["a"]);
         app.ws_attempted = true; // a sid exists...
-        app.status = "auth: pat · edit enabled · sync: poll · ? help".into();
+        app.status = "認証: pat · 編集可 · 同期: poll · ? ヘルプ".into();
         // ...but nothing has joined a room, so the plan is still the fast one.
         assert_eq!(app.sync_state, SyncState::Polling);
         assert_eq!(app.sync_state.poll_interval(), Duration::from_secs(3));
@@ -9554,18 +9568,18 @@ mod tests {
             app.poll_ctrl_rx_for_test().recv().unwrap(),
             Duration::from_secs(3)
         );
-        assert!(app.status.contains("sync: reconnecting"));
+        assert!(app.status.contains("同期: 再接続中"));
     }
 
     #[test]
     fn only_a_proven_room_relaxes_the_poll_and_a_drop_tightens_it_again() {
         let mut app = page(&["a"]);
         app.ws_attempted = true;
-        app.status = "auth: sid · edit enabled · sync: poll · ? help".into();
+        app.status = "認証: sid · 編集可 · 同期: poll · ? ヘルプ".into();
         app.set_sync_state(SyncState::Live);
-        assert!(app.status.contains("sync: ws"));
+        assert!(app.status.contains("同期: ws"));
         app.set_sync_state(SyncState::Reconnecting);
-        assert!(app.status.contains("sync: reconnecting"));
+        assert!(app.status.contains("同期: 再接続中"));
         let rx = app.poll_ctrl_rx_for_test();
         assert_eq!(rx.recv().unwrap(), Duration::from_secs(60));
         // The drop is delivered as its own message, so the sleeping poller
@@ -9579,7 +9593,7 @@ mod tests {
         let mut app = page(&["a"]);
         app.title = "t".into();
         app.ws_attempted = true;
-        app.status = "auth: sid · edit enabled · sync: poll · ? help".into();
+        app.status = "認証: sid · 編集可 · 同期: poll · ? ヘルプ".into();
         handle_ws_event(
             &mut app,
             &ctx,
@@ -9590,7 +9604,7 @@ mod tests {
             },
         );
         assert_eq!(app.sync_state, SyncState::Live);
-        assert!(app.status.contains("sync: ws"));
+        assert!(app.status.contains("同期: ws"));
 
         // The reader moves to another page. The old room is gone; nothing
         // has joined the new one yet, so the insurance poll must be fast.
@@ -9660,7 +9674,7 @@ mod tests {
         let mut app = page(&["a"]);
         app.title = "other".into();
         app.ws_attempted = true;
-        app.status = "auth: sid · edit enabled · sync: ws · ? help".into();
+        app.status = "認証: sid · 編集可 · 同期: ws · ? ヘルプ".into();
         app.sync_state = SyncState::Live;
         // The rejoin fails, repeatedly. Every failure edge says so.
         for _ in 0..3 {
@@ -9675,7 +9689,7 @@ mod tests {
             );
         }
         assert_eq!(app.sync_state.poll_interval(), Duration::from_secs(3));
-        assert!(app.status.contains("sync: reconnecting"));
+        assert!(app.status.contains("同期: 再接続中"));
     }
 
     #[test]
@@ -9945,7 +9959,7 @@ mod tests {
         assert!(text.iter().any(|t| t.contains("flowchart LR")));
         assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })));
         assert!(
-            app.hint_text(&[]).contains("showing source"),
+            app.hint_text(&[]).contains("ソースを表示します"),
             "and the reader is told: {}",
             app.hint_text(&[]),
         );
@@ -10983,7 +10997,7 @@ mod tests {
                 key: key.clone(),
                 rescale: true,
                 attempted: None,
-                res: WebOutcome::Failed("no cached artifact to resize".into()),
+                res: WebOutcome::Failed("作り直せる図はありません".into()),
             })
             .unwrap();
         app.drain_web_renders();
@@ -11246,7 +11260,7 @@ mod tests {
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
         let key = reqs[0].cache_key();
         app.web_pending.insert(key.clone());
-        assert!(app.hint_text(&[]).contains("? help"), "hints by default");
+        assert!(app.hint_text(&[]).contains("? ヘルプ"), "hints by default");
         app.web_tx
             .send(WebMsg {
                 gen: app.gen_now(),
@@ -11259,7 +11273,7 @@ mod tests {
         assert!(app.drain_web_renders());
         // It never touches the status line — it has its own slot.
         assert!(app.status.is_empty());
-        assert!(app.hint_text(&[]).contains("showing source"), "the reader is told once");
+        assert!(app.hint_text(&[]).contains("ソースを表示します"), "the reader is told once");
         // It holds the line for its few seconds…
         assert!(!app.expire_web_notice());
         // …and then hands the row back to the key hints.
@@ -11267,7 +11281,7 @@ mod tests {
         app.web_notice = Some((msg, std::time::Instant::now()));
         assert!(app.expire_web_notice());
         assert!(app.web_notice.is_none());
-        assert!(app.hint_text(&[]).contains("? help"), "hints are visible again");
+        assert!(app.hint_text(&[]).contains("? ヘルプ"), "hints are visible again");
         assert!(!app.expire_web_notice(), "and it stays gone");
     }
 
@@ -11278,27 +11292,27 @@ mod tests {
         // status-vs-note ordering it is about.
         app.sync_state = capability::SyncState::Live;
         // Something the reader must not miss is already on the status line.
-        app.status = "commit failed: line 4 — 500".into();
-        app.note_web_failure("diagram: no Chrome found (showing source)".into());
+        app.status = "コミットに失敗しました: line 4 — 500".into();
+        app.note_web_failure("diagram: Chrome が見つかりません（ソースを表示します）".into());
         assert_eq!(
             app.hint_text(&[]),
-            "commit failed: line 4 — 500",
+            "コミットに失敗しました: line 4 — 500",
             "status outranks a diagram note",
         );
         // When the note times out it takes only itself with it.
         let (msg, _) = app.web_notice.clone().unwrap();
         app.web_notice = Some((msg, std::time::Instant::now()));
         assert!(app.expire_web_notice());
-        assert_eq!(app.status, "commit failed: line 4 — 500", "the real message survives");
-        assert_eq!(app.hint_text(&[]), "commit failed: line 4 — 500");
+        assert_eq!(app.status, "コミットに失敗しました: line 4 — 500", "the real message survives");
+        assert_eq!(app.hint_text(&[]), "コミットに失敗しました: line 4 — 500");
 
         // And with the status line free, the note would have shown.
-        app.note_web_failure("diagram: browser timed out (showing source)".into());
+        app.note_web_failure("diagram: ブラウザがタイムアウトしました（ソースを表示します）".into());
         app.status.clear();
-        assert!(app.hint_text(&[]).contains("browser timed out"));
+        assert!(app.hint_text(&[]).contains("ブラウザがタイムアウト"));
         // The edit session and cursor links still outrank both.
         let links = vec![LinkItem::Page("Somewhere".into())];
-        assert!(app.hint_text(&links).contains("Enter/f open"));
+        assert!(app.hint_text(&links).contains("Enter/f で開く"));
     }
 
     #[test]
@@ -12173,6 +12187,28 @@ mod tests {
         assert!(app.index.is_none(), "Esc uses the same back route");
     }
 
+    /// Eyeball the help and footer: prints the drawn screen so the mixed
+    /// language can be seen rather than argued about.
+    /// `cargo test -- --ignored --nocapture help_screen_dump`
+    #[test]
+    #[ignore]
+    fn help_screen_dump() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["ページ", "本文の行"]);
+        app.editable = true;
+        app.overlay = Some(Overlay::Help);
+        let mut t = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect();
+            println!("|{}|", row.trim_end());
+        }
+    }
+
     /// Eyeball the index: prints the drawn screen so the look can be
     /// judged, not just asserted. `cargo test -- --ignored --nocapture
     /// index_screen_dump`
@@ -12415,7 +12451,7 @@ mod tests {
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
         handle_session_key(&mut app, &ctx, key(KeyCode::Delete));
         assert_eq!(app.lines[0].text, "title", "the title stayed");
-        assert!(app.status.contains("タイトル行は残した"), "status: {}", app.status);
+        assert!(app.status.contains("タイトル行は残しました"), "status: {}", app.status);
     }
 
     /// "Web edits are slow" has three different causes, and the footer
@@ -12431,8 +12467,8 @@ mod tests {
         assert_eq!(app.sync_notice(), None, "live and idle says nothing");
 
         app.sync_state = capability::SyncState::Polling;
-        assert_eq!(app.sync_notice().as_deref(), Some("sync: poll"));
-        assert!(app.hint_text(&[]).starts_with("sync: poll · "), "and it leads the footer");
+        assert_eq!(app.sync_notice().as_deref(), Some("同期: poll"));
+        assert!(app.hint_text(&[]).starts_with("同期: poll · "), "and it leads the footer");
 
         app.sync_state = capability::SyncState::Live;
         app.ws_pending.push_back(commit("c1", "p0", "pid", "someone", vec![]));
@@ -13154,7 +13190,7 @@ mod tests {
         handle_key(&mut app, &ctx, shift(KeyCode::Down));
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
         assert_eq!(app.cursor, 3, "the cursor carries the far end");
-        assert!(app.status.contains("3 line(s)"), "status: {}", app.status);
+        assert!(app.status.contains("3 行を選択"), "status: {}", app.status);
 
         // It is the same selection the rest of READ acts on.
         assert_eq!(copy_payload(&app, false).unwrap().0, "one\ntwo\nthree");
@@ -13424,7 +13460,7 @@ mod tests {
         dispatch_create(&mut app);
         let jobs = drain_jobs(&mut app);
         assert_eq!(jobs.len(), 1, "one create, whatever was typed");
-        assert_eq!(jobs[0].0, "create page");
+        assert_eq!(jobs[0].0, "ページの作成");
         match &jobs[0].1[0] {
             EditOp::Insert { anchor, lines } => {
                 assert_eq!(anchor, "_end");
@@ -13443,7 +13479,7 @@ mod tests {
         // Even after it lands, further typing waits for the page to come
         // back with an id instead of creating a second one.
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Done {
-            label: "create page".into(),
+            label: "ページの作成".into(),
             title: "new title".into(),
             commit_id: String::new(),
         });
@@ -13541,7 +13577,7 @@ mod tests {
         drain_jobs(&mut app);
 
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Failed {
-            label: "create page".into(),
+            label: "ページの作成".into(),
             msg: "500".into(),
         });
         assert_eq!(app.create_state, CreateState::Idle, "not stuck as sent");
@@ -13849,7 +13885,7 @@ mod tests {
         do_edit(&mut app, &ctx, "line 3", vec![EditOp::Replace { id: "id2".into(), text: "x".into() }]);
         assert!(!app.history_dropped);
         redo(&mut app, &ctx);
-        assert_eq!(app.status, "nothing to redo");
+        assert_eq!(app.status, "やり直せる編集がありません");
     }
 
     /// The undo reflex must not depend on which mode you are in: `^z`
@@ -13923,7 +13959,7 @@ mod tests {
         // Nothing left to undo: the session survives that too.
         handle_session_key(&mut app, &ctx, ctrl('z'));
         assert!(app.session.is_some());
-        assert_eq!(app.status, "nothing to undo");
+        assert_eq!(app.status, "取り消せる編集がありません");
     }
 
     #[test]

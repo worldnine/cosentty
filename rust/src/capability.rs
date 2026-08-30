@@ -73,7 +73,7 @@ impl SyncState {
         match self {
             SyncState::Polling => "poll",
             SyncState::Live => "ws",
-            SyncState::Reconnecting => "reconnecting",
+            SyncState::Reconnecting => "再接続中",
         }
     }
 }
