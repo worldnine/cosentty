@@ -102,6 +102,10 @@ fn diagram_max_cols(text_w: u16) -> u16 {
 /// Rows reserved for an image that is still downloading. The real height
 /// replaces it (and the layout is rebuilt) once the image arrives.
 const IMAGE_PLACEHOLDER_H: u16 = 8;
+/// The tallest a picture may be drawn, in rows. Beyond this the reader is
+/// scrolling through one image instead of reading a page; the picture is
+/// scaled down (keeping its shape) so the text around it stays reachable.
+const MAX_IMAGE_ROWS: u16 = 20;
 /// …and how wide, while a mixed line is being laid out without it.
 const IMAGE_PLACEHOLDER_W: u16 = 24;
 
@@ -3868,13 +3872,29 @@ fn build_image(
     let font = picker.font_size();
     let (px_w, px_h) = (dyn_img.width(), dyn_img.height());
     let nat_cols = (px_w as f32 / font.width as f32).ceil() as u32;
-    let nat_rows = (px_h as f32 / font.height as f32).ceil() as u32;
+    // Rows are FLOORED, not rounded up: a picture whose last row is only
+    // half-covered ends mid-cell, and text placed on that row — its
+    // baseline — then reads as sitting below the picture instead of level
+    // with it. Losing a few pixels off the bottom is invisible; the
+    // misalignment is not.
+    let nat_rows = (px_h as f32 / font.height as f32).floor().max(1.0) as u32;
     let cap = max_cols.max(1) as u32;
     let (cw, ch) = if nat_cols > cap {
         let scale = cap as f32 / nat_cols as f32;
-        (cap, ((nat_rows as f32) * scale).ceil() as u32)
+        (cap, ((nat_rows as f32) * scale).floor().max(1.0) as u32)
     } else {
         (nat_cols.max(1), nat_rows.max(1))
+    };
+    // A picture taller than this owns the screen: the reader scrolls
+    // through one image instead of reading a page. Cosense pages are full
+    // of tall screenshots, and in a browser they simply take the width
+    // they are given — a terminal has to cap the HEIGHT instead, because
+    // rows are the scarce direction.
+    let (cw, ch) = if ch > MAX_IMAGE_ROWS as u32 {
+        let scale = MAX_IMAGE_ROWS as f32 / ch as f32;
+        (((cw as f32) * scale).floor().max(1.0) as u32, MAX_IMAGE_ROWS as u32)
+    } else {
+        (cw, ch)
     };
     let size = Size::new(cw as u16, ch as u16);
     SlicedProtocol::new(picker, dyn_img, Some(size))
@@ -10541,6 +10561,34 @@ mod tests {
         type_str(&mut app, &ctx, "!");
         let held = app.sync_notice().unwrap_or_default();
         assert!(held.contains("編集中の行"), "{held}");
+    }
+
+    /// A picture is measured in whole rows and capped in height: the first
+    /// so a baseline lands level with its bottom edge, the second so one
+    /// tall screenshot cannot take the whole screen.
+    #[test]
+    fn a_picture_is_whole_rows_and_never_taller_than_the_cap() {
+        let picker = Picker::halfblocks();
+        let font = picker.font_size();
+        let build = |w: u32, h: u32, cols: u16| {
+            let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(w, h));
+            build_image(&picker, img, cols).unwrap()
+        };
+
+        // A picture whose pixels do not fill its last row keeps the rows it
+        // FILLS — the leftover would read as a gap under the picture.
+        let one_and_a_half = font.height as u32 + font.height as u32 / 2;
+        let info = build(font.width as u32 * 4, one_and_a_half, 64);
+        assert_eq!(info.cells_h, 1, "a row and a half is one row");
+
+        // Tall pictures are scaled down, keeping their shape.
+        let tall = build(font.width as u32 * 10, font.height as u32 * 100, 64);
+        assert_eq!(tall.cells_h, MAX_IMAGE_ROWS);
+        assert!(tall.cells_w < 10, "narrowed to match: {}", tall.cells_w);
+
+        // Ordinary pictures are untouched by the cap.
+        let normal = build(font.width as u32 * 8, font.height as u32 * 4, 64);
+        assert_eq!((normal.cells_w, normal.cells_h), (8, 4));
     }
 
     /// Mixing text into an indented line must not cost it its bullet: it
