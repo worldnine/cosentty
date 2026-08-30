@@ -113,7 +113,7 @@ impl Palette {
     /// | `[**** ]` … `[* ]` headings | `markup.heading.1..4.markdown`     |
     /// | page title (line 1)         | `markup.heading.1.markdown`        |
     /// | `[Page]`, URL, `#tag`       | `markup.underline.link.markdown`   |
-    /// | a link to an uncreated page | `markup.deleted.markdown`          |
+    /// | a link to an uncreated page | `markup.deleted` (diff's "removed")|
     /// | `>` quote bar               | `markup.quote.markdown`            |
     /// | `code:` label, `[x.icon]`   | `markup.raw.inline.markdown`       |
     /// | `•` bullet                  | `comment`                          |
@@ -145,14 +145,19 @@ impl Palette {
             heading,
             heading_style,
             link: link.unwrap_or(base.link),
-            // "Deleted" is the nearest thing a code theme has to "this is
-            // not there": it is a FOREGROUND red in every theme that sets
-            // it. `invalid` reads better on paper but is a BACKGROUND rule
-            // (measured across the embedded themes: Solarized, Dracula,
-            // Nord, Monokai and OneHalfDark all paint the background and
-            // leave the text near-white), so borrowing its fg would give a
-            // link the colour of ordinary prose.
-            link_missing: fg("markup.deleted.markdown").unwrap_or(base.link_missing),
+            // `markup.deleted` is the diff family's "this line was
+            // removed" (its siblings are `markup.inserted` and
+            // `markup.changed`), which is the nearest thing a code theme
+            // has to "this is not there" — and, being a diff colour, it is
+            // a FOREGROUND red in every theme that sets it. `invalid`
+            // reads better on paper but is a BACKGROUND rule (measured
+            // across the embedded themes: Solarized, Dracula, Nord,
+            // Monokai and OneHalfDark all paint the background and leave
+            // the text near-white), so borrowing its fg would give a link
+            // the colour of ordinary prose. Asked bare, the way themes
+            // spell it: unlike the heading rules, no theme qualifies this
+            // one with a language.
+            link_missing: fg("markup.deleted").unwrap_or(base.link_missing),
             url: link.unwrap_or(base.url),
             hashtag: link.unwrap_or(base.hashtag),
             quote_bar: fg("markup.quote.markdown").unwrap_or(base.quote_bar),
