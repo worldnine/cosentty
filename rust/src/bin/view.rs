@@ -44,8 +44,7 @@ use cosense::render::{
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_continued};
 
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
@@ -78,12 +77,6 @@ struct ImageInfo {
     /// Sliced protocol: renders row-by-row so partial vertical scroll clips
     /// cleanly (SignedPosition.y may be negative) instead of vanishing.
     sliced: SlicedProtocol,
-    /// The same picture as CELLS (half-blocks), at the same size. Drawn
-    /// while the pane is not focused inside a multiplexer: a picture the
-    /// terminal paints keeps floating over whatever pane is put on top of
-    /// it, while cells are covered like any other text. Coarse, but the
-    /// page keeps its shape and comes back sharp on focus.
-    cells: SlicedProtocol,
     /// Display height in cells (from the sliced size), used for layout.
     cells_h: u16,
     /// Display width in cells, and the column cap this was encoded for. A
@@ -757,9 +750,6 @@ struct App {
     history_dropped: bool,
     /// Where an uncreated page stands with the server (see `CreateState`).
     create_state: CreateState,
-    /// The pane has lost focus and pictures are held back (see
-    /// `hides_images_unfocused`).
-    images_hidden: bool,
     /// Commit queue into the serial worker, and its outcomes back.
     commit_tx: mpsc::Sender<CommitJob>,
     commit_res_rx: mpsc::Receiver<CommitOutcome>,
@@ -1295,7 +1285,6 @@ impl App {
             redo_stack: Vec::new(),
             history_dropped: false,
             create_state: CreateState::Idle,
-            images_hidden: false,
             commit_tx,
             commit_res_rx,
             commit_jobs_rx: Some(commit_jobs_rx),
@@ -2333,14 +2322,7 @@ impl App {
         usize::MAX
     }
 
-    /// Which rendering of a picture to draw right now: the terminal's own
-    /// while we are being read, cells while another pane may be sitting on
-    /// top of us.
-    fn image_art<'a>(&self, info: &'a ImageInfo) -> &'a SlicedProtocol {
-        if self.images_hidden { &info.cells } else { &info.sliced }
-    }
-
-    /// Convenience for the places that only care whether it is code.    /// Convenience for the places that only care whether it is code.
+    /// Convenience for the places that only care whether it is code.
     #[cfg(test)]
     fn line_in_code(&self, line: usize) -> bool {
         self.code_span_at_line(line).is_some()
@@ -3471,12 +3453,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Wheel scrolling moves the viewport (akapen parity); failure to enable
     // mouse reporting only loses that, so it is not fatal. Bracketed paste
     // lets the composer take multi-line pastes as ONE event.
-    let _ = execute!(
-        std::io::stdout(),
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        EnableFocusChange
-    );
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     // Compile the macOS IME helper in the background so the first composer
     // open never blocks on swiftc.
     cosense::ime::start_background_build();
@@ -3640,12 +3617,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   3. `Stop` ends the worker loop, and the join makes "no browser and
     //      no worker outlive this process" a fact rather than a hope.
     web_backend.shutdown();
-    let _ = execute!(
-        std::io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        DisableFocusChange
-    );
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     if let Some(worker) = web_worker {
         let _ = app.web_job_tx.send(WebJob::Stop);
@@ -3974,21 +3946,7 @@ fn image_picker() -> Result<Picker, Box<dyn Error>> {
     Ok(picker)
 }
 
-/// Should pictures be held back while the pane is not focused?
-///
-/// Only inside a multiplexer. A terminal's graphics are painted by the
-/// EMULATOR: the multiplexer can cover our pane with another one and the
-/// picture stays on top of it. Dropping the picture while we are not the
-/// focused pane costs nothing — nobody is reading it — and it is the one
-/// moment the overlap can happen.
-///
-/// On a bare terminal this would only blank pictures when the user tabs to
-/// another app, which fixes nothing and looks broken, so it stays off.
-fn hides_images_unfocused() -> bool {
-    std::env::var_os("HERDR_ENV").is_some() || std::env::var_os("TMUX").is_some()
-}
-
-/// The name of the picture protocol in use/// The name of the picture protocol in use, for the status line. Which one
+/// The name of the picture protocol in use, for the status line. Which one
 /// is live decides whether pictures clip with the panes around them, so it
 /// is worth being able to see without a debugger.
 fn image_protocol_name(picker: &Picker) -> &'static str {
@@ -4037,16 +3995,11 @@ fn build_image(
         (cw, ch)
     };
     let size = Size::new(cw as u16, ch as u16);
-    // Both renderings are built now, at the same cell size, so switching
-    // between them never moves anything on the page.
-    let cells = SlicedProtocol::new(&Picker::halfblocks(), dyn_img.clone(), Some(size))
-        .map_err(|e| e.to_string())?;
     SlicedProtocol::new(picker, dyn_img, Some(size))
         .map(|sliced| {
             let s = sliced.size();
             ImageInfo {
                 sliced,
-                cells,
                 cells_h: s.height.max(1),
                 // The protocol may round down; never report more than asked
                 // for, since the cap is what keeps the diagram inside the
@@ -4540,18 +4493,6 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
                 }
                 Event::Mouse(m) => handle_mouse(app, ctx, m),
                 Event::Paste(data) => handle_paste(app, ctx, &data),
-                // Inside a multiplexer, an unfocused pane can be covered by
-                // another one — and the terminal keeps painting our
-                // pictures on top of it. Fall back to cells while we are
-                // not the pane being read; come back sharp on focus.
-                Event::FocusLost if hides_images_unfocused() && !app.images_hidden => {
-                    app.images_hidden = true;
-                    app.laid_width = 0;
-                }
-                Event::FocusGained if app.images_hidden => {
-                    app.images_hidden = false;
-                    app.laid_width = 0;
-                }
                 _ => {}
             }
         }
@@ -6156,24 +6097,14 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
         .unwrap_or_else(|_| "vi".into());
 
     // Suspend the TUI for the editor, restore it after — whatever happens.
-    let _ = execute!(
-        std::io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        DisableFocusChange
-    );
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     let status = Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} '{}'", path.display()))
         .status();
     *terminal = ratatui::init();
-    let _ = execute!(
-        std::io::stdout(),
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        EnableFocusChange
-    );
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     app.laid_width = 0; // re-lay out on the next frame
 
     let ok = matches!(status, Ok(s) if s.success());
@@ -7586,7 +7517,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         continue;
                     }
                     f.render_widget(
-                        SlicedImage::new(app.image_art(info), pos),
+                        SlicedImage::new(&info.sliced, pos),
                         Rect::new(text.x + *col, band_top as u16, w, band_h),
                     );
                 }
@@ -7631,7 +7562,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         info.cells_w.min(text.width.saturating_sub(off)),
                         band_h,
                     );
-                    f.render_widget(SlicedImage::new(app.image_art(info), pos), img_area);
+                    f.render_widget(SlicedImage::new(&info.sliced, pos), img_area);
                 }
             }
         }
@@ -11111,24 +11042,6 @@ mod tests {
         assert_eq!(forced("halfblocks"), Some(ProtocolType::Halfblocks));
         assert_eq!(forced("auto"), None);
         assert_eq!(forced(""), None, "unset changes nothing");
-    }
-
-    /// Both renderings of a picture are built at the SAME cell size, so
-    /// dropping to cells while another pane may cover us never moves
-    /// anything on the page — and the sharp one comes back on focus.
-    #[test]
-    fn a_picture_carries_a_cell_rendering_of_the_same_size() {
-        let picker = Picker::halfblocks();
-        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(64, 64));
-        let info = build_image(&picker, img, 32).unwrap();
-        assert_eq!(info.sliced.size(), info.cells.size(), "same box either way");
-
-        let mut app = page(&["t", "x"]);
-        assert!(!app.images_hidden);
-        let sharp = app.image_art(&info) as *const _;
-        app.images_hidden = true;
-        let coarse = app.image_art(&info) as *const _;
-        assert_ne!(sharp, coarse, "the unfocused pane draws the other one");
     }
 
     /// A trailing newline in a paste is how the text was COPIED, not a
