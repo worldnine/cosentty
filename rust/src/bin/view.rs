@@ -5361,30 +5361,7 @@ fn read_select_line(app: &mut App, down: bool) {
     }
 }
 
-/// Where the caret line's TEXT begins: past the indent that gives the line
-/// its level (or, inside a `code:` block, past the block's own base
-/// indent). Everything left of it is structure — `Tab` moves it, letters
-/// do not — so that is where "the start of the line" is for the caret.
-///
-/// Letting the caret in front of the indent meant typing there turned an
-/// indented item into a flush line with stray spaces inside it, and the
-/// page stopped matching what cosense web showed.
-fn session_text_start(app: &App) -> usize {
-    let Some(s) = app.session.as_ref() else { return 0 };
-    let buf = &s.input.buf;
-    let strip = match app.code_span_at_line(s.line) {
-        Some(span) => span.strip_chars(),
-        None => usize::MAX, // outline: the whole indent is structure
-    };
-    buf.char_indices()
-        .take(strip)
-        .take_while(|(_, c)| *c == ' ' || *c == '\t' || *c == '\u{3000}')
-        .map(|(i, c)| i + c.len_utf8())
-        .last()
-        .unwrap_or(0)
-}
-
-/// Is the caret line inside a `code:` block?/// Is the caret line inside a `code:` block?
+/// Is the caret line inside a `code:` block?
 fn session_in_code(app: &App) -> bool {
     app.session
         .as_ref()
@@ -5416,14 +5393,6 @@ fn session_type_char(app: &mut App, ch: char) {
     // characters someone is typing on purpose (`[0]`, `[\n`). Helping
     // would be the one place the block leaks.
     let in_code = session_in_code(app);
-    // Whatever brought the caret in front of the text (a click on the
-    // bullet, a stale column), letters go into the TEXT.
-    let start = session_text_start(app);
-    if let Some(s) = app.session.as_mut() {
-        if s.input.cur < start {
-            s.input.cur = start;
-        }
-    }
     match ch {
         '[' if !in_code => {
             // With a selection, the brackets go AROUND it: selecting a word
@@ -5934,46 +5903,12 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Down, _) => session_move_line(app, ctx, 1),
         (KeyCode::Left, _) if shift => session_select_char(app, false),
         (KeyCode::Right, _) if shift => session_select_char(app, true),
-        (KeyCode::Left, _) | (KeyCode::Char('b'), true) => {
-            // At the start of the text there is nowhere further left ON
-            // this line — the indent is not text. Carry on to the end of
-            // the line above, as cosense web does.
-            if app.session.as_ref().map(|s| s.input.cur).unwrap_or(0) <= session_text_start(app) {
-                session_move_line(app, ctx, -1);
-                if let Some(s) = app.session.as_mut() {
-                    s.input.cur = s.input.buf.len();
-                    s.want_col = None;
-                }
-            } else {
-                edit_input(app, Input::left);
-            }
-        }
+        (KeyCode::Left, _) | (KeyCode::Char('b'), true) => edit_input(app, Input::left),
         (KeyCode::Right, _) | (KeyCode::Char('f'), true) => edit_input(app, Input::right),
-        (KeyCode::Home, _) | (KeyCode::Char('a'), true) => {
-            let start = session_text_start(app);
-            if let Some(s) = app.session.as_mut() {
-                s.input.cur = start;
-                s.want_col = None;
-            }
-            app.laid_width = 0;
-            app.follow = true;
-        }
+        (KeyCode::Home, _) | (KeyCode::Char('a'), true) => edit_input(app, Input::home),
         (KeyCode::End, _) | (KeyCode::Char('e'), true) => edit_input(app, Input::end),
         (KeyCode::Char('w'), true) => edit_input(app, Input::delete_word),
-        (KeyCode::Char('u'), true) => {
-            // Kill to the start of the TEXT: the indent is structure, and
-            // taking it with the words would silently unindent the item.
-            let start = session_text_start(app);
-            if let Some(s) = app.session.as_mut() {
-                if s.input.cur > start {
-                    s.input.buf.replace_range(start..s.input.cur, "");
-                    s.input.cur = start;
-                }
-                s.want_col = None;
-            }
-            app.laid_width = 0;
-            app.follow = true;
-        }
+        (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
         (KeyCode::Char('k'), true) => session_kill(app, ctx),
         // `y` types a letter in a modeless session, and `^c` belongs to the
         // terminal, so copying takes `^y`.
@@ -5995,11 +5930,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Backspace, _) if app.selection.is_some() => session_delete_selection(app, ctx),
         (KeyCode::Delete, _) if app.selection.is_some() => session_delete_selection(app, ctx),
         (KeyCode::Backspace, _) => {
-            let at_bol = app
-                .session
-                .as_ref()
-                .map(|s| s.input.cur <= session_text_start(app))
-                .unwrap_or(false);
+            let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
                 session_join_up(app, ctx);
             } else if empty_pair_at_caret(app) && !session_in_code(app) {
@@ -6723,21 +6654,7 @@ fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
             clicked.saturating_sub(first).min(wrapped.segs.len().saturating_sub(1))
         })
         .unwrap_or(0);
-    let caret = raw_caret_from_display(&text, wrapped.offset_at(seg_index, col), code);
-    // Clicking the bullet itself puts the caret at the text, not in front
-    // of the indent: the indent is structure (see `session_text_start`).
-    let strip = match code {
-        Some(span) => span.strip_chars(),
-        None => usize::MAX,
-    };
-    let start = text
-        .char_indices()
-        .take(strip)
-        .take_while(|(_, c)| *c == ' ' || *c == '\t' || *c == '\u{3000}')
-        .map(|(i, c)| i + c.len_utf8())
-        .last()
-        .unwrap_or(0);
-    caret.max(start)
+    raw_caret_from_display(&text, wrapped.offset_at(seg_index, col), code)
 }
 
 /// Mouse over the page body (no overlay open): wheel, click, drag,
@@ -11039,47 +10956,6 @@ mod tests {
         let links = app.cursor_line_links();
         assert_eq!(links.len(), 1);
         assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == img));
-    }
-
-    /// The indent is structure, not text: `Tab` moves it, letters never
-    /// do. So the caret treats the start of the TEXT as the start of the
-    /// line — typing in front of the bullet used to turn an indented item
-    /// into a flush line with stray spaces in it, and the page stopped
-    /// matching what cosense web showed.
-    #[test]
-    fn the_caret_cannot_get_in_front_of_the_bullet() {
-        let ctx = test_ctx();
-        let mut app = page(&["title", "  本文", " 前の行"]);
-        app.rebuild(40);
-        enter_session(&mut app, &ctx, 1, "  本文".len());
-
-        // ^a goes to the text, not to column zero.
-        handle_session_key(&mut app, &ctx, ctrl('a'));
-        assert_eq!(app.session.as_ref().unwrap().input.cur, 2, "after the indent");
-        type_str(&mut app, &ctx, "X");
-        assert_eq!(
-            app.session.as_ref().unwrap().input.buf,
-            "  X本文",
-            "the item keeps its level and the letters join the text",
-        );
-
-        // ^u kills the words, never the indent.
-        handle_session_key(&mut app, &ctx, key(KeyCode::End));
-        handle_session_key(&mut app, &ctx, ctrl('u'));
-        assert_eq!(app.session.as_ref().unwrap().input.buf, "  ", "the level survives");
-
-        // ← at the start of the text carries on to the line above, as the
-        // web does — there is nothing further left on this line.
-        handle_session_key(&mut app, &ctx, ctrl('a'));
-        handle_session_key(&mut app, &ctx, key(KeyCode::Left));
-        let s = app.session.as_ref().unwrap();
-        assert_eq!(s.line, 0, "moved up");
-        assert_eq!(s.input.cur, s.input.buf.len(), "to the end of that line");
-
-        // ⌫ at the start of the text still joins, as before.
-        enter_session(&mut app, &ctx, 2, 0);
-        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
-        assert_eq!(app.lines.len(), 2, "the two lines became one");
     }
 
     /// A trailing newline in a paste is how the text was COPIED, not a
