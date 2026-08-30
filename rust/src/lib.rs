@@ -5,6 +5,7 @@ pub mod comment;
 pub mod editops;
 pub mod highlight;
 pub mod image_fetch;
+pub mod index;
 pub mod ime;
 pub mod render;
 pub mod table;

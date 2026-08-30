@@ -65,6 +65,11 @@ const TAB_MARK: &str = "|";
 /// Source mode's line-number gutter: `"  12 "` (4 digits + space).
 const SOURCE_NUM_W: usize = 5;
 
+/// How many pages the index asks for in one request. Cosense's own list
+/// pages in hundreds; beyond this the index says how many it is not
+/// showing rather than pretending to be complete.
+const INDEX_PAGE_LIMIT: u32 = 500;
+
 /// How often the page is scanned for links whose fate is unknown.
 const LINK_SCAN_EVERY: Duration = Duration::from_millis(400);
 
@@ -748,6 +753,9 @@ struct App {
     forward: Vec<(String, String)>,
     /// Open overlay (comments list / link picker / help), if any.
     overlay: Option<Overlay>,
+    /// The project index (list + preview). Open = it owns the screen and
+    /// the keys; the page it was opened from is still loaded underneath.
+    index: Option<cosense::index::Index>,
 
     /// When this page was last seen by the user before this visit — the
     /// later of Cosense's `lastAccessed` (browser) and the local visit
@@ -1210,9 +1218,6 @@ enum Overlay {
     Comments { cursor: usize },
     /// Link picker for the cursor line when it has several links.
     Links { items: Vec<LinkItem>, cursor: usize },
-    /// Recently-updated page picker with incremental filtering (akapen's
-    /// `^o files` slot). Typing filters; ↑/↓ or ^n/^p move.
-    Pages { all: Vec<(String, i64)>, filter: String, cursor: usize },
     /// Details for the cursor's line: who last edited it and when
     /// (akapen's `t` detail slot).
     LineInfo,
@@ -1221,25 +1226,6 @@ enum Overlay {
 }
 
 impl Overlay {
-    /// Titles matching the current filter (case-insensitive substring).
-    /// Does the picker offer to CREATE what was typed? Only when the name
-    /// is not already a page — an exact match is the page itself, and two
-    /// pages cannot share a title.
-    fn offers_create(all: &[(String, i64)], filter: &str) -> bool {
-        let name = filter.trim();
-        !name.is_empty() && !all.iter().any(|(t, _)| t.eq_ignore_ascii_case(name))
-    }
-
-    fn filtered_pages(all: &[(String, i64)], filter: &str) -> Vec<(String, i64)> {
-        if filter.is_empty() {
-            return all.to_vec();
-        }
-        let needle = filter.to_lowercase();
-        all.iter()
-            .filter(|(t, _)| t.to_lowercase().contains(&needle))
-            .cloned()
-            .collect()
-    }
 }
 
 /// Current wall-clock time in epoch seconds.
@@ -1322,6 +1308,7 @@ impl App {
             history: Vec::new(),
             forward: Vec::new(),
             overlay: None,
+            index: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,
             web_pending: HashSet::new(),
@@ -3566,6 +3553,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut theme: Option<String> = None;
     let mut force_light: Option<bool> = None;
     let mut ime_mode = cosense::ime::ImeMode::Jp; // Japanese-first default
+    let mut preview = cosense::index::PreviewMode::Auto;
     let mut it = raw.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -3579,6 +3567,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ime_mode = cosense::ime::ImeMode::parse(&s["--ime=".len()..]);
             }
             s if s.starts_with("--theme=") => theme = Some(s["--theme=".len()..].to_string()),
+            // The index's preview pane, ashiato's flag and ashiato's rule:
+            // `auto` (default) shows it from 80 columns up.
+            "--preview" => {
+                preview = it
+                    .next()
+                    .as_deref()
+                    .and_then(cosense::index::PreviewMode::parse)
+                    .unwrap_or_default();
+            }
+            s if s.starts_with("--preview=") => {
+                preview = cosense::index::PreviewMode::parse(&s["--preview=".len()..])
+                    .unwrap_or_default();
+            }
             _ => positional.push(a),
         }
     }
@@ -3607,6 +3608,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cfg = Config { project: project.clone(), auth, api_domain };
     let client = Client::new(cfg)?;
 
+    // No title on the command line = "show me the project". The most
+    // recently updated page is loaded underneath (Esc lands there), and
+    // the index opens on top of it: the site top.
+    let start_at_index = title.is_none();
     let title = match title {
         Some(t) => t,
         None => {
@@ -3654,6 +3659,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         light,
         terminal_bg,
         ime_mode,
+        preview,
         editability: std::sync::Mutex::new(HashMap::new()),
         project_themes: std::sync::Mutex::new(HashMap::new()),
     };
@@ -3745,6 +3751,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     app.set_page(loaded, &ctx);
+    if start_at_index {
+        open_index(&mut app, &ctx, String::new());
+    }
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
     // `sync:` shows which live-update path is active (ws = websocket push,
@@ -3820,6 +3829,8 @@ struct Ctx {
     terminal_bg: (u8, u8, u8),
     /// Input-source policy around the composer (`--ime`, default jp).
     ime_mode: cosense::ime::ImeMode,
+    /// Whether the index's preview pane is drawn (`--preview`).
+    preview: cosense::index::PreviewMode,
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
     editability: std::sync::Mutex<HashMap<String, bool>>,
@@ -4044,6 +4055,41 @@ fn record_visit(project: &str, title: &str, now: i64) -> Option<i64> {
         }
     }
     prev
+}
+
+/// Open the project index: every page, newest first, with the one under
+/// the cursor previewed beside it.
+///
+/// The list is one request (`/api/pages/<project>?limit=500&sort=updated`)
+/// and the preview costs nothing on top of it: the same response carries
+/// each page's first lines, which is what the reader is choosing between.
+fn open_index(app: &mut App, ctx: &Ctx, filter: String) {
+    use cosense::index::{Entry, Index};
+    let (count, pages) = match ctx.client.list_pages_in(&app.project, INDEX_PAGE_LIMIT, 0, "updated")
+    {
+        Ok(v) => v,
+        Err(e) => {
+            app.status = format!("page list failed: {e}");
+            return;
+        }
+    };
+    let visits = load_visits();
+    let mut entries: Vec<Entry> = pages
+        .into_iter()
+        .map(|p| {
+            let seen = visits.get(&format!("{}/{}", app.project, p.title)).copied();
+            Entry::from_summary(p, seen)
+        })
+        .collect();
+    // The API floats pinned pages to the top even under sort=updated, so a
+    // pinned two-year-old page would head a "recently updated" list.
+    entries.sort_by(|a, b| b.updated.cmp(&a.updated));
+    let mut ix = Index::new(entries, count.max(0) as usize);
+    if !filter.is_empty() {
+        ix.set_filter(filter);
+    }
+    app.index = Some(ix);
+    app.overlay = None;
 }
 
 /// Fetch and render one page. Images are NOT downloaded here: they are
@@ -4939,13 +4985,14 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
         input.insert_str(&clean);
         return;
     }
-    // The page picker is a text field too: pasting a title into it is the
-    // fastest way to reach a page someone sent you. Only the first line —
-    // a filter is one line by definition.
-    if let Some(Overlay::Pages { filter, cursor, .. }) = app.overlay.as_mut() {
+    // The index's filter is a text field too: pasting a title into it is
+    // the fastest way to reach a page someone sent you. Only the first
+    // line — a filter is one line by definition.
+    if let Some(ix) = app.index.as_mut() {
         if let Some(first) = clean.lines().next() {
-            filter.push_str(first);
-            *cursor = 0;
+            let mut f = ix.filter.clone();
+            f.push_str(first);
+            ix.set_filter(f);
         }
         return;
     }
@@ -4960,8 +5007,106 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
     }
 }
 
+/// Keys while the index owns the screen.
+///
+/// A picker's keys: move, type to narrow, Enter to go. Typing goes to the
+/// filter rather than to commands, so there is no mode to remember — the
+/// only commands are the ones a filter cannot swallow (Esc, Enter, Tab,
+/// the arrows and their control-key twins).
+fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
+    use cosense::index::{Pane, Row};
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let page_rows = app.view_h.max(1) as i32;
+    let preview_on = cosense::index::panes(ctx.preview, app.laid_width).preview.is_some();
+    let Some(ix) = app.index.as_mut() else { return Action::Continue };
+    match (k.code, ctrl) {
+        (KeyCode::Esc, _) => {
+            app.index = None;
+            app.status = String::new();
+        }
+        // The preview is a second place to be, so Tab moves between them
+        // — but only when there IS a second pane.
+        (KeyCode::Tab, _) if preview_on => {
+            ix.focus = match ix.focus {
+                Pane::List => Pane::Preview,
+                Pane::Preview => Pane::List,
+            };
+        }
+        (KeyCode::Enter, _) => {
+            let target = match ix.rows().get(ix.cursor) {
+                Some(Row::Page(e)) => Some((e.title.clone(), false)),
+                Some(Row::Create(name)) => Some((name.to_string(), true)),
+                None => None,
+            };
+            app.index = None;
+            if let Some((title, create)) = target {
+                let project = app.project.clone();
+                navigate_to(app, ctx, &project, &title);
+                if create {
+                    // Same landing as the picker's create row: EDIT on a
+                    // fresh body line, and nothing is sent until something
+                    // is written (see `dispatch_create`).
+                    app.cursor = 0;
+                    open_line(app, ctx, false);
+                }
+            }
+        }
+        // Scrolling the preview when it has the focus; moving the list
+        // otherwise. Same fingers either way.
+        (KeyCode::Down, _) | (KeyCode::Char('j'), false) if ix.focus == Pane::Preview => {
+            ix.preview_scroll = ix.preview_scroll.saturating_add(1);
+        }
+        (KeyCode::Up, _) | (KeyCode::Char('k'), false) if ix.focus == Pane::Preview => {
+            ix.preview_scroll = ix.preview_scroll.saturating_sub(1);
+        }
+        (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+            ix.move_cursor(1);
+        }
+        (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+            ix.move_cursor(-1);
+        }
+        (KeyCode::Char('j'), false) if ix.filter.is_empty() => {
+            ix.move_cursor(1);
+        }
+        (KeyCode::Char('k'), false) if ix.filter.is_empty() => {
+            ix.move_cursor(-1);
+        }
+        (KeyCode::Char('g'), false) if ix.filter.is_empty() => {
+            ix.move_cursor(i32::MIN / 2);
+        }
+        (KeyCode::Char('G'), false) if ix.filter.is_empty() => {
+            ix.move_cursor(i32::MAX / 2);
+        }
+        (KeyCode::PageDown, _) | (KeyCode::Char('d'), true) => {
+            ix.move_cursor(page_rows);
+        }
+        (KeyCode::PageUp, _) => {
+            ix.move_cursor(-page_rows);
+        }
+        (KeyCode::Backspace, _) => {
+            let mut f = ix.filter.clone();
+            f.pop();
+            ix.set_filter(f);
+        }
+        // `^u` clears the filter, as it clears a line everywhere else.
+        (KeyCode::Char('u'), true) => ix.set_filter(String::new()),
+        // Anything printable narrows the list. A filter is one line, so
+        // there is nothing else it could be.
+        (KeyCode::Char(c), false) => {
+            let mut f = ix.filter.clone();
+            f.push(c);
+            ix.set_filter(f);
+        }
+        _ => {}
+    }
+    Action::Continue
+}
+
 /// One key press.
 fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
+    if app.index.is_some() {
+        return handle_index_key(app, ctx, k);
+    }
     // Comment composer captures all keys. Emacs/readline-style line
     // editing, so a Japanese sentence can be corrected mid-line.
     if app.composing.is_some() {
@@ -5264,22 +5409,11 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('l'), false) => {
             app.overlay = Some(Overlay::Comments { cursor: 0 });
         }
-        // page picker: recently-updated pages (akapen's `^o files` slot)
-        (KeyCode::Char('o'), true) => {
-            match ctx.client.list_pages_in(&app.project, 500, 0, "updated") {
-                Ok((_, pages)) => {
-                    let mut all: Vec<(String, i64)> =
-                        pages.into_iter().map(|p| (p.title, p.updated)).collect();
-                    // The API floats pinned pages to the top even with
-                    // sort=updated, so a pinned 2-year-old page would head
-                    // a "recently updated" list. Sort by real mtime here.
-                    all.sort_by(|a, b| b.1.cmp(&a.1));
-                    app.status = format!("{} pages", all.len());
-                    app.overlay = Some(Overlay::Pages { all, filter: String::new(), cursor: 0 });
-                }
-                Err(e) => app.status = format!("page list failed: {e}"),
-            }
-        }
+        // The project index (akapen's `^o files` slot): the list of pages
+        // with the one under the cursor previewed beside it. Typing filters
+        // it, so the old picker's fingers still work — they now have a
+        // screen to work in.
+        (KeyCode::Char('o'), true) => open_index(app, ctx, String::new()),
         // line detail: who edited the cursor line and when (toggle)
         (KeyCode::Char('t'), false) => {
             app.overlay = if matches!(app.overlay, Some(Overlay::LineInfo)) {
@@ -7538,12 +7672,8 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         Up,
         Down,
         Activate,
-        Type(char),
-        Backspace,
     }
     let ctrl = mods.contains(KeyModifiers::CONTROL);
-    let is_picker = matches!(app.overlay, Some(Overlay::Pages { .. }));
-
     let is_line_info = matches!(app.overlay, Some(Overlay::LineInfo));
     let act = match code {
         KeyCode::Esc => Act::Close,
@@ -7554,9 +7684,6 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         KeyCode::Up => Act::Up,
         KeyCode::Char('n') if ctrl => Act::Down,
         KeyCode::Char('p') if ctrl => Act::Up,
-        KeyCode::Backspace if is_picker => Act::Backspace,
-        // In the picker, plain characters filter; elsewhere j/k/q act.
-        KeyCode::Char(c) if is_picker && !ctrl => Act::Type(c),
         // The comments list is where copying every comment belongs.
         KeyCode::Char('y') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
             let text = format_all(&app.comments);
@@ -7578,10 +7705,6 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     let len = match &app.overlay {
         Some(Overlay::Comments { .. }) => app.comments.len(),
         Some(Overlay::Links { items, .. }) => items.len(),
-        Some(Overlay::Pages { all, filter, .. }) => {
-            Overlay::filtered_pages(all, filter).len()
-                + usize::from(Overlay::offers_create(all, filter))
-        }
         _ => 0,
     };
 
@@ -7589,9 +7712,7 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         Act::Close => app.overlay = None,
         Act::Down => {
             if let Some(
-                Overlay::Comments { cursor }
-                | Overlay::Links { cursor, .. }
-                | Overlay::Pages { cursor, .. },
+                Overlay::Comments { cursor } | Overlay::Links { cursor, .. },
             ) = app.overlay.as_mut()
             {
                 if len > 0 {
@@ -7601,24 +7722,10 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
         }
         Act::Up => {
             if let Some(
-                Overlay::Comments { cursor }
-                | Overlay::Links { cursor, .. }
-                | Overlay::Pages { cursor, .. },
+                Overlay::Comments { cursor } | Overlay::Links { cursor, .. },
             ) = app.overlay.as_mut()
             {
                 *cursor = cursor.saturating_sub(1);
-            }
-        }
-        Act::Type(c) => {
-            if let Some(Overlay::Pages { filter, cursor, .. }) = app.overlay.as_mut() {
-                filter.push(c);
-                *cursor = 0;
-            }
-        }
-        Act::Backspace => {
-            if let Some(Overlay::Pages { filter, cursor, .. }) = app.overlay.as_mut() {
-                filter.pop();
-                *cursor = 0;
             }
         }
         Act::Activate => {
@@ -7631,25 +7738,12 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
                 }
                 return;
             }
-            let mut create = false;
+            let create = false;
             let target: Option<(String, String, Option<usize>)> = match &app.overlay {
                 Some(Overlay::Comments { cursor }) => app
                     .comments
                     .get(*cursor)
                     .map(|c| (c.project.clone(), c.title.clone(), Some(c.start))),
-                Some(Overlay::Pages { all, filter, cursor }) => {
-                    let items = Overlay::filtered_pages(all, filter);
-                    match items.get(*cursor) {
-                        Some((t, _)) => Some((app.project.clone(), t.clone(), None)),
-                        // Past the last match sits the create row: open the
-                        // typed name as the page it is not yet.
-                        None if Overlay::offers_create(all, filter) => {
-                            create = true;
-                            Some((app.project.clone(), filter.trim().to_string(), None))
-                        }
-                        None => None,
-                    }
-                }
                 _ => None,
             };
             app.overlay = None;
@@ -7676,6 +7770,154 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     }
 }
 
+/// Draw the project index: the list on the left, the page under the
+/// cursor on the right.
+///
+/// The preview is the first lines the list API already returned. That is
+/// deliberate for now: it costs no request, so moving through a thousand
+/// pages never waits for the network — the same speed-first bargain
+/// ashiato makes with its file previews.
+fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
+    use cosense::index::{Pane, Row};
+    let Some(ix) = app.index.as_mut() else { return };
+    let panes = cosense::index::panes(ctx.preview, area.width);
+    let body_h = area.height.saturating_sub(2); // header + footer
+    let rows_h = body_h as usize;
+    let scroll = ix.follow(rows_h);
+    let rows = ix.rows();
+    let focus = ix.focus;
+
+    // ---- header ------------------------------------------------------
+    let shown = rows.len();
+    let head = if ix.filter.is_empty() {
+        let more = if ix.total > ix.entries.len() {
+            format!(" of {}", ix.total)
+        } else {
+            String::new()
+        };
+        format!(" {} — {} pages{}", app.project, ix.entries.len(), more)
+    } else {
+        format!(" {} — {}_ ({} match)", app.project, ix.filter, shown)
+    };
+    f.render_widget(
+        Paragraph::new(head).style(
+            Style::default().fg(app.header_colors.fg).bg(app.header_colors.bg),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    // ---- list --------------------------------------------------------
+    let list_area = Rect::new(area.x, area.y + 1, panes.list, body_h);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, row) in rows.iter().enumerate().skip(scroll).take(rows_h) {
+        let selected = i == ix.cursor;
+        let mut style = Style::default();
+        if selected {
+            style = style.bg(CURSOR_BG);
+            if focus == Pane::List {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+        }
+        let line = match row {
+            Row::Page(e) => {
+                let age = format!("{:>4} ", relative_age(e.updated));
+                // Unread is the page's own news: the same blue the
+                // telomere uses for a line edited since the last visit.
+                let title_style = if e.unread {
+                    style.fg(CHROME_CARET)
+                } else {
+                    style.fg(Color::Reset)
+                };
+                let room = panes.list.saturating_sub(6) as usize;
+                Line::from(vec![
+                    Span::styled(age, style.fg(CHROME_DIM)),
+                    Span::styled(truncate_width(&e.title, room), title_style),
+                ])
+            }
+            Row::Create(name) => Line::from(Span::styled(
+                format!("   ＋ 「{}」を作成", name),
+                style.fg(CHROME_ACTIVE),
+            )),
+        };
+        lines.push(line);
+    }
+    f.render_widget(Paragraph::new(lines), list_area);
+    // The list's own scrollbar thumb, in the column between the panes.
+    if let Some((start, len)) = cosense::theme::scroll_thumb_in_track(
+        rows.len(),
+        rows_h,
+        rows_h,
+        scroll,
+    ) {
+        let x = area.x + panes.list;
+        let buf = f.buffer_mut();
+        for k in start..start + len {
+            if let Some(c) = buf.cell_mut((x, area.y + 1 + k as u16)) {
+                c.set_symbol("▐");
+                c.set_style(Style::default().fg(CHROME_SCROLL));
+            }
+        }
+    }
+
+    // ---- preview -----------------------------------------------------
+    if let Some(width) = panes.preview {
+        let x = area.x + panes.list + panes.gap;
+        let prev_area = Rect::new(x, area.y + 1, width, body_h);
+        let lines = index_preview_lines(app, ctx, width as usize);
+        let ix = app.index.as_ref().expect("open");
+        let skip = ix.preview_scroll as usize;
+        let shown: Vec<Line<'static>> =
+            lines.into_iter().skip(skip).take(rows_h).collect();
+        f.render_widget(Paragraph::new(shown), prev_area);
+    }
+
+    // ---- footer ------------------------------------------------------
+    let ix = app.index.as_ref().expect("open");
+    let hint = match (panes.preview.is_some(), ix.focus) {
+        (true, Pane::List) => "j/k move · type to filter · Enter open · Tab preview · Esc back",
+        (true, Pane::Preview) => "j/k scroll preview · Tab list · Enter open · Esc back",
+        (false, _) => "j/k move · type to filter · Enter open · Esc back",
+    };
+    f.render_widget(
+        Paragraph::new(format!(" index · {hint}")).style(Style::default().fg(CHROME_DIM)),
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+    );
+}
+
+/// The preview pane's rows for the page under the cursor: its first lines,
+/// rendered exactly as the page itself would render them.
+fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Line<'static>> {
+    let Some(ix) = app.index.as_ref() else { return Vec::new() };
+    let Some(entry) = ix.selected() else {
+        return vec![Line::from(Span::styled(
+            "  （新しいページ）",
+            Style::default().fg(CHROME_DIM),
+        ))];
+    };
+    let mut texts: Vec<String> = vec![entry.title.clone()];
+    texts.extend(entry.descriptions.iter().cloned());
+    let out = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &LinkTruth::default());
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for block in &out.blocks {
+        match block {
+            Block::Text(line) => {
+                for w in wrap_line_parts(line, width.saturating_sub(1), &hanging_prefix(line)) {
+                    lines.push(w.line);
+                }
+            }
+            Block::Blank => lines.push(Line::from("")),
+            // A picture, a table or a diagram in the first lines: the
+            // preview says it is there rather than drawing it, which would
+            // cost a download per cursor move.
+            _ => lines.push(Line::from(Span::styled(
+                "  …",
+                Style::default().fg(CHROME_DIM),
+            ))),
+        }
+    }
+    lines
+}
+
 fn page_frame_visible(editing: bool) -> bool {
     !editing
 }
@@ -7688,6 +7930,14 @@ fn page_frame_style() -> Style {
 fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let area = f.area();
     f.render_widget(Clear, area);
+
+    // The index owns the whole screen while it is open: it is a place to
+    // be, not something laid over the page (the page is still loaded and
+    // Esc goes back to it).
+    if app.index.is_some() {
+        draw_index(f, app, ctx, area);
+        return;
+    }
 
     // header
     let sel_info = app
@@ -8393,22 +8643,6 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .collect(),
             *cursor,
         ),
-        Some(Overlay::Pages { all, filter, cursor }) => {
-            let items = Overlay::filtered_pages(all, filter);
-            let title = if filter.is_empty() {
-                format!("pages — recently updated ({})", items.len())
-            } else {
-                format!("pages: {filter}_ ({} match)", items.len())
-            };
-            let mut rows: Vec<String> = items
-                .iter()
-                .map(|(t, u)| format!("{:>4}  {}", relative_age(*u), t))
-                .collect();
-            if Overlay::offers_create(all, filter) {
-                rows.push(format!("   ＋  「{}」を作成", filter.trim()));
-            }
-            (title, rows, *cursor)
-        }
         Some(Overlay::LineInfo) => {
             let src = app.cursor_src();
             let items = match src.and_then(|s| app.lines.get(s).map(|l| (s, l))) {
@@ -8447,7 +8681,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "mouse     click link/open · click row/move · drag/select · wheel/scroll".into(),
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
-                "pages     ^o recent pages (type to filter)".into(),
+                "index     ^o list + preview (type to filter · Tab preview · Esc back)".into(),
             ];
             if app.editable {
                 keys.extend([
@@ -8481,15 +8715,8 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    let is_picker = matches!(app.overlay, Some(Overlay::Pages { .. }));
     let w = area.width.saturating_sub(8).min(90).max(20);
-    // The page picker is a long list: give it most of the screen so filtering
-    // shows plenty of candidates at once.
-    let want_h = if is_picker {
-        area.height.saturating_sub(4)
-    } else {
-        items.len() as u16 + 2
-    };
+    let want_h = items.len() as u16 + 2;
     let h = want_h.min(area.height.saturating_sub(4)).max(3);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
@@ -8523,13 +8750,8 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         let marker = if sel { "▸ " } else { "  " };
         lines.push(Line::from(Span::styled(format!("{marker}{it}"), style)));
     }
-    let footer = if is_picker {
-        " type to filter · ↑/↓ or ^n/^p move · Enter open · Esc close "
-    } else {
-        " ↑/↓ move · Enter open · Esc close "
-    };
     lines.push(Line::from(Span::styled(
-        footer,
+        " ↑/↓ move · Enter open · Esc close ",
         Style::default().fg(CHROME_DIM),
     )));
     f.render_widget(
@@ -8590,6 +8812,7 @@ mod tests {
             light: false,
             terminal_bg: (24, 24, 24),
             ime_mode: cosense::ime::ImeMode::Off,
+            preview: cosense::index::PreviewMode::Auto,
             editability: std::sync::Mutex::new(HashMap::new()),
             project_themes: std::sync::Mutex::new(HashMap::new()),
         }
@@ -11321,16 +11544,76 @@ mod tests {
         assert!(jobs[2].0.starts_with("redo"));
     }
 
-    /// The picker is the other way in: type a name that is not a page and
-    /// the last row offers to create it.
+    /// The index draws the list and the preview side by side, and gives
+    /// the whole width to the list when the terminal is too narrow to
+    /// share (ashiato's `--preview auto`, and its 80-column threshold).
     #[test]
-    fn the_picker_offers_to_create_a_name_that_is_not_a_page() {
-        let all = vec![("Alpha".to_string(), 0i64), ("Beta".to_string(), 0i64)];
-        assert!(!Overlay::offers_create(&all, ""), "no name, no offer");
-        assert!(!Overlay::offers_create(&all, "alpha"), "an exact match IS that page");
-        assert!(Overlay::offers_create(&all, "Alp"), "a prefix is still a new name");
-        assert!(Overlay::offers_create(&all, "Gamma"));
-        assert!(!Overlay::offers_create(&all, "   "), "whitespace is not a title");
+    fn the_index_draws_a_list_beside_a_preview_until_the_terminal_is_narrow() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(80);
+        app.index = Some(cosense::index::Index::new(
+            vec![
+                cosense::index::Entry {
+                    title: "改善案".into(),
+                    updated: now_secs() - 60,
+                    descriptions: vec!["from [テスト]".into(), "進め方".into()],
+                    unread: true,
+                },
+                cosense::index::Entry {
+                    title: "画像表示テスト".into(),
+                    updated: now_secs() - 86_400,
+                    descriptions: vec!["画像の出方を並べたページ".into()],
+                    unread: false,
+                },
+            ],
+            2,
+        ));
+
+        let draw = |app: &mut App, cols: u16| -> Vec<String> {
+            let mut t = Terminal::new(TestBackend::new(cols, 8)).unwrap();
+            t.draw(|f| ui(f, app, &ctx)).unwrap();
+            let buf = t.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf.cell((x, y)).map_or(" ".into(), |c| c.symbol().to_string()))
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect()
+        };
+
+        // A wide (CJK) glyph occupies two cells, the second of which is
+        // blank; the text is read back without those.
+        let flat = |s: &str| s.replace(' ', "");
+        let has = |rows: &[String], needle: &str| rows.iter().any(|r| flat(r).contains(needle));
+
+        // Wide: the list is on the left, the preview beside it.
+        let rows = draw(&mut app, 100);
+        assert!(rows[0].contains("proj"), "header names the project: {:?}", rows[0]);
+        assert!(flat(&rows[1]).contains("改善案"), "first row: {:?}", rows[1]);
+        let list_w = cosense::index::panes(ctx.preview, 100).list as usize;
+        let preview_side: String = flat(&rows[1].chars().skip(list_w).collect::<String>());
+        assert!(
+            preview_side.contains("改善案"),
+            "the page under the cursor is previewed beside it: {:?}",
+            rows[1]
+        );
+        assert!(has(&rows, "進め方"), "…including its first lines: {rows:?}");
+        assert!(rows.last().unwrap().contains("Esc"), "footer: {:?}", rows.last());
+
+        // Narrow: no preview, and the list has the width to itself.
+        let rows = draw(&mut app, 70);
+        assert!(flat(&rows[1]).contains("改善案"));
+        assert!(!has(&rows, "進め方"), "under 80 columns the preview is gone: {rows:?}");
+
+        // Moving the cursor previews the other page.
+        app.index.as_mut().unwrap().move_cursor(1);
+        let rows = draw(&mut app, 100);
+        assert!(has(&rows, "画像の出方"), "the preview follows the cursor: {rows:?}");
     }
 
     /// Opening a name and walking away must leave nothing behind: a title
@@ -12126,19 +12409,16 @@ mod tests {
         assert!(app.status.contains("編集中"), "status: {}", app.status);
         assert_eq!(app.lines.len(), 2, "and nothing is written");
 
-        // The page picker filters by what you paste (first line only).
-        app.overlay = Some(Overlay::Pages { all: vec![], filter: String::new(), cursor: 3 });
+        // The index filters by what you paste (first line only).
+        app.index = Some(cosense::index::Index::new(Vec::new(), 0));
+        app.index.as_mut().unwrap().cursor = 3;
         handle_paste(&mut app, &ctx, "Some Page\nsecond line");
-        match &app.overlay {
-            Some(Overlay::Pages { filter, cursor, .. }) => {
-                assert_eq!(filter, "Some Page", "a filter is one line");
-                assert_eq!(*cursor, 0, "and the list starts from the top again");
-            }
-            _ => panic!("expected the picker to still be open"),
-        }
+        let ix = app.index.as_ref().expect("the index is still open");
+        assert_eq!(ix.filter, "Some Page", "a filter is one line");
+        assert_eq!(ix.cursor, 0, "and the list starts from the top again");
 
         // EDIT: real lines, as before.
-        app.overlay = None;
+        app.index = None;
         enter_session(&mut app, &ctx, 1, 3);
         handle_paste(&mut app, &ctx, "X\r\nY");
         assert_eq!(app.lines[1].text, "oneX");

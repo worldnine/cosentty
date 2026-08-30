@@ -1,0 +1,368 @@
+//! The project index: every page on the left, a preview of the one under
+//! the cursor on the right.
+//!
+//! Modelled on ashiato (the picker akapen is paired with): a list you move
+//! through with j/k and a preview that keeps up without ever making the
+//! list feel slow. What is here is the part that can be decided without a
+//! terminal or a network — which pages match what was typed, where the
+//! cursor lands, how wide each pane is, and what one row says. The viewer
+//! owns the drawing, the fetching and the keys.
+
+use crate::api::PageSummary;
+
+/// `auto` hides the preview below this terminal width. ashiato's number,
+/// and its reasoning: under 80 columns a split leaves neither pane usable.
+pub const PREVIEW_MIN_WIDTH: u16 = 80;
+
+/// The share of the width the list takes when both panes are up, and the
+/// floor the preview is never squeezed below. Both are ashiato's
+/// (`Percentage(55)`, `Length(1)`, `Min(20)`) — this screen is the same
+/// picker for a different kind of thing, so it behaves the same way.
+const LIST_PERCENT: u16 = 55;
+const PREVIEW_MIN: u16 = 20;
+
+/// Preview pane behaviour (`--preview`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PreviewMode {
+    /// Always show the preview pane.
+    On,
+    /// Never show it (the list takes the full width).
+    Off,
+    /// Show it, but hide it on narrow terminals.
+    #[default]
+    Auto,
+}
+
+impl PreviewMode {
+    /// Parse `--preview <on|off|auto>`; `None` for unknown values.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "on" => Some(PreviewMode::On),
+            "off" => Some(PreviewMode::Off),
+            "auto" => Some(PreviewMode::Auto),
+            _ => None,
+        }
+    }
+
+    pub fn shows_preview(self, width: u16) -> bool {
+        match self {
+            PreviewMode::On => true,
+            PreviewMode::Off => false,
+            PreviewMode::Auto => width >= PREVIEW_MIN_WIDTH,
+        }
+    }
+}
+
+/// Which pane the keys are talking to. The list is where a picker starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Pane {
+    #[default]
+    List,
+    Preview,
+}
+
+/// Column budget for one frame. `preview` is `None` when there is none:
+/// the list then takes everything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Panes {
+    pub list: u16,
+    pub gap: u16,
+    pub preview: Option<u16>,
+}
+
+/// Split `width` between the list and the preview.
+pub fn panes(mode: PreviewMode, width: u16) -> Panes {
+    if !mode.shows_preview(width) {
+        return Panes { list: width, gap: 0, preview: None };
+    }
+    let gap = 1;
+    let room = width.saturating_sub(gap);
+    // `Min(20)` wins over `Percentage(55)`, as it does in ratatui's solver:
+    // forcing the preview on in a narrow window shrinks the LIST.
+    let preview = (room - room * LIST_PERCENT / 100).max(PREVIEW_MIN.min(room));
+    Panes { list: room - preview, gap, preview: Some(preview) }
+}
+
+/// One page in the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub title: String,
+    /// Server-side mtime (epoch seconds).
+    pub updated: i64,
+    /// The first few lines, as the list API hands them over. This is the
+    /// preview until the page itself has been fetched — it costs nothing
+    /// and it is what the reader is deciding on.
+    pub descriptions: Vec<String>,
+    /// Has this page changed since it was last seen here?
+    pub unread: bool,
+}
+
+impl Entry {
+    pub fn from_summary(p: PageSummary, seen_at: Option<i64>) -> Self {
+        Self {
+            unread: seen_at.is_none_or(|seen| p.updated > seen),
+            title: p.title,
+            updated: p.updated,
+            descriptions: p.descriptions,
+        }
+    }
+}
+
+/// What the index is showing, and where the reader is in it.
+#[derive(Clone, Debug, Default)]
+pub struct Index {
+    /// Every page of the project, newest first (the order the API is asked
+    /// for). Filtering never reorders: the list under a filter is the same
+    /// list with rows removed.
+    pub entries: Vec<Entry>,
+    /// What has been typed. Empty = the whole project.
+    pub filter: String,
+    /// Cursor over the FILTERED rows.
+    pub cursor: usize,
+    /// First visible row of the list.
+    pub scroll: usize,
+    pub focus: Pane,
+    /// Preview scroll, in rows, kept per page under the cursor.
+    pub preview_scroll: u16,
+    /// How many pages the project has, when the API said so — the list may
+    /// hold fewer (see the viewer's paging).
+    pub total: usize,
+}
+
+/// A row of the list: a page, or the offer to create what was typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row<'a> {
+    Page(&'a Entry),
+    /// Nothing is named this yet; Enter writes it.
+    Create(&'a str),
+}
+
+impl Index {
+    pub fn new(entries: Vec<Entry>, total: usize) -> Self {
+        Self { entries, total, focus: Pane::List, ..Self::default() }
+    }
+
+    /// Rows matching the filter, in list order, with the create offer last
+    /// when the typed name is not a page.
+    ///
+    /// Matching is case-insensitive substring, on the title only. Cosense's
+    /// own quick search is cleverer (it scores, and it looks inside pages),
+    /// but this list is answering "which of these do I mean", where the
+    /// eye is already on the titles.
+    pub fn rows(&self) -> Vec<Row<'_>> {
+        let needle = self.filter.trim().to_lowercase();
+        let mut rows: Vec<Row<'_>> = self
+            .entries
+            .iter()
+            .filter(|e| needle.is_empty() || e.title.to_lowercase().contains(&needle))
+            .map(Row::Page)
+            .collect();
+        if self.offers_create() {
+            rows.push(Row::Create(self.filter.trim()));
+        }
+        rows
+    }
+
+    /// Does the list offer to create what was typed? Only when nothing is
+    /// named that already — an exact match IS the page, and two pages
+    /// cannot share a title.
+    pub fn offers_create(&self) -> bool {
+        let typed = self.filter.trim();
+        !typed.is_empty()
+            && !self.entries.iter().any(|e| e.title.eq_ignore_ascii_case(typed))
+    }
+
+    /// The entry under the cursor, if the cursor is on a page (rather than
+    /// on the create row).
+    pub fn selected(&self) -> Option<&Entry> {
+        match self.rows().get(self.cursor) {
+            Some(Row::Page(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows().is_empty()
+    }
+
+    /// Move the cursor by `delta` rows, stopping at the ends. Returns
+    /// whether the cursor moved (the viewer only re-previews if it did).
+    pub fn move_cursor(&mut self, delta: i32) -> bool {
+        let n = self.len();
+        if n == 0 {
+            return false;
+        }
+        let want = (self.cursor as i64 + delta as i64).clamp(0, n as i64 - 1) as usize;
+        let moved = want != self.cursor;
+        self.cursor = want;
+        if moved {
+            self.preview_scroll = 0;
+        }
+        moved
+    }
+
+    /// Typing (or deleting) narrows the list under the cursor, so the
+    /// cursor goes back to the top: the first match is what a filter is
+    /// for.
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.cursor = 0;
+        self.scroll = 0;
+        self.preview_scroll = 0;
+    }
+
+    /// Keep the cursor inside the list and inside the window of `height`
+    /// rows, returning the scroll offset to draw at. A cursor that walked
+    /// off the bottom pulls the window down by exactly what it needs.
+    pub fn follow(&mut self, height: usize) -> usize {
+        let n = self.len();
+        if n == 0 || height == 0 {
+            self.scroll = 0;
+            return 0;
+        }
+        self.cursor = self.cursor.min(n - 1);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + height {
+            self.scroll = self.cursor + 1 - height;
+        }
+        // A list that shrank under the window (filtering) must not leave
+        // the window hanging past its end.
+        self.scroll = self.scroll.min(n.saturating_sub(height));
+        self.scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(title: &str, updated: i64) -> Entry {
+        Entry {
+            title: title.into(),
+            updated,
+            descriptions: vec![format!("{title} の本文")],
+            unread: false,
+        }
+    }
+
+    fn index(titles: &[&str]) -> Index {
+        Index::new(
+            titles.iter().enumerate().map(|(i, t)| entry(t, 100 - i as i64)).collect(),
+            titles.len(),
+        )
+    }
+
+    #[test]
+    fn the_list_keeps_its_order_under_a_filter() {
+        let mut ix = index(&["改善案", "画像表示テスト", "テスト", "kaizen"]);
+        assert_eq!(ix.len(), 4);
+        ix.set_filter("テスト".into());
+        let titles: Vec<&str> = ix
+            .rows()
+            .iter()
+            .filter_map(|r| match r {
+                Row::Page(e) => Some(e.title.as_str()),
+                Row::Create(_) => None,
+            })
+            .collect();
+        assert_eq!(titles, vec!["画像表示テスト", "テスト"], "order is the list's, not the match's");
+        // Filtering puts the cursor on the first match: that is what
+        // typing is for.
+        assert_eq!(ix.cursor, 0);
+        assert_eq!(ix.selected().map(|e| e.title.as_str()), Some("画像表示テスト"));
+    }
+
+    #[test]
+    fn a_name_nothing_is_called_yet_is_offered_as_a_new_page() {
+        let mut ix = index(&["改善案"]);
+        ix.set_filter("改善案".into());
+        assert!(!ix.offers_create(), "an exact match is the page itself");
+        assert_eq!(ix.len(), 1);
+
+        ix.set_filter("改善案2".into());
+        assert!(ix.offers_create());
+        assert_eq!(ix.rows().last(), Some(&Row::Create("改善案2")));
+        // The create row is not a page: the preview has nothing to show.
+        ix.cursor = ix.len() - 1;
+        assert_eq!(ix.selected(), None);
+
+        ix.set_filter("   ".into());
+        assert!(!ix.offers_create(), "whitespace is not a page name");
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_list_and_the_window() {
+        let mut ix = index(&["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(ix.follow(3), 0);
+        assert!(ix.move_cursor(2));
+        assert_eq!(ix.follow(3), 0, "still visible: the window does not move");
+        assert!(ix.move_cursor(1));
+        assert_eq!(ix.follow(3), 1, "walked off the bottom: the window follows by one");
+        assert!(ix.move_cursor(99));
+        assert_eq!(ix.cursor, 5, "and stops at the end");
+        assert_eq!(ix.follow(3), 3);
+        assert!(!ix.move_cursor(9), "already there: nothing moved");
+
+        // A filter that shrinks the list to less than a window pulls the
+        // scroll back rather than leaving the window past the end.
+        ix.set_filter("a".into());
+        assert_eq!(ix.follow(3), 0);
+        assert_eq!(ix.cursor, 0);
+    }
+
+    #[test]
+    fn moving_the_cursor_starts_the_new_preview_at_its_top() {
+        let mut ix = index(&["a", "b"]);
+        ix.preview_scroll = 12;
+        assert!(ix.move_cursor(1));
+        assert_eq!(ix.preview_scroll, 0, "a different page is read from its start");
+        ix.preview_scroll = 5;
+        assert!(!ix.move_cursor(1), "at the end");
+        assert_eq!(ix.preview_scroll, 5, "…so the reader keeps their place");
+    }
+
+    #[test]
+    fn the_preview_appears_and_disappears_with_the_width() {
+        // auto: the pane is there from 80 columns and not below it.
+        let auto = PreviewMode::Auto;
+        assert_eq!(panes(auto, 79), Panes { list: 79, gap: 0, preview: None });
+        let p = panes(auto, 80);
+        assert_eq!((p.list, p.gap, p.preview), (43, 1, Some(36)), "55% to the list");
+        assert_eq!(p.list + p.gap + p.preview.unwrap(), 80, "the width is spent exactly");
+        let wide = panes(auto, 200);
+        assert_eq!(wide.list + wide.gap + wide.preview.unwrap(), 200);
+
+        // off: never, however wide.
+        assert_eq!(panes(PreviewMode::Off, 200), Panes { list: 200, gap: 0, preview: None });
+
+        // on: always — and in a window too narrow to share, the LIST gives
+        // up the columns, not the preview.
+        let forced = panes(PreviewMode::On, 40);
+        assert_eq!(forced.preview, Some(PREVIEW_MIN));
+        assert_eq!(forced.list, 40 - 1 - PREVIEW_MIN);
+        assert_eq!(PreviewMode::parse("on"), Some(PreviewMode::On));
+        assert_eq!(PreviewMode::parse("sometimes"), None);
+        assert_eq!(PreviewMode::default(), PreviewMode::Auto);
+    }
+
+    #[test]
+    fn a_page_is_unread_until_it_has_been_seen_since_its_last_edit() {
+        let p = |updated| PageSummary {
+            id: "id".into(),
+            title: "t".into(),
+            image: None,
+            descriptions: vec![],
+            updated,
+            linked: 0,
+        };
+        assert!(Entry::from_summary(p(100), None).unread, "never opened");
+        assert!(Entry::from_summary(p(100), Some(99)).unread, "edited since the visit");
+        assert!(!Entry::from_summary(p(100), Some(100)).unread);
+        assert!(!Entry::from_summary(p(100), Some(101)).unread);
+    }
+}
