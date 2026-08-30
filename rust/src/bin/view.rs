@@ -39,7 +39,7 @@ use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::highlight::Highlighter;
 use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
-    render_lines_with, Block, CodeSpan,
+    render_lines_with, Block, CodeSpan, MissingLinks,
 };
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_continued};
 
@@ -708,6 +708,10 @@ struct App {
     cursor: usize,
     /// Range selection over SOURCE lines.
     selection: Option<Selection>,
+    /// Which of this page's links lead to pages that do not exist yet.
+    /// Built when the page loads and carried until it is loaded again —
+    /// see `MissingLinks` for why absence means "say nothing".
+    missing: MissingLinks,
     /// Scroll the viewport to the cursor on the next frame. Set by keyboard
     /// navigation; wheel scrolling leaves it clear so the viewport can move
     /// away from the cursor (akapen's herdr-review style).
@@ -1263,6 +1267,7 @@ impl App {
             scroll: 0,
             cursor: 0,
             selection: None,
+            missing: MissingLinks::default(),
             follow: true,
             composing: None,
             comments: Vec::new(),
@@ -1396,6 +1401,7 @@ impl App {
         self.srcs = l.srcs;
         self.read_at = l.read_at;
         self.editable = l.editable;
+        self.missing = l.missing;
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
         }
@@ -1863,7 +1869,15 @@ impl App {
                 .iter()
                 .take(9)
                 .enumerate()
-                .map(|(i, l)| format!("{}:{}", i + 1, l.label()))
+                .map(|(i, l)| {
+                    // A link with nothing behind it does not open: Enter
+                    // starts the page. Better said before it is pressed.
+                    let mark = match l {
+                        LinkItem::Page(t) if self.missing.has(t) => "(未作成)",
+                        _ => "",
+                    };
+                    format!("{}:{}{mark}", i + 1, l.label())
+                })
                 .collect();
             return format!("Enter/f open → {}", listed.join("  "));
         }
@@ -3756,6 +3770,8 @@ struct Loaded {
     editable: bool,
     /// Related-pages sections (see `build_related`).
     related: Vec<RelSection>,
+    /// Links on this page with no page behind them (see `missing_links`).
+    missing: MissingLinks,
 }
 
 /// Build the related-pages sections the way scrapbox.io presents them:
@@ -3931,7 +3947,8 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         }
     }
     let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
-    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
+    let missing = missing_links(&page);
+    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &missing);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
     let local_prev = record_visit(project, title, now_secs());
@@ -3955,7 +3972,35 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         read_at,
         editable,
         related,
+        missing,
     })
+}
+
+/// Which of the links the server saved on this page have no page behind
+/// them.
+///
+/// The answer is already in the page response — `relatedPages.links1hop`
+/// is "the pages one hop from here THAT EXIST" (links out and back links
+/// together), so a link the page has that is absent from it was never
+/// created. Measured on scrapbox.io: on this project's own `改善案` the
+/// three missing titles were exactly the three `#issue` tags, and on
+/// villagepump's `井戸端` (35 links, 234 back links) the four absentees
+/// all answered `persistent: false`. Nothing is truncated at the sizes
+/// that matter either: `書いてけ` has 512 back links and 517 1-hop
+/// entries.
+///
+/// So this costs no extra request. What it cannot see is anything that
+/// happened after the fetch — which is why `MissingLinks` only ever
+/// paints titles it has evidence for.
+fn missing_links(page: &cosense::api::Page) -> MissingLinks {
+    // No related-pages block, no evidence: every link keeps its ordinary
+    // colour rather than all of them turning red at once.
+    let Some(r) = page.related.as_ref() else { return MissingLinks::default() };
+    let mut existing: Vec<&str> = r.links1hop.iter().map(|p| p.title.as_str()).collect();
+    // A page's link to itself is not in its own 1-hop list, and a page
+    // certainly exists while you are reading it.
+    existing.push(page.title.as_str());
+    MissingLinks::new(page.links.iter().map(|s| s.as_str()), existing)
 }
 
 /// How pictures get onto the screen.
@@ -5090,7 +5135,7 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     // the old text must not come back and be filed under it.
     app.bump_src_epoch();
     let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
-    let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
+    let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &app.missing);
     app.blocks = r.blocks;
     app.srcs = r.srcs;
     app.laid_width = 0;
@@ -6852,7 +6897,10 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
         },
     };
     let texts: Vec<String> = snap.lines.iter().map(|l| l.text.clone()).collect();
-    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette);
+    // A snapshot is the page as it was; which of its links exist is only
+    // known for NOW, so an old revision says nothing about it.
+    let rendered =
+        render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &MissingLinks::default());
     app.lines = snap.lines;
     app.blocks = rendered.blocks;
     app.srcs = rendered.srcs;
@@ -8335,7 +8383,12 @@ mod tests {
             })
             .collect();
         let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
-        let r = render_lines_with(&owned, None, &cosense::theme::Palette::for_light(false));
+        let r = render_lines_with(
+            &owned,
+            None,
+            &cosense::theme::Palette::for_light(false),
+            &MissingLinks::default(),
+        );
         app.blocks = r.blocks;
         app.srcs = r.srcs;
         app
@@ -8646,6 +8699,7 @@ mod tests {
                 related: Vec::new(),
                 read_at: None,
                 editable: true,
+                missing: MissingLinks::default(),
             },
             &ctx,
         );
@@ -9731,6 +9785,7 @@ mod tests {
                 related: Vec::new(),
                 read_at: None,
                 editable: true,
+                missing: MissingLinks::default(),
             },
             &ctx,
         );
@@ -10075,6 +10130,7 @@ mod tests {
                 read_at: None,
                 editable: true,
                 related: Vec::new(),
+                missing: MissingLinks::default(),
             },
             &ctx,
         );
@@ -10600,6 +10656,63 @@ mod tests {
         assert_eq!(secs[2].entries[0].title, "OnlyHub2");
         assert_eq!(secs[3].entries[0].title, "Orphan");
         assert_eq!(secs[4].entries[0].title, "/other/Page", "bare /project is not a page");
+    }
+
+    /// The uncreated links of a page are read out of the same response
+    /// that drew it: `links` minus the 1-hop neighbours (which the API
+    /// builds from EXISTING pages only). Shaped after a real reply — the
+    /// project's own 「改善案」, whose only dead links were its `#issue`
+    /// tags.
+    #[test]
+    fn missing_links_are_the_pages_links_minus_its_existing_neighbours() {
+        use cosense::api::{Page, RelatedPage, RelatedPages};
+        let rp = |title: &str| RelatedPage {
+            id: String::new(),
+            title: title.into(),
+            title_lc: cosense::render::title_lc(title),
+            descriptions: vec![],
+            links_lc: vec![],
+            linked: 0,
+            updated: 0,
+        };
+        let page = Page {
+            id: "P".into(),
+            persistent: true,
+            title: "改善案".into(),
+            commit_id: String::new(),
+            lines: vec![],
+            links: vec![
+                "テスト".into(),
+                "選択した文字 URL".into(),
+                "732".into(),
+                "改善案".into(), // a page linking to itself
+            ],
+            project_links: vec![],
+            related: Some(RelatedPages {
+                links1hop: vec![rp("テスト"), rp("選択した文字_URL")],
+                links2hop: vec![],
+                has_back_links_or_icons: true,
+            }),
+            updated: 0,
+            created: 0,
+            lines_count: 0,
+            last_accessed: None,
+        };
+        let m = missing_links(&page);
+        assert!(m.has("732"), "a tag with no page behind it");
+        assert!(!m.has("テスト"), "listed as a neighbour");
+        assert!(
+            !m.has("選択した文字 URL"),
+            "the neighbour is spelled with `_`, the link with a space"
+        );
+        assert!(!m.has("改善案"), "a page exists while you are reading it");
+        assert!(!m.has("何も知らないページ"), "no evidence, no claim");
+
+        // A response without relatedPages (an uncreated page's template,
+        // say) must not turn every link red.
+        let bare = Page { related: None, ..page };
+        assert!(!missing_links(&bare).has("732"));
+        assert!(missing_links(&bare).is_empty());
     }
 
     fn key(code: KeyCode) -> event::KeyEvent {

@@ -27,6 +27,11 @@ pub struct Palette {
     /// hand palette pairs `heading` with `heading_modifier`.
     pub heading_style: [Style; 4],
     pub link: Color,
+    /// A link to a page that does not exist yet. Cosense paints these red;
+    /// here the colour is borrowed from the theme's own "this is gone"
+    /// rule rather than pinned to a red of our choosing (see
+    /// `from_theme`), so it stays inside whatever palette the reader runs.
+    pub link_missing: Color,
     pub url: Color,
     pub hashtag: Color,
     pub quote_bar: Color,
@@ -69,6 +74,7 @@ impl Palette {
                 ],
                 heading_style: [Style::default(); 4],
                 link: Color::Rgb(0x1a, 0x5f, 0x9e),
+                link_missing: Color::Rgb(0xc0, 0x39, 0x2b),
                 url: Color::Rgb(0x0b, 0x61, 0x74),
                 hashtag: Color::Rgb(0x2e, 0x7d, 0x32),
                 quote_bar: Color::Rgb(0x88, 0x88, 0x88),
@@ -86,6 +92,7 @@ impl Palette {
                 ],
                 heading_style: [Style::default(); 4],
                 link: Color::Rgb(0x8a, 0xc6, 0xff),
+                link_missing: Color::Rgb(0xf3, 0x8b, 0xa8),
                 url: Color::Rgb(0x7f, 0xd0, 0xe0),
                 hashtag: Color::Rgb(0x9d, 0xe0, 0x9d),
                 quote_bar: Color::Rgb(0x88, 0x88, 0x88),
@@ -106,6 +113,7 @@ impl Palette {
     /// | `[**** ]` … `[* ]` headings | `markup.heading.1..4.markdown`     |
     /// | page title (line 1)         | `markup.heading.1.markdown`        |
     /// | `[Page]`, URL, `#tag`       | `markup.underline.link.markdown`   |
+    /// | a link to an uncreated page | `markup.deleted.markdown`          |
     /// | `>` quote bar               | `markup.quote.markdown`            |
     /// | `code:` label, `[x.icon]`   | `markup.raw.inline.markdown`       |
     /// | `•` bullet                  | `comment`                          |
@@ -137,6 +145,14 @@ impl Palette {
             heading,
             heading_style,
             link: link.unwrap_or(base.link),
+            // "Deleted" is the nearest thing a code theme has to "this is
+            // not there": it is a FOREGROUND red in every theme that sets
+            // it. `invalid` reads better on paper but is a BACKGROUND rule
+            // (measured across the embedded themes: Solarized, Dracula,
+            // Nord, Monokai and OneHalfDark all paint the background and
+            // leave the text near-white), so borrowing its fg would give a
+            // link the colour of ordinary prose.
+            link_missing: fg("markup.deleted.markdown").unwrap_or(base.link_missing),
             url: link.unwrap_or(base.url),
             hashtag: link.unwrap_or(base.hashtag),
             quote_bar: fg("markup.quote.markdown").unwrap_or(base.quote_bar),
@@ -782,10 +798,16 @@ mod tests {
         assert_eq!(p.link, p.hashtag, "hashtags are links");
         // headings are not the same color as links in this theme
         assert_ne!(p.heading[1], p.link);
+        // An uncreated link borrows the theme's "deleted" colour, which is
+        // a FOREGROUND (unlike `invalid`, which most themes spell as a
+        // background) — and it must not collide with a live link.
+        assert_eq!(p.link_missing, Color::Rgb(255, 121, 198), "dracula's deleted pink");
+        assert_ne!(p.link_missing, p.link);
         // a theme without markdown rules falls back to the hand palette
         let plain = Highlighter::new(Some("definitely-not-a-theme"), false); // -> default theme
         let q = Palette::from_theme(&plain, false);
         let base = Palette::for_light(false);
+        assert_eq!(q.link_missing, base.link_missing, "no rule → the hand-picked red");
         // every slot is either the theme's color or the base color — never unset
         for (a, b) in q.heading.iter().zip(base.heading.iter()) {
             assert!(matches!(a, Color::Rgb(..)), "{a:?} vs {b:?}");

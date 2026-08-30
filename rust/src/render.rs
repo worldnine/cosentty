@@ -241,6 +241,63 @@ pub struct RenderOutput {
 
 use crate::theme::Palette;
 
+/// Cosense's `titleLc`: the form two page titles are compared in. Lower
+/// case, and whitespace folded to `_` — `[AI supported coding]` and
+/// `[ai_supported_coding]` are one page. Verified against the API's own
+/// `titleLc` field.
+pub fn title_lc(title: &str) -> String {
+    title
+        .chars()
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect()
+}
+
+/// The links on a page that lead nowhere yet, in `title_lc` form.
+///
+/// Membership is EVIDENCE, not a guess. The set is built from what the
+/// server said about the page it sent: its `links` minus the pages the
+/// same response listed as existing. A title that is in neither — a link
+/// typed during this session, say — is simply absent, and absence paints
+/// nothing. That keeps the one unbearable error out of reach: an existing
+/// page marked as missing. The tolerable one (a page created elsewhere
+/// still looking uncreated until the page is loaded again) is all that is
+/// left.
+#[derive(Debug, Default, Clone)]
+pub struct MissingLinks {
+    titles: std::collections::HashSet<String>,
+}
+
+impl MissingLinks {
+    /// `links` = every link the page has; `existing` = the titles known to
+    /// exist (1-hop related pages, plus the page itself).
+    pub fn new<'a>(
+        links: impl IntoIterator<Item = &'a str>,
+        existing: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let existing: std::collections::HashSet<String> =
+            existing.into_iter().map(title_lc).collect();
+        Self {
+            titles: links
+                .into_iter()
+                .map(title_lc)
+                .filter(|t| !existing.contains(t))
+                .collect(),
+        }
+    }
+
+    pub fn has(&self, title: &str) -> bool {
+        // The empty check comes first on purpose: knowing nothing is the
+        // common case (a snapshot, a page whose response carried no
+        // related block), and it should not fold a string per link.
+        !self.titles.is_empty() && self.titles.contains(&title_lc(title))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.titles.is_empty()
+    }
+}
+
 /// A block label that can be followed (`code:name`, `table:name`): the
 /// notation colour, underlined like every other followable row.
 fn style_block_label(pal: &Palette) -> Style {
@@ -250,6 +307,12 @@ fn style_block_label(pal: &Palette) -> Style {
 fn style_link(pal: &Palette) -> Style {
     Style::default().fg(pal.link).add_modifier(Modifier::UNDERLINED)
 }
+/// A link to a page nobody has written yet. Still underlined: it is still
+/// followable — Enter opens it and the first line you type creates it.
+fn style_link_missing(pal: &Palette) -> Style {
+    Style::default().fg(pal.link_missing).add_modifier(Modifier::UNDERLINED)
+}
+
 fn style_url(pal: &Palette) -> Style {
     Style::default().fg(pal.url).add_modifier(Modifier::UNDERLINED)
 }
@@ -363,7 +426,13 @@ fn indent_info(raw: &str) -> (usize, usize, &str) {
 }
 
 /// Decorate inline content into styled spans. Also collects links + gyazo.
-fn decorate_inline(s: &str, links: &mut Vec<String>, images: &mut Vec<String>, pal: &Palette) -> Vec<Span<'static>> {
+fn decorate_inline(
+    s: &str,
+    links: &mut Vec<String>,
+    images: &mut Vec<String>,
+    pal: &Palette,
+    missing: &MissingLinks,
+) -> Vec<Span<'static>> {
     find_gyazo(s, images);
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut rest = s;
@@ -374,7 +443,7 @@ fn decorate_inline(s: &str, links: &mut Vec<String>, images: &mut Vec<String>, p
         if let Some(start) = rest.find('`') {
             if let Some(end_rel) = rest[start + 1..].find('`') {
                 let end = start + 1 + end_rel;
-                push_plain(&mut spans, &rest[..start], links, pal);
+                push_plain(&mut spans, &rest[..start], links, pal, missing);
                 let code = &rest[start + 1..end];
                 spans.push(Span::styled(
                     format!(" {code} "),
@@ -395,25 +464,38 @@ fn decorate_inline(s: &str, links: &mut Vec<String>, images: &mut Vec<String>, p
             if let Some(close) = matching_bracket(rest, start) {
                 let doubled =
                     rest[start + 1..].starts_with('[') && rest[..close].ends_with(']');
-                push_plain(&mut spans, &rest[..start], links, pal);
+                push_plain(&mut spans, &rest[..start], links, pal, missing);
                 if doubled {
-                    decorate_bold(&rest[start + 2..close - 1], &mut spans, links, pal);
+                    decorate_bold(&rest[start + 2..close - 1], &mut spans, links, pal, missing);
                 } else {
-                    decorate_bracket(&rest[start + 1..close], &mut spans, links, images, pal);
+                    decorate_bracket(
+                        &rest[start + 1..close],
+                        &mut spans,
+                        links,
+                        images,
+                        pal,
+                        missing,
+                    );
                 }
                 rest = &rest[close + 1..];
                 continue;
             }
         }
         // no more special tokens
-        push_plain(&mut spans, rest, links, pal);
+        push_plain(&mut spans, rest, links, pal, missing);
         break;
     }
     spans
 }
 
 /// Handle bare text: detect URLs and #hashtags, produce spans.
-fn push_plain(spans: &mut Vec<Span<'static>>, text: &str, links: &mut Vec<String>, pal: &Palette) {
+fn push_plain(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    links: &mut Vec<String>,
+    pal: &Palette,
+    missing: &MissingLinks,
+) {
     if text.is_empty() {
         return;
     }
@@ -423,19 +505,25 @@ fn push_plain(spans: &mut Vec<Span<'static>>, text: &str, links: &mut Vec<String
         if let Some(pos) = find_url(rest) {
             let (url, after) = take_url(&rest[pos..]);
             if pos > 0 {
-                push_tags(spans, &rest[..pos], links, pal);
+                push_tags(spans, &rest[..pos], links, pal, missing);
             }
             spans.push(Span::styled(url.to_string(), style_url(pal)));
             rest = after;
             continue;
         }
-        push_tags(spans, rest, links, pal);
+        push_tags(spans, rest, links, pal, missing);
         break;
     }
 }
 
 /// Handle #hashtags within a plain segment.
-fn push_tags(spans: &mut Vec<Span<'static>>, text: &str, links: &mut Vec<String>, pal: &Palette) {
+fn push_tags(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    links: &mut Vec<String>,
+    pal: &Palette,
+    missing: &MissingLinks,
+) {
     let mut rest = text;
     loop {
         if let Some(pos) = rest.find('#') {
@@ -451,10 +539,16 @@ fn push_tags(spans: &mut Vec<Span<'static>>, text: &str, links: &mut Vec<String>
                     spans.push(Span::raw(rest[..pos].to_string()));
                 }
                 links.push(tag.clone());
-                spans.push(Span::styled(
-                    format!("#{tag}"),
-                    Style::default().fg(pal.hashtag).add_modifier(Modifier::UNDERLINED),
-                ));
+                // A tag is a link, so an uncreated one is coloured like
+                // any other uncreated link: the hashtag green says "tag",
+                // and the reader still needs to know there is nothing
+                // behind it yet.
+                let style = if missing.has(&tag) {
+                    style_link_missing(pal)
+                } else {
+                    Style::default().fg(pal.hashtag).add_modifier(Modifier::UNDERLINED)
+                };
+                spans.push(Span::styled(format!("#{tag}"), style));
                 let consumed = pos + 1 + tag.len();
                 rest = &rest[consumed..];
                 continue;
@@ -493,6 +587,7 @@ fn decorate_bold(
     spans: &mut Vec<Span<'static>>,
     links: &mut Vec<String>,
     pal: &Palette,
+    missing: &MissingLinks,
 ) {
     if inner.trim().is_empty() {
         spans.push(Span::raw(format!("[[{inner}]]")));
@@ -503,7 +598,7 @@ fn decorate_bold(
     // followable), and a bold URL is still a URL. `[[x]]` is Cosense's
     // one-star heading, so it wears the same style `[* x]` does.
     let heading = star_style(1, pal);
-    for sp in decorate_inline(inner, links, &mut images, pal) {
+    for sp in decorate_inline(inner, links, &mut images, pal, missing) {
         spans.push(Span::styled(sp.content, heading.patch(sp.style)));
     }
 }
@@ -556,6 +651,7 @@ fn decorate_bracket(
     links: &mut Vec<String>,
     images: &mut Vec<String>,
     pal: &Palette,
+    missing: &MissingLinks,
 ) {
     // `[]` and `[   ]` are not notation — an empty link is nothing to
     // link to, so Cosense shows the brackets as the text they are. The
@@ -583,7 +679,7 @@ fn decorate_bracket(
         // link: `[[[改善案]]]` and `[* [改善案]]` both have to stay
         // followable, not just look bold.
         if body.contains('[') && body.contains(']') {
-            for sp in decorate_inline(body, links, images, pal) {
+            for sp in decorate_inline(body, links, images, pal, missing) {
                 spans.push(Span::styled(sp.content, style.patch(sp.style)));
             }
             return;
@@ -634,7 +730,8 @@ fn decorate_bracket(
     }
     // internal page link
     links.push(inner.to_string());
-    spans.push(Span::styled(inner.to_string(), style_link(pal)));
+    let style = if missing.has(inner) { style_link_missing(pal) } else { style_link(pal) };
+    spans.push(Span::styled(inner.to_string(), style));
 }
 
 /// If inner starts with a run of */-_ followed by space, return (flags, body).
@@ -784,6 +881,7 @@ fn inline_parts(
     links: &mut Vec<String>,
     images: &mut Vec<String>,
     pal: &Palette,
+    missing: &MissingLinks,
 ) -> Vec<InlinePart> {
     let mut parts: Vec<InlinePart> = Vec::new();
     let mut text_from = 0usize;
@@ -823,7 +921,7 @@ fn inline_parts(
             }
             Err(idx) => {
                 let (from, to) = runs[idx];
-                let spans = decorate_inline(&body[from..to], links, images, pal);
+                let spans = decorate_inline(&body[from..to], links, images, pal, missing);
                 if !spans.is_empty() {
                     parts.push(InlinePart::Text(Line::from(spans)));
                 }
@@ -851,7 +949,7 @@ fn standalone_image(body: &str) -> Option<String> {
 /// Render with defaults (dark palette, no syntax highlighting).
 pub fn render_lines(lines: &[String]) -> RenderOutput {
     let pal = Palette::for_light(false);
-    render_lines_with(lines, None, &pal)
+    render_lines_with(lines, None, &pal, &MissingLinks::default())
 }
 
 /// Render, optionally syntax-highlighting code blocks with `hl`, using `pal`
@@ -860,6 +958,7 @@ pub fn render_lines_with(
     lines: &[String],
     hl: Option<&crate::highlight::Highlighter>,
     pal: &Palette,
+    missing: &MissingLinks,
 ) -> RenderOutput {
     let mut out: Vec<Block> = Vec::new();
     let mut srcs: Vec<usize> = Vec::new();
@@ -921,7 +1020,9 @@ pub fn render_lines_with(
                     (
                         *src,
                         r.iter()
-                            .map(|c| decorate_inline(c, &mut ex.links, &mut ex.images, pal))
+                            .map(|c| {
+                                decorate_inline(c, &mut ex.links, &mut ex.images, pal, missing)
+                            })
                             .collect(),
                     )
                 })
@@ -1057,7 +1158,7 @@ pub fn render_lines_with(
         // picture at all, because splitting the line also collects its
         // links — doing that speculatively would count them twice.
         if !line_images(body).is_empty() {
-            let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal);
+            let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal, missing);
             emit!(Block::Inline { indent: text_column(level), item: level > 0, parts });
             i += 1;
             continue;
@@ -1091,7 +1192,7 @@ pub fn render_lines_with(
                 Span::raw(indent.clone()),
                 Span::styled("┃ ".to_string(), Style::default().fg(pal.quote_bar)),
             ];
-            for s in decorate_inline(q.trim(), &mut ex.links, &mut ex.images, pal) {
+            for s in decorate_inline(q.trim(), &mut ex.links, &mut ex.images, pal, missing) {
                 let styled = s.style.add_modifier(Modifier::ITALIC);
                 spans.push(Span::styled(s.content.into_owned(), styled));
             }
@@ -1104,7 +1205,7 @@ pub fn render_lines_with(
         // Markdown would make these competing block types; Cosense composes
         // them. Keep the positional bullet in the bullet style and apply the
         // theme's heading style only to the heading text.
-        if let Some(heading) = parse_heading(body, pal, &mut ex.links, &mut ex.images) {
+        if let Some(heading) = parse_heading(body, pal, missing, &mut ex.links, &mut ex.images) {
             let mut spans: Vec<Span<'static>> = Vec::new();
             if level > 0 {
                 spans.push(Span::raw(indent.clone()));
@@ -1117,7 +1218,7 @@ pub fn render_lines_with(
         }
 
         // bullet / plain
-        let content = decorate_inline(body, &mut ex.links, &mut ex.images, pal);
+        let content = decorate_inline(body, &mut ex.links, &mut ex.images, pal, missing);
         let mut spans: Vec<Span<'static>> = Vec::new();
         if level > 0 {
             spans.push(Span::raw(indent.clone()));
@@ -1140,6 +1241,7 @@ pub fn render_lines_with(
 fn parse_heading(
     body: &str,
     pal: &Palette,
+    missing: &MissingLinks,
     links: &mut Vec<String>,
     images: &mut Vec<String>,
 ) -> Option<Vec<Span<'static>>> {
@@ -1157,7 +1259,7 @@ fn parse_heading(
     // stay a followable link, not become the letters of one.
     let style = star_style(stars, pal);
     Some(
-        decorate_inline(text, links, images, pal)
+        decorate_inline(text, links, images, pal, missing)
             .into_iter()
             .map(|sp| Span::styled(sp.content, style.patch(sp.style)))
             .collect(),
@@ -1285,6 +1387,7 @@ mod tests {
             &["title".into(), " [* one]".into(), "   [*** three]".into()],
             None,
             &pal,
+            &MissingLinks::default(),
         );
         assert_eq!(plain(&out.blocks[1]), "• one");
         assert_eq!(plain(&out.blocks[2]), "    • three");
@@ -1411,7 +1514,12 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         for hl in [None, Some(crate::highlight::Highlighter::new(None, false))] {
-            let out = render_lines_with(&lines, hl.as_ref(), &Palette::for_light(false));
+            let out = render_lines_with(
+                &lines,
+                hl.as_ref(),
+                &Palette::for_light(false),
+                &MissingLinks::default(),
+            );
             let got: Vec<String> = out.blocks.iter().map(plain).collect();
             assert_eq!(
                 got,
@@ -1501,6 +1609,79 @@ mod tests {
         assert_eq!(nested.body_indent(), "   ", "deeper header, deeper body");
     }
 
+    /// A link to a page nobody has written yet is coloured differently,
+    /// as it is on scrapbox.io — and, crucially, ONLY when the page said
+    /// so. Anything the page never claimed to link to (a link typed while
+    /// editing, most of all) keeps the ordinary link colour: the viewer
+    /// would rather be silent than call an existing page missing.
+    #[test]
+    fn only_links_the_page_vouched_for_can_be_marked_missing() {
+        let pal = Palette::for_light(false);
+        // The page links to three titles; the server listed one of them
+        // as an existing neighbour.
+        let missing =
+            MissingLinks::new(["あるページ", "ないページ", "tag"], ["あるページ"]);
+        let styles = |src: &str, missing: &MissingLinks| -> Vec<(String, Style)> {
+            render_lines_with(&["t".to_string(), src.to_string()], None, &pal, missing)
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Text(l) => Some(
+                        l.spans
+                            .iter()
+                            .map(|s| (s.content.to_string(), s.style))
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .nth(1)
+                .unwrap_or_default()
+        };
+        let style_of = |src: &str, text: &str, m: &MissingLinks| {
+            styles(src, m)
+                .into_iter()
+                .find(|(c, _)| c == text)
+                .unwrap_or_else(|| panic!("{text:?} not rendered from {src:?}"))
+                .1
+        };
+        assert_eq!(style_of("[あるページ]", "あるページ", &missing).fg, Some(pal.link));
+        assert_eq!(
+            style_of("[ないページ]", "ないページ", &missing).fg,
+            Some(pal.link_missing)
+        );
+        // Still underlined: Enter opens it, and typing a line creates it.
+        assert!(style_of("[ないページ]", "ないページ", &missing)
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        // A hashtag is a link too.
+        assert_eq!(style_of("#tag", "#tag", &missing).fg, Some(pal.link_missing));
+        // A decorated link keeps the marking.
+        assert_eq!(
+            style_of("[* [ないページ]]", "ないページ", &missing).fg,
+            Some(pal.link_missing)
+        );
+        // No evidence either way → the ordinary colour.
+        let typed = style_of("[新しく打った]", "新しく打った", &missing);
+        assert_eq!(typed.fg, Some(pal.link));
+        // And with nothing known at all, nothing is marked.
+        assert_eq!(
+            style_of("[ないページ]", "ないページ", &MissingLinks::default()).fg,
+            Some(pal.link)
+        );
+    }
+
+    /// Titles are compared as Cosense compares them: case-folded, with
+    /// whitespace read as `_`.
+    #[test]
+    fn missing_links_match_titles_the_way_cosense_does() {
+        assert_eq!(title_lc("AI supported coding"), "ai_supported_coding");
+        assert_eq!(title_lc("選択した文字 URL"), "選択した文字_url");
+        let m = MissingLinks::new(["Scrapbox Golf"], ["scrapbox_golf"]);
+        assert!(!m.has("Scrapbox Golf"), "the same page under another spelling");
+        let m = MissingLinks::new(["Scrapbox Golf"], ["別のページ"]);
+        assert!(m.has("scrapbox_golf"), "and the link is found under either spelling");
+    }
+
     /// `[]` is not notation — an empty link has nothing to link to — so
     /// Cosense shows the brackets as the text they are. The viewer used to
     /// swallow them, which made a line ABOUT `[]` lose the thing it was
@@ -1509,7 +1690,12 @@ mod tests {
     fn empty_brackets_are_text_and_double_brackets_are_bold() {
         let pal = Palette::for_light(false);
         let plain = |src: &str| -> String {
-            let out = render_lines_with(&["t".to_string(), src.to_string()], None, &pal);
+            let out = render_lines_with(
+                &["t".to_string(), src.to_string()],
+                None,
+                &pal,
+                &MissingLinks::default(),
+            );
             out.blocks
                 .iter()
                 .filter_map(|b| match b {
@@ -1537,7 +1723,12 @@ mod tests {
         // `[[x]]` is Cosense's other spelling of `[* x]`, so it wears the
         // same style — whatever the theme makes that level look like.
         let styles = |src: &str| -> Vec<Style> {
-            render_lines_with(&["t".to_string(), src.to_string()], None, &pal)
+            render_lines_with(
+                &["t".to_string(), src.to_string()],
+                None,
+                &pal,
+                &MissingLinks::default(),
+            )
                 .blocks
                 .iter()
                 .filter_map(|b| match b {
@@ -1558,7 +1749,12 @@ mod tests {
     fn a_line_keeps_its_text_and_every_picture_on_it() {
         let pal = Palette::for_light(false);
         let shape = |src: &str| -> Vec<String> {
-            let out = render_lines_with(&["t".to_string(), src.to_string()], None, &pal);
+            let out = render_lines_with(
+                &["t".to_string(), src.to_string()],
+                None,
+                &pal,
+                &MissingLinks::default(),
+            );
             out.blocks
                 .iter()
                 .skip(1) // the title row
@@ -1656,7 +1852,12 @@ mod tests {
     fn inline_decorations_carry_the_heading_level_and_keep_links() {
         let pal = Palette::for_light(false);
         let render = |src: &str| -> RenderOutput {
-            render_lines_with(&["t".to_string(), src.to_string()], None, &pal)
+            render_lines_with(
+                &["t".to_string(), src.to_string()],
+                None,
+                &pal,
+                &MissingLinks::default(),
+            )
         };
         let styles = |src: &str| -> Vec<Style> {
             render(src)
