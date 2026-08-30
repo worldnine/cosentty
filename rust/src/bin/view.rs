@@ -7807,52 +7807,78 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     );
 
     // ---- list --------------------------------------------------------
-    let list_area = Rect::new(area.x, area.y + 1, panes.list, body_h);
+    //
+    // Same geometry as the page: a caret column on the left edge, the text,
+    // then a scrollbar column just inside the right edge that draws the
+    // THUMB only — no always-on track, and no rule between the panes. A
+    // vertical line down the middle of a picker is a line you have to look
+    // past on every row; whitespace separates just as well and stays out
+    // of the way (ashiato does not draw one either).
+    let caret_x = area.x;
+    let text_x = area.x + 2;
+    let bar_x = area.x + panes.list.saturating_sub(1);
+    let text_w = panes.list.saturating_sub(3);
+    let list_area = Rect::new(text_x, area.y + 1, text_w, body_h);
+    let dim_when_away = |st: Style| if focus == Pane::List { st } else { st.fg(CHROME_DIM) };
+    let app_light = app.light;
+
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut caret_rows: Vec<u16> = Vec::new();
     for (i, row) in rows.iter().enumerate().skip(scroll).take(rows_h) {
         let selected = i == ix.cursor;
         let mut style = Style::default();
         if selected {
             style = style.bg(CURSOR_BG);
-            if focus == Pane::List {
-                style = style.add_modifier(Modifier::BOLD);
-            }
+            caret_rows.push(area.y + 1 + (i - scroll) as u16);
         }
         let line = match row {
             Row::Page(e) => {
-                let age = format!("{:>4} ", relative_age(e.updated));
-                // Unread is the page's own news: the same blue the
-                // telomere uses for a line edited since the last visit.
+                // The same mark the page's own gutter wears: THICKNESS is
+                // how recently it changed, COLOUR is whether it has been
+                // seen. A project's list then reads the way its lines do.
+                let (glyph, tel) =
+                    cosense::theme::telomere(now_secs() - e.updated, e.unread, app_light);
                 let title_style = if e.unread {
-                    style.fg(CHROME_CARET)
+                    dim_when_away(style.fg(CHROME_CARET))
                 } else {
-                    style.fg(Color::Reset)
+                    style
                 };
-                let room = panes.list.saturating_sub(6) as usize;
                 Line::from(vec![
-                    Span::styled(age, style.fg(CHROME_DIM)),
-                    Span::styled(truncate_width(&e.title, room), title_style),
+                    Span::styled(glyph.to_string(), style.fg(tel)),
+                    Span::styled(format!("{:>4} ", relative_age(e.updated)), style.fg(CHROME_DIM)),
+                    Span::styled(
+                        truncate_width(&e.title, text_w.saturating_sub(6) as usize),
+                        title_style,
+                    ),
                 ])
             }
             Row::Create(name) => Line::from(Span::styled(
-                format!("   ＋ 「{}」を作成", name),
-                style.fg(CHROME_ACTIVE),
+                format!("  ＋ 「{name}」を作成"),
+                dim_when_away(style.fg(CHROME_ACTIVE)),
             )),
         };
         lines.push(line);
     }
     f.render_widget(Paragraph::new(lines), list_area);
-    // The list's own scrollbar thumb, in the column between the panes.
-    if let Some((start, len)) = cosense::theme::scroll_thumb_in_track(
-        rows.len(),
-        rows_h,
-        rows_h,
-        scroll,
-    ) {
-        let x = area.x + panes.list;
-        let buf = f.buffer_mut();
+
+    // The cursor rides the left edge, as it does on the page.
+    let buf = f.buffer_mut();
+    for y in caret_rows {
+        if let Some(c) = buf.cell_mut((caret_x, y)) {
+            c.set_symbol(">");
+            c.set_style(Style::default().fg(if focus == Pane::List {
+                CHROME_CARET
+            } else {
+                CHROME_DIM
+            }));
+        }
+    }
+    // Thumb only, and only when the list does not fit.
+    if let Some((start, len)) =
+        cosense::theme::scroll_thumb_in_track(rows.len(), rows_h, rows_h, scroll)
+    {
         for k in start..start + len {
-            if let Some(c) = buf.cell_mut((x, area.y + 1 + k as u16)) {
+            if let Some(c) = buf.cell_mut((bar_x, area.y + 1 + k as u16)) {
                 c.set_symbol("▐");
                 c.set_style(Style::default().fg(CHROME_SCROLL));
             }
@@ -7861,13 +7887,15 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- preview -----------------------------------------------------
     if let Some(width) = panes.preview {
-        let x = area.x + panes.list + panes.gap;
+        // One column of air after the list, then the page. The preview is
+        // text on the terminal's own background — nothing frames it.
+        let x = area.x + panes.list + panes.gap + 1;
+        let width = width.saturating_sub(1);
         let prev_area = Rect::new(x, area.y + 1, width, body_h);
         let lines = index_preview_lines(app, ctx, width as usize);
         let ix = app.index.as_ref().expect("open");
         let skip = ix.preview_scroll as usize;
-        let shown: Vec<Line<'static>> =
-            lines.into_iter().skip(skip).take(rows_h).collect();
+        let shown: Vec<Line<'static>> = lines.into_iter().skip(skip).take(rows_h).collect();
         f.render_widget(Paragraph::new(shown), prev_area);
     }
 
@@ -7890,15 +7918,34 @@ fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Line<'static>>
     let Some(ix) = app.index.as_ref() else { return Vec::new() };
     let Some(entry) = ix.selected() else {
         return vec![Line::from(Span::styled(
-            "  （新しいページ）",
+            "（まだ無いページ — Enter で書きはじめる）",
             Style::default().fg(CHROME_DIM),
         ))];
     };
+    // A heading rule, as the page draws over its related-page sections:
+    // the title, then a hairline to the edge. It says where the preview
+    // starts without a box around it.
+    let dim = Style::default().fg(CHROME_DIM);
+    let head = format!("{} ", entry.title);
+    let fill = "─".repeat(width.saturating_sub(str_width(&head) + 1));
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled(head, Style::default().fg(ctx.palette.title).add_modifier(Modifier::BOLD)),
+            Span::styled(fill, dim),
+        ]),
+        Line::from(Span::styled(
+            format!("{} ago{}", relative_age(entry.updated), if entry.unread { " · 未読" } else { "" }),
+            dim,
+        )),
+        Line::from(""),
+    ];
+    // The renderer reads line 0 as the page's title (it wears the title
+    // style and carries no notation), so the title has to be there — and
+    // its block dropped, since the heading above already says it.
     let mut texts: Vec<String> = vec![entry.title.clone()];
     texts.extend(entry.descriptions.iter().cloned());
     let out = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &LinkTruth::default());
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for block in &out.blocks {
+    for block in out.blocks.iter().skip(1) {
         match block {
             Block::Text(line) => {
                 for w in wrap_line_parts(line, width.saturating_sub(1), &hanging_prefix(line)) {
@@ -11542,6 +11589,47 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// Eyeball the index: prints the drawn screen so the look can be
+    /// judged, not just asserted. `cargo test -- --ignored --nocapture
+    /// index_screen_dump`
+    #[test]
+    #[ignore]
+    fn index_screen_dump() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(100);
+        let mk = |title: &str, mins: i64, unread: bool, desc: &[&str]| cosense::index::Entry {
+            title: title.into(),
+            updated: now_secs() - mins * 60,
+            descriptions: desc.iter().map(|s| s.to_string()).collect(),
+            unread,
+        };
+        app.index = Some(cosense::index::Index::new(
+            vec![
+                mk("改善案", 1, true, &["from [テスト]", "進め方", " 方針: 編集は EDIT セッションを本筋にする", " READ は読むためのモードに寄せる"]),
+                mk("画像表示テスト", 60 * 26, false, &["画像の出方を並べたページ", "[https://gyazo.com/abc]"]),
+                mk("ブラケット記法テスト", 60 * 24 * 9, false, &["各行は「`ソース` → 実際の描画」の形で並べてある", "`[]` → []"]),
+                mk("websocket 同期の設計メモ", 60 * 24 * 40, true, &["socket.io の生フレームで話す", "code:frame.txt", " 0{\"sid\":…}"]),
+                mk("テスト", 60 * 24 * 400, false, &["ここはテスト用のページ"]),
+            ],
+            137,
+        ));
+        for (w, h) in [(100u16, 14u16), (78, 12)] {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+            let buf = t.backend().buffer().clone();
+            println!("\n┌{}┐  ({w}x{h})", "─".repeat(w as usize));
+            for y in 0..buf.area.height {
+                let row: String = (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
+                    .collect();
+                println!("│{row}│");
+            }
+            println!("└{}┘", "─".repeat(w as usize));
+        }
     }
 
     /// The index draws the list and the preview side by side, and gives
