@@ -9,7 +9,7 @@
 //   y         copy all comments (clipboard)   D  delete all comments
 //   q         quit (comments also printed to stdout)
 //   Enter/f   follow the line's link: a page navigates, an uploaded file
-//             is saved to ~/Downloads and opened, an http(s) URL (↗)
+//             is saved to the download dir and opened, an http(s) URL (↗)
 //             opens in the browser (a gyazo image → its gyazo page)
 //   wheel     scroll the viewport only (the cursor keeps its line)
 //   click     open a link under the pointer, otherwise move the cursor
@@ -2217,10 +2217,11 @@ impl App {
         self.links_at_src(self.cursor)
     }
 
-    /// Save an uploaded file to ~/Downloads in the background; the result
-    /// lands in `file_rx` and is reported (and opened) by the event loop.
+    /// Save an uploaded file to the download directory in the background;
+    /// the result lands in `file_rx` and is reported (and opened) by the
+    /// event loop.
     fn start_download(&mut self, ctx: &Ctx, label: String, url: String) {
-        let dest = download_path(&label, &url);
+        let dest = download_path_in(&ctx.download_dir, &label, &url);
         let tx = self.file_tx.clone();
         let fetcher = Arc::clone(&ctx.fetcher);
         self.status = format!("downloading {label}…");
@@ -3613,6 +3614,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut force_light: Option<bool> = None;
     let mut ime_mode = cosense::ime::ImeMode::Jp; // Japanese-first default
     let mut preview = cosense::index::PreviewMode::Auto;
+    let mut download_dir: Option<String> = None;
     let mut it = raw.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -3638,6 +3640,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             s if s.starts_with("--preview=") => {
                 preview = cosense::index::PreviewMode::parse(&s["--preview=".len()..])
                     .unwrap_or_default();
+            }
+            "--download-dir" => download_dir = it.next(),
+            s if s.starts_with("--download-dir=") => {
+                download_dir = Some(s["--download-dir=".len()..].to_string())
             }
             _ => positional.push(a),
         }
@@ -3709,6 +3715,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     let palette = cosense::theme::Palette::from_theme(&hl, light);
     let picker = image_picker()?;
 
+    // Where saved files land. A directory the user NAMED is created if it
+    // is missing; if that cannot be done, say so once at startup and fall
+    // back to the search, rather than failing at each download with a
+    // message about a path nobody remembers choosing.
+    let home = std::env::var("HOME").ok();
+    let env_download = std::env::var("COSENSE_DOWNLOAD_DIR").ok();
+    let xdg_download = std::env::var("XDG_DOWNLOAD_DIR").ok();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (mut download_dir, named) = pick_download_dir(
+        download_dir.as_deref(),
+        env_download.as_deref(),
+        xdg_download.as_deref(),
+        home.as_deref(),
+        cwd.clone(),
+    );
+    let mut download_note = None;
+    if named {
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
+            let (fallback, _) =
+                pick_download_dir(None, None, xdg_download.as_deref(), home.as_deref(), cwd);
+            download_note =
+                Some(format!("{} は使えません（{e}）。{} に保存します", download_dir.display(), fallback.display()));
+            download_dir = fallback;
+        }
+    }
+
     let ctx = Ctx {
         client,
         hl,
@@ -3719,6 +3751,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         terminal_bg,
         ime_mode,
         preview,
+        download_dir,
         editability: std::sync::Mutex::new(HashMap::new()),
         project_themes: std::sync::Mutex::new(HashMap::new()),
     };
@@ -3838,6 +3871,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             "no auth — public read-only (`cosense login` to enable edits) · image: {img}"
         ),
     };
+    if let Some(note) = download_note {
+        app.status = note;
+    }
     // `#<lineId>` from the URL: start on that line (the first frame's layout
     // clamps it onto a rendered line and scrolls it into view).
     if let Some(id) = line_id {
@@ -3891,6 +3927,8 @@ struct Ctx {
     ime_mode: cosense::ime::ImeMode,
     /// Whether the index's excerpt dock is drawn (`--preview`).
     preview: cosense::index::PreviewMode,
+    /// Where saved files land (`--download-dir`, see `pick_download_dir`).
+    download_dir: std::path::PathBuf,
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
     editability: std::sync::Mutex<HashMap<String, bool>>,
@@ -4753,15 +4791,54 @@ fn files_on_line(text: &str) -> Vec<(String, String)> {
     labelled_urls(text).into_iter().filter(|(_, u)| is_scrapbox_file_url(u)).collect()
 }
 
-/// Where a downloaded file goes: `~/Downloads/<name>` (see
-/// `download_path_in`).
-fn download_path(label: &str, url: &str) -> std::path::PathBuf {
-    let dir = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join("Downloads"))
-        .ok()
+/// Where downloads go, asked in the order a reader would expect to be
+/// asked: `--download-dir`, `COSENSE_DOWNLOAD_DIR`, the desktop's own
+/// `XDG_DOWNLOAD_DIR`, `~/Downloads`, and finally the working directory.
+///
+/// `~/Downloads` was the whole rule, which is a machine-shaped assumption:
+/// a server account or a stripped-down box has no such directory, and the
+/// file then landed in whatever directory the viewer happened to start in
+/// without anyone having chosen it.
+///
+/// The bool is "the user named this place". A named directory is created if
+/// it is missing — naming it is the request. A directory merely FOUND has
+/// to exist already, or the search moves on.
+fn pick_download_dir(
+    explicit: Option<&str>,
+    env_dir: Option<&str>,
+    xdg: Option<&str>,
+    home: Option<&str>,
+    cwd: std::path::PathBuf,
+) -> (std::path::PathBuf, bool) {
+    let named = explicit
+        .into_iter()
+        .chain(env_dir)
+        .map(str::trim)
+        .find(|s| !s.is_empty());
+    if let Some(dir) = named {
+        return (expand_home(dir, home), true);
+    }
+    let found = xdg
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| expand_home(s, home))
         .filter(|d| d.is_dir())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    download_path_in(&dir, label, url)
+        .or_else(|| {
+            home.map(|h| std::path::PathBuf::from(h).join("Downloads")).filter(|d| d.is_dir())
+        });
+    (found.unwrap_or(cwd), false)
+}
+
+/// `~` and `~/…` against a known home. Config files and shells both write
+/// paths that way, and the env var arrives unexpanded when it was set by
+/// hand rather than by the shell.
+fn expand_home(path: &str, home: Option<&str>) -> std::path::PathBuf {
+    let Some(home) = home else { return std::path::PathBuf::from(path) };
+    match path {
+        "~" => std::path::PathBuf::from(home),
+        p if p.starts_with("~/") => std::path::PathBuf::from(home).join(&p[2..]),
+        p => std::path::PathBuf::from(p),
+    }
 }
 
 /// `<dir>/<name>`, where `<name>` is the link's label when it carries an
@@ -4806,7 +4883,7 @@ fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
         LinkItem::File { label, url } => app.start_download(ctx, label, url),
         LinkItem::Export { label, src, csv } => {
             let body = block_export_body(&app.lines, src, csv);
-            let dest = download_path(&label, "");
+            let dest = download_path_in(&ctx.download_dir, &label, "");
             app.status = match std::fs::write(&dest, body) {
                 Ok(()) => {
                     let shown = dest.display().to_string();
@@ -9014,7 +9091,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         Some(Overlay::Help) => {
             let mut keys: Vec<String> = vec![
                 "move      j/k · g/G · ^u/^d · PgUp/PgDn".into(),
-                "link      Enter/f open: page · 📎 file → ~/Downloads · ↗ URL → browser".into(),
+                "link      Enter/f open: page · 📎 file → download dir · ↗ URL → browser".into(),
                 "mouse     click link/open · click row/move · drag/select · wheel/scroll".into(),
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
@@ -9150,6 +9227,7 @@ mod tests {
             terminal_bg: (24, 24, 24),
             ime_mode: cosense::ime::ImeMode::Off,
             preview: cosense::index::PreviewMode::Auto,
+            download_dir: std::env::temp_dir(),
             editability: std::sync::Mutex::new(HashMap::new()),
             project_themes: std::sync::Mutex::new(HashMap::new()),
         }
@@ -15043,6 +15121,41 @@ mod tests {
         std::fs::write(dir.join("260826ニセコ (2).pdf"), b"x").unwrap();
         assert_eq!(name(&download_path_in(&dir, "260826ニセコ.pdf", url)), "260826ニセコ (3).pdf");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Where downloads go is asked in a fixed order, and `~/Downloads` is
+    /// only one answer in it — a box without that directory used to save
+    /// into whatever directory the viewer started in (改善案3).
+    #[test]
+    fn the_download_directory_is_chosen_in_a_fixed_order() {
+        let tmp = std::env::temp_dir().join(format!("cosense-dl-{}", std::process::id()));
+        let home = tmp.join("home");
+        let xdg = tmp.join("xdg");
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::fs::create_dir_all(&xdg).unwrap();
+        let cwd = tmp.join("cwd");
+        let h = home.to_str().unwrap();
+        let pick = |explicit, env, xdg: Option<&str>| {
+            pick_download_dir(explicit, env, xdg, Some(h), cwd.clone())
+        };
+
+        // The flag wins, and naming a place means "make it" — even under a
+        // `~`, which arrives unexpanded when it was set by hand.
+        let (dir, named) = pick(Some("~/elsewhere"), Some("/env"), xdg.to_str());
+        assert_eq!((dir, named), (home.join("elsewhere"), true));
+        // then the env var
+        assert_eq!(pick(None, Some("/env"), xdg.to_str()).0, std::path::PathBuf::from("/env"));
+        // then the desktop's own setting, but only where it really exists
+        assert_eq!(pick(None, None, xdg.to_str()), (xdg.clone(), false));
+        assert_eq!(pick(None, None, Some("/nope")).0, home.join("Downloads"), "missing XDG dir is skipped");
+        // then ~/Downloads, and the working directory when even that is gone
+        assert_eq!(pick(None, None, None), (home.join("Downloads"), false));
+        std::fs::remove_dir_all(home.join("Downloads")).unwrap();
+        assert_eq!(pick(None, None, None), (cwd.clone(), false));
+        // blanks are not answers
+        assert_eq!(pick(Some("  "), Some(""), None), (cwd, false));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
