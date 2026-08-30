@@ -5789,20 +5789,34 @@ fn session_split(app: &mut App, ctx: &Ctx) {
     // on the HEADER opens the block's first body line (without this there
     // is no way to type a block at all: the new line would start flush and
     // the renderer would not read it as code), and Enter on a blank line
-    // inside keeps the body indent instead of escaping the list — the
-    // escape would silently drop you out of the block.
-    let code = cosense::render::code_span_at(&app.source_texts(), line)
-        .or_else(|| cosense::render::table_span_at(&app.source_texts(), line));
-    if let Some(span) = code {
+    // inside keeps the body indent instead of escaping the list — in code
+    // a blank line is blank CODE, and the escape would drop you out of the
+    // block you are still writing.
+    let texts = app.source_texts();
+    let code = cosense::render::code_span_at(&texts, line);
+    let table = cosense::render::table_span_at(&texts, line);
+    drop(texts);
+    if let Some(span) = code.or(table) {
         let indent = span.body_indent();
         if line == span.header {
             session_open_below(app, ctx, line, indent, String::new());
             return;
         }
-        if buf.chars().all(char::is_whitespace) {
+        let empty = buf.chars().all(char::is_whitespace);
+        // A table ends the way a list does: Enter on a row with nothing in
+        // it leaves. (A code block does not — see above.)
+        let escapes = empty && code.is_none();
+        if empty && !escapes {
             let tail = format!("{indent}{}", buf[caret.min(buf.len())..].trim_start());
             session_open_below(app, ctx, line, indent, tail);
             return;
+        }
+        if !empty {
+            let tail = format!("{indent}{}", buf[caret.min(buf.len())..].trim_start());
+            if caret >= buf.trim_end().len() {
+                session_open_below(app, ctx, line, indent, tail);
+                return;
+            }
         }
     }
     if !buf.is_empty() && buf.chars().all(char::is_whitespace) {
@@ -11207,6 +11221,37 @@ mod tests {
         assert_eq!(app.session.as_ref().unwrap().input.buf, " ５人");
         handle_session_key(&mut app, &ctx, key(KeyCode::BackTab));
         assert_eq!(app.session.as_ref().unwrap().input.buf, "５人", "out of the table");
+    }
+
+    /// A table ends the way a list does: Enter on a row with nothing in it
+    /// leaves. (A code block does not — a blank line there is blank code.)
+    #[test]
+    fn an_empty_row_plus_enter_leaves_the_table() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "table:表", " a\tb", "after"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, " a\tb".len());
+
+        // First Enter: a new row, still in the table.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " ");
+        assert!(app.table_span_at_line(3).is_some());
+
+        // Second Enter on that empty row: out.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "", "the new line starts flush");
+        assert_eq!(app.lines[3].text, "", "and the empty row stopped being one");
+        assert!(app.table_span_at_line(s.line).is_none(), "outside the table");
+
+        // A code block keeps its blank lines instead.
+        let mut app = page(&["title", "code:x.py", " a = 1"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, " a = 1".len());
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " ", "still inside the code");
+        assert!(app.code_span_at_line(app.session.as_ref().unwrap().line).is_some());
     }
 
     /// A tab is invisible at width zero: the cells around it would run
