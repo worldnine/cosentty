@@ -756,6 +756,10 @@ struct App {
     /// The project index (list + preview). Open = it owns the screen and
     /// the keys; the page it was opened from is still loaded underneath.
     index: Option<cosense::index::Index>,
+    /// The list's rectangle as of the last index frame, so a click can be
+    /// turned back into a row (the page keeps `text_rect` for the same
+    /// reason).
+    index_list_rect: Rect,
 
     /// When this page was last seen by the user before this visit — the
     /// later of Cosense's `lastAccessed` (browser) and the local visit
@@ -1309,6 +1313,7 @@ impl App {
             forward: Vec::new(),
             overlay: None,
             index: None,
+            index_list_rect: Rect::default(),
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,
             web_pending: HashSet::new(),
@@ -7360,6 +7365,10 @@ fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
 /// - While the composer is open only the wheel works: the commented range
 ///   is pinned and a click must not rewrite it mid-typing.
 fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
+    if app.index.is_some() {
+        handle_mouse_index(app, ctx, m);
+        return;
+    }
     if app.overlay.is_some() {
         match m.kind {
             MouseEventKind::ScrollDown => handle_overlay_key(app, ctx, KeyCode::Down, KeyModifiers::NONE),
@@ -7369,6 +7378,68 @@ fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
         return;
     }
     handle_mouse_content(app, ctx, m);
+}
+
+/// Mouse in the index: the wheel moves the list (or scrolls the preview
+/// when the pointer is over it), and a click on a row OPENS that page.
+///
+/// One click, not two. The list is a picker — every row is a link, and a
+/// row is a big target — so the second click of a select-then-open dance
+/// would only be a way of asking "are you sure" about a page that can be
+/// left again with `[`.
+fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
+    use cosense::index::{Pane, Row};
+    let list = app.index_list_rect;
+    let over_list = m.column < list.x + list.width;
+    let row_at = |m: &MouseEvent, ix: &cosense::index::Index| -> Option<usize> {
+        if m.row < list.y || m.row >= list.y + list.height || !over_list {
+            return None;
+        }
+        let i = ix.scroll + (m.row - list.y) as usize;
+        (i < ix.len()).then_some(i)
+    };
+    match m.kind {
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+            let down = matches!(m.kind, MouseEventKind::ScrollDown);
+            let Some(ix) = app.index.as_mut() else { return };
+            // The wheel belongs to whatever it is pointing at, whichever
+            // pane has the keys.
+            if over_list {
+                ix.move_cursor(if down { 1 } else { -1 });
+            } else if down {
+                ix.preview_scroll = ix.preview_scroll.saturating_add(1);
+            } else {
+                ix.preview_scroll = ix.preview_scroll.saturating_sub(1);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let Some(ix) = app.index.as_mut() else { return };
+            if !over_list {
+                // Clicking the preview is how you get to scroll it with
+                // the keys, the way Tab does.
+                ix.focus = Pane::Preview;
+                return;
+            }
+            ix.focus = Pane::List;
+            let Some(i) = row_at(&m, ix) else { return };
+            ix.cursor = i;
+            let target = match ix.rows().get(i) {
+                Some(Row::Page(e)) => Some((e.title.clone(), false)),
+                Some(Row::Create(name)) => Some((name.to_string(), true)),
+                None => None,
+            };
+            app.index = None;
+            if let Some((title, create)) = target {
+                let project = app.project.clone();
+                navigate_to(app, ctx, &project, &title);
+                if create {
+                    app.cursor = 0;
+                    open_line(app, ctx, false);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Caret byte for a click at display column `col` of body line `line`:
@@ -7819,6 +7890,9 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let text_x = area.x + 2;
     let text_w = panes.list.saturating_sub(3);
     let list_area = Rect::new(text_x, area.y + 1, text_w, body_h);
+    // The whole left pane is the click target, not just the text: hitting
+    // the telomere or the age of a row means that row.
+    app.index_list_rect = Rect::new(area.x, area.y + 1, panes.list, body_h);
     let dim_when_away = |st: Style| if focus == Pane::List { st } else { st.fg(CHROME_DIM) };
     let app_light = app.light;
 
@@ -11591,6 +11665,64 @@ mod tests {
         assert_eq!(jobs.len(), 3, "delete, undo, redo each committed");
         assert!(jobs[1].0.starts_with("undo"));
         assert!(jobs[2].0.starts_with("redo"));
+    }
+
+    /// The index is a list of links, so the mouse treats it as one: the
+    /// wheel moves through it and a click opens the row it landed on.
+    #[test]
+    fn a_click_in_the_index_opens_that_page() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(100);
+        let mk = |title: &str| cosense::index::Entry {
+            title: title.into(),
+            updated: now_secs(),
+            descriptions: vec!["body".into()],
+            unread: false,
+        };
+        app.index = Some(cosense::index::Index::new(
+            vec![mk("最初"), mk("二番目"), mk("三番目")],
+            3,
+        ));
+        // A frame has to have been drawn: the click is answered with the
+        // geometry that was on screen.
+        let mut t = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+
+        let at = |kind: MouseEventKind, col: u16, row: u16| MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // The wheel walks the list.
+        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, 5, 3));
+        assert_eq!(app.index.as_ref().unwrap().cursor, 1);
+        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollUp, 5, 3));
+        assert_eq!(app.index.as_ref().unwrap().cursor, 0);
+
+        // Over the preview the wheel scrolls the preview instead.
+        let preview_x = cosense::index::panes(ctx.preview, 100).list + 4;
+        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, preview_x, 3));
+        assert_eq!(app.index.as_ref().unwrap().preview_scroll, 1);
+        assert_eq!(app.index.as_ref().unwrap().cursor, 0, "and leaves the list alone");
+
+        // A click on the third row opens the third page — one click. The
+        // opening itself is a page fetch, which a test has no server for;
+        // what is checked here is that the click resolved to THAT row and
+        // went to open it (the status names what was asked for).
+        handle_mouse(
+            &mut app,
+            &ctx,
+            at(MouseEventKind::Down(MouseButton::Left), 5, 3),
+        );
+        assert!(app.index.is_none(), "the index closes behind you");
+        assert!(
+            app.status.contains("三番目"),
+            "the third row was opened, not another: {}",
+            app.status
+        );
     }
 
     /// Eyeball the index: prints the drawn screen so the look can be
