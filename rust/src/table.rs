@@ -27,6 +27,10 @@ const V: &str = "│";
 #[derive(Debug, Clone)]
 pub struct Table {
     pub name: String,
+    /// How the name row is drawn. Comes from the palette (the notation
+    /// label colour `code:` uses), so a table follows the syntax theme
+    /// like the rest of the body instead of a hard-coded colour.
+    pub name_style: Style,
     /// Source line of the `table:name` opener.
     pub name_src: usize,
     /// rows[r] = (source line, cells); cells[col] = styled spans.
@@ -47,17 +51,11 @@ impl Table {
         let cols = self.column_count();
         let mut out: Vec<(Line<'static>, usize)> = Vec::new();
         if !self.name.is_empty() {
-            // The name line is also the way OUT of the table: Cosense
-            // serves it as CSV, so `Enter` on this row saves the file. The
-            // arrow says the row can be followed, the way link rows do.
+            // The name row is also the way OUT of the table — Cosense
+            // serves it as CSV and `Enter` saves it — which the underline
+            // in `name_style` says, the same way it says it on a link.
             out.push((
-                Line::from(vec![
-                    Span::styled(
-                        format!("▤ {}", self.name),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("  ↓csv", Style::default().fg(Color::DarkGray)),
-                ]),
+                Line::from(Span::styled(format!("table:{}", self.name), self.name_style)),
                 self.name_src,
             ));
         }
@@ -384,6 +382,7 @@ mod tests {
     #[test]
     fn natural_width_when_fits() {
         let t = Table {
+            name_style: Style::default(),
             name: String::new(),
             name_src: 0,
             rows: vec![
@@ -399,6 +398,7 @@ mod tests {
     #[test]
     fn rows_carry_their_source_lines() {
         let t = Table {
+            name_style: Style::default(),
             name: "t".into(),
             name_src: 5,
             rows: vec![
@@ -417,6 +417,7 @@ mod tests {
     #[test]
     fn cjk_columns_align() {
         let t = Table {
+            name_style: Style::default(),
             name: String::new(),
             name_src: 0,
             rows: vec![(1, vec![cell("長い長い文字列"), cell("短い文字列")])],
@@ -430,6 +431,7 @@ mod tests {
     #[test]
     fn shrinks_and_wraps_when_narrow() {
         let t = Table {
+            name_style: Style::default(),
             name: String::new(),
             name_src: 0,
             rows: vec![

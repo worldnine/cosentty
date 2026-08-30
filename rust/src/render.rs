@@ -241,6 +241,12 @@ pub struct RenderOutput {
 
 use crate::theme::Palette;
 
+/// A block label that can be followed (`code:name`, `table:name`): the
+/// notation colour, underlined like every other followable row.
+fn style_block_label(pal: &Palette) -> Style {
+    Style::default().fg(pal.code_fence).add_modifier(Modifier::UNDERLINED)
+}
+
 fn style_link(pal: &Palette) -> Style {
     Style::default().fg(pal.link).add_modifier(Modifier::UNDERLINED)
 }
@@ -606,20 +612,20 @@ fn decorate_bracket(
             find_gyazo(url, images);
             let label = if title.is_empty() { "[gyazo]" } else { title };
             spans.push(Span::styled(
-                format!("🖼 {label}"),
+                label.to_string(),
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::UNDERLINED),
             ));
         } else if is_scrapbox_file_url(url) {
             // Uploaded file: a paper-clip so it reads as "download", not
             // "open in browser". Enter/f in the viewer saves and opens it.
             let label = if title.is_empty() { file_name_of_url(url) } else { title };
-            spans.push(Span::styled(format!("📎 {label}"), style_url(pal)));
+            spans.push(Span::styled(label.to_string(), style_url(pal)));
         } else if looks_like_image_url(url) {
             // The picture is drawn on its own row; the text row only needs
             // to say that it is there. Spelling out the whole URL made a
             // one-line note wrap over three rows of link.
             let label = if title.is_empty() { file_name_of_url(url) } else { title };
-            spans.push(Span::styled(format!("\u{1f5bc} {label}"), style_url(pal)));
+            spans.push(Span::styled(label.to_string(), style_url(pal)));
         } else {
             let label = if title.is_empty() { url } else { title };
             spans.push(Span::styled(label.to_string(), style_url(pal)));
@@ -924,7 +930,12 @@ pub fn render_lines_with(
             // flush; nesting is rare and the width-adaptive layout owns
             // horizontal budget. Keep the indent as a note for the future.
             let _ = &indent;
-            emit!(Block::Table(crate::table::Table { name, name_src: i, rows: styled_rows }));
+            emit!(Block::Table(crate::table::Table {
+                name,
+                name_src: i,
+                rows: styled_rows,
+                name_style: style_block_label(pal),
+            }));
             i = j;
             continue;
         }
@@ -933,13 +944,13 @@ pub fn render_lines_with(
         if let Some(rest) = body.strip_prefix("code:") {
             let lang = rest.trim().to_string();
             let code_indent = raw_len;
-            // Cosense serves a code block as a file, so the header line
-            // is something to follow: `Enter` saves it. The arrow marks
-            // the row as actionable, like a link row.
+            // Cosense serves a code block as a file, so the header line is
+            // something to follow: `Enter` saves it. That is said with the
+            // underline every followable row wears — one signal for "you
+            // can press Enter here", not a glyph per kind.
             let header = Line::from(vec![
                 Span::raw(indent.clone()),
-                Span::styled(format!("code:{lang}"), Style::default().fg(pal.code_fence)),
-                Span::styled("  ↓", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("code:{lang}"), style_block_label(pal)),
             ]);
             // A Mermaid block is collected whole and handed to the web
             // renderer; everything else emits the header row right away.
@@ -1298,11 +1309,11 @@ mod tests {
         assert!(!is_scrapbox_file_url("https://scrapbox.io/files/6a8e7e5d714feb3f195319dd.png"));
         // a titled file link renders as a paper-clip label, never an image block
         let out = render_lines(&["t".into(), format!("[260826ニセコ.pdf {pdf}]")]);
-        assert_eq!(plain(&out.blocks[1]), "📎 260826ニセコ.pdf");
+        assert_eq!(plain(&out.blocks[1]), "260826ニセコ.pdf");
         assert!(out.extracted.images.is_empty());
         // an untitled one shows the file name
         let out = render_lines(&["t".into(), format!("[{pdf}]")]);
-        assert_eq!(plain(&out.blocks[1]), "📎 6a8e7e5d714feb3f195319dd.pdf");
+        assert_eq!(plain(&out.blocks[1]), "6a8e7e5d714feb3f195319dd.pdf");
     }
 
     #[test]
@@ -1404,7 +1415,7 @@ mod tests {
             let got: Vec<String> = out.blocks.iter().map(plain).collect();
             assert_eq!(
                 got,
-                vec!["t", "code:x.py  ↓", "  print(1)", "[BLANK]", "[BLANK]", "[BLANK]", "after"],
+                vec!["t", "code:x.py", "  print(1)", "[BLANK]", "[BLANK]", "[BLANK]", "after"],
                 "highlighted={}",
                 hl.is_some()
             );
@@ -1418,7 +1429,7 @@ mod tests {
             .collect();
         let out = render_lines(&lines);
         let got: Vec<String> = out.blocks.iter().map(plain).collect();
-        assert_eq!(got, vec!["t", "code:x.py  ↓", "  a = 1", "  ", "  b = 2", "end"]);
+        assert_eq!(got, vec!["t", "code:x.py", "  a = 1", "  ", "  b = 2", "end"]);
         assert_eq!(out.srcs, vec![0, 1, 2, 3, 4, 5]);
     }
 

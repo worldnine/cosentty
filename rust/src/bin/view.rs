@@ -9,7 +9,7 @@
 //   y         copy all comments (clipboard)   D  delete all comments
 //   q         quit (comments also printed to stdout)
 //   Enter/f   follow the line's link: a page navigates, an uploaded file
-//             (📎) is saved to ~/Downloads and opened, an http(s) URL (↗)
+//             is saved to ~/Downloads and opened, an http(s) URL (↗)
 //             opens in the browser (a gyazo image → its gyazo page)
 //   wheel     scroll the viewport only (the cursor keeps its line)
 //   click     open a link under the pointer, otherwise move the cursor
@@ -493,7 +493,7 @@ impl LinkItem {
         match self {
             LinkItem::Page(t) => t.clone(),
             LinkItem::ProjectPage { project, title } => format!("/{project}/{title}"),
-            LinkItem::File { label, .. } => format!("📎 {label}"),
+            LinkItem::File { label, .. } => format!("↓ {label}"),
             LinkItem::Url { label, .. } => format!("↗ {label}"),
         }
     }
@@ -505,10 +505,8 @@ impl LinkItem {
         match self {
             LinkItem::Page(t) => vec![t.clone(), format!("#{t}")],
             LinkItem::ProjectPage { project, title } => vec![format!("/{project}/{title}")],
-            LinkItem::File { label, .. } => vec![format!("📎 {label}")],
-            LinkItem::Url { label, .. } => {
-                vec![label.clone(), format!("🖼 {label}"), format!("🖼 [{label}]")]
-            }
+            LinkItem::File { label, .. } => vec![label.clone()],
+            LinkItem::Url { label, .. } => vec![label.clone(), format!("[{label}]")],
         }
     }
 }
@@ -13312,7 +13310,7 @@ mod tests {
             "/shokai/t"
         );
         assert!(matches!(&items[1], LinkItem::File { label, .. } if label == "260826ニセコ.pdf"));
-        assert_eq!(items[1].label(), "📎 260826ニセコ.pdf");
+        assert_eq!(items[1].label(), "↓ 260826ニセコ.pdf");
     }
 
     #[test]
