@@ -122,6 +122,11 @@ pub struct Index {
     /// First visible row of the list.
     pub scroll: usize,
     pub focus: Pane,
+    /// Keep the cursor in view on the next frame. Set by every key that
+    /// moves the cursor and cleared by the wheel: scrolling with the mouse
+    /// moves the VIEW and leaves the cursor where it is, exactly as it
+    /// does over the page body.
+    pub follow: bool,
     /// Preview scroll, in rows, kept per page under the cursor.
     pub preview_scroll: u16,
     /// How many pages the project has, when the API said so — the list may
@@ -139,7 +144,7 @@ pub enum Row<'a> {
 
 impl Index {
     pub fn new(entries: Vec<Entry>, total: usize) -> Self {
-        Self { entries, total, focus: Pane::List, ..Self::default() }
+        Self { entries, total, focus: Pane::List, follow: true, ..Self::default() }
     }
 
     /// Rows matching the filter, in list order, with the create offer last
@@ -199,6 +204,7 @@ impl Index {
         let want = (self.cursor as i64 + delta as i64).clamp(0, n as i64 - 1) as usize;
         let moved = want != self.cursor;
         self.cursor = want;
+        self.follow = true;
         if moved {
             self.preview_scroll = 0;
         }
@@ -213,6 +219,24 @@ impl Index {
         self.cursor = 0;
         self.scroll = 0;
         self.preview_scroll = 0;
+        self.follow = true;
+    }
+
+    /// Wheel: move the WINDOW by `delta` rows and leave the cursor alone.
+    /// The list is content, and content scrolls under the pointer — the
+    /// selection is the keyboard's business (the page body behaves the
+    /// same way). Returns whether anything moved, which is what decides
+    /// if the scrollbar shows itself.
+    pub fn scroll_by(&mut self, delta: i32, height: usize) -> bool {
+        let n = self.len();
+        let max = n.saturating_sub(height.max(1));
+        let want = (self.scroll as i64 + delta as i64).clamp(0, max as i64) as usize;
+        let moved = want != self.scroll;
+        self.scroll = want;
+        // The cursor stays put, so the window must stop being dragged back
+        // onto it until a key asks for that again.
+        self.follow = false;
+        moved
     }
 
     /// Keep the cursor inside the list and inside the window of `height`
@@ -225,6 +249,12 @@ impl Index {
             return 0;
         }
         self.cursor = self.cursor.min(n - 1);
+        if !self.follow {
+            // Scrolled away with the wheel: only keep the window inside
+            // the list.
+            self.scroll = self.scroll.min(n.saturating_sub(height));
+            return self.scroll;
+        }
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + height {
@@ -313,6 +343,24 @@ mod tests {
         ix.set_filter("a".into());
         assert_eq!(ix.follow(3), 0);
         assert_eq!(ix.cursor, 0);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_window_and_the_keys_move_the_cursor() {
+        let mut ix = index(&["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(ix.follow(3), 0);
+        // The wheel scrolls the list under the cursor: the cursor does not
+        // move, and the window is not dragged back to it.
+        assert!(ix.scroll_by(2, 3));
+        assert_eq!(ix.cursor, 0, "the selection is the keyboard's business");
+        assert_eq!(ix.follow(3), 2, "…and the window stays where it was put");
+        assert!(ix.scroll_by(9, 3), "…up to the last window");
+        assert_eq!(ix.scroll, 3, "which stops with the last row in view");
+        assert!(!ix.scroll_by(9, 3), "and there is nothing past it");
+        // A key that moves the cursor takes the window back with it.
+        ix.move_cursor(1);
+        assert_eq!(ix.cursor, 1);
+        assert_eq!(ix.follow(3), 1, "the window follows the cursor again");
     }
 
     #[test]

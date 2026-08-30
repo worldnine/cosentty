@@ -70,6 +70,9 @@ const SOURCE_NUM_W: usize = 5;
 /// showing rather than pretending to be complete.
 const INDEX_PAGE_LIMIT: u32 = 500;
 
+/// How long the index's scrollbar stays up after the last scroll.
+const INDEX_BAR_LINGER: Duration = Duration::from_millis(900);
+
 /// How often the page is scanned for links whose fate is unknown.
 const LINK_SCAN_EVERY: Duration = Duration::from_millis(400);
 
@@ -494,6 +497,9 @@ enum LinkItem {
     /// A cross-project link (`[/project/Page]`): the viewer moves into that
     /// project, as the browser does.
     ProjectPage { project: String, title: String },
+    /// A link to a whole project (`[/project]`), which on Cosense is its
+    /// home screen. Here that is the project's index.
+    ProjectIndex { project: String },
     /// An uploaded file (`[name https://scrapbox.io/files/…pdf]`).
     File { label: String, url: String },
     /// Any other http(s) URL (`[title https://…]`, bare URL) — the browser's.
@@ -513,6 +519,7 @@ impl LinkItem {
         match self {
             LinkItem::Page(t) => t.clone(),
             LinkItem::ProjectPage { project, title } => format!("/{project}/{title}"),
+            LinkItem::ProjectIndex { project } => format!("/{project}"),
             LinkItem::File { label, .. } => format!("↓ {label}"),
             LinkItem::Export { label, .. } => format!("↓ {label}"),
             LinkItem::Url { label, .. } => format!("↗ {label}"),
@@ -606,6 +613,24 @@ impl Row {
 enum Mode {
     View,
     Source,
+}
+
+/// Somewhere the reader has been. A project's index is a place like any
+/// page: it is where Cosense's own home screen would be, so `[` has to be
+/// able to go back to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Place {
+    Page { project: String, title: String },
+    Index { project: String },
+}
+
+impl Place {
+    fn label(&self) -> String {
+        match self {
+            Place::Page { title, .. } => title.clone(),
+            Place::Index { project } => format!("/{project}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -748,9 +773,9 @@ struct App {
     comments: Vec<Comment>,
     status: String,
 
-    /// Back stack of visited page titles (`[`), and forward stack (`]`).
-    history: Vec<(String, String)>,
-    forward: Vec<(String, String)>,
+    /// Back stack of visited places (`[`), and forward stack (`]`).
+    history: Vec<Place>,
+    forward: Vec<Place>,
     /// Open overlay (comments list / link picker / help), if any.
     overlay: Option<Overlay>,
     /// The project index (list + preview). Open = it owns the screen and
@@ -760,6 +785,16 @@ struct App {
     /// turned back into a row (the page keeps `text_rect` for the same
     /// reason).
     index_list_rect: Rect,
+    /// The project the open index is listing. Usually the page's own, but
+    /// a `[/other-project]` link opens that project's index while the page
+    /// underneath is still this one's.
+    index_project: String,
+    /// When the index was last scrolled. The list's scrollbar is drawn for
+    /// a moment after that and not otherwise: a bar standing permanently in
+    /// the seam between the panes reads as a rule down the middle of the
+    /// screen, but while the list is moving it is the one thing that says
+    /// where the movement has got to.
+    index_scrolled_at: Option<Instant>,
 
     /// When this page was last seen by the user before this visit — the
     /// later of Cosense's `lastAccessed` (browser) and the local visit
@@ -1314,6 +1349,8 @@ impl App {
             overlay: None,
             index: None,
             index_list_rect: Rect::default(),
+            index_project: String::new(),
+            index_scrolled_at: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,
             web_pending: HashSet::new(),
@@ -1384,6 +1421,14 @@ impl App {
     /// related entries in view mode (virtual lines after the body). The
     /// edit session hides the related section, so its rows are not
     /// addressable then either — exactly like source mode.
+    /// Where the reader is right now, for the back stack.
+    fn here(&self) -> Place {
+        match self.index.is_some() {
+            true => Place::Index { project: self.index_project.clone() },
+            false => Place::Page { project: self.project.clone(), title: self.title.clone() },
+        }
+    }
+
     fn src_count(&self) -> usize {
         self.lines.len()
             + if self.mode == Mode::View && self.session.is_none() {
@@ -3757,7 +3802,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     app.set_page(loaded, &ctx);
     if start_at_index {
-        open_index(&mut app, &ctx, String::new());
+        let project = app.project.clone();
+        open_index(&mut app, &ctx, &project, String::new());
     }
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
@@ -4062,16 +4108,82 @@ fn record_visit(project: &str, title: &str, now: i64) -> Option<i64> {
     prev
 }
 
+/// Leave the index for one of its rows. The index goes on the back stack
+/// (that is what makes `[` come back to it), and a row that is not a page
+/// yet lands in EDIT on a fresh line — nothing is sent until something is
+/// written (see `dispatch_create`).
+fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, bool)>) {
+    let from = app.here();
+    let project = app.index_project.clone();
+    // Held, not dropped: a page that fails to load is not a reason to lose
+    // the list you were choosing from.
+    let saved = app.index.take();
+    let Some((title, create)) = target else { return };
+    if !navigate_from(app, ctx, &project, &title, from) {
+        app.index = saved;
+        return;
+    }
+    if create {
+        app.cursor = 0;
+        open_line(app, ctx, false);
+    }
+}
+
+/// `[` / `]`: step back or forward through the places visited.
+///
+/// A place is a page OR a project's index, so walking back out of a page
+/// you reached from the index lands in the index — where you were — rather
+/// than in whatever page happened to precede it.
+fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
+    let (from, to) = if back {
+        (&mut app.forward, app.history.pop())
+    } else {
+        (&mut app.history, app.forward.pop())
+    };
+    let Some(place) = to else {
+        app.status = if back { "no history".into() } else { "no forward history".into() };
+        return;
+    };
+    let _ = from;
+    let here = app.here();
+    let arrow = if back { "←" } else { "→" };
+    match place {
+        Place::Page { project, title } => match load_page(ctx, &project, &title) {
+            Ok(loaded) => {
+                app.index = None;
+                app.set_page(loaded, ctx);
+                if back {
+                    app.forward.push(here);
+                } else {
+                    app.history.push(here);
+                }
+                app.status = format!("{arrow} {title}");
+            }
+            Err(e) => app.status = format!("history failed: {e}"),
+        },
+        Place::Index { project } => {
+            open_index(app, ctx, &project, String::new());
+            if app.index.is_some() {
+                if back {
+                    app.forward.push(here);
+                } else {
+                    app.history.push(here);
+                }
+                app.status = format!("{arrow} {}", Place::Index { project }.label());
+            }
+        }
+    }
+}
+
 /// Open the project index: every page, newest first, with the one under
 /// the cursor previewed beside it.
 ///
 /// The list is one request (`/api/pages/<project>?limit=500&sort=updated`)
 /// and the preview costs nothing on top of it: the same response carries
 /// each page's first lines, which is what the reader is choosing between.
-fn open_index(app: &mut App, ctx: &Ctx, filter: String) {
+fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String) {
     use cosense::index::{Entry, Index};
-    let (count, pages) = match ctx.client.list_pages_in(&app.project, INDEX_PAGE_LIMIT, 0, "updated")
-    {
+    let (count, pages) = match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, "updated") {
         Ok(v) => v,
         Err(e) => {
             app.status = format!("page list failed: {e}");
@@ -4082,7 +4194,7 @@ fn open_index(app: &mut App, ctx: &Ctx, filter: String) {
     let mut entries: Vec<Entry> = pages
         .into_iter()
         .map(|p| {
-            let seen = visits.get(&format!("{}/{}", app.project, p.title)).copied();
+            let seen = visits.get(&format!("{project}/{}", p.title)).copied();
             Entry::from_summary(p, seen)
         })
         .collect();
@@ -4094,6 +4206,7 @@ fn open_index(app: &mut App, ctx: &Ctx, filter: String) {
         ix.set_filter(filter);
     }
     app.index = Some(ix);
+    app.index_project = project.to_string();
     app.overlay = None;
 }
 
@@ -4396,21 +4509,10 @@ fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
             let is_url = inner.contains("http://") || inner.contains("https://");
             let is_icon = inner.contains(".icon");
             if !is_deco && !is_url && !is_icon && !inner.is_empty() {
-                if let Some(rest) = inner.strip_prefix('/') {
-                    if let Some((project, title)) = rest.split_once('/') {
-                        if !project.is_empty() && !title.is_empty() {
-                            out.push((
-                                start,
-                                LinkItem::ProjectPage {
-                                    project: project.to_string(),
-                                    title: title.to_string(),
-                                },
-                            ));
-                        }
-                    }
-                } else {
-                    out.push((start, LinkItem::Page(inner.to_string())));
-                }
+                // One reading of what a bracket points at, shared with the
+                // renderer's hits (`page_link_item`): a page here, a page
+                // over there, or a whole project.
+                out.push((start, page_link_item(inner)));
             }
             from = end + 1;
         } else {
@@ -4435,17 +4537,22 @@ fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
 /// What `[...]` (or a `#tag`) leads to: a page here, or a page in another
 /// project when it is written `/project/title`.
 fn page_link_item(text: &str) -> LinkItem {
-    if let Some(rest) = text.strip_prefix('/') {
-        if let Some((project, title)) = rest.split_once('/') {
-            if !project.is_empty() && !title.is_empty() {
-                return LinkItem::ProjectPage {
-                    project: project.to_string(),
-                    title: title.to_string(),
-                };
-            }
-        }
+    let Some(rest) = text.strip_prefix('/') else {
+        return LinkItem::Page(text.to_string());
+    };
+    let (project, title) = match rest.split_once('/') {
+        Some((p, t)) => (p, t.trim()),
+        None => (rest, ""),
+    };
+    if project.is_empty() {
+        return LinkItem::Page(text.to_string());
     }
-    LinkItem::Page(text.to_string())
+    if title.is_empty() {
+        // `[/project]` (or `[/project/]`): the project itself, whose home
+        // screen here is its index.
+        return LinkItem::ProjectIndex { project: project.to_string() };
+    }
+    LinkItem::ProjectPage { project: project.to_string(), title: title.to_string() }
 }
 
 fn links_on_line(text: &str) -> Vec<LinkItem> {
@@ -4658,6 +4765,18 @@ fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
             navigate_to(app, ctx, &project, &title)
         }
         LinkItem::ProjectPage { project, title } => navigate_to(app, ctx, &project, &title),
+        // A whole project: its index, which is what Cosense's home screen
+        // is for. The place being left goes on the back stack, as it does
+        // for a page.
+        LinkItem::ProjectIndex { project } => {
+            let from = app.here();
+            open_index(app, ctx, &project, String::new());
+            if app.index.is_some() {
+                app.history.push(from);
+                app.forward.clear();
+                app.status = format!("→ /{project}");
+            }
+        }
         LinkItem::File { label, url } => app.start_download(ctx, label, url),
         LinkItem::Export { label, src, csv } => {
             let body = block_export_body(&app.lines, src, csv);
@@ -4822,11 +4941,22 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// Load `project/title` and install it, pushing the current page onto
 /// history. `project` may differ from the current one (`[/project/title]`).
 fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) {
-    let from = (app.project.clone(), app.title.clone());
-    let same_project = from.0 == project;
+    let from = app.here();
+    // The caller has nothing to undo: it was not holding anything the way
+    // the index holds its list.
+    let _ = navigate_from(app, ctx, project, title, from);
+}
+
+/// `navigate_to`, saying explicitly where it is being left from — the
+/// index closes before the page loads, so it has to name itself while it
+/// still can.
+#[must_use = "a failed navigation leaves the reader where they were"]
+fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str, from: Place) -> bool {
+    let same_project = app.project == project;
     match load_page(ctx, project, title) {
         Ok(loaded) => {
             app.history.push(from);
+            app.forward.clear();
             app.set_page(loaded, ctx);
             app.status = if page_is_uncreated(app) {
                 // Following a link to a page nobody has written yet is how
@@ -4837,9 +4967,11 @@ fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) {
             } else {
                 format!("→ /{project}/{title}")
             };
+            true
         }
         Err(e) => {
             app.status = format!("open failed: /{project}/{title} — {e}");
+            false
         }
     }
 }
@@ -5043,18 +5175,7 @@ fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 Some(Row::Create(name)) => Some((name.to_string(), true)),
                 None => None,
             };
-            app.index = None;
-            if let Some((title, create)) = target {
-                let project = app.project.clone();
-                navigate_to(app, ctx, &project, &title);
-                if create {
-                    // Same landing as the picker's create row: EDIT on a
-                    // fresh body line, and nothing is sent until something
-                    // is written (see `dispatch_create`).
-                    app.cursor = 0;
-                    open_line(app, ctx, false);
-                }
-            }
+            open_from_index(app, ctx, target);
         }
         // Scrolling the preview when it has the focus; moving the list
         // otherwise. Same fingers either way.
@@ -5225,36 +5346,8 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 _ => app.overlay = Some(Overlay::Links { items: links, cursor: 0 }),
             }
         }
-        (KeyCode::Char('['), false) => {
-            if let Some((project, title)) = app.history.pop() {
-                let cur = (app.project.clone(), app.title.clone());
-                match load_page(ctx, &project, &title) {
-                    Ok(loaded) => {
-                        app.forward.push(cur);
-                        app.set_page(loaded, ctx);
-                        app.status = format!("← {title}");
-                    }
-                    Err(e) => app.status = format!("back failed: {e}"),
-                }
-            } else {
-                app.status = "no history".into();
-            }
-        }
-        (KeyCode::Char(']'), false) => {
-            if let Some((project, title)) = app.forward.pop() {
-                let cur = (app.project.clone(), app.title.clone());
-                match load_page(ctx, &project, &title) {
-                    Ok(loaded) => {
-                        app.history.push(cur);
-                        app.set_page(loaded, ctx);
-                        app.status = format!("→ {title}");
-                    }
-                    Err(e) => app.status = format!("forward failed: {e}"),
-                }
-            } else {
-                app.status = "no forward history".into();
-            }
-        }
+        (KeyCode::Char('['), false) => go_history(app, ctx, true),
+        (KeyCode::Char(']'), false) => go_history(app, ctx, false),
 
         // ---- mode toggle (akapen's `Tab view⇄source`) ----
         (KeyCode::Tab, _) => {
@@ -5418,7 +5511,18 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         // with the one under the cursor previewed beside it. Typing filters
         // it, so the old picker's fingers still work — they now have a
         // screen to work in.
-        (KeyCode::Char('o'), true) => open_index(app, ctx, String::new()),
+        (KeyCode::Char('o'), true) => {
+            let from = app.here();
+            let project = app.project.clone();
+            open_index(app, ctx, &project, String::new());
+            if app.index.is_some() {
+                // Opening the index is going somewhere, so it goes on the
+                // stack: `[` from here returns to the page it was opened
+                // from, and `[` from a page opened out of it returns here.
+                app.history.push(from);
+                app.forward.clear();
+            }
+        }
         // line detail: who edited the cursor line and when (toggle)
         (KeyCode::Char('t'), false) => {
             app.overlay = if matches!(app.overlay, Some(Overlay::LineInfo)) {
@@ -7401,11 +7505,15 @@ fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
             let down = matches!(m.kind, MouseEventKind::ScrollDown);
+            let height = list.height as usize;
             let Some(ix) = app.index.as_mut() else { return };
             // The wheel belongs to whatever it is pointing at, whichever
-            // pane has the keys.
+            // pane has the keys. Over the list it moves the WINDOW and
+            // leaves the selection alone — the same bargain the page body
+            // makes, where the wheel never carries the cursor off its line.
             if over_list {
-                ix.move_cursor(if down { 1 } else { -1 });
+                ix.scroll_by(if down { 1 } else { -1 }, height);
+                app.index_scrolled_at = Some(Instant::now());
             } else if down {
                 ix.preview_scroll = ix.preview_scroll.saturating_add(1);
             } else {
@@ -7428,15 +7536,7 @@ fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 Some(Row::Create(name)) => Some((name.to_string(), true)),
                 None => None,
             };
-            app.index = None;
-            if let Some((title, create)) = target {
-                let project = app.project.clone();
-                navigate_to(app, ctx, &project, &title);
-                if create {
-                    app.cursor = 0;
-                    open_line(app, ctx, false);
-                }
-            }
+            open_from_index(app, ctx, target);
         }
         _ => {}
     }
@@ -7935,6 +8035,15 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines), list_area);
 
+    // The scrollbar, for as long as the scroll is still in the reader's
+    // hand: thumb only, in the column just inside the list's right edge.
+    let bar = app
+        .index_scrolled_at
+        .filter(|t| t.elapsed() < INDEX_BAR_LINGER)
+        .and_then(|_| {
+            cosense::theme::scroll_thumb_in_track(rows.len(), rows_h, rows_h, scroll)
+        });
+
     // Everything the rest of the frame needs from the borrowed list, so
     // the preview can read the app again.
     let row_count = rows.len();
@@ -7943,6 +8052,15 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // The cursor rides the left edge, as it does on the page.
     let buf = f.buffer_mut();
+    if let Some((start, len)) = bar {
+        let bar_x = area.x + panes.list.saturating_sub(1);
+        for k in start..start + len {
+            if let Some(c) = buf.cell_mut((bar_x, area.y + 1 + k as u16)) {
+                c.set_symbol("▐");
+                c.set_style(Style::default().fg(CHROME_SCROLL));
+            }
+        }
+    }
     for y in caret_rows {
         if let Some(c) = buf.cell_mut((caret_x, y)) {
             c.set_symbol(">");
@@ -11681,10 +11799,11 @@ mod tests {
             descriptions: vec!["body".into()],
             unread: false,
         };
-        app.index = Some(cosense::index::Index::new(
-            vec![mk("最初"), mk("二番目"), mk("三番目")],
-            3,
-        ));
+        let mut entries = vec![mk("最初"), mk("二番目"), mk("三番目")];
+        // …and enough behind them that the list has somewhere to scroll.
+        entries.extend((0..30).map(|i| mk(&format!("その他{i}"))));
+        let n = entries.len();
+        app.index = Some(cosense::index::Index::new(entries, n));
         // A frame has to have been drawn: the click is answered with the
         // geometry that was on screen.
         let mut t = Terminal::new(TestBackend::new(100, 10)).unwrap();
@@ -11696,11 +11815,18 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         };
-        // The wheel walks the list.
-        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, 5, 3));
-        assert_eq!(app.index.as_ref().unwrap().cursor, 1);
-        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollUp, 5, 3));
-        assert_eq!(app.index.as_ref().unwrap().cursor, 0);
+        // The wheel scrolls the list under the pointer and leaves the
+        // selection where it is — content scrolls, cursors do not.
+        for _ in 0..3 {
+            handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, 5, 3));
+        }
+        assert_eq!(app.index.as_ref().unwrap().cursor, 0, "the selection stayed");
+        assert!(app.index.as_ref().unwrap().scroll > 0, "and the view moved");
+        assert!(app.index_scrolled_at.is_some(), "so the scrollbar shows itself");
+        for _ in 0..3 {
+            handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollUp, 5, 3));
+        }
+        assert_eq!(app.index.as_ref().unwrap().scroll, 0);
 
         // Over the preview the wheel scrolls the preview instead.
         let preview_x = cosense::index::panes(ctx.preview, 100).list + 4;
@@ -11717,12 +11843,60 @@ mod tests {
             &ctx,
             at(MouseEventKind::Down(MouseButton::Left), 5, 3),
         );
-        assert!(app.index.is_none(), "the index closes behind you");
+        // The opening itself is a page fetch, which a test has no server
+        // for — so the list is still there (a failed open keeps the
+        // reader's place). What is checked is which row it resolved to.
         assert!(
             app.status.contains("三番目"),
             "the third row was opened, not another: {}",
             app.status
         );
+    }
+
+    /// The index is a place, so it is on the back stack: leaving it for a
+    /// page and pressing `[` comes back to the list, not to whatever page
+    /// happened to be open before it.
+    #[test]
+    fn the_index_is_somewhere_you_can_come_back_to() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.project = "proj".into();
+        app.title = "A".into();
+        app.index_project = "proj".into();
+        app.index = Some(cosense::index::Index::new(
+            vec![cosense::index::Entry {
+                title: "B".into(),
+                updated: now_secs(),
+                descriptions: vec![],
+                unread: false,
+            }],
+            1,
+        ));
+        assert_eq!(app.here(), Place::Index { project: "proj".into() });
+
+        // Opening a row that cannot be fetched (no server in a test) puts
+        // the reader back in the list rather than dropping them onto the
+        // page they had left.
+        open_from_index(&mut app, &ctx, Some(("B".into(), false)));
+        assert!(app.index.is_some(), "the list survives a failed open");
+        assert!(app.history.is_empty(), "and nothing went on the stack");
+
+        // `[/other-project]` opens someone else's index, and that is a
+        // place too — reached from the PAGE the reader is on.
+        app.history.clear();
+        app.index = None;
+        activate_link(&mut app, &ctx, LinkItem::ProjectIndex { project: "help-jp".into() });
+        // (No network in tests: the index only opens when the list arrives.
+        // Either way the reader must not lose their place.)
+        if app.index.is_some() {
+            assert_eq!(app.index_project, "help-jp");
+            assert_eq!(
+                app.history.last(),
+                Some(&Place::Page { project: "proj".into(), title: "A".into() })
+            );
+        } else {
+            assert!(app.history.is_empty(), "a failed open leaves the stack alone");
+        }
     }
 
     /// Eyeball the index: prints the drawn screen so the look can be
@@ -14587,12 +14761,14 @@ mod tests {
         app.goto_src(1);
         let items = app.cursor_line_links();
         assert_eq!(items[0], LinkItem::Page("Other Page".into()));
-        // cross-project links: `[/project/title]` (a bare `[/project]` is
-        // the project's top page, not a page link); tags stay in-project
+        // Cross-project links: `[/project/title]` is that page, and a bare
+        // `[/project]` is the project itself — on Cosense its home screen,
+        // here its index. Tags stay in-project.
         assert_eq!(
             links_on_line("see [/shokai/階層整理型WiKiはスケールしない] and [/tus-alpine] #Scrapboxの哲学 [/ italic]"),
             vec![
                 LinkItem::ProjectPage { project: "shokai".into(), title: "階層整理型WiKiはスケールしない".into() },
+                LinkItem::ProjectIndex { project: "tus-alpine".into() },
                 LinkItem::Page("Scrapboxの哲学".into()),
             ]
         );
