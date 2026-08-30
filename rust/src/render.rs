@@ -558,15 +558,14 @@ fn push_tags(
                     spans.push(Span::raw(rest[..pos].to_string()));
                 }
                 links.push(tag.clone());
-                // A tag is a link, so an uncreated one is coloured like
-                // any other uncreated link: the hashtag green says "tag",
-                // and the reader still needs to know there is nothing
-                // behind it yet.
-                let style = if known.missing(&tag) {
-                    style_link_missing(pal)
-                } else {
-                    Style::default().fg(pal.hashtag).add_modifier(Modifier::UNDERLINED)
-                };
+                // A tag IS a link — `#foo` and `[foo]` are the same page,
+                // and Cosense draws them the same way (both are
+                // `.page-link` in its stylesheet; there is no rule for a
+                // hashtag anywhere in it, uncreated ones included). So no
+                // colour of its own: the `#` already says which notation
+                // was written.
+                let style =
+                    if known.missing(&tag) { style_link_missing(pal) } else { style_link(pal) };
                 spans.push(Span::styled(format!("#{tag}"), style));
                 let consumed = pos + 1 + tag.len();
                 rest = &rest[consumed..];

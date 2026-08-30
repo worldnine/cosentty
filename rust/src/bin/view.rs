@@ -2974,8 +2974,12 @@ impl App {
         }
         let color_matches = |item: &LinkItem| {
             match item {
+                // A page link wears the link colour — or the uncreated
+                // one, which is still a link and still opens (that is how
+                // a page gets written). Leaving it out here made a red
+                // link the one thing on the page a click could not follow.
                 LinkItem::Page(_) | LinkItem::ProjectPage { .. } => {
-                    clicked_fg == Some(pal.link) || clicked_fg == Some(pal.hashtag)
+                    clicked_fg == Some(pal.link) || clicked_fg == Some(pal.link_missing)
                 }
                 LinkItem::File { .. } | LinkItem::Url { .. } => {
                     clicked_fg == Some(pal.url) || clicked_fg == Some(Color::Magenta)
@@ -13455,6 +13459,26 @@ mod tests {
             app.link_at_screen_position(1, 3, &pal),
             None,
             "plain text is not clickable"
+        );
+
+        // A link to a page nobody has written is drawn in another colour,
+        // and clicking it is how that page gets written — so the hit test
+        // has to know that colour too. (It did not, and a red link was the
+        // one thing on a page a click could not follow.) The same goes for
+        // a tag: `#foo` and `[foo]` are one page, drawn one way.
+        let mut fresh = page(&["t", "see [Target] and #tag"]);
+        fresh.links = LinkTruth::seed(["Target", "tag"], ["別のページ"]);
+        rerender(&mut fresh, &test_ctx());
+        fresh.rebuild(80);
+        assert_eq!(
+            fresh.link_at_screen_position(1, 4, &test_ctx().palette),
+            Some((1, LinkItem::Page("Target".into()))),
+            "an uncreated link still opens"
+        );
+        assert_eq!(
+            fresh.link_at_screen_position(1, 16, &test_ctx().palette),
+            Some((1, LinkItem::Page("tag".into()))),
+            "and so does an uncreated tag"
         );
 
         // Identical labels still resolve by their rendered occurrence.

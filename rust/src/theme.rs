@@ -20,7 +20,7 @@ use std::time::Duration;
 pub struct Palette {
     /// Heading colors, BIGGEST first: index 0 = `[**** ]` and up, 3 = `[* ]`
     /// (see `heading_for`). A warm family, deliberately away from the link
-    /// blue and the hashtag green so a heading is never read as a link.
+    /// blue so a heading is never read as a link.
     pub heading: [Color; 4],
     /// Full heading styles (color + font style), same indexing. From a
     /// theme these are the `markup.heading.N.markdown` rules verbatim; the
@@ -33,7 +33,6 @@ pub struct Palette {
     /// `from_theme`), so it stays inside whatever palette the reader runs.
     pub link_missing: Color,
     pub url: Color,
-    pub hashtag: Color,
     pub quote_bar: Color,
     pub code_fence: Color,
     pub bullet: Color,
@@ -76,7 +75,6 @@ impl Palette {
                 link: Color::Rgb(0x1a, 0x5f, 0x9e),
                 link_missing: Color::Rgb(0xc0, 0x39, 0x2b),
                 url: Color::Rgb(0x0b, 0x61, 0x74),
-                hashtag: Color::Rgb(0x2e, 0x7d, 0x32),
                 quote_bar: Color::Rgb(0x88, 0x88, 0x88),
                 code_fence: Color::Rgb(0x8a, 0x6d, 0x00),
                 bullet: Color::Rgb(0x99, 0x99, 0x99),
@@ -94,7 +92,6 @@ impl Palette {
                 link: Color::Rgb(0x8a, 0xc6, 0xff),
                 link_missing: Color::Rgb(0xf3, 0x8b, 0xa8),
                 url: Color::Rgb(0x7f, 0xd0, 0xe0),
-                hashtag: Color::Rgb(0x9d, 0xe0, 0x9d),
                 quote_bar: Color::Rgb(0x88, 0x88, 0x88),
                 code_fence: Color::Rgb(0xf2, 0xd0, 0x8b),
                 bullet: Color::Rgb(0x88, 0x88, 0x88),
@@ -112,7 +109,7 @@ impl Palette {
     /// |-----------------------------|------------------------------------|
     /// | `[**** ]` … `[* ]` headings | `markup.heading.1..4.markdown`     |
     /// | page title (line 1)         | `markup.heading.1.markdown`        |
-    /// | `[Page]`, URL, `#tag`       | `markup.underline.link.markdown`   |
+    /// | `[Page]`, `#tag`, URL       | `markup.underline.link.markdown`   |
     /// | a link to an uncreated page | `markup.deleted` (diff's "removed")|
     /// | `>` quote bar               | `markup.quote.markdown`            |
     /// | `code:` label, `[x.icon]`   | `markup.raw.inline.markdown`       |
@@ -159,7 +156,6 @@ impl Palette {
             // one with a language.
             link_missing: fg("markup.deleted").unwrap_or(base.link_missing),
             url: link.unwrap_or(base.url),
-            hashtag: link.unwrap_or(base.hashtag),
             quote_bar: fg("markup.quote.markdown").unwrap_or(base.quote_bar),
             code_fence: fg("markup.raw.inline.markdown").unwrap_or(base.code_fence),
             bullet: fg("comment").unwrap_or(base.bullet),
@@ -800,7 +796,7 @@ mod tests {
         assert_eq!(p.heading_style[1].add_modifier, Modifier::BOLD);
         assert_eq!(p.heading_style_for(3), p.heading_style[1], "three stars = level 2");
         assert_eq!(p.title, p.heading[0], "the page title is the top heading");
-        assert_eq!(p.link, p.hashtag, "hashtags are links");
+
         // headings are not the same color as links in this theme
         assert_ne!(p.heading[1], p.link);
         // An uncreated link borrows the theme's "deleted" colour, which is
@@ -834,7 +830,6 @@ mod tests {
             for c in p.heading {
                 assert_ne!(c, p.link, "a heading must not wear the link color");
                 assert_ne!(c, p.url);
-                assert_ne!(c, p.hashtag);
             }
         }
     }

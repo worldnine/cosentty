@@ -246,11 +246,17 @@ Markdown を開いたときと同じ見え方になる。テーマが書式を�
 
 `--theme NAME` は本文全体に効く（akapen 同様）。コードブロックのハイライトに加え、見出し・リンク・
 引用・`code:` ラベルの色をテーマの **Markdown スコープ**から引く（`[**** ]`〜`[* ]` → `markup.heading.1..4`、
-リンク/URL/ハッシュタグ → `markup.underline.link`、引用 → `markup.quote`、`code:` → `markup.raw.inline`、
+リンク/`#タグ`/URL → `markup.underline.link`、引用 → `markup.quote`、`code:` → `markup.raw.inline`、
 **未作成ページへのリンク → `markup.deleted`**）。未作成リンクに `invalid` を使わないのは、埋め込みテーマを
 実測したところ `invalid` のほとんどが**背景色**の指定で（Solarized・Dracula・Nord・Monokai・OneHalfDark）、
 前景色を借りると本文と同じ色になってしまうため。`markup.deleted`（diff の削除行）はどのテーマでも
 前景の赤系で、意味も「そこには無い」で一致する。
+**`#タグ` はリンクと同じ色**で描く。`#foo` と `[foo]` は同じページで、Cosense も両方を
+`.page-link` として同じように描いている（`app.css` にハッシュタグ専用の規則は1つも無い。未作成の
+`.empty-page-link` も共通）。`#` が既に「どの記法で書いたか」を言っているので、色を分ける必要がない。
+（以前は緑だったが、あれは TypeScript 試作の `chalk.green` の名残で、しかもテーマが
+`markup.underline.link` を持つかどうかで緑になったりリンク色になったりしていた）
+
 テーマにそのスコープの定義がない構文は、端末背景（OSC 11 で自動判定、`--light`/`--dark` で強制）に
 合わせた既定色に落ちる。見出しは書式ごと、それ以外は色だけを借りる。
 テロメア・カーソル・選択の色はテーマに依存しない。
