@@ -39,7 +39,7 @@ use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::highlight::Highlighter;
 use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
-    render_lines_with, Block, CodeSpan, MissingLinks,
+    render_lines_with, Block, CodeSpan, LinkTruth,
 };
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_continued};
 
@@ -64,6 +64,9 @@ const BULLET: &str = "\u{2022}";
 const TAB_MARK: &str = "|";
 /// Source mode's line-number gutter: `"  12 "` (4 digits + space).
 const SOURCE_NUM_W: usize = 5;
+
+/// How often the page is scanned for links whose fate is unknown.
+const LINK_SCAN_EVERY: Duration = Duration::from_millis(400);
 /// Cursor-row highlight inside the page body.
 const CURSOR_BG: Color = Color::DarkGray;
 const CARD_BG: Color = Color::Black;
@@ -708,10 +711,23 @@ struct App {
     cursor: usize,
     /// Range selection over SOURCE lines.
     selection: Option<Selection>,
-    /// Which of this page's links lead to pages that do not exist yet.
-    /// Built when the page loads and carried until it is loaded again —
-    /// see `MissingLinks` for why absence means "say nothing".
-    missing: MissingLinks,
+    /// What is known about the pages this page's links lead to. Seeded by
+    /// each page load and filled in by background lookups; kept for the
+    /// whole project so walking back and forth does not re-ask.
+    links: LinkTruth,
+    /// Titles (in `title_lc` form) already asked about. A title stays here
+    /// even if the lookup failed: one question per title per session, so a
+    /// project this credential cannot read costs one request, not one
+    /// every scan. The cost of that is a link left uncoloured, which is
+    /// the harmless direction.
+    link_pending: HashSet<String>,
+    /// When the page was last scanned for links nobody has asked about.
+    link_scan_at: Instant,
+    /// To the lookup worker (`spawn_link_prober`); `None` in tests, which
+    /// makes `probe_unknown_links` a no-op.
+    link_probe_tx: Option<mpsc::Sender<(String, String)>>,
+    link_probe_rx: mpsc::Receiver<(String, String, bool)>,
+    link_probe_res_tx: mpsc::Sender<(String, String, bool)>,
     /// Scroll the viewport to the cursor on the next frame. Set by keyboard
     /// navigation; wheel scrolling leaves it clear so the viewport can move
     /// away from the cursor (akapen's herdr-review style).
@@ -1241,6 +1257,7 @@ impl App {
         let (vis_tx, vis_rx) = mpsc::channel();
         let (ws_tx, ws_rx) = mpsc::channel();
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
+        let (link_probe_res_tx, link_probe_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -1267,7 +1284,12 @@ impl App {
             scroll: 0,
             cursor: 0,
             selection: None,
-            missing: MissingLinks::default(),
+            links: LinkTruth::default(),
+            link_pending: HashSet::new(),
+            link_scan_at: Instant::now(),
+            link_probe_tx: None,
+            link_probe_rx,
+            link_probe_res_tx,
             follow: true,
             composing: None,
             comments: Vec::new(),
@@ -1401,7 +1423,7 @@ impl App {
         self.srcs = l.srcs;
         self.read_at = l.read_at;
         self.editable = l.editable;
-        self.missing = l.missing;
+        self.links.absorb(l.links);
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
         }
@@ -1873,7 +1895,7 @@ impl App {
                     // A link with nothing behind it does not open: Enter
                     // starts the page. Better said before it is pressed.
                     let mark = match l {
-                        LinkItem::Page(t) if self.missing.has(t) => "(未作成)",
+                        LinkItem::Page(t) if self.links.missing(t) => "(未作成)",
                         _ => "",
                     };
                     format!("{}:{}{mark}", i + 1, l.label())
@@ -2002,6 +2024,62 @@ impl App {
     /// Install images that finished loading. Returns true if anything
     /// changed (the caller rebuilds the layout, since heights shift). Cheap:
     /// the worker already did the decoding and encoding.
+    /// Ask about every page link on the page whose fate is not known yet.
+    ///
+    /// Two things are deliberately left out:
+    ///
+    /// * **the caret line**, while a session is open. That line is being
+    ///   written; `[新` on the way to `[新しいページ]` is not a question
+    ///   worth asking, and the line is drawn as raw source anyway, so no
+    ///   answer could show. Moving off the line is what submits it.
+    /// * **cross-project links**, whose existence this reading of
+    ///   `relatedPages` never covered.
+    fn probe_unknown_links(&mut self) {
+        let Some(tx) = self.link_probe_tx.as_ref() else { return };
+        // The scan itself is the only cost when there is nothing to ask
+        // (the usual case), so it runs on a slow beat rather than on every
+        // frame. Nothing is waiting on it: a colour that settles a moment
+        // after the caret leaves the line is exactly the intended feel.
+        if self.link_scan_at.elapsed() < LINK_SCAN_EVERY {
+            return;
+        }
+        self.link_scan_at = Instant::now();
+        let editing = self.session.as_ref().map(|s| s.line);
+        for (i, line) in self.lines.iter().enumerate() {
+            if Some(i) == editing {
+                continue;
+            }
+            for item in links_on_line(&mask_inline_code(&line.text)) {
+                let LinkItem::Page(title) = item else { continue };
+                if self.links.exists(&title).is_some() {
+                    continue;
+                }
+                let key = cosense::render::title_lc(&title);
+                if !self.link_pending.insert(key) {
+                    continue;
+                }
+                let _ = tx.send((self.project.clone(), title));
+            }
+        }
+    }
+
+    /// Take the answers that came back. `true` = something changed, so the
+    /// page has to be rendered again with them.
+    fn drain_link_probes(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((project, title, exists)) = self.link_probe_rx.try_recv() {
+            self.link_pending.remove(&cosense::render::title_lc(&title));
+            // An answer about a project we have since left says nothing
+            // about the page on screen.
+            if project != self.project {
+                continue;
+            }
+            self.links.learn(&title, exists);
+            changed = true;
+        }
+        changed
+    }
+
     fn drain_images(&mut self) -> bool {
         let mut changed = false;
         while let Ok((url, res)) = self.image_rx.try_recv() {
@@ -3617,6 +3695,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         Arc::clone(&app.server_epoch),
         initial_state.poll_interval(),
     );
+    // Answers "was this link ever written?" for the links a page arrives
+    // without an answer for — the ones typed since it was loaded.
+    let (probe_tx, probe_rx) = mpsc::channel();
+    app.link_probe_tx = Some(probe_tx);
+    spawn_link_prober(ctx.client.clone(), probe_rx, app.link_probe_res_tx.clone());
     if let Some(sid) = &sid {
         let ws_req_rx = app
             .ws_req_rx
@@ -3770,8 +3853,8 @@ struct Loaded {
     editable: bool,
     /// Related-pages sections (see `build_related`).
     related: Vec<RelSection>,
-    /// Links on this page with no page behind them (see `missing_links`).
-    missing: MissingLinks,
+    /// What this page's response said about the pages it links to.
+    links: LinkTruth,
 }
 
 /// Build the related-pages sections the way scrapbox.io presents them:
@@ -3947,8 +4030,8 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         }
     }
     let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
-    let missing = missing_links(&page);
-    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &missing);
+    let links = link_truth(&page);
+    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &links);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
     let local_prev = record_visit(project, title, now_secs());
@@ -3972,35 +4055,65 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         read_at,
         editable,
         related,
-        missing,
+        links,
     })
 }
 
-/// Which of the links the server saved on this page have no page behind
-/// them.
+/// What this page's own response says about the pages it links to.
 ///
-/// The answer is already in the page response — `relatedPages.links1hop`
-/// is "the pages one hop from here THAT EXIST" (links out and back links
-/// together), so a link the page has that is absent from it was never
-/// created. Measured on scrapbox.io: on this project's own `改善案` the
-/// three missing titles were exactly the three `#issue` tags, and on
-/// villagepump's `井戸端` (35 links, 234 back links) the four absentees
-/// all answered `persistent: false`. Nothing is truncated at the sizes
-/// that matter either: `書いてけ` has 512 back links and 517 1-hop
-/// entries.
+/// `relatedPages.links1hop` is "the pages one hop from here THAT EXIST"
+/// (links out and back links together), so a link the page has that is
+/// absent from it was never written. Measured on scrapbox.io: on this
+/// project's own `改善案` the three absentees were exactly the three
+/// `#issue` tags, and on villagepump's `井戸端` (35 links, 234 back
+/// links) the four absentees all answered `persistent: false`. Nothing is
+/// truncated at the sizes that matter either: `書いてけ` has 512 back
+/// links and 517 1-hop entries.
 ///
-/// So this costs no extra request. What it cannot see is anything that
-/// happened after the fetch — which is why `MissingLinks` only ever
-/// paints titles it has evidence for.
-fn missing_links(page: &cosense::api::Page) -> MissingLinks {
-    // No related-pages block, no evidence: every link keeps its ordinary
+/// This costs no extra request, and it answers every link the page was
+/// SAVED with. Links written since — the ones a reader is most likely to
+/// be looking at — are not in it at all, and `probe_unknown_links` goes
+/// and asks about those one at a time.
+fn link_truth(page: &cosense::api::Page) -> LinkTruth {
+    // No related-pages block, no reading: every link keeps its ordinary
     // colour rather than all of them turning red at once.
-    let Some(r) = page.related.as_ref() else { return MissingLinks::default() };
+    let Some(r) = page.related.as_ref() else { return LinkTruth::default() };
     let mut existing: Vec<&str> = r.links1hop.iter().map(|p| p.title.as_str()).collect();
-    // A page's link to itself is not in its own 1-hop list, and a page
-    // certainly exists while you are reading it.
-    existing.push(page.title.as_str());
-    MissingLinks::new(page.links.iter().map(|s| s.as_str()), existing)
+    // 2-hop neighbours exist too (that is how the API builds them), and
+    // they are often exactly what a page links to next.
+    existing.extend(r.links2hop.iter().map(|p| p.title.as_str()));
+    let mut truth = LinkTruth::seed(page.links.iter().map(|s| s.as_str()), existing);
+    // And this page itself, which is not in its own 1-hop list. Reading a
+    // page is the most direct answer there is about it — including the
+    // uncreated one opened through a link, which is exactly the title the
+    // page we came from is drawing.
+    truth.learn(&page.title, page.persistent);
+    truth
+}
+
+/// The lookup worker: one title in, one answer out.
+///
+/// Serial on purpose. Unknown links are rare (a page arrives with all of
+/// its links already answered), so this is a trickle — and a trickle down
+/// one thread cannot turn a page full of new links into a burst of
+/// requests.
+fn spawn_link_prober(
+    client: Client,
+    rx: mpsc::Receiver<(String, String)>,
+    tx: mpsc::Sender<(String, String, bool)>,
+) {
+    std::thread::spawn(move || {
+        while let Ok((project, title)) = rx.recv() {
+            // A failed lookup answers nothing, and is not retried (see
+            // `App::link_pending`): the title stays unknown and keeps its
+            // ordinary colour, which is the safe direction.
+            if let Ok(exists) = client.page_exists(&project, &title) {
+                if tx.send((project, title, exists)).is_err() {
+                    return; // app gone
+                }
+            }
+        }
+    });
 }
 
 /// How pictures get onto the screen.
@@ -4628,6 +4741,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         if app.drain_images() | app.drain_web_renders() {
             app.laid_width = 0; // heights changed — rebuild layout
         }
+        // A link's fate came back: the page has to be coloured again.
+        if app.drain_link_probes() {
+            rerender(app, ctx);
+        }
+        app.probe_unknown_links();
         // Both are no-ops on most frames: a diagram is only requested when
         // its own source changed, and only re-encoded when the pane crossed
         // the column cap it was built for.
@@ -5135,7 +5253,7 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     // the old text must not come back and be filed under it.
     app.bump_src_epoch();
     let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
-    let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &app.missing);
+    let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &app.links);
     app.blocks = r.blocks;
     app.srcs = r.srcs;
     app.laid_width = 0;
@@ -6490,6 +6608,9 @@ fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::Page) {
     app.page_id = page.id.clone();
     app.lines = page.lines.clone();
     app.create_state = CreateState::Idle;
+    // It exists now. Pages that link here are drawing it as uncreated on
+    // the strength of a reading that is one commit out of date.
+    app.links.learn(&app.title.clone(), true);
     app.bump_server_epoch();
     app.mark_synced();
     let ops = cosense::editops::diff_to_ops(&server, &local);
@@ -6900,7 +7021,7 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     // A snapshot is the page as it was; which of its links exist is only
     // known for NOW, so an old revision says nothing about it.
     let rendered =
-        render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &MissingLinks::default());
+        render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &LinkTruth::default());
     app.lines = snap.lines;
     app.blocks = rendered.blocks;
     app.srcs = rendered.srcs;
@@ -8387,7 +8508,7 @@ mod tests {
             &owned,
             None,
             &cosense::theme::Palette::for_light(false),
-            &MissingLinks::default(),
+            &LinkTruth::default(),
         );
         app.blocks = r.blocks;
         app.srcs = r.srcs;
@@ -8699,7 +8820,7 @@ mod tests {
                 related: Vec::new(),
                 read_at: None,
                 editable: true,
-                missing: MissingLinks::default(),
+                links: LinkTruth::default(),
             },
             &ctx,
         );
@@ -9785,7 +9906,7 @@ mod tests {
                 related: Vec::new(),
                 read_at: None,
                 editable: true,
-                missing: MissingLinks::default(),
+                links: LinkTruth::default(),
             },
             &ctx,
         );
@@ -10130,7 +10251,7 @@ mod tests {
                 read_at: None,
                 editable: true,
                 related: Vec::new(),
-                missing: MissingLinks::default(),
+                links: LinkTruth::default(),
             },
             &ctx,
         );
@@ -10658,13 +10779,68 @@ mod tests {
         assert_eq!(secs[4].entries[0].title, "/other/Page", "bare /project is not a page");
     }
 
+    /// A link written during the session is the case the page response
+    /// cannot answer — it was not there when the page was fetched. So the
+    /// viewer asks about that one title, and only that one, and only once
+    /// the caret has left the line it is being typed on.
+    #[test]
+    fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
+        let mut app = page(&["t", "[もとからある]", "[いま打った]"]);
+        let (tx, rx) = mpsc::channel();
+        app.link_probe_tx = Some(tx);
+        // What the page arrived knowing.
+        app.links = LinkTruth::seed(["もとからある"], ["もとからある"]);
+
+        // The caret sits on the new link: it is still being written, so
+        // there is nothing to ask yet.
+        let text = app.lines[2].text.clone();
+        app.session = Some(EditSession {
+            line: 2,
+            input: Input { buf: text.clone(), cur: 0 },
+            orig: text,
+            want_col: None,
+            sel_from: None,
+        });
+        app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
+        app.probe_unknown_links();
+        assert!(rx.try_recv().is_err(), "the line under the caret is not judged");
+
+        // The caret moves away — now the question is worth asking, and
+        // only about the title the page could not answer for.
+        app.session = None;
+        app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
+        app.probe_unknown_links();
+        assert_eq!(rx.try_recv().unwrap(), ("proj".to_string(), "いま打った".to_string()));
+        assert!(rx.try_recv().is_err(), "a known link is not asked about");
+
+        // Not asked twice while the answer is out.
+        app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
+        app.probe_unknown_links();
+        assert!(rx.try_recv().is_err(), "one question per title");
+
+        // The answer arrives and the link is marked.
+        app.link_probe_res_tx
+            .send(("proj".into(), "いま打った".into(), false))
+            .unwrap();
+        assert!(app.drain_link_probes());
+        assert!(app.links.missing("いま打った"));
+        assert!(!app.links.missing("もとからある"));
+
+        // An answer about a project we have left is not about this page.
+        app.link_probe_res_tx
+            .send(("elsewhere".into(), "もとからある".into(), false))
+            .unwrap();
+        assert!(!app.drain_link_probes(), "another project's answer changes nothing");
+        assert!(!app.links.missing("もとからある"));
+    }
+
     /// The uncreated links of a page are read out of the same response
     /// that drew it: `links` minus the 1-hop neighbours (which the API
     /// builds from EXISTING pages only). Shaped after a real reply — the
     /// project's own 「改善案」, whose only dead links were its `#issue`
     /// tags.
     #[test]
-    fn missing_links_are_the_pages_links_minus_its_existing_neighbours() {
+    fn a_pages_links_are_read_against_its_existing_neighbours() {
         use cosense::api::{Page, RelatedPage, RelatedPages};
         let rp = |title: &str| RelatedPage {
             id: String::new(),
@@ -10698,21 +10874,27 @@ mod tests {
             lines_count: 0,
             last_accessed: None,
         };
-        let m = missing_links(&page);
-        assert!(m.has("732"), "a tag with no page behind it");
-        assert!(!m.has("テスト"), "listed as a neighbour");
+        let m = link_truth(&page);
+        assert!(m.missing("732"), "a tag with no page behind it");
+        assert!(!m.missing("テスト"), "listed as a neighbour");
         assert!(
-            !m.has("選択した文字 URL"),
+            !m.missing("選択した文字 URL"),
             "the neighbour is spelled with `_`, the link with a space"
         );
-        assert!(!m.has("改善案"), "a page exists while you are reading it");
-        assert!(!m.has("何も知らないページ"), "no evidence, no claim");
+        assert!(!m.missing("改善案"), "a page exists while you are reading it");
+        assert_eq!(m.exists("何も知らないページ"), None, "no reading, no claim");
 
-        // A response without relatedPages (an uncreated page's template,
-        // say) must not turn every link red.
-        let bare = Page { related: None, ..page };
-        assert!(!missing_links(&bare).has("732"));
-        assert!(missing_links(&bare).is_empty());
+        // Opening a link to an uncreated page answers the question about
+        // THAT title too — in the negative. Recording it as existing (it
+        // is, after all, the page being read) would tell the page we came
+        // from that its link is fine.
+        let template = Page { persistent: false, ..page };
+        assert_eq!(link_truth(&template).exists("改善案"), Some(false));
+
+        // A response without relatedPages must not turn every link red.
+        let bare = Page { related: None, ..template };
+        assert!(!link_truth(&bare).missing("732"));
+        assert!(link_truth(&bare).is_empty());
     }
 
     fn key(code: KeyCode) -> event::KeyEvent {

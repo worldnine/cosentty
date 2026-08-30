@@ -503,6 +503,44 @@ impl Client {
         self.get_json(&url, project)
     }
 
+    /// Has anyone written `project/title`?
+    ///
+    /// Asked as a HEAD on the page's `/text`, which is the cheapest
+    /// question the API answers and the only one that splits the three
+    /// cases the right way. The page endpoint does not: it returns 200 for
+    /// a title that merely has links pointing at it (with
+    /// `persistent: false`) and 404 only for a title nobody has ever
+    /// mentioned — and it ships the whole page to say so. `/text` calls
+    /// both of those 404, which is the answer wanted here, and HEAD makes
+    /// it a header exchange: measured on villagepump's `井戸端`, 365 KB
+    /// and 0.69 s as a page GET against 0 bytes and 0.22 s this way.
+    ///
+    /// A 404 is therefore an ANSWER, not a failure. Any other non-success
+    /// (403 on a project this credential cannot read, a 5xx) is an error,
+    /// and the caller is expected to keep saying nothing rather than
+    /// guess.
+    pub fn page_exists(&self, project: &str, title: &str) -> Result<bool, Box<dyn Error>> {
+        let url = format!(
+            "{}/pages/{}/{}/text",
+            self.cfg.base(),
+            urlencoding(project),
+            urlencoding(title)
+        );
+        let mut req = self.http.head(&url);
+        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send()?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        Ok(true)
+    }
+
     /// Project members, for resolving line author ids to display names.
     pub fn list_members(&self) -> Result<Vec<Member>, Box<dyn Error>> {
         self.list_members_in(&self.cfg.project)
