@@ -2767,13 +2767,15 @@ impl App {
             return Vec::new();
         }
         let dim = Style::default().fg(CHROME_DIM);
-        // No underline here. The rule is that underlining marks what can be
-        // pressed — but that is a rule for finding the pressable thing IN A
-        // LINE OF PROSE. These rows are nothing but links, one per line,
-        // under a heading that says so; underlining every one of them just
-        // draws a line under every row. The index's list is read the same
-        // way, and reads better for it.
-        let link_style = Style::default().fg(CHROME_CARET);
+        // Neither underlined nor coloured for being links. That rule is
+        // for finding the pressable thing IN A LINE OF PROSE; these rows
+        // are nothing but links, one per line, under a heading that says
+        // so. With link-ness needing no mark, the colour is free to carry
+        // the one thing that differs between rows — whether the page has
+        // been seen since it changed — in the same blue the telomere uses
+        // for it. Same reading as the index's list.
+        let unread_style = Style::default().fg(CHROME_CARET);
+        let read_style = Style::default();
         let mut vsrc = self.lines.len();
         let mut rows = vec![Row::Card { line: Line::from("") }];
         for sec in &self.related {
@@ -2784,7 +2786,8 @@ impl App {
                 line: Line::from(Span::styled(format!("{head}{fill}"), dim)),
             });
             for e in &sec.entries {
-                rows.push(Row::Line { line: related_row(e, text_w, link_style), src: vsrc, start: 0, hang: 0 });
+                let style = if e.unread { unread_style } else { read_style };
+                rows.push(Row::Line { line: related_row(e, text_w, style), src: vsrc, start: 0, hang: 0 });
                 vsrc += 1;
             }
             rows.push(Row::Card { line: Line::from("") });
@@ -3514,13 +3517,14 @@ fn truncate_width(s: &str, w: usize) -> String {
     out
 }
 
-/// One related-pages row: `title · age  description`, title in the link
-/// color, the rest dim, truncated to the pane width (related rows do not
-/// wrap: they are a scannable list, not body text).
-fn related_row(e: &RelEntry, text_w: usize, link_style: Style) -> Line<'static> {
+/// One related-pages row: `title · age  description`, the title in
+/// `title_style` (see `related_rows`: blue while unread, plain once seen)
+/// and the rest dim, truncated to the pane width — related rows do not
+/// wrap, being a scannable list rather than body text.
+fn related_row(e: &RelEntry, text_w: usize, title_style: Style) -> Line<'static> {
     let dim = Style::default().fg(CHROME_DIM);
     let title = truncate_width(&e.title, text_w);
-    let mut spans = vec![Span::styled(title.clone(), link_style)];
+    let mut spans = vec![Span::styled(title.clone(), title_style)];
     let mut used = str_width(&title);
     if e.age > 0 {
         let meta = format!(" · {}", relative_age(e.age));
@@ -11342,6 +11346,60 @@ mod tests {
         assert_eq!(app.src_count(), 5);
         let end = app.rows.iter().position(|r| matches!(r, Row::FrameEnd)).unwrap();
         assert!(app.rows[end + 1..].iter().any(|r| r.src() == Some(2)));
+    }
+
+    /// One reading of a list row on both screens: the link needs no mark
+    /// (every row is one), so the colour says whether the page has been
+    /// seen — blue while unread, plain once read, the same blue its
+    /// telomere uses.
+    #[test]
+    fn a_list_row_is_blue_while_unread_and_plain_once_seen() {
+        let mut app = page(&["t", "one"]);
+        app.related = vec![RelSection {
+            heading: "Links".into(),
+            entries: vec![
+                RelEntry {
+                    item: LinkItem::Page("新しい".into()),
+                    title: "新しい".into(),
+                    desc: String::new(),
+                    age: now_secs(),
+                    unread: true,
+                },
+                RelEntry {
+                    item: LinkItem::Page("読んだ".into()),
+                    title: "読んだ".into(),
+                    desc: String::new(),
+                    age: now_secs(),
+                    unread: false,
+                },
+            ],
+        }];
+        app.virtual_items = vec![
+            LinkItem::Page("新しい".into()),
+            LinkItem::Page("読んだ".into()),
+        ];
+        app.laid_width = 0;
+        app.rebuild(60);
+        let colour_of = |title: &str| -> Option<Style> {
+            app.rows.iter().find_map(|r| match r {
+                Row::Line { line, .. } => line
+                    .spans
+                    .first()
+                    .filter(|sp| sp.content.trim() == title)
+                    .map(|sp| sp.style),
+                _ => None,
+            })
+        };
+        let unread = colour_of("新しい").expect("the unread row is drawn");
+        let read = colour_of("読んだ").expect("the read row is drawn");
+        assert_eq!(unread.fg, Some(CHROME_CARET));
+        assert_eq!(read.fg, None, "read rows are ordinary text");
+        for st in [unread, read] {
+            assert!(
+                !st.add_modifier.contains(Modifier::UNDERLINED),
+                "a list of links needs no underline on every row"
+            );
+        }
     }
 
     #[test]
