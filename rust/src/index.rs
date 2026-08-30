@@ -114,7 +114,7 @@ impl Entry {
 }
 
 /// What the index is showing, and where the reader is in it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Index {
     /// Every page of the project, newest first (the order the API is asked
     /// for). Filtering never reorders: the list under a filter is the same

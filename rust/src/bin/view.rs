@@ -615,20 +615,21 @@ enum Mode {
     Source,
 }
 
-/// Somewhere the reader has been. A project's index is a place like any
-/// page: it is where Cosense's own home screen would be, so `[` has to be
-/// able to go back to it.
+/// Somewhere the reader has been. An index is not merely its project name:
+/// its filter, cursor, scroll and focused excerpt are the choice the reader
+/// was making. Keeping the model makes browser-style back instant and exact
+/// — no refetch and no jump back to the first row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Place {
     Page { project: String, title: String },
-    Index { project: String },
+    Index { project: String, state: Box<cosense::index::Index> },
 }
 
 impl Place {
     fn label(&self) -> String {
         match self {
             Place::Page { title, .. } => title.clone(),
-            Place::Index { project } => format!("/{project}"),
+            Place::Index { project, .. } => format!("/{project}"),
         }
     }
 }
@@ -1421,9 +1422,12 @@ impl App {
     /// addressable then either — exactly like source mode.
     /// Where the reader is right now, for the back stack.
     fn here(&self) -> Place {
-        match self.index.is_some() {
-            true => Place::Index { project: self.index_project.clone() },
-            false => Place::Page { project: self.project.clone(), title: self.title.clone() },
+        match self.index.as_ref() {
+            Some(index) => Place::Index {
+                project: self.index_project.clone(),
+                state: Box::new(index.clone()),
+            },
+            None => Place::Page { project: self.project.clone(), title: self.title.clone() },
         }
     }
 
@@ -4140,42 +4144,59 @@ fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, bool)>) {
 /// you reached from the index lands in the index — where you were — rather
 /// than in whatever page happened to precede it.
 fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
-    let (from, to) = if back {
-        (&mut app.forward, app.history.pop())
-    } else {
-        (&mut app.history, app.forward.pop())
-    };
-    let Some(place) = to else {
+    let place = if back { app.history.pop() } else { app.forward.pop() };
+    let Some(place) = place else {
         app.status = if back { "no history".into() } else { "no forward history".into() };
         return;
     };
-    let _ = from;
     let here = app.here();
+    let label = place.label();
     let arrow = if back { "←" } else { "→" };
+    let mut arrived = false;
     match place {
-        Place::Page { project, title } => match load_page(ctx, &project, &title) {
-            Ok(loaded) => {
+        Place::Page { project, title } => {
+            // Every index keeps the page it was opened over loaded. If that
+            // page is the destination, closing the index is both exact and
+            // instant: cursor, scroll and images do not have to be rebuilt.
+            if app.index.is_some() && app.project == project && app.title == title {
                 app.index = None;
-                app.set_page(loaded, ctx);
-                if back {
-                    app.forward.push(here);
-                } else {
-                    app.history.push(here);
-                }
                 app.status = format!("{arrow} {title}");
-            }
-            Err(e) => app.status = format!("history failed: {e}"),
-        },
-        Place::Index { project } => {
-            open_index(app, ctx, &project, String::new());
-            if app.index.is_some() {
-                if back {
-                    app.forward.push(here);
-                } else {
-                    app.history.push(here);
+                arrived = true;
+            } else {
+                match load_page(ctx, &project, &title) {
+                    Ok(loaded) => {
+                        app.index = None;
+                        app.set_page(loaded, ctx);
+                        app.status = format!("{arrow} {title}");
+                        arrived = true;
+                    }
+                    Err(e) => {
+                        // A failed back must not eat the destination. The
+                        // same key can retry after the connection recovers.
+                        let place = Place::Page { project, title };
+                        if back {
+                            app.history.push(place);
+                        } else {
+                            app.forward.push(place);
+                        }
+                        app.status = format!("history failed: {e}");
+                    }
                 }
-                app.status = format!("{arrow} {}", Place::Index { project }.label());
             }
+        }
+        Place::Index { project, state } => {
+            app.index = Some(*state);
+            app.index_project = project;
+            app.overlay = None;
+            app.status = format!("{arrow} {label}");
+            arrived = true;
+        }
+    }
+    if arrived {
+        if back {
+            app.forward.push(here);
+        } else {
+            app.history.push(here);
         }
     }
 }
@@ -5152,9 +5173,9 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
 /// Keys while the index owns the screen.
 ///
 /// A picker's keys: move, type to narrow, Enter to go. Typing goes to the
-/// filter rather than to commands, so there is no mode to remember — the
-/// only commands are the ones a filter cannot swallow (Esc, Enter, Tab,
-/// the arrows and their control-key twins).
+/// filter rather than to commands, so there is no mode to remember. The
+/// exceptions are navigation (`[`/`]`, Esc, Enter, Tab) and movement keys;
+/// back must remain back on every screen rather than becoming filter text.
 fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     use cosense::index::{Pane, Row};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -5162,9 +5183,18 @@ fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
     let Some(ix) = app.index.as_mut() else { return Action::Continue };
     match (k.code, ctrl) {
+        (KeyCode::Char('['), false) => go_history(app, ctx, true),
+        (KeyCode::Char(']'), false) => go_history(app, ctx, false),
         (KeyCode::Esc, _) => {
-            app.index = None;
-            app.status = String::new();
+            if app.history.is_empty() {
+                // A title-less launch starts at the site top and therefore
+                // has no earlier route. The latest page is already loaded
+                // underneath, which remains a useful fallback.
+                app.index = None;
+                app.status = String::new();
+            } else {
+                go_history(app, ctx, true);
+            }
         }
         // The excerpt is a second place to be, so Tab moves between it and
         // the list — but only when there IS an excerpt dock.
@@ -8120,9 +8150,9 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
     let hint = match (layout.preview.is_some(), ix.focus) {
-        (true, Pane::List) => "j/k move · type to filter · Enter open · Tab excerpt · Esc back",
-        (true, Pane::Preview) => "j/k scroll excerpt · Tab list · Enter open · Esc back",
-        (false, _) => "j/k move · type to filter · Enter open · Esc back",
+        (true, Pane::List) => "j/k · type filter · Enter open · Tab excerpt · Esc/[ back · ] forward",
+        (true, Pane::Preview) => "j/k scroll · Tab list · Enter open · Esc/[ back · ] forward",
+        (false, _) => "j/k · type filter · Enter open · Esc/[ back · ] forward",
     };
     // Where in the list the reader is — the footer's job here as on the
     // page (`L12/205`), which is why the list needs no scrollbar.
@@ -8956,7 +8986,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "mouse     click link/open · click row/move · drag/select · wheel/scroll".into(),
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
-                "index     ^o list + excerpt (type to filter · Tab excerpt · Esc back)".into(),
+                "index     ^o list + excerpt · Esc/[ back · ] forward".into(),
             ];
             if app.editable {
                 keys.extend([
@@ -11961,7 +11991,11 @@ mod tests {
             }],
             1,
         ));
-        assert_eq!(app.here(), Place::Index { project: "proj".into() });
+        assert!(matches!(
+            app.here(),
+            Place::Index { project, state }
+                if project == "proj" && state.selected().map(|e| e.title.as_str()) == Some("B")
+        ));
 
         // Opening a row that cannot be fetched (no server in a test) puts
         // the reader back in the list rather than dropping them onto the
@@ -11986,6 +12020,47 @@ mod tests {
         } else {
             assert!(app.history.is_empty(), "a failed open leaves the stack alone");
         }
+    }
+
+    /// Back is back even while printable keys normally belong to the
+    /// filter. The index itself goes onto the forward stack with its exact
+    /// cursor/filter/scroll state, so returning does not restart the list.
+    #[test]
+    fn brackets_and_escape_leave_and_restore_the_index() {
+        let ctx = test_ctx();
+        let mut app = page(&["A", "one"]);
+        app.project = "proj".into();
+        app.title = "A".into();
+        app.index_project = "proj".into();
+        let entries: Vec<_> = (0..12)
+            .map(|i| cosense::index::Entry {
+                title: format!("B{i}"),
+                updated: now_secs() - i,
+                descriptions: vec![format!("body {i}")],
+                unread: i % 2 == 0,
+            })
+            .collect();
+        let mut index = cosense::index::Index::new(entries, 12);
+        index.cursor = 4;
+        index.scroll = 2;
+        index.preview_scroll = 1;
+        index.focus = cosense::index::Pane::Preview;
+        let saved = index.clone();
+        app.index = Some(index);
+        app.history.push(Place::Page { project: "proj".into(), title: "A".into() });
+
+        handle_index_key(&mut app, &ctx, key(KeyCode::Char('[')));
+        assert!(app.index.is_none(), "[ leaves the index rather than filtering");
+        assert!(matches!(
+            app.forward.last(),
+            Some(Place::Index { project, state }) if project == "proj" && **state == saved
+        ));
+
+        go_history(&mut app, &ctx, false);
+        assert_eq!(app.index.as_ref(), Some(&saved), "] restores the exact list state");
+
+        handle_index_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.index.is_none(), "Esc uses the same back route");
     }
 
     /// Eyeball the index: prints the drawn screen so the look can be
