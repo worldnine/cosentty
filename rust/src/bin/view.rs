@@ -5423,7 +5423,66 @@ fn read_select_line(app: &mut App, down: bool) {
     }
 }
 
-/// Is the caret line inside a `code:` block?
+/// `^t`: step the caret line's heading up a level, and off the top back
+/// to plain text.
+///
+/// Cosense has no official shortcut for this — the community UserScript
+/// uses `Ctrl+8` (`*` is Shift+8), which a terminal cannot offer: Ctrl+8
+/// arrives as 0x7F, indistinguishable from Backspace. One key that CYCLES
+/// gives both directions without a modifier the terminal mangles, and
+/// matches how the levels are used in practice: keep pressing until it
+/// looks right.
+fn session_cycle_heading(app: &mut App, ctx: &Ctx) {
+    let Some(s) = app.session.as_ref() else { return };
+    let (buf, cur) = (s.input.buf.clone(), s.input.cur);
+    let indent = indent_of(&buf).to_string();
+    let body = &buf[indent.len()..];
+    let (stars, text) = match heading_body(body) {
+        Some((n, t)) => (Some(n), t.to_string()),
+        None => (None, body.to_string()),
+    };
+    // 1 → 2 → 3 → 4 → plain → 1 …
+    let next = match stars {
+        None => Some(1),
+        Some(n) if n < 4 => Some(n + 1),
+        _ => None,
+    };
+    let new_body = match next {
+        Some(n) => format!("[{} {text}]", "*".repeat(n)),
+        None => text.clone(),
+    };
+    // Keep the caret on the same character of the TEXT, wherever the
+    // notation around it moved to.
+    let old_text_at = indent.len() + stars.map(|n| n + 2).unwrap_or(0);
+    let new_text_at = indent.len() + next.map(|n| n + 2).unwrap_or(0);
+    let within = cur.saturating_sub(old_text_at).min(text.len());
+    let new_cur = new_text_at + within;
+    if let Some(s) = app.session.as_mut() {
+        s.input = Input { buf: format!("{indent}{new_body}"), cur: new_cur };
+        s.want_col = None;
+        s.sel_from = None;
+    }
+    app.laid_width = 0;
+    app.follow = true;
+    let _ = ctx;
+    app.status = match next {
+        Some(n) => format!("見出し レベル{n}（^t でさらに）"),
+        None => "見出しを解除（^t で再び）".into(),
+    };
+}
+
+/// `[** text]` → `(2, "text")`. Only a WHOLE line counts: a heading is the
+/// line, not a run inside it.
+fn heading_body(body: &str) -> Option<(usize, &str)> {
+    let inner = body.strip_prefix('[')?.strip_suffix(']')?;
+    let stars = inner.chars().take_while(|c| *c == '*').count();
+    if stars == 0 {
+        return None;
+    }
+    inner[stars..].strip_prefix(' ').map(|t| (stars, t))
+}
+
+/// Is the caret line inside a `code:` block?/// Is the caret line inside a `code:` block?
 fn session_in_code(app: &App) -> bool {
     app.session
         .as_ref()
@@ -5972,6 +6031,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Char('w'), true) => edit_input(app, Input::delete_word),
         (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
         (KeyCode::Char('k'), true) => session_kill(app, ctx),
+        (KeyCode::Char('t'), true) => session_cycle_heading(app, ctx),
         // `y` types a letter in a modeless session, and `^c` belongs to the
         // terminal, so copying takes `^y`.
         (KeyCode::Char('y'), true) => {
@@ -11050,6 +11110,44 @@ mod tests {
         assert_eq!(forced("halfblocks"), Some(ProtocolType::Halfblocks));
         assert_eq!(forced("auto"), None);
         assert_eq!(forced(""), None, "unset changes nothing");
+    }
+
+    /// Cosense has no official shortcut for heading levels — the community
+    /// UserScript uses `Ctrl+8`, which a terminal delivers as Backspace —
+    /// so one key cycles: bigger, bigger, bigger, then back to plain text.
+    #[test]
+    fn ctrl_t_cycles_the_heading_level() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "  見出し"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, "  見出し".len());
+        let buf = |app: &App| app.session.as_ref().unwrap().input.buf.clone();
+
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        assert_eq!(buf(&app), "  [* 見出し]", "the indent is untouched");
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        assert_eq!(buf(&app), "  [** 見出し]");
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        assert_eq!(buf(&app), "  [**** 見出し]", "four is the top");
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        assert_eq!(buf(&app), "  見出し", "and off the top it is plain again");
+
+        // The caret keeps its place in the TEXT, not in the notation.
+        let mut app = page(&["title", "abcdef"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3); // between c and d
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "[* abcdef]");
+        assert_eq!(&s.input.buf[s.input.cur..s.input.cur + 1], "d", "still before d");
+
+        // A heading with other notation inside keeps it.
+        let mut app = page(&["title", "[改善案] を見る"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        handle_session_key(&mut app, &ctx, ctrl('t'));
+        assert_eq!(buf(&app), "[* [改善案] を見る]");
     }
 
     /// Reading happens in ASCII — `j`/`k`/`e`/`q` are the language of the
