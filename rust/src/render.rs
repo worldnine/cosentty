@@ -933,9 +933,13 @@ pub fn render_lines_with(
         if let Some(rest) = body.strip_prefix("code:") {
             let lang = rest.trim().to_string();
             let code_indent = raw_len;
+            // Cosense serves a code block as a file, so the header line
+            // is something to follow: `Enter` saves it. The arrow marks
+            // the row as actionable, like a link row.
             let header = Line::from(vec![
                 Span::raw(indent.clone()),
                 Span::styled(format!("code:{lang}"), Style::default().fg(pal.code_fence)),
+                Span::styled("  ↓", Style::default().fg(Color::DarkGray)),
             ]);
             // A Mermaid block is collected whole and handed to the web
             // renderer; everything else emits the header row right away.
@@ -1400,7 +1404,7 @@ mod tests {
             let got: Vec<String> = out.blocks.iter().map(plain).collect();
             assert_eq!(
                 got,
-                vec!["t", "code:x.py", "  print(1)", "[BLANK]", "[BLANK]", "[BLANK]", "after"],
+                vec!["t", "code:x.py  ↓", "  print(1)", "[BLANK]", "[BLANK]", "[BLANK]", "after"],
                 "highlighted={}",
                 hl.is_some()
             );
@@ -1414,7 +1418,7 @@ mod tests {
             .collect();
         let out = render_lines(&lines);
         let got: Vec<String> = out.blocks.iter().map(plain).collect();
-        assert_eq!(got, vec!["t", "code:x.py", "  a = 1", "  ", "  b = 2", "end"]);
+        assert_eq!(got, vec!["t", "code:x.py  ↓", "  a = 1", "  ", "  b = 2", "end"]);
         assert_eq!(out.srcs, vec![0, 1, 2, 3, 4, 5]);
     }
 

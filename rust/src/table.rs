@@ -47,11 +47,17 @@ impl Table {
         let cols = self.column_count();
         let mut out: Vec<(Line<'static>, usize)> = Vec::new();
         if !self.name.is_empty() {
+            // The name line is also the way OUT of the table: Cosense
+            // serves it as CSV, so `Enter` on this row saves the file. The
+            // arrow says the row can be followed, the way link rows do.
             out.push((
-                Line::from(Span::styled(
-                    format!("▤ {}", self.name),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                )),
+                Line::from(vec![
+                    Span::styled(
+                        format!("▤ {}", self.name),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  ↓csv", Style::default().fg(Color::DarkGray)),
+                ]),
                 self.name_src,
             ));
         }

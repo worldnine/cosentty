@@ -2013,7 +2013,12 @@ impl App {
             return Vec::new();
         };
         let text = &mask_inline_code(text);
-        let mut items: Vec<LinkItem> = links_on_line(text);
+        let mut items: Vec<LinkItem> = Vec::new();
+        // A code block or a table is a file Cosense will hand over.
+        if let Some(item) = block_export_link(&self.project, &self.title, text) {
+            items.push(item);
+        }
+        items.extend(links_on_line(text));
         items.extend(labelled_urls(text).into_iter().map(|(label, url)| {
             link_item_for_url(label, url)
         }));
@@ -2028,6 +2033,9 @@ impl App {
         }
         let text = &mask_inline_code(&self.lines[src].text);
         let mut positioned = positioned_links_on_line(text);
+        if let Some(item) = block_export_link(&self.project, &self.title, text) {
+            positioned.push((0, item));
+        }
         positioned.extend(
             positioned_labelled_urls(text)
                 .into_iter()
@@ -4201,6 +4209,36 @@ fn labelled_urls(text: &str) -> Vec<(String, String)> {
         .into_iter()
         .map(|(_, label, url)| (label, url))
         .collect()
+}
+
+/// A `code:` or `table:` header line, as something to FOLLOW.
+///
+/// Cosense serves both as files — `/api/code/<project>/<title>/<name>` and
+/// `/api/table/<project>/<title>/<name>.csv` — so the header line can be a
+/// link like any other, and `Enter` saves it the way it saves an
+/// attachment. No new key, no invented download path.
+fn block_export_link(project: &str, title: &str, text: &str) -> Option<LinkItem> {
+    let body = text.trim_start();
+    let (kind, name) = if let Some(n) = body.strip_prefix("code:") {
+        ("code", n.trim())
+    } else if let Some(n) = body.strip_prefix("table:") {
+        ("table", n.trim())
+    } else {
+        return None;
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let file = if kind == "table" { format!("{name}.csv") } else { name.to_string() };
+    Some(LinkItem::File {
+        label: file.clone(),
+        url: format!(
+            "https://scrapbox.io/api/{kind}/{}/{}/{}",
+            urlencode_component(project),
+            urlencode_component(title),
+            urlencode_component(&file)
+        ),
+    })
 }
 
 fn link_item_for_url(label: String, url: String) -> LinkItem {
@@ -11221,6 +11259,41 @@ mod tests {
         assert_eq!(app.session.as_ref().unwrap().input.buf, " ５人");
         handle_session_key(&mut app, &ctx, key(KeyCode::BackTab));
         assert_eq!(app.session.as_ref().unwrap().input.buf, "５人", "out of the table");
+    }
+
+    /// Cosense serves a code block and a table as files, so their header
+    /// lines are links: `Enter` saves them, with no new key and no
+    /// download path of our own.
+    #[test]
+    fn a_code_or_table_header_is_a_link_to_its_file() {
+        let mut app = page(&["t", "code:sample.py", " print(1)", "table:売上", " a\tb"]);
+        app.project = "proj".into();
+        app.title = "ページ".into();
+        app.rebuild(80);
+
+        app.goto_src(1);
+        match app.cursor_line_links().first() {
+            Some(LinkItem::File { label, url }) => {
+                assert_eq!(label, "sample.py");
+                assert_eq!(url, "https://scrapbox.io/api/code/proj/%E3%83%9A%E3%83%BC%E3%82%B8/sample.py");
+            }
+            other => panic!("expected the code file, got {other:?}"),
+        }
+
+        app.goto_src(3);
+        match app.cursor_line_links().first() {
+            Some(LinkItem::File { label, url }) => {
+                assert_eq!(label, "売上.csv", "a table comes back as CSV");
+                assert!(url.contains("/api/table/proj/"), "{url}");
+                assert!(url.ends_with(".csv"), "{url}");
+            }
+            other => panic!("expected the table file, got {other:?}"),
+        }
+
+        // Body lines are not links, and a nameless block offers nothing.
+        app.goto_src(2);
+        assert!(app.cursor_line_links().is_empty());
+        assert!(block_export_link("p", "t", "code:").is_none());
     }
 
     /// A table ends the way a list does: Enter on a row with nothing in it
