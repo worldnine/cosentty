@@ -7808,15 +7808,15 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- list --------------------------------------------------------
     //
-    // Same geometry as the page: a caret column on the left edge, the text,
-    // then a scrollbar column just inside the right edge that draws the
-    // THUMB only — no always-on track, and no rule between the panes. A
-    // vertical line down the middle of a picker is a line you have to look
-    // past on every row; whitespace separates just as well and stays out
-    // of the way (ashiato does not draw one either).
+    // A caret column on the left edge and then the text — and NOTHING at
+    // the pane boundary. The page's scrollbar thumb lives just inside its
+    // right frame, but here that column is the seam between the panes, and
+    // a thumb spanning a long list reads as a vertical rule drawn down the
+    // middle of the screen. Where the reader is in the list is said in the
+    // footer instead, the way the page says `L12/205`. Same information,
+    // no line to look past on every row.
     let caret_x = area.x;
     let text_x = area.x + 2;
-    let bar_x = area.x + panes.list.saturating_sub(1);
     let text_w = panes.list.saturating_sub(3);
     let list_area = Rect::new(text_x, area.y + 1, text_w, body_h);
     let dim_when_away = |st: Style| if focus == Pane::List { st } else { st.fg(CHROME_DIM) };
@@ -7861,6 +7861,12 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines), list_area);
 
+    // Everything the rest of the frame needs from the borrowed list, so
+    // the preview can read the app again.
+    let row_count = rows.len();
+    let cursor = ix.cursor;
+    drop(rows);
+
     // The cursor rides the left edge, as it does on the page.
     let buf = f.buffer_mut();
     for y in caret_rows {
@@ -7871,17 +7877,6 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
             } else {
                 CHROME_DIM
             }));
-        }
-    }
-    // Thumb only, and only when the list does not fit.
-    if let Some((start, len)) =
-        cosense::theme::scroll_thumb_in_track(rows.len(), rows_h, rows_h, scroll)
-    {
-        for k in start..start + len {
-            if let Some(c) = buf.cell_mut((bar_x, area.y + 1 + k as u16)) {
-                c.set_symbol("▐");
-                c.set_style(Style::default().fg(CHROME_SCROLL));
-            }
         }
     }
 
@@ -7906,8 +7901,15 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         (true, Pane::Preview) => "j/k scroll preview · Tab list · Enter open · Esc back",
         (false, _) => "j/k move · type to filter · Enter open · Esc back",
     };
+    // Where in the list the reader is — the footer's job here as on the
+    // page (`L12/205`), which is why the list needs no scrollbar.
+    let pos = if row_count == 0 {
+        "0/0".to_string()
+    } else {
+        format!("{}/{}", cursor + 1, row_count)
+    };
     f.render_widget(
-        Paragraph::new(format!(" index · {hint}")).style(Style::default().fg(CHROME_DIM)),
+        Paragraph::new(format!(" index {pos} · {hint}")).style(Style::default().fg(CHROME_DIM)),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 }
@@ -11617,6 +11619,12 @@ mod tests {
             ],
             137,
         ));
+        // …and a real project's worth of pages, where the scrollbar has
+        // something to say.
+        for i in 0..200 {
+            let e = mk(&format!("ページ{i}"), 60 * (i as i64 + 2), i % 7 == 0, &["本文"]);
+            app.index.as_mut().unwrap().entries.push(e);
+        }
         for (w, h) in [(100u16, 14u16), (78, 12)] {
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
             t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
