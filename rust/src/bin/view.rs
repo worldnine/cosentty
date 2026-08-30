@@ -3575,18 +3575,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     // reads depend on it, and `cosense login` is the fix when missing.
     // `sync:` shows which live-update path is active (ws = websocket push,
     // poll = 3 s polling).
+    // `image:` says which picture protocol answered the terminal query.
+    // Only `kitty` (unicode placeholders) and `halfblocks` are anchored to
+    // cells, so this is the first thing to look at when pictures float
+    // over a neighbouring pane.
+    let img = image_protocol_name(&ctx.picker);
     app.status = match ctx.client.credential_for(&project) {
         Some(c) if app.editable => format!(
-            "auth: {} · edit enabled · sync: {} · ? help",
+            "auth: {} · edit enabled · sync: {} · image: {img} · ? help",
             c.kind(),
             app.sync_label()
         ),
         Some(c) => format!(
-            "auth: {} · read-only (not a project member) · sync: {} · ? help",
+            "auth: {} · read-only (not a project member) · sync: {} · image: {img} · ? help",
             c.kind(),
             app.sync_label()
         ),
-        None => "no auth — public read-only (`cosense login` to enable edits)".into(),
+        None => format!(
+            "no auth — public read-only (`cosense login` to enable edits) · image: {img}"
+        ),
     };
     // `#<lineId>` from the URL: start on that line (the first frame's layout
     // clamps it onto a rendered line and scrolls it into view).
@@ -3923,11 +3930,33 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
 /// `COSENSE_IMAGE=halfblocks` — draw pictures as text cells
 /// `COSENSE_IMAGE=auto` (default) — the terminal's own protocol
 fn image_picker() -> Result<Picker, Box<dyn Error>> {
+    use ratatui_image::picker::ProtocolType;
     let mut picker = Picker::from_query_stdio()?;
-    if std::env::var("COSENSE_IMAGE").as_deref() == Ok("halfblocks") {
-        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+    let want = std::env::var("COSENSE_IMAGE").unwrap_or_default();
+    let forced = match want.as_str() {
+        "kitty" => Some(ProtocolType::Kitty),
+        "iterm2" => Some(ProtocolType::Iterm2),
+        "sixel" => Some(ProtocolType::Sixel),
+        "halfblocks" => Some(ProtocolType::Halfblocks),
+        _ => None, // "auto" or unset: whatever the terminal answered
+    };
+    if let Some(p) = forced {
+        picker.set_protocol_type(p);
     }
     Ok(picker)
+}
+
+/// The name of the picture protocol in use, for the status line. Which one
+/// is live decides whether pictures clip with the panes around them, so it
+/// is worth being able to see without a debugger.
+fn image_protocol_name(picker: &Picker) -> &'static str {
+    use ratatui_image::picker::ProtocolType;
+    match picker.protocol_type() {
+        ProtocolType::Kitty => "kitty",
+        ProtocolType::Iterm2 => "iterm2",
+        ProtocolType::Sixel => "sixel",
+        ProtocolType::Halfblocks => "halfblocks",
+    }
 }
 
 /// Turn a decoded image into a sliced protocol at a width-capped cell size./// Turn a decoded image into a sliced protocol at a width-capped cell size.
@@ -10983,14 +11012,36 @@ mod tests {
         assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == img));
     }
 
-    /// Half-blocks cost most of the picture, so they are something the
-    /// reader asks for, never something chosen for them.
+    /// Which protocol draws the pictures decides whether they clip with
+    /// the panes around them, so it is named in the status line and can be
+    /// forced by anyone whose terminal answers badly.
     #[test]
-    fn half_blocks_are_opt_in() {
-        let forced = |want: &str| want == "halfblocks";
-        assert!(forced("halfblocks"));
-        assert!(!forced(""), "the default is the terminal's own protocol");
-        assert!(!forced("auto"));
+    fn the_picture_protocol_is_named_and_can_be_forced() {
+        use ratatui_image::picker::ProtocolType;
+        let name = |p: ProtocolType| {
+            let mut picker = Picker::halfblocks();
+            picker.set_protocol_type(p);
+            image_protocol_name(&picker)
+        };
+        assert_eq!(name(ProtocolType::Kitty), "kitty");
+        assert_eq!(name(ProtocolType::Iterm2), "iterm2");
+        assert_eq!(name(ProtocolType::Sixel), "sixel");
+        assert_eq!(name(ProtocolType::Halfblocks), "halfblocks");
+
+        // `COSENSE_IMAGE` takes a protocol NAME; anything else means auto.
+        let forced = |want: &str| -> Option<ProtocolType> {
+            match want {
+                "kitty" => Some(ProtocolType::Kitty),
+                "iterm2" => Some(ProtocolType::Iterm2),
+                "sixel" => Some(ProtocolType::Sixel),
+                "halfblocks" => Some(ProtocolType::Halfblocks),
+                _ => None,
+            }
+        };
+        assert_eq!(forced("kitty"), Some(ProtocolType::Kitty));
+        assert_eq!(forced("halfblocks"), Some(ProtocolType::Halfblocks));
+        assert_eq!(forced("auto"), None);
+        assert_eq!(forced(""), None, "unset changes nothing");
     }
 
     /// A trailing newline in a paste is how the text was COPIED, not a
