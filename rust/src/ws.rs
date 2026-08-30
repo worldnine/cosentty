@@ -529,6 +529,11 @@ pub struct ResyncPage {
     /// Newest commit the thread had seen when the page was fetched
     /// (`None` on a brand-new room: the first event triggers one catch-up).
     pub head: Option<String>,
+    /// Server-state epoch when the FETCH STARTED. If the viewer has moved
+    /// past it since (a commit of ours landed, a commit was applied), this
+    /// page is a photograph of the past and installing it would take the
+    /// reader backwards — the same guard `PolledPage` carries.
+    pub epoch: u64,
 }
 
 /// Messages the websocket thread ships to the event loop.
@@ -632,6 +637,7 @@ pub fn spawn_ws_sync(
     target: Arc<Mutex<(String, String)>>,
     req_rx: mpsc::Receiver<WsRequest>,
     tx: Sender<WsEvent>,
+    epoch: Arc<std::sync::atomic::AtomicU64>,
 ) {
     std::thread::spawn(move || {
         use crate::capability::SyncState;
@@ -708,11 +714,13 @@ pub fn spawn_ws_sync(
             // fetch and the join are in neither the room stream we had nor
             // the old snapshot. A failed catch-up fetch means the join does
             // NOT count as live: reconnect and retry the whole cycle.
+            let at = epoch.load(std::sync::atomic::Ordering::SeqCst);
             match client.get_page_in(&project, &title) {
                 Ok(page) => {
                     let _ = tx.send(WsEvent::Resynced(ResyncPage {
                         page,
                         head: last_commit_id.clone(),
+                        epoch: at,
                     }));
                     // The join AND its catch-up both landed: this is the only place
                     // the push channel counts as live, so the only place the
@@ -745,6 +753,7 @@ pub fn spawn_ws_sync(
                 &tx,
                 &mut last_commit_id,
                 &mut last_sync,
+                &epoch,
             );
             if changed {
                 // Navigation: loop re-reads the target and rejoins there.
@@ -771,6 +780,7 @@ fn room_loop(
     tx: &Sender<WsEvent>,
     last_commit_id: &mut Option<String>,
     last_sync: &mut Instant,
+    epoch: &std::sync::atomic::AtomicU64,
 ) -> bool {
     // A requested resync is served until it SUCCEEDS: a failed fetch does
     // not consume the request (the gap event's effect must not vanish until
@@ -789,11 +799,13 @@ fn room_loop(
             Err(mpsc::TryRecvError::Disconnected) => return false,
         }
         if resync.attempt(Instant::now()) {
+            let at = epoch.load(std::sync::atomic::Ordering::SeqCst);
             match client.get_page_in(project, title) {
                 Ok(page) => {
                     let _ = tx.send(WsEvent::Resynced(ResyncPage {
                         page,
                         head: last_commit_id.clone(),
+                        epoch: at,
                     }));
                     *last_sync = Instant::now();
                     resync.ok();
@@ -828,10 +840,12 @@ fn room_loop(
                 };
                 // Periodic full-page resync (the insurance poll).
                 if last_sync.elapsed() >= PERIODIC_SYNC && !moved {
+                    let at = epoch.load(std::sync::atomic::Ordering::SeqCst);
                     if let Ok(page) = client.get_page_in(project, title) {
                         let _ = tx.send(WsEvent::Resynced(ResyncPage {
                             page,
                             head: last_commit_id.clone(),
+                            epoch: at,
                         }));
                         *last_sync = Instant::now();
                     }
@@ -965,7 +979,14 @@ mod tests {
         let (req_tx, req_rx) = mpsc::channel();
         let (tx, rx) = mpsc::channel();
         let target = Arc::new(Mutex::new((project.clone(), title.clone())));
-        spawn_ws_sync(client.clone(), sid.clone(), target, req_rx, tx);
+        spawn_ws_sync(
+            client.clone(),
+            sid.clone(),
+            target,
+            req_rx,
+            tx,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
 
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut catch_up: Option<crate::api::Page> = None;

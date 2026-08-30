@@ -67,6 +67,10 @@ const SOURCE_NUM_W: usize = 5;
 
 /// How often the page is scanned for links whose fate is unknown.
 const LINK_SCAN_EVERY: Duration = Duration::from_millis(400);
+
+/// How many of this viewer's own commit ids are remembered, waiting for
+/// their websocket echo (see `App::own_commits`).
+const OWN_COMMIT_MEMORY: usize = 256;
 /// Cursor-row highlight inside the page body.
 const CURSOR_BG: Color = Color::DarkGray;
 const CARD_BG: Color = Color::Black;
@@ -793,6 +797,16 @@ struct App {
     commit_res_tx: mpsc::Sender<CommitOutcome>,
     /// Jobs sent but not yet answered (quit flushes until 0).
     inflight: usize,
+    /// Commit ids this viewer wrote, newest last. Their websocket echoes
+    /// carry ops we have already applied locally — and may arrive AFTER we
+    /// have edited past them, in which case applying the ops again would
+    /// put an older version of a line back on screen. Recognised by id, so
+    /// they only move the chain head along.
+    ///
+    /// Bounded: an echo that has not arrived within `OWN_COMMIT_MEMORY`
+    /// commits is not going to, and the page has moved so far past it that
+    /// the chain check would send us to a resync anyway.
+    own_commits: std::collections::VecDeque<String>,
     /// Conflict generation: bumping it invalidates all queued jobs.
     gen: Arc<std::sync::atomic::AtomicU64>,
     /// What the web poller should watch (project, title); updated on every
@@ -1043,7 +1057,10 @@ struct CommitJob {
 
 /// What a commit attempt came back with.
 enum CommitOutcome {
-    Done { label: String, title: String },
+    /// `commit_id` is the id the server gave this commit — the name our
+    /// own edit will come back under on the websocket (see
+    /// `App::own_commits`).
+    Done { label: String, title: String, commit_id: String },
     Conflict,
     Skipped,
     Failed { label: String, msg: String },
@@ -1174,7 +1191,11 @@ fn spawn_commit_worker(
                 .preview_edit(&job.project, &job.page_id, &job.ops)
                 .and_then(|p| client.submit_edit(&job.project, &p.preview_id));
             let outcome = match res {
-                Ok(c) => CommitOutcome::Done { label: job.label, title: c.title },
+                Ok(c) => CommitOutcome::Done {
+                    label: job.label,
+                    title: c.title,
+                    commit_id: c.commit_id,
+                },
                 Err(EditError::NotFastForward) => CommitOutcome::Conflict,
                 Err(e) => CommitOutcome::Failed { label: job.label, msg: e.to_string() },
             };
@@ -1332,6 +1353,7 @@ impl App {
             commit_jobs_rx: Some(commit_jobs_rx),
             commit_res_tx,
             inflight: 0,
+            own_commits: std::collections::VecDeque::new(),
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
             poll_rx,
@@ -1402,6 +1424,8 @@ impl App {
         self.session = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        // Echoes of the last page's commits say nothing about this one.
+        self.own_commits.clear();
         self.history_dropped = false;
         // Whatever the last page was waiting to become, it is not this one.
         self.create_state = CreateState::Idle;
@@ -3717,6 +3741,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&app.poll_target),
             ws_req_rx,
             app.ws_tx.clone(),
+            Arc::clone(&app.server_epoch),
         );
     }
     app.set_page(loaded, &ctx);
@@ -6619,7 +6644,13 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
 fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     app.inflight = app.inflight.saturating_sub(1);
     match outcome {
-        CommitOutcome::Done { label, title } => {
+        CommitOutcome::Done { label, title, commit_id } => {
+            if !commit_id.is_empty() {
+                app.own_commits.push_back(commit_id);
+                while app.own_commits.len() > OWN_COMMIT_MEMORY {
+                    app.own_commits.pop_front();
+                }
+            }
             // The server now holds something a poll started before this may
             // not know about.
             app.bump_server_epoch();
@@ -6875,6 +6906,9 @@ fn ws_on_resync(app: &mut App, ctx: &Ctx, res: ws::ResyncPage) {
     if res.page.id != app.page_id {
         return; // stale room
     }
+    if resync_is_stale(app, &res) {
+        return;
+    }
     if !remote_gate_clear(app) {
         // Buffered commits so far precede this full page (their effects are
         // inside it); commits received after it are in the channel still.
@@ -6893,6 +6927,10 @@ fn ws_apply_held_resync(app: &mut App, ctx: &Ctx) {
     let Some((res, pre)) = app.ws_held_resync.take() else { return };
     if !remote_gate_clear(app) {
         app.ws_held_resync = Some((res, pre)); // still gated — keep holding
+        return;
+    }
+    // Waiting for the gate is exactly when the page moves on underneath.
+    if resync_is_stale(app, &res) {
         return;
     }
     for _ in 0..pre.min(app.ws_pending.len()) {
@@ -6938,6 +6976,19 @@ fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
         app.ws_pending.push_front(c);
         return false;
     }
+    // Our own commit, coming back to us. Its ops are already in the local
+    // model — that is where they came from — and re-applying them is not
+    // harmless: an echo can arrive AFTER we have edited past it, and a
+    // `Replace` then puts the older text back. (Type, press Enter to
+    // split, and let the first commit's echo land afterwards: the line
+    // grows its old tail back and the caret ends up a line below the
+    // text. Reported from the IME, where confirming and splitting happen
+    // a keystroke apart.) So it only moves the head along.
+    if let Some(i) = app.own_commits.iter().position(|id| *id == c.commit_id) {
+        app.own_commits.remove(i);
+        app.ws_head = Some(c.commit_id);
+        return true;
+    }
     if app.ws_head.as_deref() == Some(c.parent_id.as_str()) {
         // Contiguous: this commit extends the state we are known to be at.
         // Apply its ops as a diff (idempotent: our own echo changes
@@ -6964,6 +7015,26 @@ fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
     // carry this commit's effect.
     app.ws_resync_pending = true;
     app.status = "⟳ websocket 差分に欠落 — 再同期します".into();
+    true
+}
+
+/// Was this full page fetched before something newer landed here?
+///
+/// A resync replaces the local lines wholesale, so a page fetched before
+/// our last commit would delete the line we are typing on — and deleting
+/// the session's line closes the session, dropping the reader out of EDIT
+/// mid-word. (Reported as \"pressing Enter twice quickly throws me back to
+/// view mode\".) Polls have carried this guard from the start; the
+/// websocket's resync had not.
+///
+/// A stale page is not an error and not a loss: another resync is asked
+/// for at once, and the ws thread's own backoff keeps that from becoming
+/// a storm while someone is typing.
+fn resync_is_stale(app: &mut App, res: &ws::ResyncPage) -> bool {
+    if res.epoch == app.server_epoch_now() {
+        return false;
+    }
+    app.ws_resync_pending = true;
     true
 }
 
@@ -8762,7 +8833,7 @@ mod tests {
         handle_commit_outcome(
             &mut app,
             &ctx,
-            CommitOutcome::Done { label: "line 2".into(), title: String::new() },
+            CommitOutcome::Done { label: "line 2".into(), title: String::new(), commit_id: String::new() },
         );
         apply_remote(&mut app, &ctx, in_flight);
         assert_eq!(app.lines[1].text, "mine", "the server has our commit; the snapshot predates it");
@@ -10167,7 +10238,7 @@ mod tests {
         handle_commit_outcome(
             &mut app,
             &ctx,
-            CommitOutcome::Done { label: "line 9".into(), title: String::new() },
+            CommitOutcome::Done { label: "line 9".into(), title: String::new(), commit_id: String::new() },
         );
         assert!(app.web_unsynced, "one success does not prove the page agrees");
         app.start_web_renders(capability::Trigger::Auto);
@@ -12415,6 +12486,7 @@ mod tests {
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Done {
             label: "create page".into(),
             title: "new title".into(),
+            commit_id: String::new(),
         });
         assert_eq!(app.inflight, 0);
         enter_session(&mut app, &ctx, 1, 4);
@@ -13059,6 +13131,66 @@ mod tests {
         assert_eq!(texts, vec!["t", "one", "new line"]);
     }
 
+    /// The reported bug: confirm an IME composition (Enter), then press
+    /// Enter again straight away. The caret ends up a line lower, or the
+    /// session drops out to view mode, and the status says the websocket
+    /// applied an update.
+    ///
+    /// The sequence is: the text commit goes out, the split commit goes
+    /// out, both are acknowledged — and only THEN does the websocket echo
+    /// of the first one arrive. It carries the line as it was before the
+    /// split, which is older than what is on screen.
+    #[test]
+    fn a_late_echo_of_our_own_commit_does_not_undo_the_split_after_it() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        let pid = app.page_id.clone();
+
+        // Type into the line (as an IME commit does), then Enter: the
+        // dirty text commits, and the line splits at the caret.
+        enter_session(&mut app, &ctx, 1, 3);
+        type_str(&mut app, &ctx, "日本語");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Left));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        let after_split: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        let caret_line = app.session.as_ref().map(|s| s.line).unwrap();
+        let caret_id = app.lines[caret_line].id.clone();
+        assert_eq!(after_split, vec!["t", "one日本", "語"]);
+
+        // Both commits are acknowledged: nothing is in flight, so the
+        // gates are down.
+        while app.inflight > 0 {
+            handle_commit_outcome(
+                &mut app,
+                &ctx,
+                CommitOutcome::Done { label: "line".into(), title: String::new(), commit_id: "c1".into() },
+            );
+        }
+
+        // Now the echo of the FIRST commit turns up.
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c1",
+                "c0",
+                &pid,
+                "me",
+                vec![EditOp::Replace { id: "id1".into(), text: "one日本語".into() }],
+            ),
+        );
+        let now: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(now, after_split, "our own echo must not roll the page back");
+        assert!(app.session.is_some(), "and must not drop the reader out of EDIT");
+        assert_eq!(
+            app.session.as_ref().map(|s| app.lines[s.line].id.clone()),
+            Some(caret_id),
+            "the caret stays on the line it was typing"
+        );
+    }
+
     #[test]
     fn ws_commits_buffer_while_gated_and_flush_in_order() {
         let ctx = test_ctx();
@@ -13154,9 +13286,67 @@ mod tests {
         assert!(app.ws_pending.is_empty());
     }
 
-    /// A resync result as the ws thread would ship it.
+    /// A resync result as the ws thread would ship it, stamped with the
+    /// epoch the fetch started at (tests that do not care pass the current
+    /// one, which is what a fetch with nothing racing it would carry).
     fn resync(page: cosense::api::Page, head: Option<&str>) -> ws::ResyncPage {
-        ws::ResyncPage { page, head: head.map(str::to_string) }
+        resync_at(page, head, 0)
+    }
+    fn resync_at(page: cosense::api::Page, head: Option<&str>, epoch: u64) -> ws::ResyncPage {
+        ws::ResyncPage { page, head: head.map(str::to_string), epoch }
+    }
+
+    /// The other half of the report: pressing Enter twice quickly could
+    /// throw the reader out of EDIT into view mode.
+    ///
+    /// A resync fetch that STARTED before our commit landed comes back
+    /// without the line we just made. Installing it deletes that line, and
+    /// a session whose line has vanished closes — mid-word. The page is a
+    /// photograph of the past, so it is refused and another one asked for,
+    /// which is what polls have always done.
+    #[test]
+    fn a_resync_fetched_before_our_own_commit_is_refused() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        let pid = app.page_id.clone();
+
+        // The ws thread starts a resync fetch: it stamps the epoch it saw.
+        let fetched_at = app.server_epoch_now();
+
+        // Meanwhile we split the line and the commit lands, which moves the
+        // server state on (and the epoch with it).
+        enter_session(&mut app, &ctx, 1, 3);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        while app.inflight > 0 {
+            handle_commit_outcome(
+                &mut app,
+                &ctx,
+                CommitOutcome::Done {
+                    label: "line".into(),
+                    title: String::new(),
+                    commit_id: "c1".into(),
+                },
+            );
+        }
+        let lines_now = app.lines.len();
+        let caret_id = app.session.as_ref().map(|s| app.lines[s.line].id.clone());
+        assert!(caret_id.is_some());
+
+        // Now the stale page arrives: it predates the split.
+        let mut p = polled(&[("id0", "t"), ("id1", "one")]).page;
+        p.id = pid;
+        handle_ws_event(&mut app, &ctx, WsEvent::Resynced(resync_at(p, Some("c1"), fetched_at)));
+
+        assert_eq!(app.lines.len(), lines_now, "the new line survives");
+        assert!(app.session.is_some(), "and the reader stays in EDIT");
+        assert_eq!(
+            app.session.as_ref().map(|s| app.lines[s.line].id.clone()),
+            caret_id,
+            "on the same line"
+        );
+        assert!(app.ws_resync_pending, "a fresh page is asked for instead");
     }
 
     #[test]
