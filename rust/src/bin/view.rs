@@ -5352,7 +5352,16 @@ fn read_select_line(app: &mut App, down: bool) {
     }
 }
 
-/// Is the caret sitting inside an empty `[]`?
+/// Is the caret line inside a `code:` block?
+fn session_in_code(app: &App) -> bool {
+    app.session
+        .as_ref()
+        .map(|s| s.line)
+        .map(|line| app.code_span_at_line(line).is_some())
+        .unwrap_or(false)
+}
+
+/// Is the caret sitting inside an empty `[]`?/// Is the caret sitting inside an empty `[]`?
 fn empty_pair_at_caret(app: &App) -> bool {
     app.session
         .as_ref()
@@ -5370,8 +5379,13 @@ fn empty_pair_at_caret(app: &App) -> bool {
 /// decoration — so typing the closing half by hand every time is the
 /// single most repeated keystroke there is.
 fn session_type_char(app: &mut App, ch: char) {
+    // Not inside a `code:` block. There, notation is off by contract —
+    // links, images and quotes all stop working — and brackets are just
+    // characters someone is typing on purpose (`[0]`, `[\n`). Helping
+    // would be the one place the block leaks.
+    let in_code = session_in_code(app);
     match ch {
-        '[' => {
+        '[' if !in_code => {
             // With a selection, the brackets go AROUND it: selecting a word
             // and pressing `[` is how a link gets made.
             let selected = app.session.as_ref().and_then(|s| {
@@ -5393,7 +5407,12 @@ fn session_type_char(app: &mut App, ch: char) {
                 s.want_col = None;
             }
         }
-        ']' if app.session.as_ref().map(|s| s.input.buf[s.input.cur..].starts_with(']')).unwrap_or(false)
+        ']' if !in_code
+            && app
+                .session
+                .as_ref()
+                .map(|s| s.input.buf[s.input.cur..].starts_with(']'))
+                .unwrap_or(false)
             && app.session.as_ref().and_then(|s| s.sel_span()).is_none() =>
         {
             if let Some(s) = app.session.as_mut() {
@@ -5905,7 +5924,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
                 session_join_up(app, ctx);
-            } else if empty_pair_at_caret(app) {
+            } else if empty_pair_at_caret(app) && !session_in_code(app) {
                 // Backspacing out of `[|]` takes the bracket that was put
                 // there for you, not just the one you typed.
                 edit_input(app, Input::delete);
@@ -10816,7 +10835,35 @@ mod tests {
         assert_eq!(app.session.as_ref().unwrap().input.buf, "[改善案]");
     }
 
-    /// Selecting a word and pressing `[` is how a link gets written.
+    /// Inside a `code:` block notation is off by contract — links, images
+    /// and quotes all stop working there — so brackets are just characters
+    /// someone typed on purpose. Completing them would be the one place
+    /// the block leaks.
+    #[test]
+    fn brackets_are_not_completed_inside_a_code_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:x.py", " ", "after"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 1);
+        assert!(session_in_code(&app));
+
+        type_str(&mut app, &ctx, "a[0");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " a[0", "no closing half");
+        type_str(&mut app, &ctx, "]");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " a[0]", "and `]` is a `]`");
+
+        // ⌫ takes one character, not a pair it never made.
+        type_str(&mut app, &ctx, "[");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " a[0]");
+
+        // Outside the block it completes as before.
+        enter_session(&mut app, &ctx, 3, 5);
+        type_str(&mut app, &ctx, "[");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "after[]");
+    }
+
+    /// Selecting a word and pressing `[` is how a link gets written.    /// Selecting a word and pressing `[` is how a link gets written.
     #[test]
     fn typing_a_bracket_over_a_selection_wraps_it() {
         let ctx = test_ctx();
