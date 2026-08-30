@@ -3475,7 +3475,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // One color scheme for the whole page: headings, links, quotes and
     // code labels take the theme's markdown colors (akapen parity).
     let palette = cosense::theme::Palette::from_theme(&hl, light);
-    let picker = Picker::from_query_stdio()?;
+    let picker = image_picker()?;
 
     let ctx = Ctx {
         client,
@@ -3905,7 +3905,33 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
     })
 }
 
-/// Turn a decoded image into a sliced protocol at a width-capped cell size.
+/// How pictures get onto the screen.
+///
+/// The pixel protocols (kitty, iTerm2, sixel) are painted by the terminal
+/// EMULATOR, which knows nothing about a multiplexer's panes: an image
+/// keeps floating on top when another pane is drawn over it. Half-blocks
+/// are ordinary text cells, so they are clipped, scrolled and covered like
+/// everything else — worse pictures, correct windows.
+///
+/// `COSENSE_IMAGE=halfblocks|auto` decides. The default is `auto`, except
+/// inside a multiplexer that cannot place graphics for us, where
+/// half-blocks are the only thing that behaves.
+fn image_picker() -> Result<Picker, Box<dyn Error>> {
+    let want = std::env::var("COSENSE_IMAGE").unwrap_or_default();
+    let mut picker = Picker::from_query_stdio()?;
+    let multiplexed = std::env::var_os("HERDR_ENV").is_some();
+    let halfblocks = match want.as_str() {
+        "halfblocks" => true,
+        "auto" => false,
+        _ => multiplexed,
+    };
+    if halfblocks {
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+    }
+    Ok(picker)
+}
+
+/// Turn a decoded image into a sliced protocol at a width-capped cell size./// Turn a decoded image into a sliced protocol at a width-capped cell size.
 /// Runs on a worker thread (`Picker` is a plain clone of the terminal's
 /// capabilities), never on the UI thread.
 fn build_image(
@@ -10956,6 +10982,25 @@ mod tests {
         let links = app.cursor_line_links();
         assert_eq!(links.len(), 1);
         assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == img));
+    }
+
+    /// Which picture protocol to use is a question about the WINDOW, not
+    /// the picture: a pixel protocol is painted by the terminal and floats
+    /// over whatever a multiplexer draws next to it.
+    #[test]
+    fn the_picture_protocol_follows_the_environment() {
+        // The decision, without touching the real terminal.
+        let decide = |want: &str, multiplexed: bool| -> bool {
+            match want {
+                "halfblocks" => true,
+                "auto" => false,
+                _ => multiplexed,
+            }
+        };
+        assert!(decide("", true), "in a multiplexer, cells are the only thing that clips");
+        assert!(!decide("", false), "on a bare terminal, use the good pictures");
+        assert!(decide("halfblocks", false), "the reader can always ask for cells");
+        assert!(!decide("auto", true), "…and can always ask for pixels back");
     }
 
     /// A trailing newline in a paste is how the text was COPIED, not a
