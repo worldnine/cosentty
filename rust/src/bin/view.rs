@@ -3907,25 +3907,24 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
 
 /// How pictures get onto the screen.
 ///
-/// The pixel protocols (kitty, iTerm2, sixel) are painted by the terminal
-/// EMULATOR, which knows nothing about a multiplexer's panes: an image
-/// keeps floating on top when another pane is drawn over it. Half-blocks
-/// are ordinary text cells, so they are clipped, scrolled and covered like
-/// everything else — worse pictures, correct windows.
+/// Quality first: whatever the terminal answers to the capability query.
+/// Half-blocks are a fallback the reader can ask for, not a default —
+/// they cost most of the picture (two pixels per cell) and that is a worse
+/// trade than the problem they solve.
 ///
-/// `COSENSE_IMAGE=halfblocks|auto` decides. The default is `auto`, except
-/// inside a multiplexer that cannot place graphics for us, where
-/// half-blocks are the only thing that behaves.
+/// The problem they solve: a pixel protocol is painted by the terminal
+/// EMULATOR, which knows nothing about a multiplexer's panes, so an image
+/// can float over whatever is drawn next to it. kitty's graphics go
+/// through UNICODE PLACEHOLDERS here (ratatui-image draws them that way),
+/// which are anchored to text cells and therefore clip and scroll like
+/// text; sixel and iTerm2 placements do not. So the fallback is worth
+/// having, and worth being explicit about:
+///
+/// `COSENSE_IMAGE=halfblocks` — draw pictures as text cells
+/// `COSENSE_IMAGE=auto` (default) — the terminal's own protocol
 fn image_picker() -> Result<Picker, Box<dyn Error>> {
-    let want = std::env::var("COSENSE_IMAGE").unwrap_or_default();
     let mut picker = Picker::from_query_stdio()?;
-    let multiplexed = std::env::var_os("HERDR_ENV").is_some();
-    let halfblocks = match want.as_str() {
-        "halfblocks" => true,
-        "auto" => false,
-        _ => multiplexed,
-    };
-    if halfblocks {
+    if std::env::var("COSENSE_IMAGE").as_deref() == Ok("halfblocks") {
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
     }
     Ok(picker)
@@ -10984,23 +10983,14 @@ mod tests {
         assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == img));
     }
 
-    /// Which picture protocol to use is a question about the WINDOW, not
-    /// the picture: a pixel protocol is painted by the terminal and floats
-    /// over whatever a multiplexer draws next to it.
+    /// Half-blocks cost most of the picture, so they are something the
+    /// reader asks for, never something chosen for them.
     #[test]
-    fn the_picture_protocol_follows_the_environment() {
-        // The decision, without touching the real terminal.
-        let decide = |want: &str, multiplexed: bool| -> bool {
-            match want {
-                "halfblocks" => true,
-                "auto" => false,
-                _ => multiplexed,
-            }
-        };
-        assert!(decide("", true), "in a multiplexer, cells are the only thing that clips");
-        assert!(!decide("", false), "on a bare terminal, use the good pictures");
-        assert!(decide("halfblocks", false), "the reader can always ask for cells");
-        assert!(!decide("auto", true), "…and can always ask for pixels back");
+    fn half_blocks_are_opt_in() {
+        let forced = |want: &str| want == "halfblocks";
+        assert!(forced("halfblocks"));
+        assert!(!forced(""), "the default is the terminal's own protocol");
+        assert!(!forced("auto"));
     }
 
     /// A trailing newline in a paste is how the text was COPIED, not a
