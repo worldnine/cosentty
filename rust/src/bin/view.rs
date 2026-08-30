@@ -4904,8 +4904,16 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         _ => {
             if let KeyCode::Char(c) = k.code {
                 if !c.is_ascii() {
-                    app.status =
-                        "IMEがONのようです — 英数に切り替えてください（入力欄では自動で日本語になります）".into();
+                    // Reading is done in ASCII — j/k/e/q are the language
+                    // here — so put the input source back rather than only
+                    // complaining about it. (Typing Japanese belongs to the
+                    // edit session, which turns the IME on by itself.)
+                    let fixed = app.session_ime.force_ascii();
+                    app.status = if fixed {
+                        "英数に戻しました（日本語は e / i で編集に入ってから）".into()
+                    } else {
+                        "IMEがONのようです — 英数に切り替えてください（編集中は自動で日本語になります）".into()
+                    };
                     return Action::Continue;
                 }
             }
@@ -11042,6 +11050,36 @@ mod tests {
         assert_eq!(forced("halfblocks"), Some(ProtocolType::Halfblocks));
         assert_eq!(forced("auto"), None);
         assert_eq!(forced(""), None, "unset changes nothing");
+    }
+
+    /// Reading happens in ASCII — `j`/`k`/`e`/`q` are the language of the
+    /// viewer — and typing Japanese belongs to the edit session, which
+    /// turns the IME on by itself. A full-width character arriving in READ
+    /// therefore means the input source drifted: put it back rather than
+    /// only complaining about it.
+    #[test]
+    fn a_full_width_key_in_read_puts_the_input_source_back() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+
+        let before: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        handle_key(&mut app, &ctx, key(KeyCode::Char('あ')));
+        assert!(
+            app.status.contains("英数") || app.status.contains("IME"),
+            "status: {}",
+            app.status,
+        );
+        assert_eq!(
+            app.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>(),
+            before,
+            "and the key does nothing else",
+        );
+
+        // In EDIT the same key is just text.
+        enter_session(&mut app, &ctx, 1, 3);
+        type_str(&mut app, &ctx, "あ");
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "oneあ");
     }
 
     /// A trailing newline in a paste is how the text was COPIED, not a
