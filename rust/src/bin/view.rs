@@ -719,13 +719,17 @@ struct App {
     /// every scan. The cost of that is a link left uncoloured, which is
     /// the harmless direction.
     link_pending: HashSet<String>,
-    /// When the page was last scanned for links nobody has asked about.
+    /// When the page was last scanned for links nobody has asked about,
+    /// and what the page looked like then: the caret's line and the source
+    /// epoch. A change to either is a reason to scan now rather than on
+    /// the next beat.
     link_scan_at: Instant,
+    link_scan_key: (Option<usize>, u64),
     /// To the lookup worker (`spawn_link_prober`); `None` in tests, which
     /// makes `probe_unknown_links` a no-op.
     link_probe_tx: Option<mpsc::Sender<LinkProbe>>,
-    link_probe_rx: mpsc::Receiver<(String, String, bool)>,
-    link_probe_res_tx: mpsc::Sender<(String, String, bool)>,
+    link_probe_rx: mpsc::Receiver<(LinkProbe, bool)>,
+    link_probe_res_tx: mpsc::Sender<(LinkProbe, bool)>,
     /// Scroll the viewport to the cursor on the next frame. Set by keyboard
     /// navigation; wheel scrolling leaves it clear so the viewport can move
     /// away from the cursor (akapen's herdr-review style).
@@ -1286,6 +1290,7 @@ impl App {
             links: LinkTruth::default(),
             link_pending: HashSet::new(),
             link_scan_at: Instant::now(),
+            link_scan_key: (None, 0),
             link_probe_tx: None,
             link_probe_rx,
             link_probe_res_tx,
@@ -1423,7 +1428,12 @@ impl App {
         self.hits = l.hits;
         self.read_at = l.read_at;
         self.editable = l.editable;
+        // Answers that were only true of the page we are leaving go now;
+        // the page arriving may be the second one writing that word.
+        self.links.forget_dead();
         self.links.absorb(l.links);
+        // ...so those titles must be askable again.
+        self.link_pending.clear();
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
         }
@@ -2036,13 +2046,17 @@ impl App {
     ///   `relatedPages` never covered.
     fn probe_unknown_links(&mut self) {
         let Some(tx) = self.link_probe_tx.as_ref() else { return };
-        // The scan itself is the only cost when there is nothing to ask
-        // (the usual case), so it runs on a slow beat rather than on every
-        // frame. Nothing is waiting on it: a colour that settles a moment
-        // after the caret leaves the line is exactly the intended feel.
-        if self.link_scan_at.elapsed() < LINK_SCAN_EVERY {
+        // Scan at once when something could have changed the answer — the
+        // text was edited, or the caret left the line it was writing on,
+        // which is the moment a new link becomes a question worth asking.
+        // Otherwise keep a slow beat: with nothing to ask (the usual case)
+        // the scan itself is the only cost, and it should not run every
+        // frame.
+        let key = (self.session.as_ref().map(|s| s.line), self.src_epoch_now());
+        if key == self.link_scan_key && self.link_scan_at.elapsed() < LINK_SCAN_EVERY {
             return;
         }
+        self.link_scan_key = key;
         self.link_scan_at = Instant::now();
         let editing = self.session.as_ref().map(|s| s.line);
         for (i, line) in self.lines.iter().enumerate() {
@@ -2071,14 +2085,21 @@ impl App {
     /// page has to be rendered again with them.
     fn drain_link_probes(&mut self) -> bool {
         let mut changed = false;
-        while let Ok((project, title, exists)) = self.link_probe_rx.try_recv() {
-            self.link_pending.remove(&cosense::render::title_lc(&title));
+        while let Ok((probe, live)) = self.link_probe_rx.try_recv() {
+            self.link_pending.remove(&cosense::render::title_lc(&probe.title));
             // An answer about a project we have since left says nothing
             // about the page on screen.
-            if project != self.project {
+            if probe.project != self.project {
                 continue;
             }
-            self.links.learn(&title, exists);
+            // "Nobody but the asking page writes this" is only an answer
+            // for the page that asked (see `LinkTruth::forget_dead`); if
+            // the reader has moved on, this page may be the second one
+            // writing it, and that is a different question.
+            if !live && probe.asked_by != self.page_id {
+                continue;
+            }
+            self.links.learn(&probe.title, live);
             changed = true;
         }
         changed
@@ -4119,25 +4140,26 @@ fn link_truth(page: &cosense::api::Page) -> LinkTruth {
 fn spawn_link_prober(
     client: Client,
     rx: mpsc::Receiver<LinkProbe>,
-    tx: mpsc::Sender<(String, String, bool)>,
+    tx: mpsc::Sender<(LinkProbe, bool)>,
 ) {
     std::thread::spawn(move || {
-        while let Ok(LinkProbe { project, title, asked_by }) = rx.recv() {
+        while let Ok(probe) = rx.recv() {
+            let LinkProbe { project, title, asked_by } = &probe;
             // A failed lookup answers nothing, and is not retried (see
             // `App::link_pending`): the title stays unknown and keeps its
             // ordinary colour, which is the safe direction.
-            let Ok(written) = client.page_exists(&project, &title) else { continue };
+            let Ok(written) = client.page_exists(project, title) else { continue };
             let live = if written {
                 true
             } else {
-                match client.backlink_ids(&project, &title) {
+                match client.backlink_ids(project, title) {
                     // The asking page's own link does not make a word
                     // shared — that is the whole point of the rule.
-                    Ok(ids) => ids.iter().any(|id| *id != asked_by),
+                    Ok(ids) => ids.iter().any(|id| id != asked_by),
                     Err(_) => continue,
                 }
             };
-            if tx.send((project, title, live)).is_err() {
+            if tx.send((probe, live)).is_err() {
                 return; // app gone
             }
         }
@@ -10837,6 +10859,69 @@ mod tests {
         assert_eq!(secs[4].entries[0].title, "/other/Page", "bare /project is not a page");
     }
 
+    /// Adding a tag that some OTHER page already writes makes it a shared
+    /// word, and it has to stop being red at once.
+    ///
+    /// It did not, because "dead" had been learned on the page before and
+    /// carried over: the viewer thought it already knew, so it never
+    /// asked again — and the answer it was holding was the answer to a
+    /// question about a different page.
+    #[test]
+    fn a_word_this_page_shares_is_asked_about_again_after_navigating() {
+        let ctx = test_ctx();
+        let mut app = page(&["A", "#タグ"]);
+        let (tx, rx) = mpsc::channel();
+        app.link_probe_tx = Some(tx);
+        // On page A the tag was nobody else's: red, and asked about once.
+        app.links.learn("タグ", false);
+        app.links.learn("書かれているページ", true);
+        app.link_pending.insert(cosense::render::title_lc("タグ"));
+
+        // The reader opens another page and writes the same tag there.
+        app.set_page(
+            Loaded {
+                project: "proj".into(),
+                title: "B".into(),
+                header_colors: HeaderColors::fallback(),
+                page_id: "pid-B".into(),
+                lines: vec![PageLine {
+                    id: "b0".into(),
+                    text: "B".into(),
+                    user_id: String::new(),
+                    created: 0,
+                    updated: 0,
+                }],
+                blocks: Vec::new(),
+                srcs: Vec::new(),
+                hits: Vec::new(),
+                read_at: None,
+                editable: true,
+                related: Vec::new(),
+                links: LinkTruth::default(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.links.exists("タグ"), None, "a dead word does not travel");
+        assert_eq!(
+            app.links.exists("書かれているページ"),
+            Some(true),
+            "a live one does: whoever made it live is not the page asking"
+        );
+
+        app.lines.push(PageLine {
+            id: "b1".into(),
+            text: "#タグ".into(),
+            user_id: String::new(),
+            created: 0,
+            updated: 0,
+        });
+        app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
+        app.probe_unknown_links();
+        let asked = rx.try_recv().expect("the tag is asked about again");
+        assert_eq!(asked.title, "タグ");
+        assert_eq!(asked.asked_by, "pid-B", "asked on behalf of the page that now writes it");
+    }
+
     /// A link written during the session is the case the page response
     /// cannot answer — it was not there when the page was fetched. So the
     /// viewer asks about that one title, and only that one, and only once
@@ -10879,19 +10964,39 @@ mod tests {
         assert!(rx.try_recv().is_err(), "one question per title");
 
         // The answer arrives and the link is marked.
-        app.link_probe_res_tx
-            .send(("proj".into(), "いま打った".into(), false))
-            .unwrap();
+        let answer = |project: &str, title: &str, from: &str| LinkProbe {
+            project: project.into(),
+            title: title.into(),
+            asked_by: from.into(),
+        };
+        let me = app.page_id.clone();
+        app.link_probe_res_tx.send((answer("proj", "いま打った", &me), false)).unwrap();
         assert!(app.drain_link_probes());
         assert!(app.links.missing("いま打った"));
         assert!(!app.links.missing("もとからある"));
 
         // An answer about a project we have left is not about this page.
         app.link_probe_res_tx
-            .send(("elsewhere".into(), "もとからある".into(), false))
+            .send((answer("elsewhere", "もとからある", &me), false))
             .unwrap();
         assert!(!app.drain_link_probes(), "another project's answer changes nothing");
         assert!(!app.links.missing("もとからある"));
+
+        // Nor is "nobody but the asking page writes this" an answer once
+        // the reader has moved to another page — that page may be the
+        // second one writing it, which is a different question.
+        app.link_probe_res_tx
+            .send((answer("proj", "よそで聞いた", "another-page-id"), false))
+            .unwrap();
+        assert!(!app.drain_link_probes(), "a dead answer belongs to the page that asked");
+        assert_eq!(app.links.exists("よそで聞いた"), None);
+        // A LIVE answer travels: whoever made it live is not the page that
+        // asked, so it is still live here.
+        app.link_probe_res_tx
+            .send((answer("proj", "よそで聞いた", "another-page-id"), true))
+            .unwrap();
+        assert!(app.drain_link_probes());
+        assert_eq!(app.links.exists("よそで聞いた"), Some(true));
     }
 
     /// The uncreated links of a page are read out of the same response

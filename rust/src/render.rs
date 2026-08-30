@@ -333,6 +333,20 @@ impl LinkTruth {
         self.known.extend(other.known);
     }
 
+    /// Forget every "nobody says this word" before reading another page.
+    ///
+    /// The two answers do not travel equally. **Live travels**: a written
+    /// page stays written, and a word two pages share is shared wherever
+    /// you read it — the page that made it live is not the page asking,
+    /// or the asking page would not have needed to ask. **Dead does not**:
+    /// it means "nobody BUT the page that asked writes this word", and the
+    /// next page you open may be the second one writing it. Carrying that
+    /// answer over is exactly how a tag stays red on the page that just
+    /// made it a shared one.
+    pub fn forget_dead(&mut self) {
+        self.known.retain(|_, live| *live);
+    }
+
     /// `None` = nobody has looked yet.
     pub fn exists(&self, title: &str) -> Option<bool> {
         if self.known.is_empty() {
