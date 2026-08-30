@@ -187,10 +187,10 @@ pub enum WebError {
 impl fmt::Display for WebError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WebError::NoBrowser => write!(f, "Chrome が見つかりません（COSENSE_CHROME で指定できます）"),
-            WebError::Timeout { seconds } => write!(f, "ブラウザが {seconds} 秒でタイムアウトしました"),
-            WebError::NotRendered => write!(f, "Cosense 側が図を描きませんでした"),
-            WebError::NotAuthorized => write!(f, "このログインではページを見られません"),
+            WebError::NoBrowser => write!(f, "{}", crate::ts!("Chrome が見つかりません（COSENSE_CHROME で指定できます）", "no Chrome found (set COSENSE_CHROME)")),
+            WebError::Timeout { seconds } => write!(f, "{}", crate::t!("ブラウザが {seconds} 秒でタイムアウトしました", "browser timed out after {seconds}s")),
+            WebError::NotRendered => write!(f, "{}", crate::ts!("Cosense 側が図を描きませんでした", "diagram not drawn by Cosense")),
+            WebError::NotAuthorized => write!(f, "{}", crate::ts!("このログインではページを見られません", "page not visible to this login")),
             WebError::Backend(m) => write!(f, "{m}"),
         }
     }
@@ -827,7 +827,14 @@ mod tests {
         let out = b.render_batch(&[req(), req()], RenderCapability::Anonymous);
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], Err(WebError::NoBrowser)));
-        assert_eq!(WebError::NoBrowser.to_string(), "Chrome が見つかりません（COSENSE_CHROME で指定できます）");
+        // The reason is told in the reader's own language.
+        crate::lang::set_for_thread(crate::lang::Lang::En);
+        assert_eq!(WebError::NoBrowser.to_string(), "no Chrome found (set COSENSE_CHROME)");
+        crate::lang::set_for_thread(crate::lang::Lang::Ja);
+        assert_eq!(
+            WebError::NoBrowser.to_string(),
+            "Chrome が見つかりません（COSENSE_CHROME で指定できます）"
+        );
     }
 
     #[test]

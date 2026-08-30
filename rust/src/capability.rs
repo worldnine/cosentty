@@ -73,7 +73,7 @@ impl SyncState {
         match self {
             SyncState::Polling => "poll",
             SyncState::Live => "ws",
-            SyncState::Reconnecting => "再接続中",
+            SyncState::Reconnecting => crate::ts!("再接続中", "reconnecting"),
         }
     }
 }
@@ -135,9 +135,19 @@ pub enum Decision {
 
 /// Said once per page when a private diagram cannot be drawn. Names the
 /// cookie, never a value.
-pub const NEEDS_SID: &str = "非公開の図を描画するには connect.sid が必要です";
+pub fn needs_sid() -> &'static str {
+    crate::ts!(
+        "非公開の図を描画するには connect.sid が必要です",
+        "a connect.sid is needed to draw a private diagram"
+    )
+}
 /// The same, when a cookie exists but the server has rejected it.
-pub const SID_REJECTED: &str = "connect.sid が失効しています — 非公開の図は描画できません";
+pub fn sid_rejected() -> &'static str {
+    crate::ts!(
+        "connect.sid が失効しています — 非公開の図は描画できません",
+        "the connect.sid has expired — private diagrams cannot be drawn"
+    )
+}
 
 /// The session's browser-render standing for one project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +213,7 @@ pub fn decide(caps: &Capabilities, policy: RenderPolicy, trigger: Trigger) -> De
         // Saying "you need a cookie" is only honest when we KNOW it is
         // private; the notice is suppressed for Unknown.
         (false, Visibility::Private) => Decision::CacheOnly {
-            notice: Some(if caps.sid { SID_REJECTED } else { NEEDS_SID }),
+            notice: Some(if caps.sid { sid_rejected() } else { needs_sid() }),
         },
         // Unknown: automatic passes stay conservative — no browser is spent
         // guessing. An explicit `m` is allowed exactly one anonymous try.
@@ -304,9 +314,9 @@ mod tests {
     #[test]
     fn no_sid_on_a_private_project_falls_back_to_source_and_says_why() {
         let d = decide(&caps(false, Visibility::Private), RenderPolicy::Auto, Trigger::Auto);
-        assert_eq!(d, Decision::CacheOnly { notice: Some(NEEDS_SID) });
+        assert_eq!(d, Decision::CacheOnly { notice: Some(needs_sid()) });
         // The advice names the cookie; it can never name a value.
-        assert!(NEEDS_SID.contains("connect.sid"));
+        assert!(needs_sid().contains("connect.sid"));
     }
 
     #[test]
@@ -351,9 +361,9 @@ mod tests {
         let p = Capabilities { cookie_rejected: true, ..caps(true, Visibility::Private) };
         assert_eq!(
             decide(&p, RenderPolicy::Auto, Trigger::Manual),
-            Decision::CacheOnly { notice: Some(SID_REJECTED) }
+            Decision::CacheOnly { notice: Some(sid_rejected()) }
         );
-        assert!(SID_REJECTED.contains("connect.sid"));
+        assert!(sid_rejected().contains("connect.sid"));
     }
 
     #[test]

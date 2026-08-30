@@ -6,6 +6,7 @@ pub mod editops;
 pub mod highlight;
 pub mod image_fetch;
 pub mod index;
+pub mod lang;
 pub mod ime;
 pub mod render;
 pub mod table;
