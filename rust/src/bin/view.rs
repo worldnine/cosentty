@@ -41,7 +41,7 @@ use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
     render_lines_with, Block, CodeSpan, LinkTruth,
 };
-use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_continued};
+use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_parts};
 
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -510,18 +510,6 @@ impl LinkItem {
         }
     }
 
-    /// Labels this target can have in the rendered page. The link picker
-    /// adds `↗`, while the page itself does not; hashtags and Gyazo add
-    /// their own visible marker.
-    fn rendered_labels(&self) -> Vec<String> {
-        match self {
-            LinkItem::Page(t) => vec![t.clone(), format!("#{t}")],
-            LinkItem::ProjectPage { project, title } => vec![format!("/{project}/{title}")],
-            LinkItem::File { label, .. } => vec![label.clone()],
-            LinkItem::Export { label, .. } => vec![label.clone()],
-            LinkItem::Url { label, .. } => vec![label.clone(), format!("[{label}]")],
-        }
-    }
 }
 
 /// One section of the related-pages list rendered below the page body
@@ -548,7 +536,13 @@ struct RelEntry {
 /// are synthesized (not selectable, no source). `FrameEnd` is the explicit
 /// boundary between the boxed page body and the unboxed related sections.
 enum Row {
-    Line { line: Line<'static>, src: usize },
+    /// A rendered row. `start`/`hang` say where it sits in the line it was
+    /// wrapped out of: `start` is the display column of its first
+    /// character along the unwrapped line, `hang` the indent it carries in
+    /// front of that. A row that is nobody's continuation has both zero.
+    /// This is what turns a click back into a position in the source
+    /// line's rendering — see `App::link_at_screen_position`.
+    Line { line: Line<'static>, src: usize, start: usize, hang: usize },
     Blank { src: usize },
     /// A picture on a line of its own. `indent`: the display column it
     /// starts at, so it lines up with the text of its level. `item`: the
@@ -630,6 +624,10 @@ struct App {
     /// original author — the page API does not carry the creator.
     lines: Vec<PageLine>,
     blocks: Vec<Block>,
+    /// What can be followed on each block (parallel to `blocks`), as the
+    /// renderer reported it. The click path reads this instead of looking
+    /// at colours.
+    hits: Vec<Vec<cosense::render::Hit>>,
     srcs: Vec<usize>,
     images: HashMap<String, ImageInfo>,
     image_errors: HashMap<String, String>,
@@ -1284,6 +1282,7 @@ impl App {
             scroll: 0,
             cursor: 0,
             selection: None,
+            hits: Vec::new(),
             links: LinkTruth::default(),
             link_pending: HashSet::new(),
             link_scan_at: Instant::now(),
@@ -1421,6 +1420,7 @@ impl App {
         self.lines = l.lines;
         self.blocks = l.blocks;
         self.srcs = l.srcs;
+        self.hits = l.hits;
         self.read_at = l.read_at;
         self.editable = l.editable;
         self.links.absorb(l.links);
@@ -2129,26 +2129,6 @@ impl App {
         items
     }
 
-    /// Mouse targets in rendered left-to-right order. Keyboard activation
-    /// intentionally keeps its historic page-first ordering above.
-    fn mouse_links_at_src(&self, src: usize) -> Vec<LinkItem> {
-        if src >= self.lines.len() {
-            return self.links_at_src(src);
-        }
-        let text = &mask_inline_code(&self.lines[src].text);
-        let mut positioned = positioned_links_on_line(text);
-        if let Some(item) = block_export_link(text, src) {
-            positioned.push((0, item));
-        }
-        positioned.extend(
-            positioned_labelled_urls(text)
-                .into_iter()
-                .map(|(pos, label, url)| (pos, link_item_for_url(label, url))),
-        );
-        positioned.sort_by_key(|(pos, _)| *pos);
-        positioned.into_iter().map(|(_, item)| item).collect()
-    }
-
     fn cursor_line_links(&self) -> Vec<LinkItem> {
         self.links_at_src(self.cursor)
     }
@@ -2540,7 +2520,7 @@ impl App {
                     push(&seg[from..cut], selected, true);
                     push(&seg[cut..to], selected, false);
                 }
-                content.push(Row::Line { line: Line::from(spans), src });
+                content.push(Row::Line { line: Line::from(spans), src, start: 0, hang: 0 });
             }
         };
         let mut content: Vec<Row> = Vec::new();
@@ -2557,8 +2537,13 @@ impl App {
                 Block::Text(line) => {
                     // bullets / code hang their continuation rows under the
                     // text; quotes repeat their bar on every row
-                    for wrapped in wrap_line_continued(line, text_w, &hanging_prefix(line)) {
-                        content.push(Row::Line { line: wrapped, src });
+                    for w in wrap_line_parts(line, text_w, &hanging_prefix(line)) {
+                        content.push(Row::Line {
+                            line: w.line,
+                            src,
+                            start: w.start,
+                            hang: w.hang,
+                        });
                     }
                 }
                 Block::Blank => content.push(Row::Blank { src }),
@@ -2577,7 +2562,7 @@ impl App {
                                 continue;
                             }
                         }
-                        content.push(Row::Line { line, src: row_src });
+                        content.push(Row::Line { line, src: row_src, start: 0, hang: 0 });
                     }
                 }
                 Block::WebRender { kind, code, rows, last_src } => {
@@ -2614,10 +2599,13 @@ impl App {
                                 continue;
                             }
                         }
-                        for wrapped in
-                            wrap_line_continued(line, text_w, &hanging_prefix(line))
-                        {
-                            content.push(Row::Line { line: wrapped, src: *rsrc });
+                        for w in wrap_line_parts(line, text_w, &hanging_prefix(line)) {
+                            content.push(Row::Line {
+                                line: w.line,
+                                src: *rsrc,
+                                start: w.start,
+                                hang: w.hang,
+                            });
                         }
                     }
                 }
@@ -2710,7 +2698,7 @@ impl App {
                 line: Line::from(Span::styled(format!("{head}{fill}"), dim)),
             });
             for e in &sec.entries {
-                rows.push(Row::Line { line: related_row(e, text_w, link_style), src: vsrc });
+                rows.push(Row::Line { line: related_row(e, text_w, link_style), src: vsrc, start: 0, hang: 0 });
                 vsrc += 1;
             }
             rows.push(Row::Card { line: Line::from("") });
@@ -2736,7 +2724,7 @@ impl App {
                 };
                 let mut spans: Vec<Span<'static>> = vec![Span::styled(label, num_style)];
                 spans.extend(wrapped.spans);
-                content.push(Row::Line { line: Line::from(spans), src });
+                content.push(Row::Line { line: Line::from(spans), src, start: 0, hang: 0 });
             }
         }
         content
@@ -2944,109 +2932,98 @@ impl App {
         self.row_at_screen_row(screen_row).and_then(Row::src)
     }
 
-    /// Link under a mouse cell in VIEW mode. Rendered links are underlined,
-    /// so decoration-hidden source syntax and wrapped CJK labels do not need
-    /// to be reverse-mapped to raw byte offsets.
-    fn link_at_screen_position(
-        &self,
-        screen_row: i32,
-        col: usize,
-        pal: &cosense::theme::Palette,
-    ) -> Option<(usize, LinkItem)> {
+    /// What a mouse cell leads to, in VIEW mode.
+    ///
+    /// The answer comes from what the renderer said it drew (`Hit`: a
+    /// span index per followable thing), not from how the row looks. The
+    /// click is turned into a column of the unwrapped rendered line, and
+    /// the hit whose span covers that column wins.
+    ///
+    /// It used to be done by comparing the clicked span's colour with the
+    /// palette and counting equal labels. That made the click path depend
+    /// on the styling: giving uncreated links their own colour quietly
+    /// made them the one thing on a page that could not be followed.
+    fn link_at_screen_position(&self, screen_row: i32, col: usize) -> Option<(usize, LinkItem)> {
         if self.mode != Mode::View || self.session.is_some() {
             return None;
         }
-        let Row::Line { line, src } = self.row_at_screen_row(screen_row)? else {
+        let Row::Line { line, src, start, hang } = self.row_at_screen_row(screen_row)? else {
             return None;
         };
-        let mut left = 0usize;
-        let clicked = line.spans.iter().find_map(|span| {
-            let width = str_width(span.content.as_ref());
-            let hit = left <= col
-                && col < left + width
-                && span.style.add_modifier.contains(Modifier::UNDERLINED);
-            left += width;
-            hit.then(|| (span.content.trim().to_string(), span.style.fg, left - width))
-                .filter(|(s, _, _)| !s.is_empty())
-        })?;
-        let (clicked, clicked_fg, clicked_left) = clicked;
-        let candidates = self.mouse_links_at_src(*src);
-        // A related-page row has exactly one target; its visible title may
-        // be truncated with `…`, so no label reconstruction is necessary.
+        // A related-page row (a virtual line below the page) has exactly
+        // one target and no notation to speak of.
         if *src >= self.lines.len() {
-            return candidates.into_iter().next().map(|item| (*src, item));
-        }
-        let color_matches = |item: &LinkItem| {
-            match item {
-                // A page link wears the link colour — or the uncreated
-                // one, which is still a link and still opens (that is how
-                // a page gets written). Leaving it out here made a red
-                // link the one thing on the page a click could not follow.
-                LinkItem::Page(_) | LinkItem::ProjectPage { .. } => {
-                    clicked_fg == Some(pal.link) || clicked_fg == Some(pal.link_missing)
-                }
-                LinkItem::File { .. } | LinkItem::Url { .. } => {
-                    clicked_fg == Some(pal.url) || clicked_fg == Some(Color::Magenta)
-                }
-                // A block header wears the notation label colour.
-                LinkItem::Export { .. } => clicked_fg == Some(pal.code_fence),
+            let underlined = line.spans.iter().any(|sp| {
+                sp.style.add_modifier.contains(Modifier::UNDERLINED)
+            });
+            if !underlined {
+                return None;
             }
-        };
-        // Prefer exact labels. If two targets render with the same label,
-        // count equal underlined spans before this cell and select the same
-        // occurrence from the source-ordered candidates.
-        let exact: Vec<&LinkItem> = candidates
-            .iter()
-            .filter(|item| {
-                color_matches(item)
-                    && item.rendered_labels().iter().any(|label| label == &clicked)
-            })
-            .collect();
-        let matching: Vec<&LinkItem> = if exact.is_empty() {
-            // Wrapping can split one link span; then the clicked fragment is
-            // contained in its full rendered label.
-            candidates
-                .iter()
-                .filter(|item| {
-                    color_matches(item)
-                        && item.rendered_labels().iter().any(|label| label.contains(&clicked))
-                })
-                .collect()
-        } else {
-            exact
-        };
-        let target_y = self.scroll as i32 + screen_row;
-        if target_y < 0 {
+            return self.links_at_src(*src).into_iter().next().map(|item| (*src, item));
+        }
+        // A table is laid out against the pane at draw time, so its
+        // `table:` header is not a Text block and has no hits of its own.
+        // The header is still followable (Enter saves the CSV), and its
+        // label is the row's first span — so the column decides, as it
+        // does everywhere else here.
+        if self.text_block_at(*src).is_none() {
+            let label_w = line.spans.first().map(|s| str_width(s.content.as_ref()))?;
+            if col >= label_w {
+                return None;
+            }
+            let text = mask_inline_code(&self.lines.get(*src)?.text);
+            return block_export_link(&text, *src).map(|item| (*src, item));
+        }
+        // Screen column → column of the line as it was rendered before
+        // wrapping. A continuation row carries the hanging indent in
+        // front, which belongs to no span of the original.
+        if col < *hang {
             return None;
         }
-        let target_y = target_y as u32;
-        let mut y = 0u32;
-        let mut occurrence = 0usize;
-        for row in &self.rows {
-            if y > target_y {
-                break;
-            }
-            if let Row::Line { line, src: row_src } = row {
-                if row_src == src {
-                    let mut span_left = 0usize;
-                    for span in &line.spans {
-                        let width = str_width(span.content.as_ref());
-                        let before_clicked = y < target_y || span_left < clicked_left;
-                        if before_clicked
-                            && span.style.add_modifier.contains(Modifier::UNDERLINED)
-                            && span.style.fg == clicked_fg
-                            && span.content.trim() == clicked
-                        {
-                            occurrence += 1;
-                        }
-                        span_left += width;
-                    }
-                }
-            }
-            y += row.height() as u32;
+        let want = start + (col - hang);
+        // The hit's span is an index into the UNWRAPPED line, so measure
+        // there: this row only holds a slice of it.
+        let (full, hits) = self.text_block_at(*src)?;
+        let mut at = 0usize;
+        let mut spans = Vec::with_capacity(full.spans.len());
+        for sp in &full.spans {
+            let w = str_width(sp.content.as_ref());
+            spans.push((at, w));
+            at += w;
         }
-        let item = matching.get(occurrence).or_else(|| matching.first())?;
-        Some((*src, (*item).clone()))
+        let hit = hits.iter().find(|h| {
+            spans.get(h.span).is_some_and(|(from, w)| *from <= want && want < from + w)
+        })?;
+        self.item_for_hit(*src, &hit.target).map(|item| (*src, item))
+    }
+
+    /// The rendered (unwrapped) line for a source line and what can be
+    /// followed on it. `Hit::span` counts spans of THIS line, which is the
+    /// coordinate system the renderer reported in.
+    fn text_block_at(&self, src: usize) -> Option<(&Line<'static>, &[cosense::render::Hit])> {
+        let i = self
+            .srcs
+            .iter()
+            .position(|s| *s == src)
+            .filter(|i| matches!(self.blocks.get(*i), Some(Block::Text(_))))?;
+        let Some(Block::Text(line)) = self.blocks.get(i) else { return None };
+        Some((line, self.hits.get(i).map(|v| v.as_slice()).unwrap_or(&[])))
+    }
+
+    /// Turn what the renderer drew into what this viewer does with it: a
+    /// page is opened, an upload is downloaded, a `code:`/`table:` header
+    /// is saved as a file.
+    fn item_for_hit(&self, src: usize, target: &cosense::render::HitTarget) -> Option<LinkItem> {
+        use cosense::render::HitTarget;
+        match target {
+            HitTarget::Page(text) => Some(page_link_item(text)),
+            HitTarget::Url { label, url } => {
+                Some(link_item_for_url(label.clone(), url.clone()))
+            }
+            HitTarget::BlockLabel => {
+                block_export_link(&mask_inline_code(&self.lines.get(src)?.text), src)
+            }
+        }
     }
 
     /// Put the cursor on source line `src` (clamped / snapped to a rendered
@@ -3855,6 +3832,8 @@ struct Loaded {
     lines: Vec<PageLine>,
     blocks: Vec<Block>,
     srcs: Vec<usize>,
+    /// See `App::hits`.
+    hits: Vec<Vec<cosense::render::Hit>>,
     /// See `App::read_at`.
     read_at: Option<i64>,
     /// Whether this credential may edit the loaded project.
@@ -4060,6 +4039,7 @@ fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Er
         lines,
         blocks: rendered.blocks,
         srcs: rendered.srcs,
+        hits: rendered.hits,
         read_at,
         editable,
         related,
@@ -4352,6 +4332,22 @@ fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
         from = pos + 1;
     }
     out
+}
+
+/// What `[...]` (or a `#tag`) leads to: a page here, or a page in another
+/// project when it is written `/project/title`.
+fn page_link_item(text: &str) -> LinkItem {
+    if let Some(rest) = text.strip_prefix('/') {
+        if let Some((project, title)) = rest.split_once('/') {
+            if !project.is_empty() && !title.is_empty() {
+                return LinkItem::ProjectPage {
+                    project: project.to_string(),
+                    title: title.to_string(),
+                };
+            }
+        }
+    }
+    LinkItem::Page(text.to_string())
 }
 
 fn links_on_line(text: &str) -> Vec<LinkItem> {
@@ -5313,6 +5309,7 @@ fn rerender(app: &mut App, ctx: &Ctx) {
     let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &app.links);
     app.blocks = r.blocks;
     app.srcs = r.srcs;
+    app.hits = r.hits;
     app.laid_width = 0;
     app.start_image_loads(ctx);
     app.start_web_renders(capability::Trigger::Auto);
@@ -7082,6 +7079,7 @@ fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.lines = snap.lines;
     app.blocks = rendered.blocks;
     app.srcs = rendered.srcs;
+    app.hits = rendered.hits;
     app.related = Vec::new();
     app.virtual_items = Vec::new();
     app.images.clear();
@@ -7305,7 +7303,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                     // Waiting for release preserves click-drag selection.
                     if in_text_col {
                         if let Some((link_src, item)) =
-                            app.link_at_screen_position(screen_row, col, &ctx.palette)
+                            app.link_at_screen_position(screen_row, col)
                         {
                             app.selection = None;
                             app.drag_anchor = Some(link_src);
@@ -7387,7 +7385,6 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                         .link_at_screen_position(
                             screen_row,
                             m.column.saturating_sub(text.x) as usize,
-                            &ctx.palette,
                         )
                         .map(|(_, item)| item == target)
                         .unwrap_or(false);
@@ -7906,7 +7903,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         };
 
         match row {
-            Row::Line { line, src } => {
+            Row::Line { line, src, .. } => {
                 if let Some(r) = one_row(screen_y) {
                     // A diagram being rendered dims its code and lets a band
                     // of brightness run down it: the reader sees the work
@@ -8569,6 +8566,7 @@ mod tests {
         );
         app.blocks = r.blocks;
         app.srcs = r.srcs;
+        app.hits = r.hits;
         app
     }
 
@@ -8874,6 +8872,7 @@ mod tests {
                 lines: Vec::new(),
                 blocks: Vec::new(),
                 srcs: Vec::new(),
+                hits: Vec::new(),
                 related: Vec::new(),
                 read_at: None,
                 editable: true,
@@ -9960,6 +9959,7 @@ mod tests {
                 lines: Vec::new(),
                 blocks: Vec::new(),
                 srcs: Vec::new(),
+                hits: Vec::new(),
                 related: Vec::new(),
                 read_at: None,
                 editable: true,
@@ -10305,6 +10305,7 @@ mod tests {
                 lines: vec![],
                 blocks: vec![],
                 srcs: vec![],
+                hits: vec![],
                 read_at: None,
                 editable: true,
                 related: Vec::new(),
@@ -10578,7 +10579,7 @@ mod tests {
             .rows
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, src } if *src == 1 => {
+                Row::Line { line, src, .. } if *src == 1 => {
                     Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                 }
                 _ => None,
@@ -10603,7 +10604,7 @@ mod tests {
             .rows
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, src } if *src == 1 => {
+                Row::Line { line, src, .. } if *src == 1 => {
                     Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                 }
                 _ => None,
@@ -12137,7 +12138,7 @@ mod tests {
         let line = rows
             .iter()
             .find_map(|r| match r {
-                Row::Line { line, src } if *src == 1 => Some(line.clone()),
+                Row::Line { line, src, .. } if *src == 1 => Some(line.clone()),
                 _ => None,
             })
             .expect("the caret row");
@@ -12513,7 +12514,7 @@ mod tests {
         let shown: Vec<String> = rows
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, src } if *src == 2 => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
+                Row::Line { line, src, .. } if *src == 2 => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
                 _ => None,
             })
             .collect();
@@ -12524,7 +12525,7 @@ mod tests {
             .content_view(40)
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, src } if *src == 2 => {
+                Row::Line { line, src, .. } if *src == 2 => {
                     Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                 }
                 _ => None,
@@ -12552,7 +12553,7 @@ mod tests {
         let shown: Vec<String> = rows
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, src } if *src == 1 => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
+                Row::Line { line, src, .. } if *src == 1 => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()),
                 _ => None,
             })
             .collect();
@@ -13240,7 +13241,7 @@ mod tests {
             .content_view(46)
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, src } if *src == 1 => {
+                Row::Line { line, src, .. } if *src == 1 => {
                     Some(line.spans.iter().map(|s| s.content.as_ref()).collect())
                 }
                 _ => None,
@@ -13513,14 +13514,13 @@ mod tests {
             "see [Target] and [Docs https://example.com] #tag",
         ]);
         app.rebuild(80);
-        let pal = cosense::theme::Palette::for_light(false);
         // Rendered row: `see Target and Docs #tag`.
         assert_eq!(
-            app.link_at_screen_position(1, 4, &pal),
+            app.link_at_screen_position(1, 4),
             Some((1, LinkItem::Page("Target".into())))
         );
         assert_eq!(
-            app.link_at_screen_position(1, 15, &pal),
+            app.link_at_screen_position(1, 15),
             Some((
                 1,
                 LinkItem::Url {
@@ -13530,14 +13530,25 @@ mod tests {
             ))
         );
         assert_eq!(
-            app.link_at_screen_position(1, 20, &pal),
+            app.link_at_screen_position(1, 20),
             Some((1, LinkItem::Page("tag".into())))
         );
         assert_eq!(
-            app.link_at_screen_position(1, 3, &pal),
+            app.link_at_screen_position(1, 3),
             None,
             "plain text is not clickable"
         );
+
+        // A `table:` header is followable too (Enter saves the CSV), and
+        // a table's rows are not Text blocks — they are laid out against
+        // the pane at draw time — so it takes the column path of its own.
+        let mut tbl = page(&["t", "table:売上", "\t1\t2"]);
+        tbl.rebuild(80);
+        assert!(matches!(
+            tbl.link_at_screen_position(1, 3),
+            Some((1, LinkItem::Export { .. })),
+        ));
+        assert_eq!(tbl.link_at_screen_position(1, 40), None, "past the label is not the label");
 
         // A link to a page nobody has written is drawn in another colour,
         // and clicking it is how that page gets written — so the hit test
@@ -13549,12 +13560,12 @@ mod tests {
         rerender(&mut fresh, &test_ctx());
         fresh.rebuild(80);
         assert_eq!(
-            fresh.link_at_screen_position(1, 4, &test_ctx().palette),
+            fresh.link_at_screen_position(1, 4),
             Some((1, LinkItem::Page("Target".into()))),
             "an uncreated link still opens"
         );
         assert_eq!(
-            fresh.link_at_screen_position(1, 16, &test_ctx().palette),
+            fresh.link_at_screen_position(1, 16),
             Some((1, LinkItem::Page("tag".into()))),
             "and so does an uncreated tag"
         );
@@ -13566,7 +13577,7 @@ mod tests {
         ]);
         dup.rebuild(80);
         assert_eq!(
-            dup.link_at_screen_position(1, 14, &pal),
+            dup.link_at_screen_position(1, 14),
             Some((
                 1,
                 LinkItem::Url {
@@ -13579,7 +13590,7 @@ mod tests {
         let mut wrapped = page(&["t", "[ABCDEFGHIJK]"]);
         wrapped.rebuild(12); // text width 6: the link occupies rows 1 and 2
         assert_eq!(
-            wrapped.link_at_screen_position(2, 1, &pal),
+            wrapped.link_at_screen_position(2, 1),
             Some((1, LinkItem::Page("ABCDEFGHIJK".into())))
         );
 
@@ -13594,9 +13605,11 @@ mod tests {
                     .add_modifier(Modifier::UNDERLINED),
             )),
             src: related_src,
+            start: 0,
+            hang: 0,
         }];
         assert_eq!(
-            wrapped.link_at_screen_position(0, 2, &pal),
+            wrapped.link_at_screen_position(0, 2),
             Some((related_src, LinkItem::Page("Very long related page".into())))
         );
 

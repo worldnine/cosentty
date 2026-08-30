@@ -51,7 +51,33 @@ pub fn wrap_line_hanging(line: &Line<'static>, width: usize, hang: usize) -> Vec
 ///
 /// When the body would be narrower than [`MIN_HANGING_BODY`], the prefix
 /// is dropped and the line wraps flat.
-pub fn wrap_line_continued(line: &Line<'static>, width: usize, prefix: &[Span<'static>]) -> Vec<Line<'static>> {
+/// One row of a wrapped line, and where it sits in the unwrapped one.
+///
+/// `start` is the display column of this row's first character measured
+/// along the ORIGINAL line, and `hang` is how many columns of hanging
+/// indent this row carries in front of it. Together they turn a screen
+/// column back into a column of the line that was rendered — which is how
+/// a click finds what it landed on without inspecting how it looks.
+pub struct Wrapped {
+    pub line: Line<'static>,
+    pub start: usize,
+    pub hang: usize,
+}
+
+pub fn wrap_line_continued(
+    line: &Line<'static>,
+    width: usize,
+    prefix: &[Span<'static>],
+) -> Vec<Line<'static>> {
+    wrap_line_parts(line, width, prefix).into_iter().map(|w| w.line).collect()
+}
+
+/// `wrap_line_continued`, keeping each row's place in the original line.
+pub fn wrap_line_parts(
+    line: &Line<'static>,
+    width: usize,
+    prefix: &[Span<'static>],
+) -> Vec<Wrapped> {
     let width = width.max(1);
     let hang: usize = prefix.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
     let hang = if hang > 0 && width.saturating_sub(hang) >= MIN_HANGING_BODY { hang } else { 0 };
@@ -64,7 +90,7 @@ pub fn wrap_line_continued(line: &Line<'static>, width: usize, prefix: &[Span<'s
         }
     }
     if chars.is_empty() {
-        return vec![Line::from("")];
+        return vec![Wrapped { line: Line::from(""), start: 0, hang: 0 }];
     }
 
     let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
@@ -111,16 +137,22 @@ pub fn wrap_line_continued(line: &Line<'static>, width: usize, prefix: &[Span<'s
         rows.push(Vec::new());
     }
 
+    let mut start = 0usize;
     rows.into_iter()
         .enumerate()
         .map(|(i, row)| {
+            let row_width: usize = row.iter().map(|(c, _)| c.width().unwrap_or(0)).sum();
             let mut line = merge_row(row);
+            let mut hang_here = 0;
             if i > 0 && hang > 0 {
                 let mut spans = prefix.to_vec();
                 spans.append(&mut line.spans);
                 line.spans = spans;
+                hang_here = hang;
             }
-            line
+            let at = start;
+            start += row_width;
+            Wrapped { line, start: at, hang: hang_here }
         })
         .collect()
 }

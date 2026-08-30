@@ -229,6 +229,37 @@ pub struct Extracted {
     pub images: Vec<String>,
 }
 
+/// One followable thing on a rendered line: which SPAN of the line it is,
+/// and what following it does.
+///
+/// A span index, not a colour and not a label. The viewer used to work
+/// out what had been clicked by comparing the span's foreground against
+/// the palette, which meant the click path had to be told about every new
+/// colour — and when "uncreated link" got its own colour, red links
+/// silently became the one thing on a page a click could not follow. What
+/// was drawn is known here, at the moment of drawing; saying so is both
+/// cheaper and impossible to get out of step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    /// Index into the rendered line's `spans`.
+    pub span: usize,
+    pub target: HitTarget,
+}
+
+/// What a [`Hit`] leads to. Deliberately close to the notation rather
+/// than to the viewer's actions: the viewer decides that an uploaded file
+/// is downloaded and a page is opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HitTarget {
+    /// The text inside the brackets of a page link, or a `#tag` without
+    /// its `#`. `/project/title` included, verbatim.
+    Page(String),
+    Url { label: String, url: String },
+    /// A `code:name` / `table:name` header, which the viewer serves as a
+    /// file.
+    BlockLabel,
+}
+
 pub struct RenderOutput {
     pub blocks: Vec<Block>,
     /// Source line index each block was rendered from (parallel to `blocks`).
@@ -237,6 +268,9 @@ pub struct RenderOutput {
     /// viewer uses to place the cursor, anchor comments, and insert cards.
     pub srcs: Vec<usize>,
     pub extracted: Extracted,
+    /// What can be followed on each block, by block index (parallel to
+    /// `blocks`). Empty for a block that draws nothing followable.
+    pub hits: Vec<Vec<Hit>>,
 }
 
 use crate::theme::Palette;
@@ -451,6 +485,7 @@ fn decorate_inline(
     images: &mut Vec<String>,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
 ) -> Vec<Span<'static>> {
     find_gyazo(s, images);
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -462,7 +497,7 @@ fn decorate_inline(
         if let Some(start) = rest.find('`') {
             if let Some(end_rel) = rest[start + 1..].find('`') {
                 let end = start + 1 + end_rel;
-                push_plain(&mut spans, &rest[..start], links, pal, known);
+                push_plain(&mut spans, &rest[..start], links, pal, known, hits);
                 let code = &rest[start + 1..end];
                 spans.push(Span::styled(
                     format!(" {code} "),
@@ -483,9 +518,9 @@ fn decorate_inline(
             if let Some(close) = matching_bracket(rest, start) {
                 let doubled =
                     rest[start + 1..].starts_with('[') && rest[..close].ends_with(']');
-                push_plain(&mut spans, &rest[..start], links, pal, known);
+                push_plain(&mut spans, &rest[..start], links, pal, known, hits);
                 if doubled {
-                    decorate_bold(&rest[start + 2..close - 1], &mut spans, links, pal, known);
+                    decorate_bold(&rest[start + 2..close - 1], &mut spans, links, pal, known, hits);
                 } else {
                     decorate_bracket(
                         &rest[start + 1..close],
@@ -494,6 +529,7 @@ fn decorate_inline(
                         images,
                         pal,
                         known,
+                        hits,
                     );
                 }
                 rest = &rest[close + 1..];
@@ -501,10 +537,16 @@ fn decorate_inline(
             }
         }
         // no more special tokens
-        push_plain(&mut spans, rest, links, pal, known);
+        push_plain(&mut spans, rest, links, pal, known, hits);
         break;
     }
     spans
+}
+
+/// Merge the hits of a nested decoration, whose span indices start at 0,
+/// into a line that already has `base` spans in front of them.
+fn merge_hits(hits: &mut Vec<Hit>, inner: Vec<Hit>, base: usize) {
+    hits.extend(inner.into_iter().map(|h| Hit { span: h.span + base, ..h }));
 }
 
 /// Handle bare text: detect URLs and #hashtags, produce spans.
@@ -514,6 +556,7 @@ fn push_plain(
     links: &mut Vec<String>,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
 ) {
     if text.is_empty() {
         return;
@@ -524,13 +567,17 @@ fn push_plain(
         if let Some(pos) = find_url(rest) {
             let (url, after) = take_url(&rest[pos..]);
             if pos > 0 {
-                push_tags(spans, &rest[..pos], links, pal, known);
+                push_tags(spans, &rest[..pos], links, pal, known, hits);
             }
+            hits.push(Hit {
+                span: spans.len(),
+                target: HitTarget::Url { label: url.to_string(), url: url.to_string() },
+            });
             spans.push(Span::styled(url.to_string(), style_url(pal)));
             rest = after;
             continue;
         }
-        push_tags(spans, rest, links, pal, known);
+        push_tags(spans, rest, links, pal, known, hits);
         break;
     }
 }
@@ -542,6 +589,7 @@ fn push_tags(
     links: &mut Vec<String>,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
 ) {
     let mut rest = text;
     loop {
@@ -566,6 +614,7 @@ fn push_tags(
                 // was written.
                 let style =
                     if known.missing(&tag) { style_link_missing(pal) } else { style_link(pal) };
+                hits.push(Hit { span: spans.len(), target: HitTarget::Page(tag.clone()) });
                 spans.push(Span::styled(format!("#{tag}"), style));
                 let consumed = pos + 1 + tag.len();
                 rest = &rest[consumed..];
@@ -606,6 +655,7 @@ fn decorate_bold(
     links: &mut Vec<String>,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
 ) {
     if inner.trim().is_empty() {
         spans.push(Span::raw(format!("[[{inner}]]")));
@@ -616,7 +666,10 @@ fn decorate_bold(
     // followable), and a bold URL is still a URL. `[[x]]` is Cosense's
     // one-star heading, so it wears the same style `[* x]` does.
     let heading = star_style(1, pal);
-    for sp in decorate_inline(inner, links, &mut images, pal, known) {
+    let mut inner_hits = Vec::new();
+    let decorated = decorate_inline(inner, links, &mut images, pal, known, &mut inner_hits);
+    merge_hits(hits, inner_hits, spans.len());
+    for sp in decorated {
         spans.push(Span::styled(sp.content, heading.patch(sp.style)));
     }
 }
@@ -670,6 +723,7 @@ fn decorate_bracket(
     images: &mut Vec<String>,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
 ) {
     // `[]` and `[   ]` are not notation — an empty link is nothing to
     // link to, so Cosense shows the brackets as the text they are. The
@@ -697,7 +751,10 @@ fn decorate_bracket(
         // link: `[[[改善案]]]` and `[* [改善案]]` both have to stay
         // followable, not just look bold.
         if body.contains('[') && body.contains(']') {
-            for sp in decorate_inline(body, links, images, pal, known) {
+            let mut inner_hits = Vec::new();
+            let inner = decorate_inline(body, links, images, pal, known, &mut inner_hits);
+            merge_hits(hits, inner_hits, spans.len());
+            for sp in inner {
                 spans.push(Span::styled(sp.content, style.patch(sp.style)));
             }
             return;
@@ -722,9 +779,18 @@ fn decorate_bracket(
         let (url, _) = take_url(&inner[pos..]);
         let title = inner.replace(url, "");
         let title = title.trim();
+        // Whatever the label turns out to be, the thing this leads to is
+        // the URL; recorded once here rather than in each arm below.
+        let mut hit = |label: &str, spans: &Vec<Span<'static>>| {
+            hits.push(Hit {
+                span: spans.len(),
+                target: HitTarget::Url { label: label.to_string(), url: url.to_string() },
+            });
+        };
         if url.contains("gyazo.com") {
             find_gyazo(url, images);
             let label = if title.is_empty() { "[gyazo]" } else { title };
+            hit(label, spans);
             spans.push(Span::styled(
                 label.to_string(),
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::UNDERLINED),
@@ -733,15 +799,18 @@ fn decorate_bracket(
             // Uploaded file: a paper-clip so it reads as "download", not
             // "open in browser". Enter/f in the viewer saves and opens it.
             let label = if title.is_empty() { file_name_of_url(url) } else { title };
+            hit(label, spans);
             spans.push(Span::styled(label.to_string(), style_url(pal)));
         } else if looks_like_image_url(url) {
             // The picture is drawn on its own row; the text row only needs
             // to say that it is there. Spelling out the whole URL made a
             // one-line note wrap over three rows of link.
             let label = if title.is_empty() { file_name_of_url(url) } else { title };
+            hit(label, spans);
             spans.push(Span::styled(label.to_string(), style_url(pal)));
         } else {
             let label = if title.is_empty() { url } else { title };
+            hit(label, spans);
             spans.push(Span::styled(label.to_string(), style_url(pal)));
         }
         return;
@@ -749,6 +818,7 @@ fn decorate_bracket(
     // internal page link
     links.push(inner.to_string());
     let style = if known.missing(inner) { style_link_missing(pal) } else { style_link(pal) };
+    hits.push(Hit { span: spans.len(), target: HitTarget::Page(inner.to_string()) });
     spans.push(Span::styled(inner.to_string(), style));
 }
 
@@ -900,6 +970,7 @@ fn inline_parts(
     images: &mut Vec<String>,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
 ) -> Vec<InlinePart> {
     let mut parts: Vec<InlinePart> = Vec::new();
     let mut text_from = 0usize;
@@ -939,7 +1010,7 @@ fn inline_parts(
             }
             Err(idx) => {
                 let (from, to) = runs[idx];
-                let spans = decorate_inline(&body[from..to], links, images, pal, known);
+                let spans = decorate_inline(&body[from..to], links, images, pal, known, hits);
                 if !spans.is_empty() {
                     parts.push(InlinePart::Text(Line::from(spans)));
                 }
@@ -980,14 +1051,28 @@ pub fn render_lines_with(
 ) -> RenderOutput {
     let mut out: Vec<Block> = Vec::new();
     let mut srcs: Vec<usize> = Vec::new();
+    let mut all_hits: Vec<Vec<Hit>> = Vec::new();
     let mut ex = Extracted::default();
     let mut i = 0;
+    // Filled by the decorating pass for the line being built, then handed
+    // to the block it belongs to. `emit!` shifts it by the spans the block
+    // puts in FRONT of the decorated content (indent, bullet, quote bar),
+    // which is the only place those prefixes are known.
+    let mut hits: Vec<Hit> = Vec::new();
 
     // Every block records the source line it came from (see RenderOutput.srcs).
     macro_rules! emit {
-        ($block:expr) => {{
+        ($block:expr) => {{ emit!($block, 0) }};
+        ($block:expr, $shift:expr) => {{
             out.push($block);
             srcs.push(i);
+            let shift: usize = $shift;
+            all_hits.push(
+                std::mem::take(&mut hits)
+                    .into_iter()
+                    .map(|h| Hit { span: h.span + shift, ..h })
+                    .collect(),
+            );
         }};
     }
 
@@ -1039,7 +1124,7 @@ pub fn render_lines_with(
                         *src,
                         r.iter()
                             .map(|c| {
-                                decorate_inline(c, &mut ex.links, &mut ex.images, pal, known)
+                                decorate_inline(c, &mut ex.links, &mut ex.images, pal, known, &mut hits)
                             })
                             .collect(),
                     )
@@ -1075,7 +1160,8 @@ pub fn render_lines_with(
             // renderer; everything else emits the header row right away.
             let webbable = mermaid_lang(&lang);
             if !webbable {
-                emit!(Block::Text(header.clone()));
+                hits.push(Hit { span: 0, target: HitTarget::BlockLabel });
+                emit!(Block::Text(header.clone()), 1);
             }
             // collect continuation lines (deeper indent, or blank)
             let mut j = i + 1;
@@ -1148,7 +1234,10 @@ pub fn render_lines_with(
                             last_src,
                         });
                     }
-                    None => emit!(Block::Text(header)),
+                    None => {
+                        hits.push(Hit { span: 0, target: HitTarget::BlockLabel });
+                        emit!(Block::Text(header), 1)
+                    }
                 }
             } else {
                 for (src, line) in code_rows {
@@ -1176,7 +1265,13 @@ pub fn render_lines_with(
         // picture at all, because splitting the line also collects its
         // links — doing that speculatively would count them twice.
         if !line_images(body).is_empty() {
-            let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal, known);
+            // The hits of a mixed text-and-picture line would be indices
+            // into its PIECES, which the viewer positions itself; they do
+            // not address the block's line. Dropped rather than filed
+            // wrongly — such a line is not clickable today either.
+            let mut inline_hits = Vec::new();
+            let parts =
+                inline_parts(body, &mut ex.links, &mut ex.images, pal, known, &mut inline_hits);
             emit!(Block::Inline { indent: text_column(level), item: level > 0, parts });
             i += 1;
             continue;
@@ -1210,11 +1305,11 @@ pub fn render_lines_with(
                 Span::raw(indent.clone()),
                 Span::styled("┃ ".to_string(), Style::default().fg(pal.quote_bar)),
             ];
-            for s in decorate_inline(q.trim(), &mut ex.links, &mut ex.images, pal, known) {
+            for s in decorate_inline(q.trim(), &mut ex.links, &mut ex.images, pal, known, &mut hits) {
                 let styled = s.style.add_modifier(Modifier::ITALIC);
                 spans.push(Span::styled(s.content.into_owned(), styled));
             }
-            emit!(Block::Text(Line::from(spans)));
+            emit!(Block::Text(Line::from(spans)), 2);
             i += 1;
             continue;
         }
@@ -1223,31 +1318,33 @@ pub fn render_lines_with(
         // Markdown would make these competing block types; Cosense composes
         // them. Keep the positional bullet in the bullet style and apply the
         // theme's heading style only to the heading text.
-        if let Some(heading) = parse_heading(body, pal, known, &mut ex.links, &mut ex.images) {
+        if let Some(heading) = parse_heading(body, pal, known, &mut hits, &mut ex.links, &mut ex.images) {
             let mut spans: Vec<Span<'static>> = Vec::new();
             if level > 0 {
                 spans.push(Span::raw(indent.clone()));
                 spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
             }
             spans.extend(heading);
-            emit!(Block::Text(Line::from(spans)));
+            let prefix = if level > 0 { 2 } else { 0 };
+            emit!(Block::Text(Line::from(spans)), prefix);
             i += 1;
             continue;
         }
 
         // bullet / plain
-        let content = decorate_inline(body, &mut ex.links, &mut ex.images, pal, known);
+        let content = decorate_inline(body, &mut ex.links, &mut ex.images, pal, known, &mut hits);
         let mut spans: Vec<Span<'static>> = Vec::new();
         if level > 0 {
             spans.push(Span::raw(indent.clone()));
             spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
         }
         spans.extend(content);
-        emit!(Block::Text(Line::from(spans)));
+        let prefix = if level > 0 { 2 } else { 0 };
+        emit!(Block::Text(Line::from(spans)), prefix);
         i += 1;
     }
 
-    RenderOutput { blocks: out, srcs, extracted: ex }
+    RenderOutput { blocks: out, srcs, extracted: ex, hits: all_hits }
 }
 
 /// If the whole body is `[* ...]`/`[** ...]`/…, render it as a heading.
@@ -1260,6 +1357,7 @@ fn parse_heading(
     body: &str,
     pal: &Palette,
     known: &LinkTruth,
+    hits: &mut Vec<Hit>,
     links: &mut Vec<String>,
     images: &mut Vec<String>,
 ) -> Option<Vec<Span<'static>>> {
@@ -1277,7 +1375,7 @@ fn parse_heading(
     // stay a followable link, not become the letters of one.
     let style = star_style(stars, pal);
     Some(
-        decorate_inline(text, links, images, pal, known)
+        decorate_inline(text, links, images, pal, known, hits)
             .into_iter()
             .map(|sp| Span::styled(sp.content, style.patch(sp.style)))
             .collect(),
@@ -1625,6 +1723,88 @@ mod tests {
         let nested = code_span_at(&refs, 10).unwrap();
         assert_eq!(nested.header, 9);
         assert_eq!(nested.body_indent(), "   ", "deeper header, deeper body");
+    }
+
+    /// What can be followed on a line is reported as SPAN INDICES, so the
+    /// viewer never has to work it out from how the line looks. The click
+    /// path used to compare colours, which is why a new colour (the
+    /// uncreated-link one) silently made red links unclickable.
+    #[test]
+    fn every_followable_thing_says_which_span_it_is() {
+        let pal = Palette::for_light(false);
+        let render = |src: &str| {
+            let out = render_lines_with(
+                &["t".to_string(), src.to_string()],
+                None,
+                &pal,
+                &LinkTruth::default(),
+            );
+            let line = match &out.blocks[1] {
+                Block::Text(l) => l.clone(),
+                b => panic!("not a text block: {b:?}"),
+            };
+            let hits = out.hits[1].clone();
+            // Every hit must name a span that exists, and the span it
+            // names is the one the reader sees.
+            let seen: Vec<(String, HitTarget)> = hits
+                .iter()
+                .map(|h| (line.spans[h.span].content.to_string(), h.target.clone()))
+                .collect();
+            seen
+        };
+
+        assert_eq!(
+            render("see [Target] and [Docs https://example.com] #tag"),
+            vec![
+                ("Target".into(), HitTarget::Page("Target".into())),
+                (
+                    "Docs".into(),
+                    HitTarget::Url {
+                        label: "Docs".into(),
+                        url: "https://example.com".into()
+                    }
+                ),
+                ("#tag".into(), HitTarget::Page("tag".into())),
+            ]
+        );
+        // Two links with the SAME label: the indices tell them apart with
+        // no counting of occurrences and no comparing of colours.
+        assert_eq!(
+            render("[Docs] then [Docs https://example.com]"),
+            vec![
+                ("Docs".into(), HitTarget::Page("Docs".into())),
+                (
+                    "Docs".into(),
+                    HitTarget::Url {
+                        label: "Docs".into(),
+                        url: "https://example.com".into()
+                    }
+                ),
+            ]
+        );
+        // A link inside a decoration keeps its place once the decoration's
+        // spans are counted.
+        assert_eq!(
+            render("a [* [ページ]] b [[[太字リンク]]]"),
+            vec![
+                ("ページ".into(), HitTarget::Page("ページ".into())),
+                ("太字リンク".into(), HitTarget::Page("太字リンク".into())),
+            ]
+        );
+        // An indented line puts its indent and bullet in front; the hit
+        // has to point past them.
+        assert_eq!(
+            render(" ここに [リンク]"),
+            vec![("リンク".into(), HitTarget::Page("リンク".into()))]
+        );
+        // A quote puts two spans in front, a code header one.
+        assert_eq!(
+            render("> 引用の中の [リンク]"),
+            vec![("リンク".into(), HitTarget::Page("リンク".into()))]
+        );
+        assert_eq!(render(" code:hello.py"), vec![("code:hello.py".into(), HitTarget::BlockLabel)]);
+        // Notation that leads nowhere reports nothing.
+        assert_eq!(render("[* ただの太字] and [] text"), vec![]);
     }
 
     /// A link to a page nobody has written yet is coloured differently,
