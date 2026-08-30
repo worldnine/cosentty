@@ -4477,6 +4477,15 @@ fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &C
 /// see `session_paste`).
 fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
     let clean = data.replace("\r\n", "\n").replace('\r', "\n");
+    // A single trailing newline is an artefact of how the text was copied
+    // (a whole line from a file, a terminal selection, an IME committing a
+    // phrase), not a request for an empty line after it. Keeping it left a
+    // blank line behind every such paste — and with the caret carried onto
+    // it, the caret looked like it had jumped one line too far.
+    let clean = clean.strip_suffix('\n').unwrap_or(&clean).to_string();
+    if clean.is_empty() {
+        return;
+    }
     if let Some(input) = app.composing.as_mut() {
         input.insert_str(&clean);
         return;
@@ -10835,7 +10844,7 @@ mod tests {
         assert_eq!(app.session.as_ref().unwrap().input.buf, "[改善案]");
     }
 
-    /// Inside a `code:` block notation is off by contract — links, images
+    /// Inside a `code:` block notation is off by contract    /// Inside a `code:` block notation is off by contract — links, images
     /// and quotes all stop working there — so brackets are just characters
     /// someone typed on purpose. Completing them would be the one place
     /// the block leaks.
@@ -10947,6 +10956,38 @@ mod tests {
         let links = app.cursor_line_links();
         assert_eq!(links.len(), 1);
         assert!(matches!(&links[0], LinkItem::Url { url, .. } if url == img));
+    }
+
+    /// A trailing newline in a paste is how the text was COPIED, not a
+    /// line the writer asked for. Keeping it dropped a blank line under
+    /// every pasted line — and carried the caret onto it, which reads as
+    /// the caret jumping one line too far.
+    #[test]
+    fn a_pasted_trailing_newline_does_not_leave_a_blank_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3);
+
+        handle_paste(&mut app, &ctx, "tail\n");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "onetail", "pasted into the line, no new line");
+        assert_eq!(s.line, 1, "and the caret stays on it");
+        assert_eq!(app.lines.len(), 2, "nothing structural happened");
+
+        // Newlines INSIDE the paste still make lines — and the trailing one
+        // still does not.
+        handle_paste(&mut app, &ctx, "a\nb\n");
+        assert_eq!(
+            app.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec!["title", "onetaila", "b"],
+        );
+        assert_eq!(app.session.as_ref().unwrap().line, 2, "on the last pasted line");
+
+        // A paste of nothing but a newline does nothing at all.
+        let before: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+        handle_paste(&mut app, &ctx, "\n");
+        assert_eq!(app.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>(), before);
     }
 
     /// A pasted URL usually wants brackets: that is what makes an image a
