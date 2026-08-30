@@ -1,34 +1,36 @@
-//! The project index: every page on the left, a preview of the one under
-//! the cursor on the right.
+//! The project index: every page in a full-width list, with a short excerpt
+//! from the one under the cursor docked below it.
 //!
 //! Modelled on ashiato (the picker akapen is paired with): a list you move
 //! through with j/k and a preview that keeps up without ever making the
-//! list feel slow. What is here is the part that can be decided without a
-//! terminal or a network — which pages match what was typed, where the
-//! cursor lands, how wide each pane is, and what one row says. The viewer
-//! owns the drawing, the fetching and the keys.
+//! list feel slow. Unlike a side pane, the shallow dock promises an excerpt
+//! rather than a second reading view — exactly what the pages API supplies.
+//! What is here is the part that can be decided without a terminal or a
+//! network: matching, cursor movement, the vertical budget, and row text.
+//! The viewer owns drawing, fetching and keys.
 
 use crate::api::PageSummary;
 
-/// `auto` hides the preview below this terminal width. ashiato's number,
-/// and its reasoning: under 80 columns a split leaves neither pane usable.
+/// `auto` hides the preview below this terminal width. Keep ashiato's
+/// established switch even though the excerpt is now below the list: at
+/// narrow widths its few source lines wrap too aggressively to help.
 pub const PREVIEW_MIN_WIDTH: u16 = 80;
 
-/// The share of the width the list takes when both panes are up, and the
-/// floor the preview is never squeezed below. Both are ashiato's
-/// (`Percentage(55)`, `Length(1)`, `Min(20)`) — this screen is the same
-/// picker for a different kind of thing, so it behaves the same way.
-const LIST_PERCENT: u16 = 55;
-const PREVIEW_MIN: u16 = 20;
+/// The excerpt is deliberately shallow. A large region promises a reading
+/// view and makes the pages API's few description lines look incomplete;
+/// six rows read as the quick peek they are.
+const PREVIEW_ROWS: u16 = 6;
+const PREVIEW_MIN_ROWS: u16 = 2;
+const LIST_MIN_ROWS: u16 = 3;
 
-/// Preview pane behaviour (`--preview`).
+/// Excerpt dock behaviour (`--preview`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PreviewMode {
-    /// Always show the preview pane.
+    /// Show the excerpt whenever the screen is tall enough.
     On,
-    /// Never show it (the list takes the full width).
+    /// Never show it (the list takes the full height).
     Off,
-    /// Show it, but hide it on narrow terminals.
+    /// Show it, but hide it on narrow or very short terminals.
     #[default]
     Auto,
 }
@@ -61,26 +63,30 @@ pub enum Pane {
     Preview,
 }
 
-/// Column budget for one frame. `preview` is `None` when there is none:
-/// the list then takes everything.
+/// Row budget for the index body (the header and footer are outside it).
+/// `preview` is `None` when there is no excerpt; the list then takes every
+/// row. The gap is blank space, not a border.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Panes {
+pub struct IndexLayout {
     pub list: u16,
     pub gap: u16,
     pub preview: Option<u16>,
 }
 
-/// Split `width` between the list and the preview.
-pub fn panes(mode: PreviewMode, width: u16) -> Panes {
-    if !mode.shows_preview(width) {
-        return Panes { list: width, gap: 0, preview: None };
+/// Stack a full-width list above a short excerpt.
+///
+/// Width decides whether `auto` enables the excerpt. Height decides whether
+/// both parts can remain useful: below three list rows + a blank separator +
+/// two excerpt rows, the list wins and takes the body alone.
+pub fn layout(mode: PreviewMode, width: u16, height: u16) -> IndexLayout {
+    if !mode.shows_preview(width)
+        || height < LIST_MIN_ROWS + 1 + PREVIEW_MIN_ROWS
+    {
+        return IndexLayout { list: height, gap: 0, preview: None };
     }
     let gap = 1;
-    let room = width.saturating_sub(gap);
-    // `Min(20)` wins over `Percentage(55)`, as it does in ratatui's solver:
-    // forcing the preview on in a narrow window shrinks the LIST.
-    let preview = (room - room * LIST_PERCENT / 100).max(PREVIEW_MIN.min(room));
-    Panes { list: room - preview, gap, preview: Some(preview) }
+    let preview = PREVIEW_ROWS.min(height - gap - LIST_MIN_ROWS);
+    IndexLayout { list: height - gap - preview, gap, preview: Some(preview) }
 }
 
 /// One page in the index.
@@ -90,8 +96,7 @@ pub struct Entry {
     /// Server-side mtime (epoch seconds).
     pub updated: i64,
     /// The first few lines, as the list API hands them over. This is the
-    /// preview until the page itself has been fetched — it costs nothing
-    /// and it is what the reader is deciding on.
+    /// excerpt — it costs nothing and is enough to decide whether to open.
     pub descriptions: Vec<String>,
     /// Has this page changed since it was last seen here?
     pub unread: bool,
@@ -375,24 +380,38 @@ mod tests {
     }
 
     #[test]
-    fn the_preview_appears_and_disappears_with_the_width() {
-        // auto: the pane is there from 80 columns and not below it.
+    fn the_preview_is_a_shallow_dock_when_width_and_height_allow_it() {
         let auto = PreviewMode::Auto;
-        assert_eq!(panes(auto, 79), Panes { list: 79, gap: 0, preview: None });
-        let p = panes(auto, 80);
-        assert_eq!((p.list, p.gap, p.preview), (43, 1, Some(36)), "55% to the list");
-        assert_eq!(p.list + p.gap + p.preview.unwrap(), 80, "the width is spent exactly");
-        let wide = panes(auto, 200);
-        assert_eq!(wide.list + wide.gap + wide.preview.unwrap(), 200);
+        assert_eq!(
+            layout(auto, 79, 20),
+            IndexLayout { list: 20, gap: 0, preview: None },
+            "auto keeps the established 80-column threshold"
+        );
+        let normal = layout(auto, 80, 22);
+        assert_eq!(normal, IndexLayout { list: 15, gap: 1, preview: Some(6) });
+        assert_eq!(normal.list + normal.gap + normal.preview.unwrap(), 22);
 
-        // off: never, however wide.
-        assert_eq!(panes(PreviewMode::Off, 200), Panes { list: 200, gap: 0, preview: None });
+        // A short screen shrinks the excerpt before sacrificing the list.
+        assert_eq!(
+            layout(auto, 80, 7),
+            IndexLayout { list: 3, gap: 1, preview: Some(3) }
+        );
+        assert_eq!(
+            layout(auto, 80, 5),
+            IndexLayout { list: 5, gap: 0, preview: None },
+            "if both cannot be useful, the list wins"
+        );
 
-        // on: always — and in a window too narrow to share, the LIST gives
-        // up the columns, not the preview.
-        let forced = panes(PreviewMode::On, 40);
-        assert_eq!(forced.preview, Some(PREVIEW_MIN));
-        assert_eq!(forced.list, 40 - 1 - PREVIEW_MIN);
+        // off is never; on bypasses the width threshold but not impossible
+        // geometry.
+        assert_eq!(
+            layout(PreviewMode::Off, 200, 20),
+            IndexLayout { list: 20, gap: 0, preview: None }
+        );
+        assert_eq!(
+            layout(PreviewMode::On, 40, 20),
+            IndexLayout { list: 13, gap: 1, preview: Some(6) }
+        );
         assert_eq!(PreviewMode::parse("on"), Some(PreviewMode::On));
         assert_eq!(PreviewMode::parse("sometimes"), None);
         assert_eq!(PreviewMode::default(), PreviewMode::Auto);

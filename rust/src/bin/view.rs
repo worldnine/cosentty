@@ -778,22 +778,19 @@ struct App {
     forward: Vec<Place>,
     /// Open overlay (comments list / link picker / help), if any.
     overlay: Option<Overlay>,
-    /// The project index (list + preview). Open = it owns the screen and
-    /// the keys; the page it was opened from is still loaded underneath.
+    /// The project index (full-width list + excerpt dock). Open = it owns
+    /// the screen and the keys; the page it came from remains underneath.
     index: Option<cosense::index::Index>,
-    /// The list's rectangle as of the last index frame, so a click can be
-    /// turned back into a row (the page keeps `text_rect` for the same
-    /// reason).
+    /// The list and excerpt rectangles from the last index frame, so mouse
+    /// input uses exactly the geometry that was drawn.
     index_list_rect: Rect,
+    index_preview_rect: Rect,
     /// The project the open index is listing. Usually the page's own, but
     /// a `[/other-project]` link opens that project's index while the page
     /// underneath is still this one's.
     index_project: String,
-    /// When the index was last scrolled. The list's scrollbar is drawn for
-    /// a moment after that and not otherwise: a bar standing permanently in
-    /// the seam between the panes reads as a rule down the middle of the
-    /// screen, but while the list is moving it is the one thing that says
-    /// where the movement has got to.
+    /// When the index was last scrolled. Its scrollbar appears briefly at
+    /// the screen edge while the list moves, then gets out of the way.
     index_scrolled_at: Option<Instant>,
 
     /// When this page was last seen by the user before this visit — the
@@ -1349,6 +1346,7 @@ impl App {
             overlay: None,
             index: None,
             index_list_rect: Rect::default(),
+            index_preview_rect: Rect::default(),
             index_project: String::new(),
             index_scrolled_at: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -3624,7 +3622,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ime_mode = cosense::ime::ImeMode::parse(&s["--ime=".len()..]);
             }
             s if s.starts_with("--theme=") => theme = Some(s["--theme=".len()..].to_string()),
-            // The index's preview pane, ashiato's flag and ashiato's rule:
+            // The index's excerpt dock keeps ashiato's flag and threshold:
             // `auto` (default) shows it from 80 columns up.
             "--preview" => {
                 preview = it
@@ -3887,7 +3885,7 @@ struct Ctx {
     terminal_bg: (u8, u8, u8),
     /// Input-source policy around the composer (`--ime`, default jp).
     ime_mode: cosense::ime::ImeMode,
-    /// Whether the index's preview pane is drawn (`--preview`).
+    /// Whether the index's excerpt dock is drawn (`--preview`).
     preview: cosense::index::PreviewMode,
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
@@ -4182,11 +4180,11 @@ fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
     }
 }
 
-/// Open the project index: every page, newest first, with the one under
-/// the cursor previewed beside it.
+/// Open the project index: every page, newest first, with a short excerpt
+/// from the one under the cursor docked below the list.
 ///
 /// The list is one request (`/api/pages/<project>?limit=500&sort=updated`)
-/// and the preview costs nothing on top of it: the same response carries
+/// and the excerpt costs nothing on top of it: the same response carries
 /// each page's first lines, which is what the reader is choosing between.
 fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String) {
     use cosense::index::{Entry, Index};
@@ -5160,16 +5158,16 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
 fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     use cosense::index::{Pane, Row};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let page_rows = app.view_h.max(1) as i32;
-    let preview_on = cosense::index::panes(ctx.preview, app.laid_width).preview.is_some();
+    let page_rows = app.index_list_rect.height.max(1) as i32;
+    let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
     let Some(ix) = app.index.as_mut() else { return Action::Continue };
     match (k.code, ctrl) {
         (KeyCode::Esc, _) => {
             app.index = None;
             app.status = String::new();
         }
-        // The preview is a second place to be, so Tab moves between them
-        // — but only when there IS a second pane.
+        // The excerpt is a second place to be, so Tab moves between it and
+        // the list — but only when there IS an excerpt dock.
         (KeyCode::Tab, _) if preview_on => {
             ix.focus = match ix.focus {
                 Pane::List => Pane::Preview,
@@ -5514,10 +5512,10 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('l'), false) => {
             app.overlay = Some(Overlay::Comments { cursor: 0 });
         }
-        // The project index (akapen's `^o files` slot): the list of pages
-        // with the one under the cursor previewed beside it. Typing filters
-        // it, so the old picker's fingers still work — they now have a
-        // screen to work in.
+        // The project index (akapen's `^o files` slot): a full-width list
+        // with a short excerpt from the selected page docked below. Typing
+        // filters it, so the old picker's fingers still work — they now
+        // have a screen to work in.
         (KeyCode::Char('o'), true) => {
             let from = app.here();
             let project = app.project.clone();
@@ -7491,7 +7489,7 @@ fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     handle_mouse_content(app, ctx, m);
 }
 
-/// Mouse in the index: the wheel moves the list (or scrolls the preview
+/// Mouse in the index: the wheel moves the list (or scrolls the excerpt
 /// when the pointer is over it), and a click on a row OPENS that page.
 ///
 /// One click, not two. The list is a picker — every row is a link, and a
@@ -7501,7 +7499,15 @@ fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
 fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     use cosense::index::{Pane, Row};
     let list = app.index_list_rect;
-    let over_list = m.column < list.x + list.width;
+    let preview = app.index_preview_rect;
+    let inside = |r: Rect| {
+        m.column >= r.x
+            && m.column < r.x + r.width
+            && m.row >= r.y
+            && m.row < r.y + r.height
+    };
+    let over_list = inside(list);
+    let over_preview = inside(preview);
     let row_at = |m: &MouseEvent, ix: &cosense::index::Index| -> Option<usize> {
         if m.row < list.y || m.row >= list.y + list.height || !over_list {
             return None;
@@ -7519,20 +7525,24 @@ fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             // leaves the selection alone — the same bargain the page body
             // makes, where the wheel never carries the cursor off its line.
             if over_list {
-                ix.scroll_by(if down { 1 } else { -1 }, height);
-                app.index_scrolled_at = Some(Instant::now());
-            } else if down {
+                if ix.scroll_by(if down { 1 } else { -1 }, height) {
+                    app.index_scrolled_at = Some(Instant::now());
+                }
+            } else if over_preview && down {
                 ix.preview_scroll = ix.preview_scroll.saturating_add(1);
-            } else {
+            } else if over_preview {
                 ix.preview_scroll = ix.preview_scroll.saturating_sub(1);
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
             let Some(ix) = app.index.as_mut() else { return };
-            if !over_list {
-                // Clicking the preview is how you get to scroll it with
+            if over_preview {
+                // Clicking the excerpt is how you get to scroll it with
                 // the keys, the way Tab does.
                 ix.focus = Pane::Preview;
+                return;
+            }
+            if !over_list {
                 return;
             }
             ix.focus = Pane::List;
@@ -7948,19 +7958,25 @@ fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifier
     }
 }
 
-/// Draw the project index: the list on the left, the page under the
-/// cursor on the right.
+/// Draw the project index: a full-width list with a shallow excerpt from
+/// the selected page docked below.
 ///
-/// The preview is the first lines the list API already returned. That is
-/// deliberate for now: it costs no request, so moving through a thousand
-/// pages never waits for the network — the same speed-first bargain
-/// ashiato makes with its file previews.
+/// The excerpt is the first lines the list API already returned. That is
+/// deliberate: it costs no request, so moving through a thousand pages
+/// never waits for the network. Its small height makes that limited content
+/// read as an intentional peek rather than an incomplete page.
 fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     use cosense::index::{Pane, Row};
     let Some(ix) = app.index.as_mut() else { return };
-    let panes = cosense::index::panes(ctx.preview, area.width);
     let body_h = area.height.saturating_sub(2); // header + footer
-    let rows_h = body_h as usize;
+    let layout = cosense::index::layout(ctx.preview, area.width, body_h);
+    if layout.preview.is_none() {
+        // A resize may remove the excerpt while it owns focus. Hand the
+        // keys back to the visible list rather than leaving them attached
+        // to a region that no longer exists.
+        ix.focus = Pane::List;
+    }
+    let rows_h = layout.list as usize;
     let scroll = ix.follow(rows_h);
     let rows = ix.rows();
     let focus = ix.focus;
@@ -7986,20 +8002,17 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- list --------------------------------------------------------
     //
-    // A caret column on the left edge and then the text — and NOTHING at
-    // the pane boundary. The page's scrollbar thumb lives just inside its
-    // right frame, but here that column is the seam between the panes, and
-    // a thumb spanning a long list reads as a vertical rule drawn down the
-    // middle of the screen. Where the reader is in the list is said in the
-    // footer instead, the way the page says `L12/205`. Same information,
-    // no line to look past on every row.
+    // Full width: the short description supplied by the pages API is an
+    // excerpt below, not a half-empty reading pane beside the list. A caret
+    // column sits at the left edge; the transient scrollbar uses the far
+    // right edge, where it cannot look like a divider between content.
     let caret_x = area.x;
     let text_x = area.x + 2;
-    let text_w = panes.list.saturating_sub(3);
-    let list_area = Rect::new(text_x, area.y + 1, text_w, body_h);
-    // The whole left pane is the click target, not just the text: hitting
-    // the telomere or the age of a row means that row.
-    app.index_list_rect = Rect::new(area.x, area.y + 1, panes.list, body_h);
+    let text_w = area.width.saturating_sub(3);
+    let list_area = Rect::new(text_x, area.y + 1, text_w, layout.list);
+    // The whole row is the click target, not just its text: hitting the
+    // telomere or age means that row.
+    app.index_list_rect = Rect::new(area.x, area.y + 1, area.width, layout.list);
     let dim_when_away = |st: Style| if focus == Pane::List { st } else { st.fg(CHROME_DIM) };
     let app_light = app.light;
 
@@ -8060,7 +8073,7 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // The cursor rides the left edge, as it does on the page.
     let buf = f.buffer_mut();
     if let Some((start, len)) = bar {
-        let bar_x = area.x + panes.list.saturating_sub(1);
+        let bar_x = area.x + area.width.saturating_sub(1);
         for k in start..start + len {
             if let Some(c) = buf.cell_mut((bar_x, area.y + 1 + k as u16)) {
                 c.set_symbol("▐");
@@ -8079,25 +8092,36 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         }
     }
 
-    // ---- preview -----------------------------------------------------
-    if let Some(width) = panes.preview {
-        // One column of air after the list, then the page. The preview is
-        // text on the terminal's own background — nothing frames it.
-        let x = area.x + panes.list + panes.gap + 1;
-        let width = width.saturating_sub(1);
-        let prev_area = Rect::new(x, area.y + 1, width, body_h);
-        let lines = index_preview_lines(app, ctx, width as usize);
+    // ---- excerpt -----------------------------------------------------
+    app.index_preview_rect = Rect::default();
+    if let Some(height) = layout.preview {
+        // One blank row after the list, then a shallow, full-width peek.
+        // Nothing frames it: its fixed height is what says "excerpt".
+        let prev_area = Rect::new(
+            text_x,
+            area.y + 1 + layout.list + layout.gap,
+            text_w,
+            height,
+        );
+        app.index_preview_rect = Rect::new(
+            area.x,
+            prev_area.y,
+            area.width,
+            height,
+        );
+        let lines = index_preview_lines(app, ctx, text_w as usize);
         let ix = app.index.as_ref().expect("open");
         let skip = ix.preview_scroll as usize;
-        let shown: Vec<Line<'static>> = lines.into_iter().skip(skip).take(rows_h).collect();
+        let shown: Vec<Line<'static>> =
+            lines.into_iter().skip(skip).take(height as usize).collect();
         f.render_widget(Paragraph::new(shown), prev_area);
     }
 
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
-    let hint = match (panes.preview.is_some(), ix.focus) {
-        (true, Pane::List) => "j/k move · type to filter · Enter open · Tab preview · Esc back",
-        (true, Pane::Preview) => "j/k scroll preview · Tab list · Enter open · Esc back",
+    let hint = match (layout.preview.is_some(), ix.focus) {
+        (true, Pane::List) => "j/k move · type to filter · Enter open · Tab excerpt · Esc back",
+        (true, Pane::Preview) => "j/k scroll excerpt · Tab list · Enter open · Esc back",
         (false, _) => "j/k move · type to filter · Enter open · Esc back",
     };
     // Where in the list the reader is — the footer's job here as on the
@@ -8113,8 +8137,8 @@ fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     );
 }
 
-/// The preview pane's rows for the page under the cursor: its first lines,
-/// rendered exactly as the page itself would render them.
+/// The excerpt dock for the page under the cursor: one compact heading and
+/// the first lines supplied by the pages API, rendered as the page would.
 fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Line<'static>> {
     let Some(ix) = app.index.as_ref() else { return Vec::new() };
     let Some(entry) = ix.selected() else {
@@ -8123,23 +8147,26 @@ fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Line<'static>>
             Style::default().fg(CHROME_DIM),
         ))];
     };
-    // A heading rule, as the page draws over its related-page sections:
-    // the title, then a hairline to the edge. It says where the preview
-    // starts without a box around it.
+    // Compact on purpose: title and metadata share one row, leaving almost
+    // all of this shallow region to the excerpt itself. A rule or box would
+    // make it look like a second full view and amplify the empty space.
     let dim = Style::default().fg(CHROME_DIM);
-    let head = format!("{} ", entry.title);
-    let fill = "─".repeat(width.saturating_sub(str_width(&head) + 1));
-    let mut lines: Vec<Line<'static>> = vec![
-        Line::from(vec![
-            Span::styled(head, Style::default().fg(ctx.palette.title).add_modifier(Modifier::BOLD)),
-            Span::styled(fill, dim),
-        ]),
-        Line::from(Span::styled(
-            format!("{} ago{}", relative_age(entry.updated), if entry.unread { " · 未読" } else { "" }),
-            dim,
-        )),
-        Line::from(""),
-    ];
+    let meta = format!(
+        " · {} ago{}",
+        relative_age(entry.updated),
+        if entry.unread { " · 未読" } else { "" }
+    );
+    let show_meta = width > str_width(&meta) + 8;
+    let title_width = if show_meta { width - str_width(&meta) } else { width };
+    let title = truncate_width(&entry.title, title_width);
+    let mut heading = vec![Span::styled(
+        title,
+        Style::default().fg(ctx.palette.title).add_modifier(Modifier::BOLD),
+    )];
+    if show_meta {
+        heading.push(Span::styled(meta, dim));
+    }
+    let mut lines: Vec<Line<'static>> = vec![Line::from(heading)];
     // The renderer reads line 0 as the page's title (it wears the title
     // style and carries no notation), so the title has to be there — and
     // its block dropped, since the heading above already says it.
@@ -8929,7 +8956,7 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 "mouse     click link/open · click row/move · drag/select · wheel/scroll".into(),
                 "history   [ back · ] forward".into(),
                 "mode      Tab view⇄source".into(),
-                "index     ^o list + preview (type to filter · Tab preview · Esc back)".into(),
+                "index     ^o list + excerpt (type to filter · Tab excerpt · Esc back)".into(),
             ];
             if app.editable {
                 keys.extend([
@@ -11889,9 +11916,10 @@ mod tests {
         }
         assert_eq!(app.index.as_ref().unwrap().scroll, 0);
 
-        // Over the preview the wheel scrolls the preview instead.
-        let preview_x = cosense::index::panes(ctx.preview, 100).list + 4;
-        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, preview_x, 3));
+        // Over the excerpt dock the wheel scrolls the excerpt instead.
+        let preview_x = app.index_preview_rect.x + 2;
+        let preview_y = app.index_preview_rect.y;
+        handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, preview_x, preview_y));
         assert_eq!(app.index.as_ref().unwrap().preview_scroll, 1);
         assert_eq!(app.index.as_ref().unwrap().cursor, 0, "and leaves the list alone");
 
@@ -12007,11 +12035,11 @@ mod tests {
         }
     }
 
-    /// The index draws the list and the preview side by side, and gives
-    /// the whole width to the list when the terminal is too narrow to
-    /// share (ashiato's `--preview auto`, and its 80-column threshold).
+    /// The index draws a full-width list above a shallow excerpt dock, and
+    /// gives the whole height to the list when `--preview auto` is below
+    /// its established 80-column threshold.
     #[test]
-    fn the_index_draws_a_list_beside_a_preview_until_the_terminal_is_narrow() {
+    fn the_index_draws_a_list_above_a_shallow_excerpt() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
         let mut app = page(&["t", "one"]);
@@ -12035,7 +12063,7 @@ mod tests {
         ));
 
         let draw = |app: &mut App, cols: u16| -> Vec<String> {
-            let mut t = Terminal::new(TestBackend::new(cols, 8)).unwrap();
+            let mut t = Terminal::new(TestBackend::new(cols, 10)).unwrap();
             t.draw(|f| ui(f, app, &ctx)).unwrap();
             let buf = t.backend().buffer().clone();
             (0..buf.area.height)
@@ -12054,26 +12082,29 @@ mod tests {
         let flat = |s: &str| s.replace(' ', "");
         let has = |rows: &[String], needle: &str| rows.iter().any(|r| flat(r).contains(needle));
 
-        // Wide: the list is on the left, the preview beside it.
+        // Wide: the list spends the full row; the excerpt starts below it.
         let rows = draw(&mut app, 100);
         assert!(rows[0].contains("proj"), "header names the project: {:?}", rows[0]);
         assert!(flat(&rows[1]).contains("改善案"), "first row: {:?}", rows[1]);
-        let list_w = cosense::index::panes(ctx.preview, 100).list as usize;
-        let preview_side: String = flat(&rows[1].chars().skip(list_w).collect::<String>());
+        let layout = cosense::index::layout(ctx.preview, 100, 8);
+        let excerpt_y = 1 + layout.list as usize + layout.gap as usize;
         assert!(
-            preview_side.contains("改善案"),
-            "the page under the cursor is previewed beside it: {:?}",
-            rows[1]
+            flat(&rows[excerpt_y]).contains("改善案"),
+            "the page under the cursor heads the excerpt below: {:?}",
+            rows[excerpt_y]
         );
-        assert!(has(&rows, "進め方"), "…including its first lines: {rows:?}");
+        assert!(has(&rows[excerpt_y + 1..], "進め方"), "…including its first lines: {rows:?}");
         assert!(rows.last().unwrap().contains("Esc"), "footer: {:?}", rows.last());
 
-        // Narrow: no preview, and the list has the width to itself.
+        // Narrow: no excerpt, and the list has the height to itself. If a
+        // resize removed the focused excerpt, focus returns to what remains.
+        app.index.as_mut().unwrap().focus = cosense::index::Pane::Preview;
         let rows = draw(&mut app, 70);
         assert!(flat(&rows[1]).contains("改善案"));
-        assert!(!has(&rows, "進め方"), "under 80 columns the preview is gone: {rows:?}");
+        assert!(!has(&rows, "進め方"), "under 80 columns the excerpt is gone: {rows:?}");
+        assert_eq!(app.index.as_ref().unwrap().focus, cosense::index::Pane::List);
 
-        // Moving the cursor previews the other page.
+        // Moving the cursor updates the excerpt.
         app.index.as_mut().unwrap().move_cursor(1);
         let rows = draw(&mut app, 100);
         assert!(has(&rows, "画像の出方"), "the preview follows the cursor: {rows:?}");
