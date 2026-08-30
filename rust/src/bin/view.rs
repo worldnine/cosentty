@@ -59,6 +59,9 @@ use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 const SEL_BG: Color = Color::DarkGray;
 /// The list marker, in the one place both the drawing and its tests read.
 const BULLET: &str = "\u{2022}";
+/// What a TAB looks like on the caret line: one column, so the cells it
+/// separates stay apart and the caret has somewhere to be.
+const TAB_MARK: &str = "|";
 /// Source mode's line-number gutter: `"  12 "` (4 digits + space).
 const SOURCE_NUM_W: usize = 5;
 /// Cursor-row highlight inside the page body.
@@ -2285,6 +2288,23 @@ impl App {
             .flatten()
     }
 
+    /// The `table:` block the line belongs to, if any. A table row is not
+    /// an outline row: its indent is structure and its TABs separate
+    /// cells, so the session has to know which one it is standing on.
+    fn table_span_at_line(&self, line: usize) -> Option<CodeSpan> {
+        (line < self.lines.len())
+            .then(|| cosense::render::table_span_at(&self.source_texts(), line))
+            .flatten()
+    }
+
+    /// A block whose lines are RAW: a `code:` block or a `table:` block.
+    /// Both hold structure in their indent rather than an outline level,
+    /// so the caret line is drawn without a bullet and the caret arithmetic
+    /// hangs from the block's own gutter.
+    fn raw_span_at_line(&self, line: usize) -> Option<CodeSpan> {
+        self.code_span_at_line(line).or_else(|| self.table_span_at_line(line))
+    }
+
     /// Put the caret on an edit's own location (see `edit_focus`). The
     /// session moves with it, so undo/redo show what changed instead of
     /// leaving the caret wherever it happened to be. Returns whether the
@@ -2340,7 +2360,7 @@ impl App {
         // row: its leading whitespace is content and must not be drawn as
         // a bullet. Judged on the WORKING text, so typing `code:` turns
         // the bullets off as you type it, not one commit later.
-        let edit_code = edit.and_then(|(line, _)| self.code_span_at_line(line));
+        let edit_code = edit.and_then(|(line, _)| self.raw_span_at_line(line));
         // The character selection, in DISPLAY byte offsets — the caret line
         // is drawn through `session_display`, so the span has to be mapped
         // the same way the caret is.
@@ -3213,23 +3233,31 @@ fn leading_ws_taken(buf: &str, n: usize) -> usize {
 }
 
 fn session_display(buf: &str, code: Option<CodeSpan>) -> String {
+    // A TAB inside the line is the cell separator of a table, and
+    // invisible everywhere else: at width zero the cells on either side
+    // run together and the caret sits in a gap nobody can see. Show it as
+    // one column — one character in, one out, so every caret offset still
+    // maps. A tab in the INDENT is a level, not a cell, and is left to the
+    // indent handling below.
+    let mark = |text: &str| text.replace('\t', TAB_MARK);
     if let Some(span) = code {
         // Wear the renderer's code gutter, not the raw indent: the block's
         // base indent comes off and the same columns go back on, so the
         // caret line sits in the same column as the code around it.
-        let rest: String = buf.chars().skip(leading_ws_taken(buf, span.strip_chars())).collect();
-        return format!("{}{rest}", " ".repeat(span.gutter_cols()));
+        let strip = leading_ws_taken(buf, span.strip_chars());
+        let rest: String = buf.chars().skip(strip).collect();
+        return format!("{}{}", " ".repeat(span.gutter_cols()), mark(&rest));
     }
     let ind = indent_of(buf);
     let n = ind.chars().count();
     if n == 0 {
-        return buf.to_string();
+        return mark(buf);
     }
     let mut out = String::with_capacity(buf.len() + n + 4);
     out.push_str(&" ".repeat(bullet_indent_width(n)));
-    out.push('•');
+    out.push('\u{2022}');
     out.push(' ');
-    out.push_str(&buf[ind.len()..]);
+    out.push_str(&mark(&buf[ind.len()..]));
     out
 }
 
@@ -5694,7 +5722,7 @@ fn session_kill(app: &mut App, ctx: &Ctx) {
 fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf, cur) = (s.line, s.input.buf.clone(), s.input.cur);
-    let code = app.code_span_at_line(line);
+    let code = app.raw_span_at_line(line);
     let width = app.session_wrap_width();
     let disp = session_display(&buf, code);
     let wrapped = SessionWrap::new(&disp, width, session_hang(&buf, code));
@@ -5729,7 +5757,7 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let text = app.lines[line].text.clone();
     // Land on the row nearest where the caret came from: the FIRST row of
     // the line below, the LAST row of the line above.
-    let code = app.code_span_at_line(line);
+    let code = app.raw_span_at_line(line);
     let disp = session_display(&text, code);
     let wrapped = SessionWrap::new(&disp, width, session_hang(&text, code));
     let landing = if delta < 0 { wrapped.segs.len().saturating_sub(1) } else { 0 };
@@ -5763,7 +5791,8 @@ fn session_split(app: &mut App, ctx: &Ctx) {
     // the renderer would not read it as code), and Enter on a blank line
     // inside keeps the body indent instead of escaping the list — the
     // escape would silently drop you out of the block.
-    let code = cosense::render::code_span_at(&app.source_texts(), line);
+    let code = cosense::render::code_span_at(&app.source_texts(), line)
+        .or_else(|| cosense::render::table_span_at(&app.source_texts(), line));
     if let Some(span) = code {
         let indent = span.body_indent();
         if line == span.header {
@@ -5907,6 +5936,31 @@ fn session_join_down(app: &mut App, ctx: &Ctx) {
 /// Tab / Shift+Tab: indent or outdent by one logical level (one source
 /// space, rendered as a two-cell nesting step).
 fn session_indent(app: &mut App, delta: i32) {
+    // In a table a TAB is what separates one cell from the next, so that
+    // is what Tab types there. (Shift+Tab takes the separator back, and
+    // once there is none left it outdents — which is how a row leaves the
+    // table, the same way a line leaves a code block.)
+    let table = app.session.as_ref().and_then(|s| app.table_span_at_line(s.line));
+    if let Some(span) = table {
+        let in_body = app.session.as_ref().map(|s| s.line > span.header).unwrap_or(false);
+        if in_body {
+            if let Some(s) = app.session.as_mut() {
+                if delta > 0 {
+                    s.input.insert_char('\t');
+                    s.want_col = None;
+                    app.laid_width = 0;
+                    return;
+                }
+                if s.input.buf[..s.input.cur].ends_with('\t') {
+                    s.input.cur -= 1;
+                    s.input.buf.remove(s.input.cur);
+                    s.want_col = None;
+                    app.laid_width = 0;
+                    return;
+                }
+            }
+        }
+    }
     let Some(s) = app.session.as_mut() else { return };
     if delta > 0 {
         s.input.buf.insert(0, ' ');
@@ -6761,7 +6815,7 @@ fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
         .unwrap_or_default();
     // Map through the bullet display: what the eye clicked is the display
     // column, which the view (bullets at indent) also approximates.
-    let code = app.code_span_at_line(line);
+    let code = app.raw_span_at_line(line);
     let disp = session_display(&text, code);
     // A wrapped line owns SEVERAL display rows. The column alone cannot say
     // where in the text the click landed — without the row, every
@@ -7703,7 +7757,7 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if let Some(s) = &app.session {
         if let Some((first, _)) = app.src_rows(s.line) {
             let text_w = App::text_width(app.mode, app.laid_width.max(1));
-            let code = app.code_span_at_line(s.line);
+            let code = app.raw_span_at_line(s.line);
             let disp = session_display(&s.input.buf, code);
             let dcaret = display_caret(&s.input.buf, s.input.cur, code);
             let wrapped =
@@ -11110,6 +11164,65 @@ mod tests {
         assert_eq!(forced("halfblocks"), Some(ProtocolType::Halfblocks));
         assert_eq!(forced("auto"), None);
         assert_eq!(forced(""), None, "unset changes nothing");
+    }
+
+    /// A table is written the way cosense web writes one: `table:名前`,
+    /// Enter for a row, Tab for the next cell. The session has to know it
+    /// is standing in a table — otherwise Tab indents the row (pushing it
+    /// out of the table) and Enter escapes the list.
+    #[test]
+    fn a_table_is_written_with_enter_and_tab() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", ""]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        type_str(&mut app, &ctx, "table:表１");
+
+        // Enter on the header opens the first row, indented into it.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[1].text, "table:表１");
+        assert_eq!(app.lines[2].text, " ", "the row belongs to the table");
+        assert!(app.table_span_at_line(2).is_some());
+
+        // Tab adds a cell instead of indenting the row out of the table.
+        type_str(&mut app, &ctx, "グループ１");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        type_str(&mut app, &ctx, "グループ２");
+        assert_eq!(
+            app.session.as_ref().unwrap().input.buf,
+            " グループ１\tグループ２",
+            "one TAB between the cells, the row still one level in",
+        );
+
+        // Enter starts the next row at the same indent (no list escape).
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " ");
+        assert!(app.table_span_at_line(3).is_some(), "still inside the table");
+
+        // Shift+Tab takes a cell separator back; with none left it
+        // outdents, which is how a row leaves the table.
+        type_str(&mut app, &ctx, "５人");
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        handle_session_key(&mut app, &ctx, key(KeyCode::BackTab));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, " ５人");
+        handle_session_key(&mut app, &ctx, key(KeyCode::BackTab));
+        assert_eq!(app.session.as_ref().unwrap().input.buf, "５人", "out of the table");
+    }
+
+    /// A tab is invisible at width zero: the cells around it would run
+    /// together and the caret would sit in a gap nobody can see.
+    #[test]
+    fn a_cell_separator_is_visible_while_editing() {
+        let row = " a\tb";
+        let span = cosense::render::CodeSpan { header: 0, header_indent: 0 };
+        let disp = session_display(row, Some(span));
+        assert!(disp.contains(TAB_MARK), "{disp:?}");
+        assert_eq!(disp.chars().count(), row.chars().count() + 1, "one column each way");
+        // …and the caret still maps through it.
+        for byte in [1usize, 2, 3, 4] {
+            let d = display_caret(row, byte, Some(span));
+            assert_eq!(raw_caret_from_display(row, d, Some(span)), byte, "byte {byte}");
+        }
     }
 
     /// Cosense has no official shortcut for heading levels — the community

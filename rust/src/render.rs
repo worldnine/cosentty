@@ -171,7 +171,42 @@ pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
     flags
 }
 
-/// Does a `code:` block's language name mark a Mermaid diagram?
+/// Is `i` inside a `table:` block (its header line included)?
+///
+/// Same shape as [`code_span_at`], and for the same reason: the editor has
+/// to know what kind of line it is standing on. In a table the indent is
+/// structure and a TAB is a cell separator, neither of which means what it
+/// means in an outline.
+pub fn table_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
+    let mut k = 0;
+    while k < lines.len() {
+        let (_, header_indent, body) = indent_info(lines[k]);
+        if !body.starts_with("table:") {
+            k += 1;
+            continue;
+        }
+        // The renderer's own scan: rows are the deeper-indented lines, and
+        // a blank line ends the table.
+        let mut j = k + 1;
+        while j < lines.len() {
+            let (_, raw_len, _) = indent_info(lines[j]);
+            if raw_len <= header_indent {
+                break;
+            }
+            j += 1;
+        }
+        if i >= k && i < j {
+            return Some(CodeSpan { header: k, header_indent });
+        }
+        if i < k {
+            return None;
+        }
+        k = j.max(k + 1);
+    }
+    None
+}
+
+/// Does a `code:` block's language name mark a Mermaid diagram?/// Does a `code:` block's language name mark a Mermaid diagram?
 ///
 /// Cosense accepts `code:mmd`, `code:mermaid` and `code:<filename>.mmd`
 /// (documented on scrapbox.io/help-jp/Mermaid). Matching is
@@ -863,7 +898,11 @@ pub fn render_lines_with(
             let mut j = i + 1;
             while j < lines.len() {
                 let (_, rl, rrest) = indent_info(&lines[j]);
-                if rl <= raw_len || lines[j].trim().is_empty() {
+                // Deeper indent = a row, even when the row is empty: that
+                // is the row you are typing into, and cosense shows it as
+                // an empty cell. Only a line that is not indented into the
+                // table ends it.
+                if rl <= raw_len {
                     break;
                 }
                 rows.push((j, rrest.split('\t').map(|c| c.trim_end().to_string()).collect()));
