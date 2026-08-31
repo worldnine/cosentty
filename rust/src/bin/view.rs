@@ -22,7 +22,9 @@
 //             opens in the browser (a gyazo image → its gyazo page)
 //   wheel     scroll the viewport only (the cursor keeps its line)
 //   click     open a link under the pointer, otherwise move the cursor
-//   drag      select a range
+//             (in EDIT a double-click takes the word, a triple the line)
+//   drag      select a range; a drag that comes back to its own line
+//             takes the characters selection back
 //   scrollbar click the track to jump, drag the thumb to scrub
 //
 // The cursor addresses SOURCE lines (akapen's ViewState model: `cursor` is a
@@ -790,8 +792,11 @@ struct App {
     /// text area and the scrollbar track.
     text_rect: Rect,
     bar_rect: Rect,
-    /// Source line where a left-button drag started (selection anchor).
-    drag_anchor: Option<usize>,
+    /// Source line where a left-button drag started (selection anchor),
+    /// with the character anchor of the same press when the drag runs
+    /// inside an edit session. A READ drag has no character range, so its
+    /// anchor keeps `None` there.
+    drag_anchor: Option<(usize, Option<usize>)>,
     /// Scrollbar thumb grab: (track row, scroll offset) at the press.
     scrollbar_drag: Option<(u16, u16)>,
     scroll: u16, // row-height units from top
@@ -1012,8 +1017,9 @@ struct App {
     /// `parentId` does not match it means we missed something → a
     /// background resync (see `ws_resync_pending`).
     ws_head: Option<String>,
-    /// Last left-click (for double-click detection): time, column, row.
-    last_click: Option<(Instant, u16, u16)>,
+    /// Last left-click (for double- and triple-click detection): time,
+    /// column, row, and how many clicks this spot has counted.
+    last_click: Option<(Instant, u16, u16, u8)>,
     /// Link pressed with the left button. Activation waits for button-up on
     /// the same target, so dragging can still select text/lines.
     pressed_link: Option<(usize, LinkItem)>,
@@ -3485,7 +3491,7 @@ impl SessionWrap {
         for (i, seg) in self.segs.iter().enumerate() {
             let end = off + seg.len();
             if disp_byte < end || (disp_byte == end && i + 1 == self.segs.len()) {
-                let within = str_width(&seg[..disp_byte - off]);
+                let within = str_width(&seg[..floor_boundary(seg, disp_byte - off)]);
                 return (i, self.indent_of(i) + within);
             }
             off = end;
@@ -3593,7 +3599,11 @@ fn display_prefix_bytes(buf: &str) -> usize {
 /// Byte offset in `session_display(buf, in_code)` for byte offset `caret`.
 
 fn display_caret(buf: &str, caret: usize, code: Option<CodeSpan>) -> usize {
-    let ci = buf[..caret.min(buf.len())].chars().count();
+    // A caret that strayed mid-character — a mouse anchor computed against
+    // another line's text is the classic way — is floored to the boundary:
+    // the slice below would panic on it.
+    let caret = floor_boundary(buf, caret);
+    let ci = buf[..caret].chars().count();
     if let Some(span) = code {
         let strip = leading_ws_taken(buf, span.strip_chars());
         let di = if ci < strip { ci } else { span.gutter_cols() + ci - strip };
@@ -3618,7 +3628,7 @@ fn display_caret(buf: &str, caret: usize, code: Option<CodeSpan>) -> usize {
 /// source boundary; the injected space after `•` maps to the text start.
 fn raw_caret_from_display(buf: &str, disp_byte: usize, code: Option<CodeSpan>) -> usize {
     let disp = session_display(buf, code);
-    let di = disp[..disp_byte.min(disp.len())].chars().count();
+    let di = disp[..floor_boundary(&disp, disp_byte)].chars().count();
     if let Some(span) = code {
         let strip = leading_ws_taken(buf, span.strip_chars());
         let gutter = span.gutter_cols();
@@ -8758,6 +8768,65 @@ fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -> usize {
     raw_caret_from_display(&text, wrapped.offset_at(seg_index, col), code)
 }
 
+/// One button-press, counted: a press within the double-click window of
+/// the previous one at (almost) the same cell continues its gesture —
+/// word on the second click, line on the third — and the count restarts
+/// after. Records the press in `last_click`, answers with this press's
+/// place in the gesture: 1, 2 or 3.
+fn register_click(
+    last: &mut Option<(Instant, u16, u16, u8)>,
+    now: Instant,
+    column: u16,
+    row: u16,
+) -> u8 {
+    let count = match *last {
+        Some((t, cx, cy, c))
+            if now.duration_since(t) < Duration::from_millis(450)
+                && cx.abs_diff(column) <= 1
+                && cy.abs_diff(row) <= 1 =>
+        {
+            if c >= 3 {
+                1
+            } else {
+                c + 1
+            }
+        }
+        _ => 1,
+    };
+    *last = Some((now, column, row, count));
+    count
+}
+
+/// The byte range of the word `caret` sits in: a run of letters and
+/// digits — CJK counts as letters, so a click inside `こんにちは` takes
+/// the whole run up to the first space or punctuation mark. A caret
+/// exactly at a word's edge still takes that word; a click in the
+/// whitespace or punctuation between two words takes nothing (`None`).
+fn word_span(buf: &str, caret: usize) -> Option<(usize, usize)> {
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '#';
+    let caret = floor_boundary(buf, caret);
+    let mut start: Option<usize> = None;
+    let mut found: Option<(usize, usize)> = None;
+    for (i, c) in buf.char_indices() {
+        match (start, word(c)) {
+            (None, true) => start = Some(i),
+            (Some(s), false) => {
+                if found.is_none() && s <= caret && caret <= i {
+                    found = Some((s, i));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if found.is_none() {
+        if let Some(s) = start.filter(|s| caret >= *s) {
+            found = Some((s, buf.len()));
+        }
+    }
+    found.filter(|(a, b)| a != b)
+}
+
 /// Mouse over the page body (no overlay open): wheel, click, drag,
 /// scrollbar. Uses the geometry the last frame recorded in
 /// `App::text_rect` / `App::bar_rect`.
@@ -8852,15 +8921,22 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 if let Some(src) = app.src_at_screen_row(screen_row) {
                     let col = (m.column.saturating_sub(text.x)) as usize;
                     // Session open: a click moves the caret and arms a
-                    // selection for a drag to grow. (No word/line click
-                    // gestures: copying a whole line already has a key,
-                    // and a click that selects something the user did not
-                    // drag over is a surprise.)
+                    // selection for a drag to grow; a double-click takes
+                    // the word under the pointer, a triple-click the whole
+                    // line — cosense web's gestures, in the unit EDIT
+                    // selects in (a character range on the caret line).
                     if app.session.is_some() {
                         if src < app.lines.len() {
                             session_commit_dirty(app, ctx);
+                            let count = register_click(
+                                &mut app.last_click,
+                                Instant::now(),
+                                m.column,
+                                m.row,
+                            );
                             let caret = click_caret(app, src, col, screen_row);
                             app.selection = None;
+                            let mut anchor_caret = None;
                             if let Some(s) = app.session.as_mut() {
                                 if s.line != src {
                                     let t = app.lines[src].text.clone();
@@ -8870,12 +8946,29 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                                 }
                                 s.input.cur = caret.min(s.input.buf.len());
                                 s.want_col = None;
-                                // An anchor, in case a drag follows. A
+                                // A plain click only arms the anchor: a
                                 // click that does not drag selects nothing
-                                // (see the Up arm).
-                                s.sel_from = Some(s.input.cur);
+                                // (see the Up arm). The gestures select.
+                                s.sel_from = match count {
+                                    2 => match word_span(&s.input.buf, s.input.cur) {
+                                        Some((a, b)) => {
+                                            s.input.cur = b;
+                                            Some(a)
+                                        }
+                                        None => None,
+                                    },
+                                    3 => {
+                                        s.input.cur = s.input.buf.len();
+                                        Some(0)
+                                    }
+                                    _ => Some(s.input.cur),
+                                };
+                                if s.sel_from == Some(s.input.cur) {
+                                    s.sel_from = None;
+                                }
+                                anchor_caret = s.sel_from.or(Some(s.input.cur));
                             }
-                            app.drag_anchor = Some(src);
+                            app.drag_anchor = Some((src, anchor_caret));
                             app.cursor = src;
                             app.follow = true;
                             app.laid_width = 0;
@@ -8889,33 +8982,38 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                             app.link_at_screen_position(screen_row, col)
                         {
                             app.selection = None;
-                            app.drag_anchor = Some(link_src);
+                            app.drag_anchor = Some((link_src, None));
                             app.goto_src(link_src);
                             app.pressed_link = Some((link_src, item));
                             app.last_click = None;
                             return;
                         }
                     }
-                    // READ: double-click enters the session at the clicked
-                    // character (the cosense-web gesture); a single click
-                    // moves the line cursor as before.
-                    let now = Instant::now();
-                    let dbl = app
-                        .last_click
-                        .map(|(t, cx, cy)| {
-                            now.duration_since(t) < Duration::from_millis(450)
-                                && cx.abs_diff(m.column) <= 1
-                                && cy.abs_diff(m.row) <= 1
-                        })
-                        .unwrap_or(false);
-                    app.last_click = Some((now, m.column, m.row));
-                    if dbl && src < app.lines.len() && app.time.is_none() {
+                    // READ: a double-click enters the session at the
+                    // clicked character AND takes the word under it (the
+                    // cosense-web gesture); the third click of the series
+                    // lands in that session, where it takes the line. A
+                    // single click moves the line cursor as before.
+                    let count =
+                        register_click(&mut app.last_click, Instant::now(), m.column, m.row);
+                    if count >= 2 && src < app.lines.len() && app.time.is_none() {
                         let caret = click_caret(app, src, col, screen_row);
                         enter_session(app, ctx, src, caret);
+                        if let Some(s) = app.session.as_mut() {
+                            if count == 2 {
+                                if let Some((a, b)) = word_span(&s.input.buf, s.input.cur) {
+                                    s.sel_from = Some(a);
+                                    s.input.cur = b;
+                                }
+                            } else {
+                                s.sel_from = Some(0);
+                                s.input.cur = s.input.buf.len();
+                            }
+                        }
                         return;
                     }
                     app.selection = None;
-                    app.drag_anchor = Some(src);
+                    app.drag_anchor = Some((src, None));
                     app.goto_src(src);
                 }
             }
@@ -8931,20 +9029,32 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                     app.wheel_scroll(1, app.view_h);
                 }
             }
-            let Some(anchor) = app.drag_anchor else { return };
+            let Some((anchor, anchor_caret)) = app.drag_anchor else { return };
             let Some(end) = app.src_at_screen_row(clamped_row) else { return };
             if app.session.is_some() {
                 let col = m.column.saturating_sub(text.x) as usize;
                 if end == anchor && end < app.lines.len() {
-                    // Same line: a character range (the anchor was set on
-                    // button-down).
-                    let caret = click_caret(app, end, col, clamped_row);
+                    // On the line the drag started on — a drag that
+                    // strayed to another line and came back included: the
+                    // CHARACTER range resumes, anchored where it was. Seat
+                    // the session on the anchor line FIRST: the caret
+                    // below belongs to THAT line's text, and assigning it
+                    // while the session stands on another line's buffer
+                    // lands mid-character on CJK — which panics the next
+                    // draw. Nothing is typed during a drag, so the seating
+                    // commits nothing.
+                    session_move_to_line(app, ctx, anchor);
+                    let caret = click_caret(app, anchor, col, clamped_row);
                     if let Some(s) = app.session.as_mut() {
                         s.input.cur = caret.min(s.input.buf.len());
+                        s.sel_from = anchor_caret;
+                        if s.sel_from == Some(s.input.cur) {
+                            s.sel_from = None;
+                        }
                         s.want_col = None;
                     }
                     app.selection = None;
-                } else {
+                } else if end < app.lines.len() {
                     // Crossing lines: hand over to the LINE range, which is
                     // the unit an edit across lines works in.
                     if let Some(s) = app.session.as_mut() {
@@ -8953,6 +9063,8 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                     session_move_to_line(app, ctx, end);
                     app.selection = Some(Selection { anchor, cursor: end });
                 }
+                // Anything else addresses no body line: the selection
+                // stays as it is.
                 app.laid_width = 0;
                 app.follow = true;
                 return;
@@ -16034,6 +16146,143 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+    }
+
+    /// Drag off the anchor line and back: the character selection has to
+    /// come home with it, and NOTHING may panic in between. (The caret
+    /// click_caret answers for the anchor line's text must never be
+    /// assigned to the session buffer of another line: mid-character on
+    /// CJK, the next draw panics.)
+    #[test]
+    fn a_drag_that_wobbles_across_lines_returns_to_characters() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "hello world", "あいx", "after"]);
+        app.rebuild(42);
+        let mut set_screen = |app: &mut App| {
+            app.text_rect = Rect::new(1, 2, 40, 8);
+            app.bar_rect = Rect::new(41, 1, 1, 10);
+            app.view_h = 10;
+        };
+        set_screen(&mut app);
+        enter_session(&mut app, &ctx, 1, 0);
+        // A draw each time, like the real loop: this is where the crash
+        // used to surface. `ui` overwrites the hit-test geometry, so the
+        // fixed screen the clicks assume goes back after every frame.
+        let mut term = Terminal::new(TestBackend::new(42, 12)).unwrap();
+        let mut draw = |app: &mut App| {
+            term.draw(|f| ui(f, app, &ctx)).unwrap();
+            set_screen(app);
+        };
+
+        // Press at column 7 of "hello world" (caret byte 7, on the "o")
+        // and drag one line down: the line range takes over.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 8, 4));
+        draw(&mut app);
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)));
+        assert_eq!(app.session.as_ref().unwrap().line, 2);
+
+        // Drag back onto the anchor line, two characters left of the press:
+        // characters again, anchored where the button went down (byte 7)
+        // and extended to byte 5. The pre-fix code wrote byte 5 as the
+        // caret into "あいx"'s buffer and died mid-'い' on this draw.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 6, 3));
+        draw(&mut app);
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1, "the session came home to the anchor line");
+        assert_eq!(
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
+            Some(" w".into()),
+            "character selection resumed from the press point"
+        );
+        assert!(app.selection.is_none(), "the line range gave way");
+    }
+
+    /// Double-click takes the word, triple-click the whole line — inside
+    /// EDIT, where a selection is a character range on the caret line.
+    /// The count restarts after the third click.
+    #[test]
+    fn clicks_in_a_session_take_a_word_then_the_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "hello world こんにちは", "next"]);
+        app.rebuild(42);
+        app.text_rect = Rect::new(1, 2, 40, 8);
+        app.bar_rect = Rect::new(41, 1, 1, 10);
+        app.view_h = 10;
+        enter_session(&mut app, &ctx, 1, 0);
+        let click = |app: &mut App, col: u16| {
+            handle_mouse_content(app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), col, 3));
+            handle_mouse_content(app, &ctx, mouse(MouseEventKind::Up(MouseButton::Left), col, 3));
+        };
+        let selected = |app: &App| {
+            let s = app.session.as_ref().unwrap();
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string())
+        };
+
+        // First press on the "w" of "world": the caret only.
+        click(&mut app, 7);
+        assert_eq!(selected(&app), None, "a single click selects nothing");
+        // Same spot again within the window: the word.
+        click(&mut app, 7);
+        assert_eq!(selected(&app).as_deref(), Some("world"));
+        assert_eq!(copy_payload(&app, false).unwrap().0, "world");
+        // A third: the whole line. A fourth starts the count over.
+        click(&mut app, 7);
+        assert_eq!(
+            selected(&app).as_deref(),
+            Some("hello world こんにちは"),
+            "the line as one character range"
+        );
+        click(&mut app, 7);
+        assert_eq!(selected(&app), None, "and plain again");
+    }
+
+    /// READ's double-click still ENTERS the session at the clicked
+    /// character — and now leaves the word selected there (cosense web),
+    /// so `[` can link it at once. The third click of the series lands
+    /// inside that session, where it takes the line.
+    #[test]
+    fn a_read_double_click_opens_the_session_on_the_word() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "hello world", "next"]);
+        app.rebuild(42);
+        app.text_rect = Rect::new(1, 2, 40, 8);
+        app.bar_rect = Rect::new(41, 1, 1, 10);
+        app.view_h = 10;
+        let click = |app: &mut App, col: u16| {
+            handle_mouse_content(app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), col, 3));
+            handle_mouse_content(app, &ctx, mouse(MouseEventKind::Up(MouseButton::Left), col, 3));
+        };
+        let selected = |app: &App| {
+            let s = app.session.as_ref().unwrap();
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string())
+        };
+
+        click(&mut app, 7);
+        assert!(app.session.is_none(), "a single click only moves the cursor");
+        assert_eq!(app.cursor, 1);
+        click(&mut app, 7);
+        assert!(app.session.is_some(), "the second click opens EDIT");
+        assert_eq!(selected(&app).as_deref(), Some("world"));
+        click(&mut app, 7);
+        assert_eq!(selected(&app).as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn a_word_is_letters_and_digits_across_scripts() {
+        assert_eq!(word_span("hello world", 0), Some((0, 5)));
+        assert_eq!(word_span("hello world", 5), Some((0, 5)), "right edge still takes it");
+        assert_eq!(word_span("hello world", 6), Some((6, 11)));
+        assert_eq!(word_span("hello  world", 6), None, "inside the gap: nothing");
+        assert_eq!(word_span("abc こんにちは", 4), Some((4, 19)), "a CJK run is a word");
+        assert_eq!(word_span("#tag ok", 0), Some((0, 4)), "a hashtag goes together");
+        assert_eq!(word_span("a-b", 2), Some((2, 3)), "the dash breaks the run");
+        assert_eq!(word_span("...", 1), None, "punctuation alone");
+        assert_eq!(word_span("", 0), None);
+        // A stray mid-character caret is floored, not fatal.
+        assert_eq!(word_span("あいx", 5), Some((0, 7)), "one run of letters: all of it");
+        assert_eq!(display_caret("あいx", 5, None), 3, "and the caret maps the same way");
     }
 
     /// Shift+↑↓ selects in READ too. `v` then j/k is the akapen way and
