@@ -7607,6 +7607,23 @@ fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
 /// One key while the session is open — the modeless core: printable keys
 /// type, arrows move the caret, Enter makes lines, Esc leaves.
 fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
+    // A modified arrow is cosense's outline chord. This viewer answers it
+    // in READ, not here, and the arms below match arrows regardless of
+    // their modifiers — so without this the chord would quietly move the
+    // caret instead. Doing nothing and saying where the block keys live is
+    // the honest answer; the selection and the caret are left untouched
+    // because nothing happened.
+    if matches!(
+        k.code,
+        KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+    ) && matches!(k.modifiers, KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        app.status = t!(
+            "ブロックを動かすには Esc で編集を抜けて m（移動モード）",
+            "to move a block: Esc to leave EDIT, then m (move mode)"
+        );
+        return;
+    }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     // Anything that is not extending or acting on the selection drops it:
@@ -13672,6 +13689,39 @@ mod tests {
             jobs[0].1
         );
         finish_outline(&mut app, &ctx);
+    }
+
+    /// In EDIT a modified arrow used to move the caret, because the arrow
+    /// arms match whatever modifiers came with them. A cosense reader
+    /// pressing Alt+Up expects a block to move, so the quiet caret move was
+    /// the wrong answer: say where the block keys are and touch nothing.
+    #[test]
+    fn a_modified_arrow_in_edit_points_at_the_move_mode_instead_of_moving_the_caret() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b", " c"]);
+        enter_session(&mut app, &ctx, 2, 1);
+        app.selection = Some(Selection { anchor: 1, cursor: 2 });
+
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+                handle_session_key(&mut app, &ctx, modified(code, modifiers));
+                assert_eq!(texts(&app), vec!["title", " a", " b", " c"]);
+                assert_eq!(app.session.as_ref().map(|s| s.line), Some(2), "the caret line");
+                assert_eq!(app.session.as_ref().map(|s| s.input.cur), Some(1), "and the caret");
+                assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)), "and the selection");
+                assert!(app.status.contains("移動モード"), "status: {}", app.status);
+            }
+        }
+        assert!(drain_jobs(&mut app).is_empty());
+
+        // Shift keeps its own meaning: it selects, and always did.
+        handle_session_key(&mut app, &ctx, modified(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(
+            app.selection.map(|s| s.range()),
+            Some((1, 1)),
+            "Shift+Up still moves the selection's active end"
+        );
+        assert!(app.session.is_some(), "and EDIT is untouched throughout");
     }
 
     /// Nothing in the mode can lose the grabbed lines, so if they are gone
