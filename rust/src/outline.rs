@@ -101,12 +101,11 @@ pub fn plan(lines: &[String], scope: Scope, direction: Direction) -> Result<Plan
         Direction::Left | Direction::Right => horizontal(lines, range, direction),
         Direction::Up | Direction::Down => match scope {
             Scope::Lines(_) => move_lines(lines, range, direction),
-            Scope::Block(root) => move_block(lines, root, range, direction, false),
+            Scope::Block(root) => move_block(lines, root, range, direction),
             // The grabbed range says what moves; its first line still says
             // at what depth and under which parent it is looking for a
-            // sibling. `frozen` is what allows the two rules that only make
-            // sense for an extent that cannot grow.
-            Scope::Grabbed(range) => move_block(lines, range.start, range, direction, true),
+            // sibling.
+            Scope::Grabbed(range) => move_block(lines, range.start, range, direction),
         },
     }
 }
@@ -185,29 +184,17 @@ fn parent(lines: &[String], line: usize) -> Option<usize> {
         .find(|&candidate| depth(&lines[candidate]) < child_depth)
 }
 
-/// `frozen` marks a grabbed extent, which cannot grow when its indentation
-/// changes. Only such a block, and only once an outdent has left it smaller
-/// than its indentation says, can have lines below it that READ as its own
-/// children — and only then does one of those lines count as a step. In
-/// every other case a grabbed block moves exactly as a recomputed one.
+/// A whole-sibling step: over the previous or next sibling subtree at once.
+/// This is the fast way to reorder sections; `Scope::Lines` is the one that
+/// steps a single source line, and between them nothing is unreachable.
 fn move_block(
     lines: &[String],
     root: usize,
     range: LineRange,
     direction: Direction,
-    frozen: bool,
 ) -> Result<Plan, PlanError> {
     let root_depth = depth(&lines[root]);
     let root_parent = parent(lines, root);
-    // A frozen grab whose extent no longer matches its indentation: the
-    // reader outdented it, so lines that are NOT part of it now read as its
-    // children. That is the only situation with a step to take that a
-    // recomputed block does not have. While the two still agree, a grabbed
-    // block moves exactly as `Scope::Block` does — no exceptions.
-    let outdented = frozen
-        && subtree(lines, root)
-            .map(|whole| whole != range)
-            .unwrap_or(false);
     match direction {
         Direction::Up => {
             if root <= 1 {
@@ -230,18 +217,6 @@ fn move_block(
                     destination_start: sibling,
                 });
             }
-            // Still no sibling. A deeper line above belongs to whatever is
-            // above IT, so a grabbed extent that has been outdented past
-            // its old parent can only step back one line at a time — the
-            // way it stepped forward. This never runs while a sibling
-            // exists, so it cannot splice the block into one.
-            if outdented && depth(&lines[prev]) > root_depth {
-                return Ok(Plan::Move {
-                    range,
-                    destination: Destination::Before(prev),
-                    destination_start: prev,
-                });
-            }
             Err(PlanError::NotSibling)
         }
         Direction::Down => {
@@ -249,27 +224,10 @@ fn move_block(
             if next >= lines.len() {
                 return Err(PlanError::Boundary);
             }
-            let next_depth = depth(&lines[next]);
-            // Shallower means the parent ends here: there is no next
-            // sibling, and `Left` is how a block leaves its parent.
-            if next_depth < root_depth {
+            if depth(&lines[next]) != root_depth || parent(lines, next) != root_parent {
                 return Err(PlanError::NotSibling);
             }
-            let over = if next_depth == root_depth || !outdented {
-                // The ordinary case: step over one whole sibling subtree.
-                // A recomputed block is always here — `subtree` is maximal,
-                // so the line after it is never deeper than its root.
-                if parent(lines, next) != root_parent {
-                    return Err(PlanError::NotSibling);
-                }
-                subtree(lines, next)?
-            } else {
-                // Deeper: a grabbed extent whose outdent left the line
-                // below reading as its own child. One LINE is the step,
-                // which is what lets `Left` then `Down` then `Right` carry
-                // a block out of a list instead of dead-ending.
-                LineRange::new(next, next)
-            };
+            let over = subtree(lines, next)?;
             Ok(Plan::Move {
                 range,
                 destination: if over.end + 1 < lines.len() {
@@ -446,10 +404,10 @@ mod tests {
         out
     }
 
-    /// A grab that still matches its indentation is not a special case: it
-    /// must move exactly as a recomputed block does. This is what keeps the
-    /// one-line escape step from ever splicing a block into the sibling
-    /// above or below it.
+    /// While a grab still matches its indentation it is not a special case:
+    /// the whole-sibling step must move it exactly as a recomputed block
+    /// moves. Once an outdent makes the grab smaller than its subtree the
+    /// two part company, which is what the next test covers.
     #[test]
     fn a_fresh_grab_moves_exactly_like_a_recomputed_block() {
         let mut checked = 0usize;
@@ -520,56 +478,82 @@ mod tests {
         assert!(checked > 1000, "the sweep actually ran: {checked} steps");
     }
 
-    /// The route out of a list: `Left` to leave the parent, `Down` for each
-    /// line that now reads as a child, `Right` to land under the next one.
-    /// The middle step is the one that used to have nowhere to go, and one
-    /// line per press is what lets `Up` take it straight back.
+    /// The route out of a list: `Left` to leave the parent, then step. The
+    /// line step never refuses, so nothing has to be reached the long way
+    /// round; the sibling step is the fast one and may have nowhere to go.
     #[test]
-    fn a_grabbed_block_steps_over_the_children_it_appears_to_have() {
+    fn a_line_step_goes_where_the_sibling_step_refuses() {
         let source = lines(&["title", "root", "a", " b", " c", "next"]);
-        let first = plan(
-            &source,
-            Scope::Grabbed(LineRange::new(2, 2)),
-            Direction::Down,
-        );
+        let grabbed = LineRange::new(2, 2);
+
+        // No sibling below: "a" is at depth 0 and " b" is deeper.
         assert_eq!(
-            first,
-            Ok(Plan::Move {
-                range: LineRange::new(2, 2),
-                destination: Destination::Before(4),
-                destination_start: 3,
-            }),
-            "one press, one apparent child"
-        );
-        let moved = apply(&source, first.as_ref().unwrap());
-        assert_eq!(moved, lines(&["title", "root", " b", "a", " c", "next"]));
-        assert_eq!(
-            plan(
-                &moved,
-                Scope::Grabbed(LineRange::new(3, 3)),
-                Direction::Down
-            )
-            .as_ref()
-            .map(|plan| apply(&moved, plan)),
-            Ok(lines(&["title", "root", " b", " c", "a", "next"])),
-            "a second press clears the other one"
-        );
-        // `Up` from here does NOT retrace that press: `root` is a real
-        // previous sibling now, so it swaps with its whole subtree. The
-        // documented asymmetry — correct structure beats a tidy inverse.
-        assert_eq!(
-            plan(&moved, Scope::Grabbed(LineRange::new(3, 3)), Direction::Up)
-                .as_ref()
-                .map(|plan| apply(&moved, plan)),
-            Ok(lines(&["title", "a", "root", " b", " c", "next"]))
-        );
-        // A block whose parent simply ends below it still has no sibling
-        // that way: `Left` is the way out, exactly as cosense has it.
-        let flat = lines(&["title", "p", " last", "q"]);
-        assert_eq!(
-            plan(&flat, Scope::Grabbed(LineRange::new(2, 2)), Direction::Down),
+            plan(&source, Scope::Grabbed(grabbed), Direction::Down),
             Err(PlanError::NotSibling)
         );
+        // The line step goes anyway, one line at a time, depth untouched.
+        let first = plan(&source, Scope::Lines(grabbed), Direction::Down);
+        let moved = apply(&source, first.as_ref().unwrap());
+        assert_eq!(moved, lines(&["title", "root", " b", "a", " c", "next"]));
+        let second = plan(&moved, Scope::Lines(LineRange::new(3, 3)), Direction::Down);
+        assert_eq!(
+            apply(&moved, second.as_ref().unwrap()),
+            lines(&["title", "root", " b", " c", "a", "next"])
+        );
+        // And it comes straight back.
+        assert_eq!(
+            plan(&moved, Scope::Lines(LineRange::new(3, 3)), Direction::Up)
+                .as_ref()
+                .map(|plan| apply(&moved, plan)),
+            Ok(source.clone())
+        );
+    }
+
+    /// A line step is its own inverse in both directions, over every
+    /// arrangement of five body lines across three depths, and it never
+    /// takes a block above the title.
+    #[test]
+    fn a_line_step_up_and_down_always_come_home() {
+        let mut checked = 0usize;
+        for pattern in 0..3usize.pow(5) {
+            let mut source = vec!["title".to_string()];
+            let mut rest = pattern;
+            for k in 0..5 {
+                source.push(format!("{}line{k}", " ".repeat(rest % 3)));
+                rest /= 3;
+            }
+            for start in 1..source.len() {
+                for end in start..source.len() {
+                    let range = LineRange::new(start, end);
+                    for direction in [Direction::Up, Direction::Down] {
+                        let Ok(step) = plan(&source, Scope::Lines(range), direction) else {
+                            continue;
+                        };
+                        let moved = apply(&source, &step);
+                        assert_eq!(moved[0], source[0], "the title stays put");
+                        let Plan::Move {
+                            destination_start, ..
+                        } = step
+                        else {
+                            panic!("a vertical step moves");
+                        };
+                        let landed =
+                            LineRange::new(destination_start, destination_start + (end - start));
+                        let back = match direction {
+                            Direction::Up => Direction::Down,
+                            _ => Direction::Up,
+                        };
+                        let home = plan(&moved, Scope::Lines(landed), back);
+                        assert!(
+                            matches!(&home, Ok(plan) if apply(&moved, plan) == source),
+                            "{direction:?} then {back:?} must come home\n  from {source:?}\n  moved {moved:?}\n  range {start}..={end}\n  back {home:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "the sweep actually ran: {checked} pairs");
     }
 
     #[test]
@@ -580,19 +564,15 @@ mod tests {
             Ok(LineRange::new(2, 4)),
             "indentation alone would now hand over three lines"
         );
-        // Down does not refuse: the lines below now READ as this block's
-        // children, so it steps over the whole run of them at once.
+        // The sibling step has nowhere to go — the lines below are deeper
+        // now — and that is fine: `j` steps one line and never refuses.
         assert_eq!(
             plan(
                 &source,
                 Scope::Grabbed(LineRange::new(2, 3)),
                 Direction::Down
             ),
-            Ok(Plan::Move {
-                range: LineRange::new(2, 3),
-                destination: Destination::End,
-                destination_start: 3,
-            })
+            Err(PlanError::NotSibling)
         );
         assert_eq!(
             plan(

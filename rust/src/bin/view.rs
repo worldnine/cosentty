@@ -2075,8 +2075,8 @@ impl App {
         // A refusal ("no sibling that way") rides along behind them.
         if self.move_mode.is_some() {
             let keys = t!(
-                "MOVE 移動モード — j/k/↑↓ 兄弟と入れ替え · h/l/←→ 字下げ · Esc/Enter/m 確定",
-                "MOVE — j/k/↑↓ swap sibling · h/l/←→ outdent/indent · Esc/Enter/m commit"
+                "MOVE — j/k 1行 · J/K 兄弟 · h/l 字下げ · Esc 確定",
+                "MOVE — j/k line · J/K sibling · h/l indent · Esc commit"
             );
             return match self.status.is_empty() {
                 true => keys,
@@ -5777,7 +5777,7 @@ fn enter_move_mode(app: &mut App, ctx: &Ctx) {
 /// reordered or re-indented, so every id — and every permalink, telomere
 /// and comment hanging off it — stays exactly where it was. Nothing goes
 /// to the server, nothing goes onto the undo stack.
-fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirection) {
+fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirection, whole_sibling: bool) {
     let Some((start, end)) = move_block_range(app) else {
         // The grabbed lines are gone. Nothing in the mode can do that, and
         // remote application is held while it is up, so this is the
@@ -5798,12 +5798,28 @@ fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirection) {
         return;
     };
     let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
-    let scope = OutlineScope::Grabbed(LineRange::new(start, end));
+    // Two vertical steps, and the reader picks which one. `Lines` moves the
+    // block past ONE source line, keeping its depth: it never refuses (bar
+    // the title), and Up and Down are exact inverses. `Grabbed` steps over
+    // a whole sibling subtree at once, which is the fast way to reorder
+    // sections but has nowhere to go when there is no sibling.
+    //
+    // Requiring the sibling step was the mistake this replaces: it refused
+    // moves that were reachable anyway by going out a level, stepping, and
+    // coming back in — so the rule cost keystrokes without protecting any
+    // arrangement.
+    let range = LineRange::new(start, end);
+    let scope = if whole_sibling && matches!(direction, OutlineDirection::Up | OutlineDirection::Down)
+    {
+        OutlineScope::Grabbed(range)
+    } else {
+        OutlineScope::Lines(range)
+    };
     let plan = match cosense::outline::plan(&source, scope, direction) {
         Ok(plan) => plan,
         Err(error) => {
-            // "No sibling that way" is the answer, not a bug: getting out
-            // of a parent is h → j → l, which is why the mode exists.
+            // Only the whole-sibling step can refuse, and the answer is
+            // one press away: `j` steps a single line and never refuses.
             outline_error(app, error);
             return;
         }
@@ -5984,19 +6000,24 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         // and caps lock or the habit of the `^g H/J/K/L` block bindings
         // must not commit a half-finished drag.
         let plain = (k.modifiers - KeyModifiers::SHIFT) == KeyModifiers::NONE;
+        // Lowercase and the bare arrows step one line; uppercase steps over
+        // a whole sibling. Caps lock therefore gives a bigger jump, never a
+        // commit.
         let drag = match k.code {
-            KeyCode::Char('j' | 'J') if plain => Some(OutlineDirection::Down),
-            KeyCode::Char('k' | 'K') if plain => Some(OutlineDirection::Up),
-            KeyCode::Char('h' | 'H') if plain => Some(OutlineDirection::Left),
-            KeyCode::Char('l' | 'L') if plain => Some(OutlineDirection::Right),
-            KeyCode::Down if plain => Some(OutlineDirection::Down),
-            KeyCode::Up if plain => Some(OutlineDirection::Up),
-            KeyCode::Left if plain => Some(OutlineDirection::Left),
-            KeyCode::Right if plain => Some(OutlineDirection::Right),
+            KeyCode::Char('j') if plain => Some((OutlineDirection::Down, false)),
+            KeyCode::Char('k') if plain => Some((OutlineDirection::Up, false)),
+            KeyCode::Char('J') if plain => Some((OutlineDirection::Down, true)),
+            KeyCode::Char('K') if plain => Some((OutlineDirection::Up, true)),
+            KeyCode::Char('h' | 'H') if plain => Some((OutlineDirection::Left, false)),
+            KeyCode::Char('l' | 'L') if plain => Some((OutlineDirection::Right, false)),
+            KeyCode::Down if plain => Some((OutlineDirection::Down, false)),
+            KeyCode::Up if plain => Some((OutlineDirection::Up, false)),
+            KeyCode::Left if plain => Some((OutlineDirection::Left, false)),
+            KeyCode::Right if plain => Some((OutlineDirection::Right, false)),
             _ => None,
         };
-        if let Some(direction) = drag {
-            move_mode_step(app, ctx, direction);
+        if let Some((direction, whole_sibling)) = drag {
+            move_mode_step(app, ctx, direction, whole_sibling);
             return Action::Continue;
         }
         match k.code {
@@ -10136,8 +10157,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                        "            in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done"),
                     t!("            x 行/選択を削除 · ^e ページ全体を $EDITOR で編集 · コミットは自動",
                        "            x delete line/selection · ^e whole page in $EDITOR · commits are automatic"),
-                    t!("構造編集    m 移動モード（ブロックをつかむ）: j/k/↑↓ 兄弟 · h/l/←→ 字下げ · Esc/Enter/m 確定",
-                       "outline     m move mode (grab a block): j/k/↑↓ sibling · h/l/←→ indent · Esc/Enter/m commit"),
+                    t!("構造編集    m 移動モード（ブロックをつかむ）: j/k/↑↓ 1行 · J/K 兄弟ごと",
+                       "outline     m move mode (grab a block): j/k/↑↓ one line · J/K whole sibling"),
+                    t!("            h/l/←→ 字下げ · Esc/Enter/m 確定（掴んだまま他のキーを押すと確定）",
+                       "            h/l/←→ indent · Esc/Enter/m commit (any other key commits too)"),
                     t!("            Ctrl+←/→/↑/↓ 行・選択範囲 · Alt+←/→/↑/↓ ブロック",
                        "            Ctrl+←/→/↑/↓ line/range · Alt+←/→/↑/↓ block"),
                     t!("            ^g h/j/k/l 行 左/下/上/右 · ^g H/J/K/L ブロック（選択中は不可）",
@@ -13328,7 +13351,10 @@ mod tests {
         );
         let footer = app.hint_text(&[]);
         assert!(footer.contains("MOVE"), "footer: {footer}");
-        assert!(footer.contains("j/k") && footer.contains("h/l") && footer.contains("Esc/Enter"));
+        // The footer has to fit beside the mode and sync tags, so it names
+        // the four steps and the way out; the overlay carries the rest.
+        assert!(footer.contains("j/k") && footer.contains("J/K"), "footer: {footer}");
+        assert!(footer.contains("h/l") && footer.contains("Esc"), "footer: {footer}");
         assert!(
             !remote_gate_clear(&app),
             "remote edits wait, exactly as they do for a dirty line"
@@ -13610,9 +13636,9 @@ mod tests {
     }
 
     /// The reader grabbed two lines. Outdenting makes the lines below read
-    /// as their children, and the grab still holds exactly those two — so
-    /// `j` steps over one of them per press. This is the route out of a
-    /// list: `h` → `j` → `l`.
+    /// as their children, and the grab still holds exactly those two. `j`
+    /// steps one line and never refuses, so the route out of a list is
+    /// `h` → `j` → `l` with nothing in the way.
     #[test]
     fn the_grabbed_block_carries_out_of_the_list_after_an_outdent() {
         let ctx = test_ctx();
@@ -13722,6 +13748,63 @@ mod tests {
             "Shift+Up still moves the selection's active end"
         );
         assert!(app.session.is_some(), "and EDIT is untouched throughout");
+    }
+
+    /// Two vertical steps: `j` moves one line and always goes, `J` steps
+    /// over a whole sibling subtree and may have nowhere to go. Requiring
+    /// the sibling step was the old mistake — every arrangement it refused
+    /// was reachable anyway, so it only cost presses.
+    #[test]
+    fn a_line_step_always_goes_and_the_sibling_step_jumps_a_subtree() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "a", "b", " b-child", "c"]);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+
+        // `J` clears b AND its child in one press.
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        assert_eq!(texts(&app), vec!["title", "b", " b-child", "a", "c"]);
+        // `K` brings it back the same way.
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        assert_eq!(texts(&app), vec!["title", "a", "b", " b-child", "c"]);
+
+        // The bare arrow is the LINE step, not the sibling one: it stops
+        // between b and its child, a position `J` cannot reach.
+        handle_key(&mut app, &ctx, key(KeyCode::Down));
+        assert_eq!(texts(&app), vec!["title", "b", "a", " b-child", "c"]);
+        handle_key(&mut app, &ctx, key(KeyCode::Up));
+        assert_eq!(texts(&app), vec!["title", "a", "b", " b-child", "c"]);
+
+        // A shifted arrow is the same line step, not the sibling one.
+        handle_key(&mut app, &ctx, modified(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(texts(&app), vec!["title", "b", "a", " b-child", "c"]);
+        handle_key(&mut app, &ctx, modified(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(texts(&app), vec!["title", "a", "b", " b-child", "c"]);
+
+        // And so is `j`.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(texts(&app), vec!["title", "b", "a", " b-child", "c"]);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(texts(&app), vec!["title", "b", " b-child", "a", "c"]);
+        // And back, press for press.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('k')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('k')));
+        assert_eq!(texts(&app), vec!["title", "a", "b", " b-child", "c"]);
+        assert!(drain_jobs(&mut app).is_empty(), "every press was local");
+
+        // The sibling step still explains itself when there is none, and
+        // the block stays in hand.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        assert!(app.status.contains("兄弟ブロック"), "status: {}", app.status);
+        assert!(app.move_mode.is_some());
+        // While `j` from the same spot simply goes.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(texts(&app), vec!["title", "b", " a", " b-child", "c"]);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert_eq!(drain_jobs(&mut app).len(), 1, "one commit for the whole drag");
+        finish_outline(&mut app, &ctx);
     }
 
     /// Nothing in the mode can lose the grabbed lines, so if they are gone
