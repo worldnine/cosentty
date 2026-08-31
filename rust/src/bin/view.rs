@@ -684,6 +684,25 @@ struct OutlinePending {
     snapshot: OutlineSnapshot,
 }
 
+/// The sticky outline move mode (NOTE-outline-editing.md §移動モード): the
+/// reader grabs one block with `m` and keeps dragging it with plain keys.
+/// Every step is LOCAL — the existing line values are reordered and
+/// re-indented in place, ids and all, nothing is sent and nothing is
+/// pushed onto the undo stack — and leaving sends ONE commit for the whole
+/// drag. Five presses are one commit, one new set of ids, one undo step.
+#[derive(Clone)]
+struct MoveMode {
+    /// Line ids of the grabbed block, frozen at entry. Outdenting inside
+    /// the mode makes the lines below read as children; the reader still
+    /// picked up THESE lines, so the set never grows.
+    block: Vec<String>,
+    /// The page as it stood before the grab. The one exit commit is the
+    /// diff from here to wherever the block ended up.
+    before: Vec<PageLine>,
+    cursor: usize,
+    selection: Option<Selection>,
+}
+
 struct App {
     mode: Mode,
     project: String,
@@ -814,6 +833,8 @@ struct App {
     /// One-shot portable fallback for terminals that do not deliver
     /// modified arrow keys. The next key is always consumed.
     outline_prefix: bool,
+    /// The grabbed block, while the sticky move mode is up.
+    move_mode: Option<MoveMode>,
     /// Snapshot held while the one structural commit is outstanding. READ
     /// remains navigable, but no second mutation may be based on its
     /// optimistic line order until the server accepts or rejects it.
@@ -1416,6 +1437,7 @@ impl App {
             comments: Vec::new(),
             status: String::new(),
             outline_prefix: false,
+            move_mode: None,
             outline_pending: None,
             outline_refresh_needed: false,
             history: Vec::new(),
@@ -1536,6 +1558,7 @@ impl App {
         self.bump_server_epoch();
         self.time = None; // installing a live page always exits history
         self.outline_prefix = false;
+        self.move_mode = None;
         self.outline_refresh_needed = false;
         // A page install ends any edit session and cuts the undo lineage:
         // undo ops reference THIS page's line ids.
@@ -2020,7 +2043,11 @@ impl App {
                 .as_ref()
                 .map(|s| s.input.buf != s.orig)
                 .unwrap_or(false);
-            let why = if dirty {
+            let why = if self.move_mode.is_some() {
+                // A drag holds the whole page's order, so remote edits wait
+                // for it exactly as they wait for an unsaved line.
+                ts!("つかんでいるブロックを待っています", "waiting on the grabbed block")
+            } else if dirty {
                 ts!("編集中の行を待っています", "waiting on the line being edited")
             } else {
                 ts!("適用待ち", "waiting to apply")
@@ -2042,6 +2069,20 @@ impl App {
     }
 
     fn hint_body(&self, cursor_links: &[LinkItem]) -> String {
+        // The move mode says its own name and its own keys, in words: the
+        // grabbed block is highlighted, but a highlight is a colour and a
+        // colour alone must not be what tells the reader where they are.
+        // A refusal ("no sibling that way") rides along behind them.
+        if self.move_mode.is_some() {
+            let keys = t!(
+                "MOVE 移動モード — j/k/↑↓ 兄弟と入れ替え · h/l/←→ 字下げ · Esc/Enter/m 確定",
+                "MOVE — j/k/↑↓ swap sibling · h/l/←→ outdent/indent · Esc/Enter/m commit"
+            );
+            return match self.status.is_empty() {
+                true => keys,
+                false => format!("{keys} · {}", self.status),
+            };
+        }
         if self.outline_prefix {
             return t!(
                 "OUTLINE h/j/k/l 行 左/下/上/右 · H/J/K/L ブロック · Esc 取消",
@@ -5288,6 +5329,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
 /// serial worker to drain — nothing typed is left behind. Bounded at 15 s;
 /// a hung network reports instead of trapping the user in a dead TUI.
 fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) {
+    // A block still in hand is work the reader did: let go of it (which
+    // sends the drag) before the queue is drained, exactly as a dirty caret
+    // line is committed here.
+    if app.move_mode.is_some() {
+        leave_move_mode(app, ctx);
+    }
     if app.session.is_some() {
         leave_session(app, ctx);
     }
@@ -5315,6 +5362,12 @@ fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &C
 /// session takes it structurally (a multi-line paste becomes real lines,
 /// see `session_paste`).
 fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
+    // Pasting is not a move key, so it lets go of the block first for the
+    // same reason every other key does: the page must not change under a
+    // block still being carried.
+    if app.move_mode.is_some() {
+        leave_move_mode(app, ctx);
+    }
     let clean = data.replace("\r\n", "\n").replace('\r', "\n");
     // A single trailing newline is an artefact of how the text was copied
     // (a whole line from a file, a terminal selection, an IME committing a
@@ -5481,6 +5534,13 @@ fn outline_prefix_command(k: event::KeyEvent) -> Option<(bool, OutlineDirection)
 }
 
 fn outline_mutation_blocked(app: &mut App) -> bool {
+    if app.move_mode.is_some() {
+        app.status = t!(
+            "移動モード中 — Esc/Enter で確定してから",
+            "in move mode — commit it first with Esc/Enter"
+        );
+        return true;
+    }
     if app.outline_refresh_needed {
         app.status = t!(
             "アウトライン移動後の再読み込み待ち — ページを開き直してください",
@@ -5537,45 +5597,73 @@ fn outline_error(app: &mut App, error: PlanError) {
     };
 }
 
-/// Lower one pure outline plan into the existing edit queue. Replacements
-/// keep IDs. Moves delete and recreate only the user's target.
-fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: OutlineDirection) {
+/// The refusals every outline action shares, in the order the reader
+/// meets them. `false` means the reason is already on the status line.
+fn outline_action_allowed(app: &mut App) -> bool {
     // An ordinary commit may still be in flight: the gate waits for its own
     // job id, and the serial worker keeps the ops in order. Only a second
     // structural action has to wait, because there is one snapshot to roll
     // back to and one gate to release.
     if outline_mutation_blocked(app) {
-        return;
+        return false;
     }
     if app.web_unsynced {
         app.status = t!(
             "サーバーの内容を読み直すまでアウトライン操作できません",
             "outline actions require a fresh server copy"
         );
+        return false;
+    }
+    if app.time.is_some() {
+        app.status = t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)");
+        return false;
+    }
+    if !ensure_editable(app) {
+        return false;
+    }
+    if app.cursor >= app.lines.len() {
+        outline_error(app, PlanError::InvalidTarget);
+        return false;
+    }
+    if page_is_uncreated(app) {
+        app.status = t!(
+            "未作成ページではアウトライン操作できません",
+            "outline actions are unavailable until the page is created"
+        );
+        return false;
+    }
+    true
+}
+
+/// Hand one structural op list to the single write path, under the gate
+/// and the rollback every outline action shares: the snapshot is the page
+/// as it stands NOW, so a job the worker never took leaves no screen-only
+/// fact behind.
+fn queue_outline_action(app: &mut App, ctx: &Ctx, label: &str, done: String, ops: Vec<EditOp>) {
+    let snapshot = outline_snapshot(app);
+    if let Some(job) = do_edit(app, ctx, label, ops) {
+        app.outline_pending = Some(OutlinePending { job, snapshot });
+        app.follow = true;
+        app.status = done;
+    } else {
+        // The worker never took the structural job. Put the clean
+        // pre-action model back immediately; an optimistic move must never
+        // become a screen-only fact.
+        restore_outline_snapshot(app, &snapshot);
+        rerender(app, ctx);
+    }
+}
+
+/// Lower one pure outline plan into the existing edit queue. Replacements
+/// keep IDs. Moves delete and recreate only the user's target.
+fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: OutlineDirection) {
+    if !outline_action_allowed(app) {
         return;
     }
     if block && app.selection.is_some() {
         app.status = t!(
             "選択中はブロック操作できません — Esc で選択を解除",
             "block actions are unavailable with a selection — Esc clears it"
-        );
-        return;
-    }
-    if app.time.is_some() {
-        app.status = t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)");
-        return;
-    }
-    if !ensure_editable(app) {
-        return;
-    }
-    if app.cursor >= app.lines.len() {
-        outline_error(app, PlanError::InvalidTarget);
-        return;
-    }
-    if page_is_uncreated(app) {
-        app.status = t!(
-            "未作成ページではアウトライン操作できません",
-            "outline actions are unavailable until the page is created"
         );
         return;
     }
@@ -5629,18 +5717,207 @@ fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: OutlineDirecti
         }
     };
 
-    let snapshot = outline_snapshot(app);
-    if let Some(job) = do_edit(app, ctx, &label, ops) {
-        app.outline_pending = Some(OutlinePending { job, snapshot });
-        app.follow = true;
-        app.status = done;
-    } else {
-        // The worker never took the structural job. Put the clean
-        // pre-action model back immediately; an optimistic move must never
-        // become a screen-only fact.
-        restore_outline_snapshot(app, &snapshot);
-        rerender(app, ctx);
+    queue_outline_action(app, ctx, &label, done, ops);
+}
+
+/// Where the grabbed block sits right now, found by its frozen ids. `None`
+/// means the run is no longer there, which the mode itself cannot cause.
+fn move_block_range(app: &App) -> Option<(usize, usize)> {
+    let block = &app.move_mode.as_ref()?.block;
+    let first = block.first()?;
+    let start = app.lines.iter().position(|line| line.id == *first)?;
+    let end = start + block.len() - 1;
+    let run = app.lines.get(start..=end)?;
+    run.iter()
+        .map(|line| line.id.as_str())
+        .eq(block.iter().map(|id| id.as_str()))
+        .then_some((start, end))
+}
+
+/// `m`: grab the block under the cursor and stay in the mode until
+/// `Esc`/`Enter`. Nothing is sent yet — the grab is a promise to send one
+/// commit later.
+fn enter_move_mode(app: &mut App, ctx: &Ctx) {
+    if !outline_action_allowed(app) {
+        return;
     }
+    // A block operation with a selection open has no single answer — the
+    // same refusal the Alt and ^g block bindings give. Refusing is better
+    // than carrying a selection that the drag would silently drop.
+    if app.selection.is_some() {
+        app.status = t!(
+            "選択中はブロック操作できません — Esc で選択を解除",
+            "block actions are unavailable with a selection — Esc clears it"
+        );
+        return;
+    }
+    let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+    let range = match cosense::outline::grab(&source, app.cursor) {
+        Ok(range) => range,
+        Err(error) => {
+            outline_error(app, error);
+            return;
+        }
+    };
+    app.move_mode = Some(MoveMode {
+        block: app.lines[range.start..=range.end]
+            .iter()
+            .map(|line| line.id.clone())
+            .collect(),
+        before: app.lines.clone(),
+        cursor: app.cursor,
+        selection: app.selection,
+    });
+    app.follow = true;
+    app.status.clear();
+    rerender(app, ctx);
+}
+
+/// One press inside the mode. Purely local: the same `PageLine` values are
+/// reordered or re-indented, so every id — and every permalink, telomere
+/// and comment hanging off it — stays exactly where it was. Nothing goes
+/// to the server, nothing goes onto the undo stack.
+fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirection) {
+    let Some((start, end)) = move_block_range(app) else {
+        // The grabbed lines are gone. Nothing in the mode can do that, and
+        // remote application is held while it is up, so this is the
+        // unexpected case — which is exactly why it must not keep the
+        // half-dragged arrangement. The page goes back to what it was when
+        // the block was picked up, and the disagreement is recorded.
+        let Some(mode) = app.move_mode.take() else { return };
+        app.lines = mode.before;
+        app.cursor = mode.cursor.min(app.lines.len().saturating_sub(1));
+        app.selection = mode.selection;
+        app.mark_desynced();
+        app.follow = true;
+        rerender(app, ctx);
+        app.status = t!(
+            "つかんでいたブロックが見つからないので、つかむ前の並びに戻しました",
+            "the grabbed block is gone — restored the arrangement from before the grab"
+        );
+        return;
+    };
+    let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+    let scope = OutlineScope::Grabbed(LineRange::new(start, end));
+    let plan = match cosense::outline::plan(&source, scope, direction) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // "No sibling that way" is the answer, not a bug: getting out
+            // of a parent is h → j → l, which is why the mode exists.
+            outline_error(app, error);
+            return;
+        }
+    };
+    // Ids survive every step, so the cursor and the selection travel by id.
+    let cursor_id = app.lines.get(app.cursor).map(|line| line.id.clone());
+    let selection_ids = app.selection.and_then(|selection| {
+        let anchor = app.lines.get(selection.anchor)?.id.clone();
+        let cursor = app.lines.get(selection.cursor)?.id.clone();
+        Some((anchor, cursor))
+    });
+    match plan {
+        OutlinePlan::Replace { range, texts } => {
+            for (line, text) in (range.start..=range.end).zip(texts) {
+                app.lines[line].text = text;
+            }
+        }
+        OutlinePlan::Move { range, destination: _, destination_start } => {
+            let block: Vec<PageLine> = app.lines.drain(range.start..=range.end).collect();
+            let at = destination_start.min(app.lines.len());
+            app.lines.splice(at..at, block);
+        }
+    }
+    if let Some(id) = cursor_id {
+        if let Some(line) = app.lines.iter().position(|line| line.id == id) {
+            app.cursor = line;
+        }
+    }
+    app.selection = selection_ids.and_then(|(anchor, cursor)| {
+        let anchor = app.lines.iter().position(|line| line.id == anchor)?;
+        let cursor = app.lines.iter().position(|line| line.id == cursor)?;
+        Some(Selection { anchor, cursor })
+    });
+    app.follow = true;
+    app.status.clear();
+    rerender(app, ctx);
+}
+
+/// The ONE edit from the pre-mode page to the final arrangement: nothing
+/// when the block came home, `Replace` (ids kept) when only its
+/// indentation changed, and — exactly as cosense itself does it — delete
+/// plus insert of the block ALONE when its position changed.
+/// Returns `(commit label, status while saving, ops)`.
+fn move_mode_edit(
+    before: &[PageLine],
+    after: &[PageLine],
+    block: &[String],
+) -> Option<(String, String, Vec<EditOp>)> {
+    let moved = before
+        .iter()
+        .map(|line| line.id.as_str())
+        .ne(after.iter().map(|line| line.id.as_str()));
+    if !moved {
+        let ops: Vec<EditOp> = before
+            .iter()
+            .zip(after)
+            .filter(|(was, now)| was.text != now.text)
+            .map(|(_, now)| EditOp::Replace { id: now.id.clone(), text: now.text.clone() })
+            .collect();
+        return (!ops.is_empty()).then(|| {
+            (
+                t!("アウトラインの字下げ", "outline indent"),
+                t!("…字下げを保存中", "…saving indentation"),
+                ops,
+            )
+        });
+    }
+    let first = block.first()?;
+    let start = after.iter().position(|line| line.id == *first)?;
+    let final_block = after.get(start..start + block.len())?;
+    // The block is contiguous wherever it landed, so the line after it is
+    // never one of its own — and it still exists in the pre-mode page.
+    let anchor = after
+        .get(start + block.len())
+        .map(|line| line.id.clone())
+        .unwrap_or_else(|| "_end".to_string());
+    let mut ops: Vec<EditOp> =
+        block.iter().map(|id| EditOp::Delete { id: id.clone() }).collect();
+    ops.push(EditOp::Insert {
+        anchor,
+        lines: final_block
+            .iter()
+            .map(|line| (new_line_id(), line.text.clone()))
+            .collect(),
+    });
+    Some((
+        t!("アウトラインの移動", "outline move"),
+        t!("…移動を保存中", "…saving move"),
+        ops,
+    ))
+}
+
+/// `Esc`/`Enter` (and anything else the reader asks for): let go of the
+/// block and send the whole drag as one commit. The pre-mode arrangement
+/// goes back first, so the ops are applied exactly once — by `do_edit`,
+/// the same write path every other edit uses, which is also what makes it
+/// one undo step and what puts the cursor back on the moved block.
+fn leave_move_mode(app: &mut App, ctx: &Ctx) {
+    let Some(mode) = app.move_mode.take() else { return };
+    let after = std::mem::replace(&mut app.lines, mode.before);
+    app.cursor = mode.cursor;
+    app.selection = mode.selection;
+    let Some((label, done, ops)) = move_mode_edit(&app.lines, &after, &mode.block) else {
+        // The block came home: position and depth are what they were, so
+        // there is nothing to tell the server.
+        rerender(app, ctx);
+        app.follow = true;
+        app.status = t!(
+            "移動モードを抜けました（変更なし）",
+            "left move mode (nothing changed)"
+        );
+        return;
+    };
+    queue_outline_action(app, ctx, &label, done, ops);
 }
 
 /// One key press.
@@ -5691,6 +5968,49 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     if app.overlay.is_some() {
         handle_overlay_key(app, ctx, k.code, k.modifiers);
         return Action::Continue;
+    }
+
+    // The sticky move mode owns the plain keys while it is up: h/j/k/l and
+    // the bare arrows drag the grabbed block, Esc/Enter/m let go. Every
+    // OTHER key lets go first — the drag's one commit goes out — and then
+    // does its ordinary job, so navigating away can never leave the block
+    // half moved.
+    //
+    // The arrows are bound because they are what a reader reaches for when
+    // a block is visibly held: having them silently drop it and move the
+    // cursor instead would be the one surprise this mode must not have.
+    if app.move_mode.is_some() {
+        // SHIFT counts as plain here: a terminal reports `H` as Shift+`h`,
+        // and caps lock or the habit of the `^g H/J/K/L` block bindings
+        // must not commit a half-finished drag.
+        let plain = (k.modifiers - KeyModifiers::SHIFT) == KeyModifiers::NONE;
+        let drag = match k.code {
+            KeyCode::Char('j' | 'J') if plain => Some(OutlineDirection::Down),
+            KeyCode::Char('k' | 'K') if plain => Some(OutlineDirection::Up),
+            KeyCode::Char('h' | 'H') if plain => Some(OutlineDirection::Left),
+            KeyCode::Char('l' | 'L') if plain => Some(OutlineDirection::Right),
+            KeyCode::Down if plain => Some(OutlineDirection::Down),
+            KeyCode::Up if plain => Some(OutlineDirection::Up),
+            KeyCode::Left if plain => Some(OutlineDirection::Left),
+            KeyCode::Right if plain => Some(OutlineDirection::Right),
+            _ => None,
+        };
+        if let Some(direction) = drag {
+            move_mode_step(app, ctx, direction);
+            return Action::Continue;
+        }
+        match k.code {
+            // `m` grabbed the block, so `m` puts it down again.
+            KeyCode::Esc | KeyCode::Enter => {
+                leave_move_mode(app, ctx);
+                return Action::Continue;
+            }
+            KeyCode::Char('m' | 'M') if plain => {
+                leave_move_mode(app, ctx);
+                return Action::Continue;
+            }
+            _ => leave_move_mode(app, ctx),
+        }
     }
 
     // ^g is a one-shot prefix: whatever follows is consumed, including Esc
@@ -5823,6 +6143,14 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 .map(|l| indent_of(&l.text).len())
                 .unwrap_or(0);
             enter_session(app, ctx, app.cursor, caret);
+        }
+
+        // ---- the sticky outline move mode (**m**ove) ----
+        // One block, dragged with plain keys for as long as it takes, then
+        // one commit. The modified arrows still do single steps from here
+        // and from EDIT; this is the route that needs no modifier at all.
+        (KeyCode::Char('m'), false) if k.modifiers == KeyModifiers::NONE => {
+            enter_move_mode(app, ctx)
         }
 
         // ---- render this page's missing web artifacts ----
@@ -7773,6 +8101,10 @@ fn remote_gate_clear(app: &App) -> bool {
     app.time.is_none()
         && app.inflight == 0
         && app.composing.is_none()
+        // A grabbed block is uncommitted local work exactly like a dirty
+        // caret line: installing someone else's page under it would drag
+        // the block against lines the reader never saw.
+        && app.move_mode.is_none()
         && !app.session.as_ref().map(|s| s.input.buf != s.orig).unwrap_or(false)
 }
 
@@ -8256,6 +8588,22 @@ fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
 /// - While the composer is open only the wheel works: the commented range
 ///   is pinned and a click must not rewrite it mid-typing.
 fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
+    // Clicking and dragging move the cursor and the selection, which are
+    // the move mode's own hands: let go of the block (committing the drag)
+    // before they mean something else.
+    //
+    // Only a BUTTON does that. Mouse capture asks for any-event tracking,
+    // so bare pointer motion arrives here too, and letting that go would
+    // mean a trackpad brushed in passing commits a half-finished drag and
+    // spends a set of line ids on it. The wheel only moves the viewport.
+    if app.move_mode.is_some()
+        && matches!(
+            m.kind,
+            MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_)
+        )
+    {
+        leave_move_mode(app, ctx);
+    }
     if app.index.is_some() {
         handle_mouse_index(app, ctx, m);
         return;
@@ -9193,7 +9541,11 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // 2 permanently blank.
     let visible_rows_top = view_top - 1;
     let visible_rows_bottom = view_top + band_h as i32 - 1;
-    let sel_range = app.selection.map(|s| s.range());
+    // The grabbed block wears the SAME highlight a selection does — it is
+    // the thing being carried around, which is what a selection means
+    // here. The footer says the mode and its keys in words, so this colour
+    // is never the only thing telling the reader what is going on.
+    let sel_range = move_block_range(app).or_else(|| app.selection.map(|s| s.range()));
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
     let mut carets: Vec<(u16, Style)> = Vec::new();
@@ -9767,8 +10119,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                        "            in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done"),
                     t!("            x 行/選択を削除 · ^e ページ全体を $EDITOR で編集 · コミットは自動",
                        "            x delete line/selection · ^e whole page in $EDITOR · commits are automatic"),
-                    t!("構造編集    Ctrl+←/→/↑/↓ 行・選択範囲 · Alt+←/→/↑/↓ ブロック",
-                       "outline     Ctrl+←/→/↑/↓ line/range · Alt+←/→/↑/↓ block"),
+                    t!("構造編集    m 移動モード（ブロックをつかむ）: j/k/↑↓ 兄弟 · h/l/←→ 字下げ · Esc/Enter/m 確定",
+                       "outline     m move mode (grab a block): j/k/↑↓ sibling · h/l/←→ indent · Esc/Enter/m commit"),
+                    t!("            Ctrl+←/→/↑/↓ 行・選択範囲 · Alt+←/→/↑/↓ ブロック",
+                       "            Ctrl+←/→/↑/↓ line/range · Alt+←/→/↑/↓ block"),
                     t!("            ^g h/j/k/l 行 左/下/上/右 · ^g H/J/K/L ブロック（選択中は不可）",
                        "            ^g h/j/k/l line left/down/up/right · ^g H/J/K/L block (no selection)"),
                     t!("取り消し    u 取り消し · ^r やり直し（どのコミットも戻せます）",
@@ -12566,6 +12920,25 @@ mod tests {
             handle_session_key(app, ctx, key(KeyCode::Char(ch)));
         }
     }
+    /// The page's source texts, for comparing one arrangement to another.
+    fn texts(app: &App) -> Vec<&str> {
+        app.lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    /// The page's line ids, in order.
+    fn ids(app: &App) -> Vec<&str> {
+        app.lines.iter().map(|line| line.id.as_str()).collect()
+    }
+
+    /// The same two readings, for a remembered set of lines.
+    fn texts_of(lines: &[PageLine]) -> Vec<&str> {
+        lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn ids_of(lines: &[PageLine]) -> Vec<&str> {
+        lines.iter().map(|line| line.id.as_str()).collect()
+    }
+
     /// Drain the (unspawned) commit queue: (label, ops) per job.
     fn drain_jobs(app: &mut App) -> Vec<(String, Vec<EditOp>)> {
         let rx = app.commit_jobs_rx.as_ref().unwrap();
@@ -12819,6 +13192,628 @@ mod tests {
             app.status
         );
         assert!(drain_jobs(&mut app).is_empty(), "an ancestor is not moved");
+    }
+
+    // ---- the sticky move mode (NOTE-outline-editing.md §移動モード) --------
+
+    /// `m` grabs a block, so it needs everything an outline action needs.
+    /// Each refusal says which one is missing, and none of them starts the
+    /// mode.
+    #[test]
+    fn move_mode_refuses_to_start_wherever_an_outline_action_would() {
+        let ctx = test_ctx();
+
+        let mut app = page(&["title", " one"]);
+        app.cursor = 0;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("タイトル行"), "status: {}", app.status);
+
+        // A related row below the body is not a source line.
+        let mut app = page(&["title", " one"]);
+        app.cursor = app.lines.len();
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("ソース行"), "status: {}", app.status);
+
+        // A page that does not exist yet has nothing to commit against.
+        let mut app = page_uncreated(&["title", " one"]);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("未作成"), "status: {}", app.status);
+
+        let mut app = page(&["title", " one"]);
+        app.cursor = 1;
+        in_history(&mut app);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("履歴を表示中"), "status: {}", app.status);
+
+        let mut app = page(&["title", " one"]);
+        app.cursor = 1;
+        app.editable = false;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("編集権限"), "status: {}", app.status);
+
+        // One structural action at a time: the outstanding one has the only
+        // snapshot to roll back to.
+        let mut app = page(&["title", " one", " two"]);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, modified(KeyCode::Down, KeyModifiers::CONTROL));
+        assert!(app.outline_pending.is_some());
+        drain_jobs(&mut app);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("完了待ち"), "status: {}", app.status);
+        assert!(drain_jobs(&mut app).is_empty());
+
+        // A landed action whose ids we no longer trust: reopen the page.
+        let mut app = page(&["title", " one"]);
+        app.cursor = 1;
+        app.outline_refresh_needed = true;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert!(app.status.contains("開き直して"), "status: {}", app.status);
+        assert!(drain_jobs(&mut app).is_empty());
+    }
+
+    /// Inside the mode nothing leaves the machine: the same line values are
+    /// carried around, so every id survives the whole drag, and the rest of
+    /// the editor waits exactly as it does for a dirty caret line.
+    /// A held block is visible, so the arrows a reader reaches for must
+    /// drag it rather than silently drop it and move the cursor. `m` puts
+    /// it down again, because `m` is what picked it up.
+    #[test]
+    fn bare_arrows_drag_the_block_and_m_puts_it_down() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three"]);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+
+        handle_key(&mut app, &ctx, key(KeyCode::Down));
+        assert_eq!(texts(&app), vec!["title", "two", "one", "three"]);
+        assert!(app.move_mode.is_some(), "the arrow drags, it does not let go");
+        assert!(drain_jobs(&mut app).is_empty(), "still local");
+
+        handle_key(&mut app, &ctx, key(KeyCode::Right));
+        assert_eq!(texts(&app), vec!["title", "two", " one", "three"]);
+        handle_key(&mut app, &ctx, key(KeyCode::Left));
+        handle_key(&mut app, &ctx, key(KeyCode::Up));
+        assert_eq!(texts(&app), vec!["title", "one", "two", "three"], "back home");
+        assert!(app.move_mode.is_some());
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none(), "m lets go");
+        assert!(drain_jobs(&mut app).is_empty(), "nothing changed, nothing sent");
+        assert_eq!(app.cursor, 1, "the cursor stayed on the block");
+    }
+
+    #[test]
+    fn move_mode_steps_are_local_and_keep_every_line_id() {
+        let ctx = test_ctx();
+        let mut app = page(&[
+            "title",
+            " parent",
+            "  first",
+            "   child",
+            "  second",
+            " next-parent",
+        ]);
+        app.cursor = 2;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert_eq!(
+            move_block_range(&app),
+            Some((2, 3)),
+            "the grabbed block is what the screen highlights"
+        );
+        let footer = app.hint_text(&[]);
+        assert!(footer.contains("MOVE"), "footer: {footer}");
+        assert!(footer.contains("j/k") && footer.contains("h/l") && footer.contains("Esc/Enter"));
+        assert!(
+            !remote_gate_clear(&app),
+            "remote edits wait, exactly as they do for a dirty line"
+        );
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+        assert_eq!(
+            texts(&app),
+            vec![
+                "title",
+                " parent",
+                "  second",
+                "   first",
+                "    child",
+                " next-parent"
+            ]
+        );
+        assert_eq!(
+            ids(&app),
+            vec!["id0", "id1", "id4", "id2", "id3", "id5"],
+            "reordering carries the very same lines"
+        );
+        assert_eq!(move_block_range(&app), Some((3, 4)));
+        assert!(app.undo_stack.is_empty(), "a step is not a commit");
+        assert!(app.outline_pending.is_none());
+        assert_eq!(app.inflight, 0);
+        assert!(drain_jobs(&mut app).is_empty(), "and nothing left the machine");
+
+        // While the block is in hand, other mutations wait their turn.
+        let id = app.lines[1].id.clone();
+        do_edit(
+            &mut app,
+            &ctx,
+            "rapid edit",
+            vec![EditOp::Replace { id, text: "changed".into() }],
+        );
+        assert_eq!(app.lines[1].text, " parent");
+        assert!(app.status.contains("移動モード中"), "status: {}", app.status);
+        assert!(drain_jobs(&mut app).is_empty());
+    }
+
+    /// The block being carried is marked on screen the way a selection is:
+    /// the same highlight, on every line of it. (The mode's name and its
+    /// keys are in the footer, so this colour never carries the news
+    /// alone.)
+    #[test]
+    fn the_grabbed_block_is_marked_like_a_selection() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", " parent", "  first", "   child", "  second"]);
+        app.cursor = 2;
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let highlighted = |app: &mut App, term: &mut Terminal<TestBackend>| -> usize {
+            term.draw(|f| ui(f, app, &ctx)).unwrap();
+            let x = app.text_rect.x;
+            let buf = term.backend().buffer().clone();
+            (0..buf.area.height)
+                .filter(|&y| buf.cell((x, y)).map(|cell| cell.bg == SEL_BG).unwrap_or(false))
+                .count()
+        };
+
+        let cursor_band = highlighted(&mut app, &mut term);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert_eq!(
+            highlighted(&mut app, &mut term),
+            cursor_band + 1,
+            "the grabbed child line is marked next to the cursor line"
+        );
+
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert_eq!(
+            highlighted(&mut app, &mut term),
+            cursor_band,
+            "and the mark goes when the block is let go"
+        );
+    }
+
+    /// Depth-only drags keep the lines they are about: `Replace` per line,
+    /// same ids, so permalinks and telomeres survive.
+    #[test]
+    fn an_indent_only_exit_replaces_the_block_and_keeps_its_ids() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " root", "  child", " peer"]);
+        app.cursor = 1;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+
+        assert!(app.move_mode.is_none());
+        assert_eq!(texts(&app), vec!["title", "  root", "   child", " peer"]);
+        assert_eq!(ids(&app), vec!["id0", "id1", "id2", "id3"]);
+        assert_eq!(app.cursor, 1);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "one drag, one commit");
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Replace { id: a, text: at }, EditOp::Replace { id: b, text: bt }]
+                if a == "id1" && at == "  root" && b == "id2" && bt == "   child"),
+            "ops: {:?}",
+            jobs[0].1
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.outline_pending.is_some(), "and it uses the structural gate");
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// A drag that changed the block's POSITION is saved the way cosense
+    /// itself saves one: the block's own lines are deleted and re-inserted
+    /// with fresh ids at the anchor it ended up in front of. Everything it
+    /// passed keeps its id and its timestamps.
+    #[test]
+    fn a_positional_exit_recreates_only_the_block() {
+        let ctx = test_ctx();
+        let mut app = page(&[
+            "title",
+            " parent",
+            "  first",
+            "   child",
+            "  second",
+            " next-parent",
+        ]);
+        app.lines[4].created = 40;
+        app.lines[4].updated = 41;
+        app.cursor = 2;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Enter));
+
+        assert!(app.move_mode.is_none(), "Enter commits the drag too");
+        assert_eq!(
+            texts(&app),
+            vec![
+                "title",
+                " parent",
+                "  second",
+                "  first",
+                "   child",
+                " next-parent"
+            ]
+        );
+        assert_eq!(
+            (app.lines[2].id.as_str(), app.lines[2].created, app.lines[2].updated),
+            ("id4", 40, 41),
+            "the sibling it passed is not rewritten"
+        );
+        assert_eq!(app.lines[5].id, "id5");
+        assert_ne!(app.lines[3].id, "id2");
+        assert_ne!(app.lines[4].id, "id3");
+        assert_eq!(app.cursor, 3, "the cursor rides the block it moved");
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Delete { id: a }, EditOp::Delete { id: b }, EditOp::Insert { anchor, lines }]
+                if a == "id2"
+                    && b == "id3"
+                    && anchor == "id5"
+                    && lines.iter().map(|(_, text)| text.as_str()).collect::<Vec<_>>()
+                        == vec!["  first", "   child"]),
+            "ops: {:?}",
+            jobs[0].1
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// A block put back where it started is not an edit. Nothing is sent,
+    /// no id is burned, and there is nothing to undo.
+    #[test]
+    fn a_block_brought_home_commits_nothing() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b"]);
+        app.cursor = 1;
+        let before = app.lines.clone();
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        for step in ['j', 'k', 'l', 'h'] {
+            handle_key(&mut app, &ctx, key(KeyCode::Char(step)));
+        }
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+
+        assert!(app.move_mode.is_none());
+        assert_eq!(texts(&app), texts_of(&before));
+        assert_eq!(ids(&app), ids_of(&before));
+        assert!(app.undo_stack.is_empty());
+        assert!(app.outline_pending.is_none());
+        assert_eq!(app.inflight, 0);
+        assert!(drain_jobs(&mut app).is_empty());
+        assert!(app.status.contains("変更なし"), "status: {}", app.status);
+    }
+
+    /// The point of the mode: however many presses it took, `u` is one
+    /// press back.
+    #[test]
+    fn one_undo_reverses_a_whole_drag() {
+        let ctx = test_ctx();
+        let mut app = page(&[
+            "title",
+            " parent",
+            "  first",
+            "   child",
+            "  second",
+            "  third",
+            " next-parent",
+        ]);
+        app.cursor = 2;
+        let original: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+
+        assert_eq!(
+            texts(&app),
+            vec![
+                "title",
+                " parent",
+                "  second",
+                "  third",
+                "  first",
+                "   child",
+                " next-parent"
+            ]
+        );
+        assert_eq!(drain_jobs(&mut app).len(), 1, "two presses, one commit");
+        assert_eq!(app.undo_stack.len(), 1);
+        finish_outline(&mut app, &ctx);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('u')));
+        assert_eq!(texts(&app), original.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(app.undo_stack.is_empty(), "one press put the whole drag back");
+        assert_eq!(drain_jobs(&mut app).len(), 1);
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// The screen must never keep what the server refused. A rejected drag
+    /// — failure or conflict — leaves the page as it was before `m`.
+    #[test]
+    fn a_refused_drag_restores_the_pre_mode_page() {
+        for conflict in [false, true] {
+            let ctx = offline_ctx();
+            let mut app = page(&["title", " parent", "  first", "   child", "  second"]);
+            app.cursor = 2;
+            let before = app.lines.clone();
+
+            handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+            handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+            handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+            handle_key(&mut app, &ctx, key(KeyCode::Esc));
+            assert_ne!(texts(&app), texts_of(&before));
+            drain_jobs(&mut app);
+
+            let job = outline_job(&app);
+            let outcome = if conflict {
+                CommitOutcome::Conflict { job }
+            } else {
+                CommitOutcome::Failed {
+                    job,
+                    label: "outline move".into(),
+                    msg: "500".into(),
+                }
+            };
+            handle_commit_outcome(&mut app, &ctx, outcome);
+
+            assert_eq!(texts(&app), texts_of(&before), "the drag is gone");
+            assert_eq!(ids(&app), ids_of(&before));
+            assert_eq!(app.cursor, 2);
+            assert!(app.move_mode.is_none());
+            assert!(app.outline_pending.is_none());
+            assert_eq!(app.inflight, 0);
+            assert!(
+                app.status.contains("アウトライン操作に失敗"),
+                "status: {}",
+                app.status
+            );
+        }
+    }
+
+    /// The reader grabbed two lines. Outdenting makes the lines below read
+    /// as their children, and the grab still holds exactly those two — so
+    /// `j` steps over one of them per press. This is the route out of a
+    /// list: `h` → `j` → `l`.
+    #[test]
+    fn the_grabbed_block_carries_out_of_the_list_after_an_outdent() {
+        let ctx = test_ctx();
+        let mut app = page(&[
+            "title",
+            " parent",
+            "  first",
+            "   child",
+            "  second",
+            " next-parent",
+        ]);
+        app.cursor = 2;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('h')));
+        assert_eq!(
+            texts(&app),
+            vec![
+                "title",
+                " parent",
+                " first",
+                "  child",
+                "  second",
+                " next-parent"
+            ]
+        );
+        assert_eq!(
+            move_block_range(&app),
+            Some((2, 3)),
+            "indentation cannot grow the grab"
+        );
+
+        // `j` clears the line that now reads as a child, in one press.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(
+            texts(&app),
+            vec![
+                "title",
+                " parent",
+                "  second",
+                " first",
+                "  child",
+                " next-parent"
+            ]
+        );
+        assert_eq!(move_block_range(&app), Some((3, 4)), "still the same two lines");
+        assert!(app.hint_text(&[]).contains("MOVE"), "the mode is still up");
+
+        // And `l` puts it under the next parent — out of the list it
+        // started in, which is the whole point of the three presses.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+        assert_eq!(
+            texts(&app),
+            vec![
+                "title",
+                " parent",
+                "  second",
+                " next-parent",
+                "  first",
+                "   child"
+            ]
+        );
+        assert!(drain_jobs(&mut app).is_empty(), "every press was local");
+
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Delete { id: a }, EditOp::Delete { id: b }, EditOp::Insert { anchor, lines }]
+                if a == "id2" && b == "id3" && anchor == "_end"
+                    && lines.iter().map(|(_, t)| t.as_str()).eq(["  first", "   child"])),
+            "one commit recreates only the grabbed lines, at the end: {:?}",
+            jobs[0].1
+        );
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// Nothing in the mode can lose the grabbed lines, so if they are gone
+    /// the page has drifted: the pre-grab arrangement goes back rather than
+    /// leaving a half-dragged order that exists nowhere but the screen.
+    #[test]
+    fn a_lost_block_restores_the_arrangement_from_before_the_grab() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b", " c"]);
+        app.cursor = 1;
+        let before: Vec<(String, String)> =
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(texts(&app), vec!["title", " b", " a", " c"]);
+
+        // Only something outside the mode could do this.
+        app.lines.retain(|line| line.id != "id1");
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+
+        assert!(app.move_mode.is_none());
+        assert_eq!(
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
+            before,
+            "the arrangement from before the grab"
+        );
+        assert!(app.web_unsynced, "and the disagreement is recorded");
+        assert!(drain_jobs(&mut app).is_empty(), "nothing was sent");
+        assert!(app.status.contains("つかむ前の並び"), "status: {}", app.status);
+    }
+
+    /// Caps lock, or the habit of the `^g H/J/K/L` block bindings, must not
+    /// commit a half-finished drag. A paste is not a move key, so it lets
+    /// go first like every other key.
+    #[test]
+    fn shifted_move_keys_drag_and_a_paste_lets_go_first() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b"]);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        assert_eq!(texts(&app), vec!["title", " b", " a"]);
+        assert!(app.move_mode.is_some(), "Shift+j drags");
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        assert_eq!(texts(&app), vec!["title", " b", "  a"]);
+        assert!(app.move_mode.is_some());
+        assert!(drain_jobs(&mut app).is_empty(), "still local");
+
+        handle_paste(&mut app, &ctx, "pasted");
+        assert!(app.move_mode.is_none(), "the paste let go of the block");
+        assert_eq!(drain_jobs(&mut app).len(), 1, "and the drag went out as one commit");
+        // And the paste itself was handled, not swallowed: in READ it
+        // points at the edit keys, which is what it does without a drag.
+        assert!(app.status.contains("貼り付けは編集中に"), "status: {}", app.status);
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// Mouse capture asks the terminal for any-event tracking, so bare
+    /// pointer motion reaches the handler. A trackpad brushed in passing
+    /// must not commit a half-finished drag; a button still lets go.
+    #[test]
+    fn pointer_motion_does_not_let_go_of_the_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b"]);
+        app.cursor = 1;
+        app.rebuild(40);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+
+        let event = |kind| MouseEvent { kind, column: 6, row: 3, modifiers: KeyModifiers::NONE };
+        handle_mouse(&mut app, &ctx, event(MouseEventKind::Moved));
+        assert!(app.move_mode.is_some(), "motion is not an action");
+        handle_mouse(&mut app, &ctx, event(MouseEventKind::ScrollDown));
+        assert!(app.move_mode.is_some(), "and the wheel only moves the viewport");
+        assert!(drain_jobs(&mut app).is_empty(), "nothing was sent");
+
+        handle_mouse(&mut app, &ctx, event(MouseEventKind::Down(MouseButton::Left)));
+        assert!(app.move_mode.is_none(), "a button does let go");
+        assert_eq!(drain_jobs(&mut app).len(), 1);
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// A selection is a range the reader chose by hand, and the drag would
+    /// have to drop it: `m` refuses while one is open, the same answer the
+    /// Alt and ^g block bindings give.
+    #[test]
+    fn a_selection_refuses_the_grab_rather_than_losing_it() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b"]);
+        app.cursor = 1;
+        app.selection = Some(Selection { anchor: 1, cursor: 2 });
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert!(app.move_mode.is_none());
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)), "kept as it was");
+        assert!(app.status.contains("選択中"), "status: {}", app.status);
+        assert!(drain_jobs(&mut app).is_empty());
+    }
+
+    /// The cursor is on the block, not on a line number: it follows the
+    /// block by id while dragging, and follows the fresh id the commit
+    /// gives it.
+    #[test]
+    fn the_cursor_rides_the_moved_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b"]);
+        app.cursor = 1;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(texts(&app), vec!["title", " b", " a"]);
+        assert_eq!(app.cursor, 2);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert_eq!(texts(&app), vec!["title", " b", " a"]);
+        assert_eq!(app.cursor, 2, "and the new id is where it sits");
+        assert_eq!(app.lines[1].id, "id2");
+        assert_ne!(app.lines[2].id, "id1");
+        assert_eq!(drain_jobs(&mut app).len(), 1);
+        finish_outline(&mut app, &ctx);
+    }
+
+    /// Anything that is not a move key lets go of the block FIRST: the drag
+    /// is committed, and only then does the key do its ordinary job. A page
+    /// can never change under a block still being carried.
+    #[test]
+    fn leaving_the_page_lets_go_of_the_block_first() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " a", " b"]);
+        app.cursor = 1;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('[')));
+
+        assert!(app.move_mode.is_none(), "the drag committed before anything moved");
+        assert_eq!(texts(&app), vec!["title", " b", " a"]);
+        assert_eq!(drain_jobs(&mut app).len(), 1);
+        assert!(app.outline_pending.is_some());
+        finish_outline(&mut app, &ctx);
     }
 
     #[test]
@@ -13821,7 +14816,9 @@ mod tests {
         assert!(app.status.contains("copied"), "status: {}", app.status);
 
         app.overlay = Some(Overlay::Help);
-        let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        // Tall enough for every help line, diagram notes included: the
+        // panel clips from the bottom, and this test reads the whole list.
+        let mut t = Terminal::new(TestBackend::new(100, 34)).unwrap();
         t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let screen: String = {
             let buf = t.backend().buffer().clone();
@@ -13842,6 +14839,42 @@ mod tests {
         assert!(screen.contains("^u/^d · PgUp/PgDn"));
 
         cosense::lang::set_for_thread(cosense::lang::Lang::Ja);
+    }
+
+    /// Eyeball the move mode: the grabbed block wears the selection
+    /// highlight and the footer names the mode and its keys.
+    #[test]
+    #[ignore]
+    fn move_mode_screen_dump() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&[
+            "アウトライン編集の実験",
+            "はじめに",
+            " 前提を書く",
+            "  さらに細かい話",
+            "本文",
+            " 具体例",
+        ]);
+        app.cursor = 2;
+        app.rebuild(72);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        println!("status: {}", app.status);
+        let mut t = Terminal::new(TestBackend::new(72, 14)).unwrap();
+        t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = t.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                let cell = buf.cell((x, y)).unwrap();
+                row.push_str(cell.symbol());
+            }
+            let held = (0..buf.area.width)
+                .any(|x| buf.cell((x, y)).map(|c| c.bg == SEL_BG).unwrap_or(false));
+            // "HELD" marks the rows carrying the grabbed block's highlight.
+            println!("{}|{row}|", if held { "HELD" } else { "    " });
+        }
     }
 
     /// Eyeball the help and footer: prints the drawn screen so the mixed
