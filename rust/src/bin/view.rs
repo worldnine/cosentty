@@ -657,8 +657,9 @@ impl HeaderColors {
     }
 }
 
+/// The pre-action model one structural action can be rolled back to.
 #[derive(Clone)]
-struct OutlinePending {
+struct OutlineSnapshot {
     project: String,
     page_id: String,
     /// Page-install generation, not the commit-queue generation. Navigating
@@ -671,6 +672,16 @@ struct OutlinePending {
     undo_stack: Vec<(String, Vec<EditOp>)>,
     redo_stack: Vec<(String, Vec<EditOp>)>,
     history_dropped: bool,
+}
+
+/// The one outstanding structural action: which commit job decides its
+/// fate, and what to put back if that job does not land. The job id is what
+/// identifies the outcome — ordering and in-flight counts cannot, because
+/// an ordinary commit may still be on its way when the action starts.
+#[derive(Clone)]
+struct OutlinePending {
+    job: CommitJobId,
+    snapshot: OutlineSnapshot,
 }
 
 struct App {
@@ -880,6 +891,9 @@ struct App {
     commit_res_tx: mpsc::Sender<CommitOutcome>,
     /// Jobs sent but not yet answered (quit flushes until 0).
     inflight: usize,
+    /// Next commit-job id. Monotonic for the life of the process, so an
+    /// outcome can always be traced back to the job that produced it.
+    next_job_id: CommitJobId,
     /// Commit ids this viewer wrote, newest last. Their websocket echoes
     /// carry ops we have already applied locally — and may arrive AFTER we
     /// have edited past them, in which case applying the ops again would
@@ -1128,9 +1142,14 @@ impl EditSession {
     }
 }
 
-/// One queued commit for the serial background worker. `gen` invalidates
-/// jobs queued before a conflict reload (their base state is gone).
+/// Identifies one queued commit for its whole life, outcome included.
+type CommitJobId = u64;
+
+/// One queued commit for the serial background worker. `id` names this job
+/// so its outcome can be recognised; `gen` invalidates jobs queued before a
+/// conflict reload (their base state is gone).
 struct CommitJob {
+    id: CommitJobId,
     gen: u64,
     project: String,
     page_id: String,
@@ -1138,15 +1157,29 @@ struct CommitJob {
     ops: Vec<EditOp>,
 }
 
-/// What a commit attempt came back with.
+/// What a commit attempt came back with. Every variant carries the id of
+/// the job it answers: outcomes arrive one at a time but jobs are queued
+/// freely, so nothing about arrival order says which job an outcome is for.
 enum CommitOutcome {
     /// `commit_id` is the id the server gave this commit — the name our
     /// own edit will come back under on the websocket (see
     /// `App::own_commits`).
-    Done { label: String, title: String, commit_id: String },
-    Conflict,
-    Skipped,
-    Failed { label: String, msg: String },
+    Done { job: CommitJobId, label: String, title: String, commit_id: String },
+    Conflict { job: CommitJobId },
+    Skipped { job: CommitJobId },
+    Failed { job: CommitJobId, label: String, msg: String },
+}
+
+impl CommitOutcome {
+    /// The job this outcome answers.
+    fn job(&self) -> CommitJobId {
+        match self {
+            CommitOutcome::Done { job, .. }
+            | CommitOutcome::Conflict { job }
+            | CommitOutcome::Skipped { job }
+            | CommitOutcome::Failed { job, .. } => *job,
+        }
+    }
 }
 
 /// A freshly polled page: how web-side edits reach the screen (~3 s).
@@ -1266,8 +1299,9 @@ fn spawn_commit_worker(
 ) {
     std::thread::spawn(move || {
         while let Ok(job) = jobs.recv() {
+            let id = job.id;
             if job.gen < gen.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = out.send(CommitOutcome::Skipped);
+                let _ = out.send(CommitOutcome::Skipped { job: id });
                 continue;
             }
             let res = client
@@ -1275,12 +1309,13 @@ fn spawn_commit_worker(
                 .and_then(|p| client.submit_edit(&job.project, &p.preview_id));
             let outcome = match res {
                 Ok(c) => CommitOutcome::Done {
+                    job: id,
                     label: job.label,
                     title: c.title,
                     commit_id: c.commit_id,
                 },
-                Err(EditError::NotFastForward) => CommitOutcome::Conflict,
-                Err(e) => CommitOutcome::Failed { label: job.label, msg: e.to_string() },
+                Err(EditError::NotFastForward) => CommitOutcome::Conflict { job: id },
+                Err(e) => CommitOutcome::Failed { job: id, label: job.label, msg: e.to_string() },
             };
             let _ = out.send(outcome);
         }
@@ -1422,6 +1457,7 @@ impl App {
             commit_jobs_rx: Some(commit_jobs_rx),
             commit_res_tx,
             inflight: 0,
+            next_job_id: 1,
             own_commits: std::collections::VecDeque::new(),
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
@@ -5462,8 +5498,8 @@ fn outline_mutation_blocked(app: &mut App) -> bool {
     false
 }
 
-fn outline_snapshot(app: &App) -> OutlinePending {
-    OutlinePending {
+fn outline_snapshot(app: &App) -> OutlineSnapshot {
+    OutlineSnapshot {
         project: app.project.clone(),
         page_id: app.page_id.clone(),
         install_gen: app.gen_now(),
@@ -5476,7 +5512,7 @@ fn outline_snapshot(app: &App) -> OutlinePending {
     }
 }
 
-fn restore_outline_snapshot(app: &mut App, snapshot: &OutlinePending) {
+fn restore_outline_snapshot(app: &mut App, snapshot: &OutlineSnapshot) {
     app.lines = snapshot.lines.clone();
     app.cursor = snapshot.cursor;
     app.selection = snapshot.selection;
@@ -5504,17 +5540,11 @@ fn outline_error(app: &mut App, error: PlanError) {
 /// Lower one pure outline plan into the existing edit queue. Replacements
 /// keep IDs. Moves delete and recreate only the user's target.
 fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: OutlineDirection) {
-    // With no older outcome outstanding, the next commit result can only
-    // belong to this outline action. That lets one small gate identify Done,
-    // Failed, and Conflict without labels or timing guesses.
+    // An ordinary commit may still be in flight: the gate waits for its own
+    // job id, and the serial worker keeps the ops in order. Only a second
+    // structural action has to wait, because there is one snapshot to roll
+    // back to and one gate to release.
     if outline_mutation_blocked(app) {
-        return;
-    }
-    if app.inflight != 0 {
-        app.status = t!(
-            "送信中の編集が完了してからアウトライン操作してください",
-            "wait for the current edit to finish before an outline action"
-        );
         return;
     }
     if app.web_unsynced {
@@ -5600,15 +5630,14 @@ fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: OutlineDirecti
     };
 
     let snapshot = outline_snapshot(app);
-    do_edit(app, ctx, &label, ops);
-    if app.inflight == 1 {
-        app.outline_pending = Some(snapshot);
+    if let Some(job) = do_edit(app, ctx, &label, ops) {
+        app.outline_pending = Some(OutlinePending { job, snapshot });
         app.follow = true;
         app.status = done;
     } else {
-        // The worker disappeared before accepting the only structural job.
-        // Put the clean pre-action model back immediately; an optimistic
-        // move must never become a screen-only fact.
+        // The worker never took the structural job. Put the clean
+        // pre-action model back immediately; an optimistic move must never
+        // become a screen-only fact.
         restore_outline_snapshot(app, &snapshot);
         rerender(app, ctx);
     }
@@ -6125,9 +6154,11 @@ fn apply_move_rebase(app: &mut App, ops: &[EditOp], rebase: MoveRebase) -> bool 
 
 /// Apply `ops` locally, push their inverse onto the undo stack, and queue
 /// the background commit. The single write path for every edit.
-fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
+/// Returns the commit job the edit was queued under, when it reached the
+/// worker at all (an uncreated page commits nothing yet; see below).
+fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) -> Option<CommitJobId> {
     if outline_mutation_blocked(app) || !ensure_editable(app) || ops.is_empty() {
-        return;
+        return None;
     }
     let inverse = invert_ops(&app.lines, &ops);
     let move_rebase = prepare_move_rebase(app, &ops);
@@ -6143,7 +6174,7 @@ fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
     // A fresh edit starts a fresh lineage: an older drop no longer
     // explains anything.
     app.history_dropped = false;
-    if page_is_uncreated(app) {
+    let job = if page_is_uncreated(app) {
         // Nothing to commit against yet. The edit lives locally and the
         // whole page goes up as one create instead — sending these ops
         // would need a pageId that does not exist. Once the create is out,
@@ -6152,10 +6183,12 @@ fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
         if app.create_state != CreateState::Sent {
             app.create_state = CreateState::Needed;
         }
+        None
     } else {
-        queue_commit(app, label, ops);
-    }
+        queue_commit(app, label, ops)
+    };
     rerender(app, ctx);
+    job
 }
 
 
@@ -6288,9 +6321,15 @@ fn dispatch_create(app: &mut App) {
     app.status = t!("ページを作成しています…", "creating the page…");
 }
 
-/// Send one commit job to the serial worker.
-fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
+/// Send one commit job to the serial worker. Returns the id the job was
+/// queued under, so a caller that has to recognise its own outcome (an
+/// outline action) can wait for that id and nothing else. `None` means the
+/// worker is gone and the edit never left the machine.
+fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) -> Option<CommitJobId> {
+    let id = app.next_job_id;
+    app.next_job_id += 1;
     let job = CommitJob {
+        id,
         gen: app.gen.load(std::sync::atomic::Ordering::SeqCst),
         project: app.project.clone(),
         page_id: app.page_id.clone(),
@@ -6299,11 +6338,13 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
     };
     if app.commit_tx.send(job).is_ok() {
         app.inflight += 1;
+        Some(id)
     } else {
         app.status = t!("コミット処理が停止しました — 編集はこの画面にしか残りません", "commit worker gone — edits are LOCAL ONLY");
         // The edit never left the machine: local lines and the server have
         // parted ways, and every diagram on the page must stay as source.
         app.mark_desynced();
+        None
     }
 }
 
@@ -6318,17 +6359,10 @@ fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
-    if structural && app.inflight != 0 {
-        app.status = t!(
-            "送信中の編集が完了してからアウトライン操作を取り消してください",
-            "wait for the current edit to finish before undoing an outline move"
-        );
-        return false;
-    }
-    if structural {
-        // Install the gate before changing either the page or its history.
-        app.outline_pending = Some(outline_snapshot(app));
-    }
+    // Capture the pre-action model before either the page or its history
+    // changes. An ordinary commit in flight is no obstacle: the gate below
+    // waits for this action's own job id.
+    let snapshot = structural.then(|| outline_snapshot(app));
 
     let (label, ops) = app.undo_stack.pop().expect("history was checked above");
     let redo = invert_ops(&app.lines, &ops);
@@ -6341,14 +6375,20 @@ fn undo(app: &mut App, ctx: &Ctx) -> bool {
     apply_ops(&mut app.lines, &ops);
     app.redo_stack.push((label.clone(), redo));
     let focus = edit_focus(&app.lines, &ops, &before);
-    queue_commit(app, &format!("undo {label}"), ops.clone());
-    rerender(app, ctx);
-    if structural && app.inflight != 1 {
-        let snapshot = app.outline_pending.take().expect("structural history installed a gate");
-        restore_outline_snapshot(app, &snapshot);
-        rerender(app, ctx);
-        return false;
+    let job = queue_commit(app, &format!("undo {label}"), ops.clone());
+    if let Some(snapshot) = snapshot {
+        match job {
+            Some(job) => app.outline_pending = Some(OutlinePending { job, snapshot }),
+            None => {
+                // The worker never took the structural job — nothing will
+                // ever answer for it, so undo the optimistic change now.
+                restore_outline_snapshot(app, &snapshot);
+                rerender(app, ctx);
+                return false;
+            }
+        }
     }
+    rerender(app, ctx);
     let seated = if let Some(selection) = replace_selection {
         // Horizontal outline changes keep every line and every endpoint.
         // The selection's cursor is the active end; focusing the first
@@ -6389,16 +6429,8 @@ fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
-    if structural && app.inflight != 0 {
-        app.status = t!(
-            "送信中の編集が完了してからアウトライン操作をやり直してください",
-            "wait for the current edit to finish before redoing an outline move"
-        );
-        return false;
-    }
-    if structural {
-        app.outline_pending = Some(outline_snapshot(app));
-    }
+    // As in `undo`: snapshot first, gate on this action's own job id.
+    let snapshot = structural.then(|| outline_snapshot(app));
 
     let (label, ops) = app.redo_stack.pop().expect("history was checked above");
     let undo_ops = invert_ops(&app.lines, &ops);
@@ -6411,14 +6443,18 @@ fn redo(app: &mut App, ctx: &Ctx) -> bool {
     apply_ops(&mut app.lines, &ops);
     app.undo_stack.push((label.clone(), undo_ops));
     let focus = edit_focus(&app.lines, &ops, &before);
-    queue_commit(app, &format!("redo {label}"), ops.clone());
-    rerender(app, ctx);
-    if structural && app.inflight != 1 {
-        let snapshot = app.outline_pending.take().expect("structural history installed a gate");
-        restore_outline_snapshot(app, &snapshot);
-        rerender(app, ctx);
-        return false;
+    let job = queue_commit(app, &format!("redo {label}"), ops.clone());
+    if let Some(snapshot) = snapshot {
+        match job {
+            Some(job) => app.outline_pending = Some(OutlinePending { job, snapshot }),
+            None => {
+                restore_outline_snapshot(app, &snapshot);
+                rerender(app, ctx);
+                return false;
+            }
+        }
     }
+    rerender(app, ctx);
     let seated = if let Some(selection) = replace_selection {
         app.selection = Some(selection);
         app.cursor = selection.cursor;
@@ -7493,7 +7529,7 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
 /// queued against it, and replace it with server truth. The pre-action
 /// snapshot is restored first, so even a failed reload cannot leave the
 /// outline move as a screen-only success.
-fn recover_outline_action(app: &mut App, ctx: &Ctx, pending: OutlinePending, reason: String) {
+fn recover_outline_action(app: &mut App, ctx: &Ctx, pending: OutlineSnapshot, reason: String) {
     recover_outline_action_with(app, ctx, pending, reason, reload_page);
 }
 
@@ -7502,7 +7538,7 @@ fn recover_outline_action(app: &mut App, ctx: &Ctx, pending: OutlinePending, rea
 fn recover_outline_action_with(
     app: &mut App,
     ctx: &Ctx,
-    pending: OutlinePending,
+    pending: OutlineSnapshot,
     reason: String,
     reload: impl FnOnce(&mut App, &Ctx) -> bool,
 ) {
@@ -7571,14 +7607,21 @@ fn recover_outline_action_with(
 /// A commit came back from the worker (drained per frame).
 fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     app.inflight = app.inflight.saturating_sub(1);
+    // Take the structural gate only for the job it is actually waiting on.
+    // An ordinary commit may have been in flight when the action started, or
+    // been queued behind it, and either could come back first — arrival
+    // order says nothing about ownership, the job id does.
+    let outline = match app.outline_pending.as_ref() {
+        Some(pending) if pending.job == outcome.job() => {
+            app.outline_pending.take().map(|pending| pending.snapshot)
+        }
+        _ => None,
+    };
     match outcome {
-        CommitOutcome::Done { label, title, commit_id } => {
-            // An outline action only starts at inflight == 0 and gates every
-            // later mutation, so this next outcome cannot be an older edit.
+        CommitOutcome::Done { job: _, label, title, commit_id } => {
             // Navigation may still happen while the gate is up. In that case
             // this result belongs wholly to the old page: clearing the gate
             // is the only current-app state it may touch.
-            let outline = app.outline_pending.take();
             if let Some(pending) = outline.as_ref() {
                 let same_page = app.project == pending.project && app.page_id == pending.page_id;
                 let same_install = same_page && app.gen_now() == pending.install_gen;
@@ -7641,13 +7684,13 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
                 adopt_after_create(app, ctx);
             }
         }
-        CommitOutcome::Skipped => {
-            if let Some(pending) = app.outline_pending.take() {
+        CommitOutcome::Skipped { job: _ } => {
+            if let Some(pending) = outline {
                 recover_outline_action(app, ctx, pending, t!("処理が失効", "invalidated"));
             }
         }
-        CommitOutcome::Failed { label, msg } => {
-            if let Some(pending) = app.outline_pending.take() {
+        CommitOutcome::Failed { job: _, label, msg } => {
+            if let Some(pending) = outline {
                 recover_outline_action(
                     app,
                     ctx,
@@ -7664,8 +7707,8 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
                 }
             }
         }
-        CommitOutcome::Conflict => {
-            if let Some(pending) = app.outline_pending.take() {
+        CommitOutcome::Conflict { job: _ } => {
+            if let Some(pending) = outline {
                 recover_outline_action(app, ctx, pending, t!("競合", "conflict"));
             } else {
                 recover_conflict(app, ctx);
@@ -10077,7 +10120,7 @@ mod tests {
         app.render_policy = capability::RenderPolicy::Auto;
         app.rebuild(80);
         app.inflight = 1;
-        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict);
+        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict { job: UNRELATED_JOB });
         assert!(app.web_unsynced, "a failed recovery leaves us divergent");
         assert!(
             app.status.contains("読み直しに失敗"),
@@ -10122,7 +10165,12 @@ mod tests {
         handle_commit_outcome(
             &mut app,
             &ctx,
-            CommitOutcome::Done { label: "line 2".into(), title: String::new(), commit_id: String::new() },
+            CommitOutcome::Done {
+                job: UNRELATED_JOB,
+                label: "line 2".into(),
+                title: String::new(),
+                commit_id: String::new(),
+            },
         );
         apply_remote(&mut app, &ctx, in_flight);
         assert_eq!(app.lines[1].text, "mine", "the server has our commit; the snapshot predates it");
@@ -10143,7 +10191,7 @@ mod tests {
         handle_commit_outcome(
             &mut app,
             &ctx,
-            CommitOutcome::Failed { label: "line 2".into(), msg: "500".into() },
+            CommitOutcome::Failed { job: UNRELATED_JOB, label: "line 2".into(), msg: "500".into() },
         );
         assert!(app.web_unsynced, "the page is known to have drifted");
 
@@ -11510,7 +11558,7 @@ mod tests {
         handle_commit_outcome(
             &mut app,
             &ctx,
-            CommitOutcome::Failed { label: "line 4".into(), msg: "500".into() },
+            CommitOutcome::Failed { job: UNRELATED_JOB, label: "line 4".into(), msg: "500".into() },
         );
         assert_eq!(app.inflight, 0, "the job is no longer in flight…");
         assert!(app.web_unsynced, "…but the page is known to have drifted");
@@ -11527,7 +11575,12 @@ mod tests {
         handle_commit_outcome(
             &mut app,
             &ctx,
-            CommitOutcome::Done { label: "line 9".into(), title: String::new(), commit_id: String::new() },
+            CommitOutcome::Done {
+                job: UNRELATED_JOB,
+                label: "line 9".into(),
+                title: String::new(),
+                commit_id: String::new(),
+            },
         );
         assert!(app.web_unsynced, "one success does not prove the page agrees");
         app.start_web_renders(capability::Trigger::Auto);
@@ -12523,16 +12576,28 @@ mod tests {
         out
     }
 
+    /// An outcome for a commit no outline gate is waiting on. Real ids start
+    /// at 1, so this can never be mistaken for a queued job.
+    const UNRELATED_JOB: CommitJobId = 0;
+
+    /// Answer the commit the outstanding outline action is waiting on.
     fn finish_outline(app: &mut App, ctx: &Ctx) {
+        let job = outline_job(app);
         handle_commit_outcome(
             app,
             ctx,
             CommitOutcome::Done {
+                job,
                 label: "outline".into(),
                 title: String::new(),
                 commit_id: String::new(),
             },
         );
+    }
+
+    /// The job id the outstanding outline action is waiting on.
+    fn outline_job(app: &App) -> CommitJobId {
+        app.outline_pending.as_ref().expect("an outline action is outstanding").job
     }
 
     #[test]
@@ -12841,11 +12906,13 @@ mod tests {
         let current_lines: Vec<(String, String)> =
             app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
         let current_target = app.poll_target.lock().unwrap().clone();
+        let job = outline_job(&app);
 
         handle_commit_outcome(
             &mut app,
             &ctx,
             CommitOutcome::Done {
+                job,
                 label: "old outline".into(),
                 title: "old renamed title".into(),
                 commit_id: "old-commit".into(),
@@ -12886,11 +12953,13 @@ mod tests {
         app.status = "current visit".into();
         app.own_commits.push_back("current-echo".into());
         let epoch = app.server_epoch_now();
+        let job = outline_job(&app);
 
         handle_commit_outcome(
             &mut app,
             &ctx,
             CommitOutcome::Done {
+                job,
                 label: "old outline".into(),
                 title: "old title".into(),
                 commit_id: "old-commit".into(),
@@ -12934,42 +13003,122 @@ mod tests {
         assert!(app.status.contains("開き直して"));
     }
 
+    /// The gate waits for one job id, so an ordinary commit still on its way
+    /// to the server neither delays the action nor releases it. Order is the
+    /// serial worker's business, identity is the id's.
     #[test]
-    fn outline_waits_for_every_earlier_commit_outcome() {
+    fn outline_action_under_an_unrelated_commit_waits_for_its_own_outcome() {
         let ctx = test_ctx();
         let mut app = page(&["title", "one"]);
         app.cursor = 1;
-        app.inflight = 1;
+        let earlier = queue_commit(
+            &mut app,
+            "earlier edit",
+            vec![EditOp::Replace { id: "id0".into(), text: "title".into() }],
+        )
+        .expect("the worker took the ordinary job");
 
         handle_key(
             &mut app,
             &ctx,
             modified(KeyCode::Right, KeyModifiers::CONTROL),
         );
-        assert_eq!(app.lines[1].text, "one");
-        assert!(app.outline_pending.is_none());
-        assert!(drain_jobs(&mut app).is_empty());
+        assert_eq!(app.lines[1].text, " one", "the action starts under an in-flight commit");
+        let outline = outline_job(&app);
+        assert_ne!(outline, earlier);
+        assert_eq!(app.inflight, 2);
+        assert_eq!(drain_jobs(&mut app).len(), 2, "both jobs reached the serial worker");
 
         handle_commit_outcome(
             &mut app,
             &ctx,
             CommitOutcome::Done {
+                job: earlier,
                 label: "earlier edit".into(),
                 title: String::new(),
                 commit_id: String::new(),
             },
         );
         assert!(
-            app.outline_pending.is_none(),
-            "an unrelated outcome cannot release a gate that never started"
+            app.outline_pending.is_some(),
+            "an unrelated outcome cannot release the gate"
         );
+        assert_eq!(app.lines[1].text, " one");
+        assert!(!undo(&mut app, &ctx), "mutations stay blocked until the action lands");
+
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done {
+                job: outline,
+                label: "outline indent".into(),
+                title: String::new(),
+                commit_id: String::new(),
+            },
+        );
+        assert!(app.outline_pending.is_none(), "its own outcome completes it");
+        assert_eq!(app.inflight, 0);
+        assert!(undo(&mut app, &ctx), "the released gate lets history run again");
+        assert_eq!(app.lines[1].text, "one");
+    }
+
+    /// An outcome the gate does not own keeps its ordinary handling, and the
+    /// outline action is still decided by its own outcome afterwards.
+    #[test]
+    fn an_unrelated_failure_under_the_gate_keeps_its_own_handling() {
+        let ctx = offline_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.cursor = 1;
+        let original: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+        let earlier = queue_commit(
+            &mut app,
+            "earlier edit",
+            vec![EditOp::Replace { id: "id0".into(), text: "title".into() }],
+        )
+        .expect("the worker took the ordinary job");
+
         handle_key(
             &mut app,
             &ctx,
-            modified(KeyCode::Right, KeyModifiers::CONTROL),
+            modified(KeyCode::Down, KeyModifiers::CONTROL),
         );
-        assert_eq!(app.lines[1].text, " one");
-        assert!(app.outline_pending.is_some());
+        let outline = outline_job(&app);
+        let optimistic: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+        assert_ne!(optimistic, original);
+
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Failed {
+                job: earlier,
+                label: "earlier edit".into(),
+                msg: "500".into(),
+            },
+        );
+        assert!(app.web_unsynced, "the unrelated failure still marks the page divergent");
+        assert!(
+            app.status.contains("コミットに失敗"),
+            "the unrelated failure keeps its own status: {}",
+            app.status
+        );
+        assert!(app.outline_pending.is_some(), "and it does not touch the gate");
+        assert_eq!(
+            app.lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>(),
+            optimistic
+        );
+
+        handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict { job: outline });
+        assert!(app.outline_pending.is_none());
+        assert_eq!(
+            app.lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>(),
+            original,
+            "the rejected action is rolled back to the pre-action page"
+        );
+        assert!(
+            app.status.contains("アウトライン操作に失敗"),
+            "status: {}",
+            app.status
+        );
     }
 
     #[test]
@@ -12996,10 +13145,12 @@ mod tests {
                     .map(|line| line.text.clone())
                     .collect::<Vec<_>>()
             );
+            let job = outline_job(&app);
             let outcome = if conflict {
-                CommitOutcome::Conflict
+                CommitOutcome::Conflict { job }
             } else {
                 CommitOutcome::Failed {
+                    job,
                     label: "outline move".into(),
                     msg: "500".into(),
                 }
@@ -13066,10 +13217,12 @@ mod tests {
                 assert!(if back { undo(&mut app, &ctx) } else { redo(&mut app, &ctx) });
                 assert!(app.outline_pending.is_some(), "move history installs the structural gate");
                 assert_eq!(drain_jobs(&mut app).len(), 1);
+                let job = outline_job(&app);
                 let outcome = if conflict {
-                    CommitOutcome::Conflict
+                    CommitOutcome::Conflict { job }
                 } else {
                     CommitOutcome::Failed {
+                        job,
                         label: if back { "undo outline".into() } else { "redo outline".into() },
                         msg: "500".into(),
                     }
@@ -13093,7 +13246,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_undo_blocks_inflight_and_rapid_opposite_mutations() {
+    fn structural_undo_queues_under_an_unrelated_commit_and_blocks_opposite_mutations() {
         let ctx = test_ctx();
         let mut app = page(&["title", "one", "two", "tail"]);
         app.cursor = 1;
@@ -13105,19 +13258,33 @@ mod tests {
         drain_jobs(&mut app);
         finish_outline(&mut app, &ctx);
 
-        let moved: Vec<(String, String)> =
-            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
-        app.inflight = 1;
-        assert!(!undo(&mut app, &ctx), "structural history waits for older commits");
-        assert_eq!(
-            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
-            moved
-        );
-        assert!(app.outline_pending.is_none());
-        app.inflight = 0;
+        // An ordinary commit is on its way to the server. Structural history
+        // is queued behind it and gates on its own job id.
+        let earlier = queue_commit(
+            &mut app,
+            "earlier edit",
+            vec![EditOp::Replace { id: "id0".into(), text: "title".into() }],
+        )
+        .expect("the worker took the ordinary job");
+        drain_jobs(&mut app);
 
-        assert!(undo(&mut app, &ctx));
+        assert!(undo(&mut app, &ctx), "structural history no longer waits at the door");
         assert!(app.outline_pending.is_some());
+        assert_ne!(outline_job(&app), earlier);
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done {
+                job: earlier,
+                label: "earlier edit".into(),
+                title: String::new(),
+                commit_id: String::new(),
+            },
+        );
+        assert!(
+            app.outline_pending.is_some(),
+            "the older commit's outcome is not the one the gate waits for"
+        );
         let undone: Vec<(String, String)> =
             app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
         let stacks = (app.undo_stack.clone(), app.redo_stack.clone());
@@ -14969,6 +15136,7 @@ mod tests {
         // Even after it lands, further typing waits for the page to come
         // back with an id instead of creating a second one.
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Done {
+            job: UNRELATED_JOB,
             label: "ページの作成".into(),
             title: "new title".into(),
             commit_id: String::new(),
@@ -15067,6 +15235,7 @@ mod tests {
         drain_jobs(&mut app);
 
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Failed {
+            job: UNRELATED_JOB,
             label: "ページの作成".into(),
             msg: "500".into(),
         });
@@ -15692,7 +15861,12 @@ mod tests {
             handle_commit_outcome(
                 &mut app,
                 &ctx,
-                CommitOutcome::Done { label: "line".into(), title: String::new(), commit_id: "c1".into() },
+                CommitOutcome::Done {
+                    job: UNRELATED_JOB,
+                    label: "line".into(),
+                    title: String::new(),
+                    commit_id: "c1".into(),
+                },
             );
         }
 
@@ -15851,6 +16025,7 @@ mod tests {
                 &mut app,
                 &ctx,
                 CommitOutcome::Done {
+                    job: UNRELATED_JOB,
                     label: "line".into(),
                     title: String::new(),
                     commit_id: "c1".into(),
