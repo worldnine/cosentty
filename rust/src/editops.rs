@@ -168,18 +168,60 @@ pub fn apply_ops(lines: &mut Vec<PageLine>, ops: &[EditOp]) {
     }
 }
 
+/// Recognize the vertical-move lowering: a contiguous run is deleted and
+/// the same texts are inserted elsewhere with fresh IDs. Its inverse must
+/// move that same logical run, not rewrite the (possibly smaller) neighbor
+/// that happened to cross it.
+fn invert_move(lines: &[PageLine], ops: &[EditOp]) -> Option<Vec<EditOp>> {
+    let (last, deletes) = ops.split_last()?;
+    let EditOp::Insert { lines: inserted, .. } = last else { return None };
+    if deletes.len() != inserted.len() || deletes.is_empty() {
+        return None;
+    }
+    let ids: Vec<&str> = deletes
+        .iter()
+        .map(|op| match op {
+            EditOp::Delete { id } => Some(id.as_str()),
+            EditOp::Insert { .. } | EditOp::Replace { .. } => None,
+        })
+        .collect::<Option<_>>()?;
+    let start = lines.iter().position(|line| line.id == ids[0])?;
+    let source = lines.get(start..start + ids.len())?;
+    if source.iter().map(|line| line.id.as_str()).ne(ids.iter().copied())
+        || source.iter().map(|line| line.text.as_str()).ne(inserted.iter().map(|(_, text)| text.as_str()))
+        || inserted.iter().any(|(id, _)| lines.iter().any(|line| line.id == *id))
+    {
+        return None;
+    }
+
+    let anchor = lines
+        .get(start + source.len())
+        .map(|line| line.id.clone())
+        .unwrap_or_else(|| "_end".to_string());
+    let mut inverse: Vec<EditOp> = inserted
+        .iter()
+        .map(|(id, _)| EditOp::Delete { id: id.clone() })
+        .collect();
+    inverse.push(EditOp::insert(
+        anchor,
+        &source.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n"),
+    ));
+    Some(inverse)
+}
+
 /// The inverse of `ops` against the state `lines` (BEFORE applying), such
 /// that `apply(apply(lines, ops), invert_ops(lines, ops)) == lines` —
 /// textually; re-inserted lines get fresh ids, which is harmless.
 ///
-/// Implemented as `diff_to_ops(after, before)`: the undo program IS the
-/// minimal edit from the post-state back to the pre-state, computed by the
-/// same LCS engine that powers `^e` — one correctness story instead of a
-/// hand-rolled per-op inversion (which gets sibling-insert ordering wrong).
-/// Lines whose text survives keep their ids; in particular a replace
+/// Vertical moves are inverted as moves of the same logical source. Other
+/// edits use `diff_to_ops(after, before)`, the same LCS engine that powers
+/// `^e`. Lines whose text survives keep their ids; in particular a replace
 /// undoes to a replace on the SAME id, so permalinks survive undo. Redo is
 /// simply the inverse of the inverse.
 pub fn invert_ops(lines: &[PageLine], ops: &[EditOp]) -> Vec<EditOp> {
+    if let Some(inverse) = invert_move(lines, ops) {
+        return inverse;
+    }
     let before_texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
     let mut after = lines.to_vec();
     apply_ops(&mut after, ops);
@@ -394,6 +436,41 @@ mod tests {
         assert_eq!(texts(&lines), texts(&orig));
         apply_ops(&mut lines, &redo);
         assert_eq!(texts(&lines), after);
+    }
+
+    #[test]
+    fn move_undo_and_redo_recreate_only_the_moved_source() {
+        let orig = vec![
+            pl("t", "title"),
+            pl("a", "neighbor"),
+            pl("b", "root"),
+            pl("c", " child"),
+            pl("z", "after"),
+        ];
+        let moved = vec![("n1".into(), "root".into()), ("n2".into(), " child".into())];
+        let ops = vec![
+            EditOp::Delete { id: "b".into() },
+            EditOp::Delete { id: "c".into() },
+            EditOp::Insert { anchor: "a".into(), lines: moved },
+        ];
+
+        let undo = invert_ops(&orig, &ops);
+        assert!(matches!(&undo[0], EditOp::Delete { id } if id == "n1"));
+        assert!(matches!(&undo[1], EditOp::Delete { id } if id == "n2"));
+        assert!(matches!(&undo[2], EditOp::Insert { anchor, .. } if anchor == "z"));
+
+        let mut after = orig.clone();
+        apply_ops(&mut after, &ops);
+        let redo = invert_ops(&after, &undo);
+        apply_ops(&mut after, &undo);
+        assert_eq!(texts(&after), texts(&orig));
+        assert_eq!(after[1].id, "a", "the smaller neighbor kept its ID");
+        assert_eq!(after[4].id, "z", "the following line kept its ID");
+
+        apply_ops(&mut after, &redo);
+        assert_eq!(texts(&after), vec!["title", "root", " child", "neighbor", "after"]);
+        assert_eq!(after[3].id, "a", "redo still moves the user's target");
+        assert_eq!(after[4].id, "z");
     }
 
     #[test]

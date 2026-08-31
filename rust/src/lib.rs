@@ -8,6 +8,7 @@ pub mod image_fetch;
 pub mod index;
 pub mod lang;
 pub mod ime;
+pub mod outline;
 pub mod render;
 pub mod table;
 pub mod theme;

@@ -45,6 +45,7 @@ use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::image_fetch::ImageFetcher;
+use cosense::outline::{Destination, Direction as OutlineDirection, LineRange, Plan as OutlinePlan, PlanError, Scope as OutlineScope};
 use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::highlight::Highlighter;
 use cosense::render::{
@@ -656,6 +657,22 @@ impl HeaderColors {
     }
 }
 
+#[derive(Clone)]
+struct OutlinePending {
+    project: String,
+    page_id: String,
+    /// Page-install generation, not the commit-queue generation. Navigating
+    /// away and back to the same immutable page id is still a different
+    /// installation whose lines may predate this commit.
+    install_gen: u64,
+    lines: Vec<PageLine>,
+    cursor: usize,
+    selection: Option<Selection>,
+    undo_stack: Vec<(String, Vec<EditOp>)>,
+    redo_stack: Vec<(String, Vec<EditOp>)>,
+    history_dropped: bool,
+}
+
 struct App {
     mode: Mode,
     project: String,
@@ -783,6 +800,17 @@ struct App {
     composing: Option<Input>,
     comments: Vec<Comment>,
     status: String,
+    /// One-shot portable fallback for terminals that do not deliver
+    /// modified arrow keys. The next key is always consumed.
+    outline_prefix: bool,
+    /// Snapshot held while the one structural commit is outstanding. READ
+    /// remains navigable, but no second mutation may be based on its
+    /// optimistic line order until the server accepts or rejects it.
+    outline_pending: Option<OutlinePending>,
+    /// A structural commit succeeded after this installation was fetched,
+    /// but its authoritative refresh failed. The displayed line IDs are
+    /// unsafe edit targets until another page install replaces them.
+    outline_refresh_needed: bool,
 
     /// Back stack of visited places (`[`), and forward stack (`]`).
     history: Vec<Place>,
@@ -1352,6 +1380,9 @@ impl App {
             composing: None,
             comments: Vec::new(),
             status: String::new(),
+            outline_prefix: false,
+            outline_pending: None,
+            outline_refresh_needed: false,
             history: Vec::new(),
             forward: Vec::new(),
             overlay: None,
@@ -1468,6 +1499,8 @@ impl App {
     fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
         self.bump_server_epoch();
         self.time = None; // installing a live page always exits history
+        self.outline_prefix = false;
+        self.outline_refresh_needed = false;
         // A page install ends any edit session and cuts the undo lineage:
         // undo ops reference THIS page's line ids.
         self.session = None;
@@ -1973,6 +2006,12 @@ impl App {
     }
 
     fn hint_body(&self, cursor_links: &[LinkItem]) -> String {
+        if self.outline_prefix {
+            return t!(
+                "OUTLINE h/j/k/l 行 左/下/上/右 · H/J/K/L ブロック · Esc 取消",
+                "OUTLINE h/j/k/l line left/down/up/right · H/J/K/L block · Esc cancel"
+            );
+        }
         if let Some(s) = self.session.as_ref() {
             let dirty = s.input.buf != s.orig;
             return t!("{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了", "{}↑↓ move · Enter new line · ⌫@BOL join · Tab indent · Esc done",
@@ -5369,6 +5408,212 @@ fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     Action::Continue
 }
 
+/// Structural arrows use exact modifiers. This deliberately excludes
+/// Shift+Alt, Ctrl+Alt, and every other combination.
+fn outline_arrow(k: event::KeyEvent) -> Option<(bool, OutlineDirection)> {
+    let block = match k.modifiers {
+        KeyModifiers::CONTROL => false,
+        KeyModifiers::ALT => true,
+        _ => return None,
+    };
+    let direction = match k.code {
+        KeyCode::Left => OutlineDirection::Left,
+        KeyCode::Right => OutlineDirection::Right,
+        KeyCode::Up => OutlineDirection::Up,
+        KeyCode::Down => OutlineDirection::Down,
+        _ => return None,
+    };
+    Some((block, direction))
+}
+
+/// The portable ^g follow-up. Uppercase characters may arrive with or
+/// without an explicit SHIFT flag depending on the terminal protocol.
+fn outline_prefix_command(k: event::KeyEvent) -> Option<(bool, OutlineDirection)> {
+    let plain = k.modifiers == KeyModifiers::NONE;
+    let upper = plain || k.modifiers == KeyModifiers::SHIFT;
+    match k.code {
+        KeyCode::Char('h') if plain => Some((false, OutlineDirection::Left)),
+        KeyCode::Char('j') if plain => Some((false, OutlineDirection::Down)),
+        KeyCode::Char('k') if plain => Some((false, OutlineDirection::Up)),
+        KeyCode::Char('l') if plain => Some((false, OutlineDirection::Right)),
+        KeyCode::Char('H') if upper => Some((true, OutlineDirection::Left)),
+        KeyCode::Char('J') if upper => Some((true, OutlineDirection::Down)),
+        KeyCode::Char('K') if upper => Some((true, OutlineDirection::Up)),
+        KeyCode::Char('L') if upper => Some((true, OutlineDirection::Right)),
+        _ => None,
+    }
+}
+
+fn outline_mutation_blocked(app: &mut App) -> bool {
+    if app.outline_refresh_needed {
+        app.status = t!(
+            "アウトライン移動後の再読み込み待ち — ページを開き直してください",
+            "outline refresh required — reopen the page before editing"
+        );
+        return true;
+    }
+    if app.outline_pending.is_some() {
+        app.status = t!(
+            "アウトライン操作の完了待ち — 編集・取り消し・やり直しは待ってください",
+            "waiting for outline action — edit, undo, and redo are temporarily blocked"
+        );
+        return true;
+    }
+    false
+}
+
+fn outline_snapshot(app: &App) -> OutlinePending {
+    OutlinePending {
+        project: app.project.clone(),
+        page_id: app.page_id.clone(),
+        install_gen: app.gen_now(),
+        lines: app.lines.clone(),
+        cursor: app.cursor,
+        selection: app.selection,
+        undo_stack: app.undo_stack.clone(),
+        redo_stack: app.redo_stack.clone(),
+        history_dropped: app.history_dropped,
+    }
+}
+
+fn restore_outline_snapshot(app: &mut App, snapshot: &OutlinePending) {
+    app.lines = snapshot.lines.clone();
+    app.cursor = snapshot.cursor;
+    app.selection = snapshot.selection;
+    app.undo_stack = snapshot.undo_stack.clone();
+    app.redo_stack = snapshot.redo_stack.clone();
+    app.history_dropped = snapshot.history_dropped;
+}
+
+fn outline_error(app: &mut App, error: PlanError) {
+    app.status = match error {
+        PlanError::InvalidTarget => t!("カーソルの下にソース行がありません", "no source line under the cursor"),
+        PlanError::TitleProtected => t!("タイトル行はアウトライン操作できません", "the title line is protected"),
+        PlanError::CannotOutdent => t!(
+            "字下げを戻せません — 対象の全行に字下げが必要です",
+            "cannot outdent — every target line must be indented"
+        ),
+        PlanError::Boundary => t!("これ以上移動できません", "cannot move any farther"),
+        PlanError::NotSibling => t!(
+            "同じ親を持つ兄弟ブロックがありません",
+            "no sibling block with the same parent"
+        ),
+    };
+}
+
+/// Lower one pure outline plan into the existing edit queue. Replacements
+/// keep IDs. Moves delete and recreate only the user's target.
+fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: OutlineDirection) {
+    // With no older outcome outstanding, the next commit result can only
+    // belong to this outline action. That lets one small gate identify Done,
+    // Failed, and Conflict without labels or timing guesses.
+    if outline_mutation_blocked(app) {
+        return;
+    }
+    if app.inflight != 0 {
+        app.status = t!(
+            "送信中の編集が完了してからアウトライン操作してください",
+            "wait for the current edit to finish before an outline action"
+        );
+        return;
+    }
+    if app.web_unsynced {
+        app.status = t!(
+            "サーバーの内容を読み直すまでアウトライン操作できません",
+            "outline actions require a fresh server copy"
+        );
+        return;
+    }
+    if block && app.selection.is_some() {
+        app.status = t!(
+            "選択中はブロック操作できません — Esc で選択を解除",
+            "block actions are unavailable with a selection — Esc clears it"
+        );
+        return;
+    }
+    if app.time.is_some() {
+        app.status = t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)");
+        return;
+    }
+    if !ensure_editable(app) {
+        return;
+    }
+    if app.cursor >= app.lines.len() {
+        outline_error(app, PlanError::InvalidTarget);
+        return;
+    }
+    if page_is_uncreated(app) {
+        app.status = t!(
+            "未作成ページではアウトライン操作できません",
+            "outline actions are unavailable until the page is created"
+        );
+        return;
+    }
+
+    let scope = if block {
+        OutlineScope::Block(app.cursor)
+    } else {
+        let (start, end) = app.selection.map(|selection| selection.range()).unwrap_or((app.cursor, app.cursor));
+        OutlineScope::Lines(LineRange::new(start, end))
+    };
+    let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+    let plan = match cosense::outline::plan(&source, scope, direction) {
+        Ok(plan) => plan,
+        Err(error) => {
+            outline_error(app, error);
+            return;
+        }
+    };
+
+    let (label, done, ops) = match plan {
+        OutlinePlan::Replace { range, texts } => {
+            let ops = (range.start..=range.end)
+                .zip(texts)
+                .map(|(line, text)| EditOp::Replace { id: app.lines[line].id.clone(), text })
+                .collect();
+            (
+                t!("アウトラインの字下げ", "outline indent"),
+                t!("…字下げを保存中", "…saving indentation"),
+                ops,
+            )
+        }
+        OutlinePlan::Move { range, destination, destination_start: _ } => {
+            let anchor = match destination {
+                Destination::Before(line) => app.lines[line].id.clone(),
+                Destination::End => "_end".to_string(),
+            };
+            let inserted: Vec<(String, String)> = app.lines[range.start..=range.end]
+                .iter()
+                .map(|line| (new_line_id(), line.text.clone()))
+                .collect();
+            let mut ops: Vec<EditOp> = app.lines[range.start..=range.end]
+                .iter()
+                .map(|line| EditOp::Delete { id: line.id.clone() })
+                .collect();
+            ops.push(EditOp::Insert { anchor, lines: inserted });
+            (
+                t!("アウトラインの移動", "outline move"),
+                t!("…移動を保存中", "…saving move"),
+                ops,
+            )
+        }
+    };
+
+    let snapshot = outline_snapshot(app);
+    do_edit(app, ctx, &label, ops);
+    if app.inflight == 1 {
+        app.outline_pending = Some(snapshot);
+        app.follow = true;
+        app.status = done;
+    } else {
+        // The worker disappeared before accepting the only structural job.
+        // Put the clean pre-action model back immediately; an optimistic
+        // move must never become a screen-only fact.
+        restore_outline_snapshot(app, &snapshot);
+        rerender(app, ctx);
+    }
+}
+
 /// One key press.
 fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     if app.index.is_some() {
@@ -5419,8 +5664,28 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         return Action::Continue;
     }
 
+    // ^g is a one-shot prefix: whatever follows is consumed, including Esc
+    // and unknown keys, so the second key never leaks into another command.
+    if app.outline_prefix {
+        app.outline_prefix = false;
+        if let Some((block, direction)) = outline_prefix_command(k) {
+            edit_outline(app, ctx, block, direction);
+        } else {
+            app.status = t!("アウトライン操作を取り消しました", "outline action cancelled");
+        }
+        return Action::Continue;
+    }
+    if k.code == KeyCode::Char('g') && k.modifiers == KeyModifiers::CONTROL {
+        app.outline_prefix = true;
+        app.status.clear();
+        return Action::Continue;
+    }
+    if let Some((block, direction)) = outline_arrow(k) {
+        edit_outline(app, ctx, block, direction);
+        return Action::Continue;
+    }
+
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
     match (k.code, ctrl) {
         // ---- quit ---- (akapen default: q quits, Esc only cancels)
         (KeyCode::Char('q'), false) => return Action::Quit,
@@ -5444,17 +5709,19 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         }
 
         // ---- time machine (←/→, akapen's timeline; server snapshots) ----
-        (KeyCode::Left, _) => travel(app, ctx, -1),
-        (KeyCode::Right, _) => travel(app, ctx, 1),
+        (KeyCode::Left, false) if k.modifiers == KeyModifiers::NONE => travel(app, ctx, -1),
+        (KeyCode::Right, false) if k.modifiers == KeyModifiers::NONE => travel(app, ctx, 1),
 
         // ---- move (akapen parity) ----
         // Shift+↑/↓ selects, in READ as in EDIT: the same fingers, the same
         // result. `v` then j/k (akapen) still works — this is the version
         // people try first.
-        (KeyCode::Down, _) if shift => read_select_line(app, true),
-        (KeyCode::Up, _) if shift => read_select_line(app, false),
-        (KeyCode::Char('j'), false) | (KeyCode::Down, _) => app.move_cursor(true),
-        (KeyCode::Char('k'), false) | (KeyCode::Up, _) => app.move_cursor(false),
+        (KeyCode::Down, false) if k.modifiers == KeyModifiers::SHIFT => read_select_line(app, true),
+        (KeyCode::Up, false) if k.modifiers == KeyModifiers::SHIFT => read_select_line(app, false),
+        (KeyCode::Char('j'), false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(true),
+        (KeyCode::Down, false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(true),
+        (KeyCode::Char('k'), false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(false),
+        (KeyCode::Up, false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(false),
         (KeyCode::Char('g'), false) => {
             if let Some(s) = app.first_src() {
                 app.goto_src(s);
@@ -5601,7 +5868,7 @@ fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('e'), true) => {
             // Whole-page edit in $EDITOR (the “big edit” path: multi-line,
             // IME-free — the editor is the user's own environment).
-            if !ensure_editable(app) {
+            if outline_mutation_blocked(app) || !ensure_editable(app) {
                 return Action::Continue;
             }
             if app.time.is_some() {
@@ -5755,6 +6022,34 @@ fn ops_replayable(ops: &[EditOp], live: &std::collections::HashSet<&str>) -> boo
     })
 }
 
+/// Keep every history entry that can be reached in the order the user will
+/// pop it. Validity is sequential: a newer undo can recreate an id required
+/// by the older undo below it, so checking every entry against only the
+/// initial live page discards perfectly usable lineage.
+fn retain_replayable_history(
+    stack: &mut Vec<(String, Vec<EditOp>)>,
+    live_lines: &[PageLine],
+) -> usize {
+    let mut simulated = live_lines.to_vec();
+    let mut keep = vec![false; stack.len()];
+    for index in (0..stack.len()).rev() {
+        let live: std::collections::HashSet<&str> =
+            simulated.iter().map(|line| line.id.as_str()).collect();
+        if ops_replayable(&stack[index].1, &live) {
+            apply_ops(&mut simulated, &stack[index].1);
+            keep[index] = true;
+        }
+    }
+    let before = stack.len();
+    let mut index = 0usize;
+    stack.retain(|_| {
+        let kept = keep[index];
+        index += 1;
+        kept
+    });
+    before - stack.len()
+}
+
 fn ensure_editable(app: &mut App) -> bool {
     if app.editable {
         true
@@ -5764,14 +6059,82 @@ fn ensure_editable(app: &mut App) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MoveShape {
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct MoveRebase {
+    cursor: usize,
+    selection: Option<(usize, usize)>,
+}
+
+/// Recognize the move lowering shared by outline actions and their history:
+/// delete one contiguous target, then recreate the same-size run with fresh IDs.
+/// Replace-only indentation history deliberately does not pass this gate.
+fn move_shape(app: &App, ops: &[EditOp]) -> Option<MoveShape> {
+    let (last, deletes) = ops.split_last()?;
+    let EditOp::Insert { lines: inserted, .. } = last else { return None };
+    if deletes.is_empty() || deletes.len() != inserted.len() {
+        return None;
+    }
+    let deleted: Vec<&str> = deletes
+        .iter()
+        .map(|op| match op {
+            EditOp::Delete { id } => Some(id.as_str()),
+            EditOp::Insert { .. } | EditOp::Replace { .. } => None,
+        })
+        .collect::<Option<_>>()?;
+    let start = app.lines.iter().position(|line| line.id == deleted[0])?;
+    let source = app.lines.get(start..start + deleted.len())?;
+    if source.iter().map(|line| line.id.as_str()).ne(deleted.iter().copied())
+        || inserted.iter().any(|(id, _)| app.lines.iter().any(|line| line.id == *id))
+    {
+        return None;
+    }
+    Some(MoveShape { start, len: deleted.len() })
+}
+
+/// If these ops are a source move, remember offsets inside the logical
+/// target before its old IDs disappear. Duplicate line text is irrelevant:
+/// rebasing uses the fresh IDs already carried by the insert op.
+fn prepare_move_rebase(app: &App, ops: &[EditOp]) -> Option<MoveRebase> {
+    let shape = move_shape(app, ops)?;
+    let cursor = app.cursor.checked_sub(shape.start)?.min(shape.len - 1);
+    let selection = app.selection.and_then(|selection| {
+        let (a, b) = selection.range();
+        (a == shape.start && b + 1 == shape.start + shape.len)
+            .then(|| (selection.anchor - shape.start, selection.cursor - shape.start))
+    });
+    Some(MoveRebase { cursor, selection })
+}
+
+fn apply_move_rebase(app: &mut App, ops: &[EditOp], rebase: MoveRebase) -> bool {
+    let Some(EditOp::Insert { lines: inserted, .. }) = ops.last() else { return false };
+    let locate = |offset: usize| app.lines.iter().position(|line| line.id == inserted[offset].0);
+    let Some(cursor) = locate(rebase.cursor) else { return false };
+    app.cursor = cursor;
+    app.selection = rebase.selection.and_then(|(anchor, cursor)| {
+        locate(anchor).zip(locate(cursor)).map(|(anchor, cursor)| Selection { anchor, cursor })
+    });
+    app.follow = true;
+    true
+}
+
 /// Apply `ops` locally, push their inverse onto the undo stack, and queue
 /// the background commit. The single write path for every edit.
 fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) {
-    if !ensure_editable(app) || ops.is_empty() {
+    if outline_mutation_blocked(app) || !ensure_editable(app) || ops.is_empty() {
         return;
     }
     let inverse = invert_ops(&app.lines, &ops);
+    let move_rebase = prepare_move_rebase(app, &ops);
     apply_ops(&mut app.lines, &ops);
+    if let Some(rebase) = move_rebase {
+        apply_move_rebase(app, &ops, rebase);
+    }
     app.undo_stack.push((label.to_string(), inverse));
     if app.undo_stack.len() > 200 {
         app.undo_stack.remove(0);
@@ -5947,22 +6310,58 @@ fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) {
 /// `u`: revert the newest commit (locally at once, on the server via the
 /// queue). Ids of replaced lines survive; re-inserted lines get fresh ids.
 fn undo(app: &mut App, ctx: &Ctx) -> bool {
-    if !ensure_editable(app) {
+    if outline_mutation_blocked(app) || !ensure_editable(app) {
         return false;
     }
-    let Some((label, ops)) = app.undo_stack.pop() else {
+    let Some((_, next_ops)) = app.undo_stack.last() else {
         app.status = empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo"));
         return false;
     };
+    let structural = move_shape(app, next_ops).is_some();
+    if structural && app.inflight != 0 {
+        app.status = t!(
+            "送信中の編集が完了してからアウトライン操作を取り消してください",
+            "wait for the current edit to finish before undoing an outline move"
+        );
+        return false;
+    }
+    if structural {
+        // Install the gate before changing either the page or its history.
+        app.outline_pending = Some(outline_snapshot(app));
+    }
+
+    let (label, ops) = app.undo_stack.pop().expect("history was checked above");
     let redo = invert_ops(&app.lines, &ops);
     let before: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let move_rebase = prepare_move_rebase(app, &ops);
+    let replace_selection = app.selection.filter(|_| {
+        move_rebase.is_none() && ops.iter().all(|op| matches!(op, EditOp::Replace { .. }))
+    });
     apply_ops(&mut app.lines, &ops);
     app.redo_stack.push((label.clone(), redo));
     let focus = edit_focus(&app.lines, &ops, &before);
-    queue_commit(app, &format!("undo {label}"), ops);
+    queue_commit(app, &format!("undo {label}"), ops.clone());
     rerender(app, ctx);
-    let seated = app.focus_edit(focus);
+    if structural && app.inflight != 1 {
+        let snapshot = app.outline_pending.take().expect("structural history installed a gate");
+        restore_outline_snapshot(app, &snapshot);
+        rerender(app, ctx);
+        return false;
+    }
+    let seated = if let Some(selection) = replace_selection {
+        // Horizontal outline changes keep every line and every endpoint.
+        // The selection's cursor is the active end; focusing the first
+        // Replace would make an upward selection visibly jump to its anchor.
+        app.selection = Some(selection);
+        app.cursor = selection.cursor;
+        app.follow = true;
+        true
+    } else {
+        move_rebase
+            .map(|rebase| apply_move_rebase(app, &ops, rebase))
+            .unwrap_or_else(|| app.focus_edit(focus))
+    };
     app.status = t!("{label} を取り消しました（あと {} 件）", "undid {label} ({} more)", app.undo_stack.len());
     seated
 }
@@ -5982,22 +6381,54 @@ fn empty_history_reason(app: &App, empty: String) -> String {
 
 /// `^r`: re-apply the newest undone commit.
 fn redo(app: &mut App, ctx: &Ctx) -> bool {
-    if !ensure_editable(app) {
+    if outline_mutation_blocked(app) || !ensure_editable(app) {
         return false;
     }
-    let Some((label, ops)) = app.redo_stack.pop() else {
+    let Some((_, next_ops)) = app.redo_stack.last() else {
         app.status = empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo"));
         return false;
     };
+    let structural = move_shape(app, next_ops).is_some();
+    if structural && app.inflight != 0 {
+        app.status = t!(
+            "送信中の編集が完了してからアウトライン操作をやり直してください",
+            "wait for the current edit to finish before redoing an outline move"
+        );
+        return false;
+    }
+    if structural {
+        app.outline_pending = Some(outline_snapshot(app));
+    }
+
+    let (label, ops) = app.redo_stack.pop().expect("history was checked above");
     let undo_ops = invert_ops(&app.lines, &ops);
     let before: Vec<(String, String)> =
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let move_rebase = prepare_move_rebase(app, &ops);
+    let replace_selection = app.selection.filter(|_| {
+        move_rebase.is_none() && ops.iter().all(|op| matches!(op, EditOp::Replace { .. }))
+    });
     apply_ops(&mut app.lines, &ops);
     app.undo_stack.push((label.clone(), undo_ops));
     let focus = edit_focus(&app.lines, &ops, &before);
-    queue_commit(app, &format!("redo {label}"), ops);
+    queue_commit(app, &format!("redo {label}"), ops.clone());
     rerender(app, ctx);
-    let seated = app.focus_edit(focus);
+    if structural && app.inflight != 1 {
+        let snapshot = app.outline_pending.take().expect("structural history installed a gate");
+        restore_outline_snapshot(app, &snapshot);
+        rerender(app, ctx);
+        return false;
+    }
+    let seated = if let Some(selection) = replace_selection {
+        app.selection = Some(selection);
+        app.cursor = selection.cursor;
+        app.follow = true;
+        true
+    } else {
+        move_rebase
+            .map(|rebase| apply_move_rebase(app, &ops, rebase))
+            .unwrap_or_else(|| app.focus_edit(focus))
+    };
     app.status = t!("{label} をやり直しました", "redid {label}");
     seated
 }
@@ -6008,7 +6439,7 @@ fn redo(app: &mut App, ctx: &Ctx) -> bool {
 
 /// Open the session on body line `line` with the caret at byte `caret`.
 fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
-    if !ensure_editable(app) {
+    if outline_mutation_blocked(app) || !ensure_editable(app) {
         return;
     }
     if app.time.is_some() {
@@ -6780,7 +7211,7 @@ fn session_indent(app: &mut App, delta: i32) {
 /// inherited) and open the session on it. On a related row (or an empty
 /// spot) `o` appends at the page end.
 fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
-    if !ensure_editable(app) {
+    if outline_mutation_blocked(app) || !ensure_editable(app) {
         return;
     }
     if app.time.is_some() {
@@ -7058,11 +7489,127 @@ fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx:
     }
 }
 
+/// Reject one optimistic structural action, invalidate anything still
+/// queued against it, and replace it with server truth. The pre-action
+/// snapshot is restored first, so even a failed reload cannot leave the
+/// outline move as a screen-only success.
+fn recover_outline_action(app: &mut App, ctx: &Ctx, pending: OutlinePending, reason: String) {
+    recover_outline_action_with(app, ctx, pending, reason, reload_page);
+}
+
+/// Recovery is parameterized at this narrow fetch seam so the successful
+/// reload path can be tested without a live Cosense server.
+fn recover_outline_action_with(
+    app: &mut App,
+    ctx: &Ctx,
+    pending: OutlinePending,
+    reason: String,
+    reload: impl FnOnce(&mut App, &Ctx) -> bool,
+) {
+    app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let same_page = app.project == pending.project && app.page_id == pending.page_id;
+    if !same_page {
+        app.status = t!(
+            "前のページのアウトライン操作に失敗しました（{reason}）",
+            "outline action on the previous page failed ({reason})"
+        );
+        return;
+    }
+
+    let cursor_id = pending.lines.get(pending.cursor).map(|line| line.id.clone());
+    let selection_ids = pending.selection.and_then(|selection| {
+        pending
+            .lines
+            .get(selection.anchor)
+            .zip(pending.lines.get(selection.cursor))
+            .map(|(anchor, cursor)| (anchor.id.clone(), cursor.id.clone()))
+    });
+
+    app.mark_desynced();
+    restore_outline_snapshot(app, &pending);
+    rerender(app, ctx);
+
+    if reload(app, ctx) {
+        // A reload normally clears page-local history in `set_page`. Put the
+        // pre-action lineage back only if the response is still for the page
+        // that owned the rejected action, and discard entries whose IDs no
+        // longer exist in the authoritative response.
+        if app.project == pending.project && app.page_id == pending.page_id {
+            app.undo_stack = pending.undo_stack;
+            app.redo_stack = pending.redo_stack;
+            let dropped = retain_replayable_history(&mut app.undo_stack, &app.lines)
+                + retain_replayable_history(&mut app.redo_stack, &app.lines);
+            app.history_dropped = pending.history_dropped || dropped != 0;
+
+            if let Some(id) = cursor_id {
+                if let Some(cursor) = app.lines.iter().position(|line| line.id == id) {
+                    app.cursor = cursor;
+                }
+            }
+            app.selection = selection_ids.and_then(|(anchor_id, cursor_id)| {
+                app.lines
+                    .iter()
+                    .position(|line| line.id == anchor_id)
+                    .zip(app.lines.iter().position(|line| line.id == cursor_id))
+                    .map(|(anchor, cursor)| Selection { anchor, cursor })
+            });
+            app.follow = true;
+        }
+        app.status = t!(
+            "アウトライン操作に失敗しました（{reason}）— サーバーの内容を読み直しました",
+            "outline action failed ({reason}) — reloaded server state"
+        );
+    } else {
+        let reload_reason = app.status.clone();
+        app.status = t!(
+            "アウトライン操作に失敗しました（{reason}）— 変更を戻しました。{reload_reason}",
+            "outline action failed ({reason}) — reverted the change. {reload_reason}"
+        );
+    }
+}
+
 /// A commit came back from the worker (drained per frame).
 fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     app.inflight = app.inflight.saturating_sub(1);
     match outcome {
         CommitOutcome::Done { label, title, commit_id } => {
+            // An outline action only starts at inflight == 0 and gates every
+            // later mutation, so this next outcome cannot be an older edit.
+            // Navigation may still happen while the gate is up. In that case
+            // this result belongs wholly to the old page: clearing the gate
+            // is the only current-app state it may touch.
+            let outline = app.outline_pending.take();
+            if let Some(pending) = outline.as_ref() {
+                let same_page = app.project == pending.project && app.page_id == pending.page_id;
+                let same_install = same_page && app.gen_now() == pending.install_gen;
+                if !same_install {
+                    // Navigation is allowed while saving. Even an away/back
+                    // trip to the same page installed a snapshot from before
+                    // this commit, so the old outcome must not rename or
+                    // otherwise mutate that installation. If it is the same
+                    // page, reload once to reveal the successful move.
+                    if same_page {
+                        // The commit succeeded after this installation was
+                        // fetched. Until an authoritative reload lands, its
+                        // line IDs are stale and neither edits nor web
+                        // rendering may trust them.
+                        app.bump_server_epoch();
+                        app.mark_desynced();
+                        app.outline_refresh_needed = true;
+                        if reload_page(app, ctx) {
+                            if !commit_id.is_empty() {
+                                app.own_commits.push_back(commit_id);
+                                while app.own_commits.len() > OWN_COMMIT_MEMORY {
+                                    app.own_commits.pop_front();
+                                }
+                            }
+                            app.status = format!("✓ {label}");
+                        }
+                    }
+                    return;
+                }
+            }
+            let outline_done = outline.is_some();
             if !commit_id.is_empty() {
                 app.own_commits.push_back(commit_id);
                 while app.own_commits.len() > OWN_COMMIT_MEMORY {
@@ -7079,7 +7626,11 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
                     *t = (app.project.clone(), app.title.clone());
                 }
             }
-            if app.status.is_empty() || app.status.starts_with('✓') || app.status.starts_with("EDIT") {
+            if outline_done
+                || app.status.is_empty()
+                || app.status.starts_with('✓')
+                || app.status.starts_with("EDIT")
+            {
                 app.status = format!("✓ {label}");
             }
             // A page that just came into being has an id we do not know
@@ -7090,17 +7641,36 @@ fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
                 adopt_after_create(app, ctx);
             }
         }
-        CommitOutcome::Skipped => {}
-        CommitOutcome::Failed { label, msg } => {
-            app.status = t!("コミットに失敗しました: {label} — {msg}", "commit failed: {label} — {msg}");
-            app.mark_desynced();
-            if app.create_state == CreateState::Sent && page_is_uncreated(app) {
-                // The page was never made. Let the next edit try again
-                // rather than retrying in a loop against a dead network.
-                app.create_state = CreateState::Idle;
+        CommitOutcome::Skipped => {
+            if let Some(pending) = app.outline_pending.take() {
+                recover_outline_action(app, ctx, pending, t!("処理が失効", "invalidated"));
             }
         }
-        CommitOutcome::Conflict => recover_conflict(app, ctx),
+        CommitOutcome::Failed { label, msg } => {
+            if let Some(pending) = app.outline_pending.take() {
+                recover_outline_action(
+                    app,
+                    ctx,
+                    pending,
+                    t!("送信失敗: {label} — {msg}", "commit failed: {label} — {msg}"),
+                );
+            } else {
+                app.status = t!("コミットに失敗しました: {label} — {msg}", "commit failed: {label} — {msg}");
+                app.mark_desynced();
+                if app.create_state == CreateState::Sent && page_is_uncreated(app) {
+                    // The page was never made. Let the next edit try again
+                    // rather than retrying in a loop against a dead network.
+                    app.create_state = CreateState::Idle;
+                }
+            }
+        }
+        CommitOutcome::Conflict => {
+            if let Some(pending) = app.outline_pending.take() {
+                recover_outline_action(app, ctx, pending, t!("競合", "conflict"));
+            } else {
+                recover_conflict(app, ctx);
+            }
+        }
     }
 }
 
@@ -9154,6 +9724,10 @@ fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                        "            in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done"),
                     t!("            x 行/選択を削除 · ^e ページ全体を $EDITOR で編集 · コミットは自動",
                        "            x delete line/selection · ^e whole page in $EDITOR · commits are automatic"),
+                    t!("構造編集    Ctrl+←/→/↑/↓ 行・選択範囲 · Alt+←/→/↑/↓ ブロック",
+                       "outline     Ctrl+←/→/↑/↓ line/range · Alt+←/→/↑/↓ block"),
+                    t!("            ^g h/j/k/l 行 左/下/上/右 · ^g H/J/K/L ブロック（選択中は不可）",
+                       "            ^g h/j/k/l line left/down/up/right · ^g H/J/K/L block (no selection)"),
                     t!("取り消し    u 取り消し · ^r やり直し（どのコミットも戻せます）",
                        "undo        u undo · ^r redo (every commit is reversible)"),
                 ]);
@@ -11931,6 +12505,9 @@ mod tests {
     fn ctrl(ch: char) -> event::KeyEvent {
         event::KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
     }
+    fn modified(code: KeyCode, modifiers: KeyModifiers) -> event::KeyEvent {
+        event::KeyEvent::new(code, modifiers)
+    }
     fn type_str(app: &mut App, ctx: &Ctx, s: &str) {
         for ch in s.chars() {
             handle_session_key(app, ctx, key(KeyCode::Char(ch)));
@@ -11944,6 +12521,812 @@ mod tests {
             out.push((j.label, j.ops));
         }
         out
+    }
+
+    fn finish_outline(app: &mut App, ctx: &Ctx) {
+        handle_commit_outcome(
+            app,
+            ctx,
+            CommitOutcome::Done {
+                label: "outline".into(),
+                title: String::new(),
+                commit_id: String::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn read_outline_indent_replaces_only_the_selected_source_lines() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "\ttwo", "\u{3000}three", "tail"]);
+        app.cursor = 3;
+        app.selection = Some(Selection {
+            anchor: 3,
+            cursor: 1,
+        });
+        let ids: Vec<String> = app.lines.iter().map(|line| line.id.clone()).collect();
+
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["title", " one", " \ttwo", " \u{3000}three", "tail"]
+        );
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(
+            app.selection.map(|selection| selection.range()),
+            Some((1, 3))
+        );
+        assert_eq!(app.cursor, 3);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "the range is one commit and undo unit");
+        assert_eq!(jobs[0].1.len(), 3);
+        assert!(jobs[0]
+            .1
+            .iter()
+            .all(|op| matches!(op, EditOp::Replace { .. })));
+        finish_outline(&mut app, &ctx);
+
+        app.cursor = 0;
+        app.selection = None;
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert!(app.status.contains("タイトル行"));
+        assert!(drain_jobs(&mut app).is_empty());
+    }
+
+    #[test]
+    fn read_outline_range_move_recreates_only_the_target_and_rebases_through_undo_redo() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "a", "b", "neighbor", "after"]);
+        app.lines[3].created = 30;
+        app.lines[3].updated = 31;
+        app.lines[4].created = 40;
+        app.lines[4].updated = 41;
+        app.cursor = 2;
+        app.selection = Some(Selection {
+            anchor: 1,
+            cursor: 2,
+        });
+
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Down, KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["title", "neighbor", "a", "b", "after"]
+        );
+        assert_eq!(
+            (
+                app.lines[1].id.as_str(),
+                app.lines[1].created,
+                app.lines[1].updated
+            ),
+            ("id3", 30, 31)
+        );
+        assert_eq!(
+            (
+                app.lines[4].id.as_str(),
+                app.lines[4].created,
+                app.lines[4].updated
+            ),
+            ("id4", 40, 41)
+        );
+        assert_ne!(app.lines[2].id, "id1");
+        assert_ne!(app.lines[3].id, "id2");
+        assert_eq!(app.cursor, 3);
+        assert_eq!(
+            app.selection,
+            Some(Selection {
+                anchor: 2,
+                cursor: 3
+            })
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Delete { id: a }, EditOp::Delete { id: b }, EditOp::Insert { anchor, lines }] if a == "id1" && b == "id2" && anchor == "id4" && lines.len() == 2)
+        );
+        assert!(!jobs[0]
+            .1
+            .iter()
+            .any(|op| matches!(op, EditOp::Replace { .. })));
+        finish_outline(&mut app, &ctx);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('u')));
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["title", "a", "b", "neighbor", "after"]
+        );
+        assert_eq!(
+            app.lines[3].id, "id3",
+            "undo does not recreate the neighbor"
+        );
+        assert_eq!(
+            app.selection,
+            Some(Selection {
+                anchor: 1,
+                cursor: 2
+            })
+        );
+        assert_eq!(app.cursor, 2);
+        finish_outline(&mut app, &ctx);
+
+        handle_key(&mut app, &ctx, ctrl('r'));
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["title", "neighbor", "a", "b", "after"]
+        );
+        assert_eq!(app.lines[1].id, "id3", "redo still moves the user's target");
+        assert_eq!(
+            app.selection,
+            Some(Selection {
+                anchor: 2,
+                cursor: 3
+            })
+        );
+        assert_eq!(app.cursor, 3);
+        assert_eq!(drain_jobs(&mut app).len(), 2);
+    }
+
+    #[test]
+    fn read_outline_block_move_obeys_sibling_and_selection_boundaries() {
+        let ctx = test_ctx();
+        let mut app = page(&[
+            "title",
+            " parent",
+            "  first",
+            "   child",
+            "  second",
+            "    skipped-child",
+            " next-parent",
+        ]);
+        app.cursor = 2;
+        app.selection = Some(Selection::new(2));
+        handle_key(&mut app, &ctx, modified(KeyCode::Down, KeyModifiers::ALT));
+        assert!(app.status.contains("選択中"));
+        assert!(drain_jobs(&mut app).is_empty());
+
+        app.selection = None;
+        handle_key(&mut app, &ctx, modified(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "title",
+                " parent",
+                "  second",
+                "    skipped-child",
+                "  first",
+                "   child",
+                " next-parent"
+            ]
+        );
+        assert_eq!(app.lines[2].id, "id4", "the sibling keeps its ID");
+        assert_eq!(app.lines[3].id, "id5");
+        assert_ne!(app.lines[4].id, "id2");
+        assert_ne!(app.lines[5].id, "id3");
+        assert_eq!(app.cursor, 4);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Delete { id: a }, EditOp::Delete { id: b }, EditOp::Insert { anchor, .. }] if a == "id2" && b == "id3" && anchor == "id6")
+        );
+        finish_outline(&mut app, &ctx);
+
+        app.cursor = 2;
+        handle_key(&mut app, &ctx, modified(KeyCode::Up, KeyModifiers::ALT));
+        assert!(
+            app.status.contains("兄弟ブロック"),
+            "status: {}",
+            app.status
+        );
+        assert!(drain_jobs(&mut app).is_empty(), "an ancestor is not moved");
+    }
+
+    #[test]
+    fn outline_commit_gate_blocks_mutations_but_not_navigation_until_done() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three"]);
+        app.cursor = 1;
+
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert!(app.outline_pending.is_some());
+        assert_eq!(app.inflight, 1);
+        let optimistic: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+        let undo_len = app.undo_stack.len();
+
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            app.lines
+                .iter()
+                .map(|line| line.text.clone())
+                .collect::<Vec<_>>(),
+            optimistic
+        );
+        do_edit(
+            &mut app,
+            &ctx,
+            "rapid edit",
+            vec![EditOp::Replace {
+                id: "id2".into(),
+                text: "changed".into(),
+            }],
+        );
+        assert_eq!(app.lines[2].text, "two", "a rapid edit is blocked");
+        assert!(!undo(&mut app, &ctx), "a rapid undo is blocked");
+        assert_eq!(app.undo_stack.len(), undo_len);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('e')));
+        assert!(app.session.is_none(), "EDIT cannot open under the gate");
+
+        app.rebuild(40); // the event loop lays out the optimistic frame
+        handle_key(&mut app, &ctx, key(KeyCode::Down));
+        assert_eq!(app.cursor, 2, "navigation remains available");
+        assert_eq!(
+            drain_jobs(&mut app).len(),
+            1,
+            "only the first outline action was queued"
+        );
+
+        finish_outline(&mut app, &ctx);
+        assert!(app.outline_pending.is_none());
+        assert_eq!(app.inflight, 0);
+        assert!(undo(&mut app, &ctx), "Done releases undo");
+        assert_eq!(app.lines[1].text, "one");
+    }
+
+    #[test]
+    fn outline_success_after_navigation_only_releases_the_old_gate() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.cursor = 1;
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Down, KeyModifiers::CONTROL),
+        );
+        assert!(app.outline_pending.is_some());
+
+        // READ navigation is allowed while the structural commit is pending.
+        app.project = "next-project".into();
+        app.page_id = "next-page".into();
+        app.title = "next title".into();
+        app.lines = page(&["next title", "current body"]).lines;
+        app.status = "current page status".into();
+        app.own_commits.push_back("current-echo".into());
+        if let Ok(mut target) = app.poll_target.lock() {
+            *target = (app.project.clone(), app.title.clone());
+        }
+        let epoch = app.server_epoch_now();
+        let current_lines: Vec<(String, String)> =
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
+        let current_target = app.poll_target.lock().unwrap().clone();
+
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done {
+                label: "old outline".into(),
+                title: "old renamed title".into(),
+                commit_id: "old-commit".into(),
+            },
+        );
+
+        assert!(app.outline_pending.is_none());
+        assert_eq!(app.inflight, 0);
+        assert_eq!(app.project, "next-project");
+        assert_eq!(app.page_id, "next-page");
+        assert_eq!(app.title, "next title");
+        assert_eq!(
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
+            current_lines
+        );
+        assert_eq!(app.status, "current page status");
+        assert_eq!(app.own_commits.iter().cloned().collect::<Vec<_>>(), vec!["current-echo"]);
+        assert_eq!(app.server_epoch_now(), epoch);
+        assert_eq!(*app.poll_target.lock().unwrap(), current_target);
+    }
+
+    #[test]
+    fn outline_success_after_away_and_back_refreshes_instead_of_retargeting() {
+        let ctx = offline_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.cursor = 1;
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Down, KeyModifiers::CONTROL),
+        );
+        assert!(app.outline_pending.is_some());
+
+        // The immutable page id is the same after an away/back trip, but
+        // this is a newly installed snapshot that may predate the commit.
+        app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        app.title = "current title".into();
+        app.status = "current visit".into();
+        app.own_commits.push_back("current-echo".into());
+        let epoch = app.server_epoch_now();
+
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done {
+                label: "old outline".into(),
+                title: "old title".into(),
+                commit_id: "old-commit".into(),
+            },
+        );
+
+        assert!(app.outline_pending.is_none());
+        assert_eq!(app.inflight, 0);
+        assert_eq!(app.title, "current title", "the old result cannot rename this visit");
+        assert_eq!(
+            app.own_commits.iter().cloned().collect::<Vec<_>>(),
+            vec!["current-echo"],
+            "a failed refresh cannot file an old echo under the new visit"
+        );
+        assert!(app.server_epoch_now() > epoch);
+        assert!(app.web_unsynced, "a failed refresh leaves the stale visit read-only");
+        assert!(app.outline_refresh_needed);
+        assert!(
+            app.status.contains("失敗") || app.status.contains("failed"),
+            "the same-page stale visit attempted an authoritative refresh: {}",
+            app.status
+        );
+
+        // The successful commit may have replaced the IDs we still display.
+        // No ordinary edit is allowed to target those stale IDs.
+        drain_jobs(&mut app);
+        let before: Vec<(String, String)> =
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
+        let id = app.lines[1].id.clone();
+        do_edit(
+            &mut app,
+            &ctx,
+            "stale edit",
+            vec![EditOp::Replace { id, text: "unsafe".into() }],
+        );
+        assert_eq!(
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
+            before
+        );
+        assert!(drain_jobs(&mut app).is_empty());
+        assert!(app.status.contains("開き直して"));
+    }
+
+    #[test]
+    fn outline_waits_for_every_earlier_commit_outcome() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.cursor = 1;
+        app.inflight = 1;
+
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.lines[1].text, "one");
+        assert!(app.outline_pending.is_none());
+        assert!(drain_jobs(&mut app).is_empty());
+
+        handle_commit_outcome(
+            &mut app,
+            &ctx,
+            CommitOutcome::Done {
+                label: "earlier edit".into(),
+                title: String::new(),
+                commit_id: String::new(),
+            },
+        );
+        assert!(
+            app.outline_pending.is_none(),
+            "an unrelated outcome cannot release a gate that never started"
+        );
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.lines[1].text, " one");
+        assert!(app.outline_pending.is_some());
+    }
+
+    #[test]
+    fn failed_and_conflicting_outline_commits_restore_the_pre_action_page() {
+        for conflict in [false, true] {
+            let ctx = offline_ctx();
+            let mut app = page(&["title", "one", "two"]);
+            app.cursor = 1;
+            let original = app.lines.clone();
+            let generation = app.gen.load(std::sync::atomic::Ordering::SeqCst);
+
+            handle_key(
+                &mut app,
+                &ctx,
+                modified(KeyCode::Down, KeyModifiers::CONTROL),
+            );
+            assert_ne!(
+                app.lines
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .collect::<Vec<_>>(),
+                original
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .collect::<Vec<_>>()
+            );
+            let outcome = if conflict {
+                CommitOutcome::Conflict
+            } else {
+                CommitOutcome::Failed {
+                    label: "outline move".into(),
+                    msg: "500".into(),
+                }
+            };
+            handle_commit_outcome(&mut app, &ctx, outcome);
+
+            assert_eq!(
+                app.lines
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .collect::<Vec<_>>(),
+                original
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .collect::<Vec<_>>(),
+                "the optimistic move is gone even when the reload itself fails"
+            );
+            assert!(app.outline_pending.is_none());
+            assert_eq!(app.inflight, 0);
+            assert!(app.gen.load(std::sync::atomic::Ordering::SeqCst) > generation);
+            assert!(
+                app.status.contains("アウトライン操作に失敗"),
+                "status: {}",
+                app.status
+            );
+            assert!(
+                app.status.contains(if conflict { "競合" } else { "500" }),
+                "status: {}",
+                app.status
+            );
+        }
+    }
+
+    #[test]
+    fn structural_outline_history_is_gated_and_uses_outline_recovery() {
+        for back in [true, false] {
+            for conflict in [false, true] {
+                let ctx = offline_ctx();
+                let mut app = page(&["title", "one", "two", "tail"]);
+                app.cursor = 1;
+                app.selection = Some(Selection { anchor: 1, cursor: 2 });
+                handle_key(
+                    &mut app,
+                    &ctx,
+                    modified(KeyCode::Down, KeyModifiers::CONTROL),
+                );
+                drain_jobs(&mut app);
+                finish_outline(&mut app, &ctx);
+
+                if !back {
+                    assert!(undo(&mut app, &ctx));
+                    drain_jobs(&mut app);
+                    finish_outline(&mut app, &ctx);
+                }
+
+                let before_lines: Vec<(String, String)> =
+                    app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
+                let before_cursor = app.cursor;
+                let before_selection = app.selection;
+                let before_undo = app.undo_stack.clone();
+                let before_redo = app.redo_stack.clone();
+                app.history_dropped = true;
+
+                assert!(if back { undo(&mut app, &ctx) } else { redo(&mut app, &ctx) });
+                assert!(app.outline_pending.is_some(), "move history installs the structural gate");
+                assert_eq!(drain_jobs(&mut app).len(), 1);
+                let outcome = if conflict {
+                    CommitOutcome::Conflict
+                } else {
+                    CommitOutcome::Failed {
+                        label: if back { "undo outline".into() } else { "redo outline".into() },
+                        msg: "500".into(),
+                    }
+                };
+                handle_commit_outcome(&mut app, &ctx, outcome);
+
+                assert_eq!(
+                    app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
+                    before_lines,
+                    "rejected history restores the pre-action lines"
+                );
+                assert_eq!(app.cursor, before_cursor);
+                assert_eq!(app.selection, before_selection);
+                assert_eq!(app.undo_stack, before_undo);
+                assert_eq!(app.redo_stack, before_redo);
+                assert!(app.history_dropped);
+                assert!(app.outline_pending.is_none());
+                assert_eq!(app.inflight, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn structural_undo_blocks_inflight_and_rapid_opposite_mutations() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "tail"]);
+        app.cursor = 1;
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Down, KeyModifiers::CONTROL),
+        );
+        drain_jobs(&mut app);
+        finish_outline(&mut app, &ctx);
+
+        let moved: Vec<(String, String)> =
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
+        app.inflight = 1;
+        assert!(!undo(&mut app, &ctx), "structural history waits for older commits");
+        assert_eq!(
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
+            moved
+        );
+        assert!(app.outline_pending.is_none());
+        app.inflight = 0;
+
+        assert!(undo(&mut app, &ctx));
+        assert!(app.outline_pending.is_some());
+        let undone: Vec<(String, String)> =
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect();
+        let stacks = (app.undo_stack.clone(), app.redo_stack.clone());
+        assert!(!redo(&mut app, &ctx), "the rapid opposite action is blocked");
+        let edit_id = app.lines[1].id.clone();
+        do_edit(
+            &mut app,
+            &ctx,
+            "rapid edit",
+            vec![EditOp::Replace { id: edit_id, text: "changed".into() }],
+        );
+        assert_eq!(
+            app.lines.iter().map(|line| (line.id.clone(), line.text.clone())).collect::<Vec<_>>(),
+            undone,
+            "other mutations are blocked too"
+        );
+        assert_eq!((app.undo_stack.clone(), app.redo_stack.clone()), stacks);
+        assert_eq!(drain_jobs(&mut app).len(), 1, "only the structural undo was queued");
+    }
+
+    #[test]
+    fn history_recovery_validates_dependent_entries_in_pop_order() {
+        let app = page(&["title", "body"]);
+        let mut stack = vec![
+            (
+                "older delete".into(),
+                vec![EditOp::Delete { id: "restored-id".into() }],
+            ),
+            (
+                "newer insert".into(),
+                vec![EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![("restored-id".into(), "restored".into())],
+                }],
+            ),
+        ];
+
+        assert_eq!(retain_replayable_history(&mut stack, &app.lines), 0);
+        assert_eq!(stack.len(), 2, "the newer undo recreates the id needed by the older one");
+    }
+
+    #[test]
+    fn successful_outline_recovery_restores_history_cursor_and_selection_by_id() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three", "tail"]);
+        app.cursor = 1;
+        app.selection = Some(Selection { anchor: 3, cursor: 1 });
+        app.undo_stack.push((
+            "older undo".into(),
+            vec![EditOp::Replace { id: "id2".into(), text: "old two".into() }],
+        ));
+        app.redo_stack.push((
+            "older redo".into(),
+            vec![EditOp::Replace { id: "id4".into(), text: "new tail".into() }],
+        ));
+        app.history_dropped = true;
+        let pending = outline_snapshot(&app);
+
+        let mut server_lines = app.lines.clone();
+        server_lines.insert(
+            1,
+            PageLine {
+                id: "web-id".into(),
+                text: "web line".into(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            },
+        );
+        recover_outline_action_with(
+            &mut app,
+            &ctx,
+            pending,
+            "conflict".into(),
+            move |app, ctx| {
+                // Model the state-destructive part of a successful set_page.
+                app.lines = server_lines;
+                app.cursor = 0;
+                app.selection = None;
+                app.undo_stack.clear();
+                app.redo_stack.clear();
+                app.history_dropped = false;
+                app.mark_synced();
+                rerender(app, ctx);
+                true
+            },
+        );
+
+        assert_eq!(app.cursor, 2, "the active line follows id1, not its old index");
+        assert_eq!(
+            app.selection,
+            Some(Selection { anchor: 4, cursor: 2 }),
+            "both directional endpoints follow their saved IDs"
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(app.undo_stack[0].0, "older undo");
+        assert_eq!(app.redo_stack.len(), 1);
+        assert_eq!(app.redo_stack[0].0, "older redo");
+        assert!(app.history_dropped);
+        assert!(app.status.contains("サーバーの内容を読み直しました"));
+    }
+
+    #[test]
+    fn outline_replace_undo_redo_keep_both_selection_directions_active() {
+        let ctx = test_ctx();
+        for selection in [
+            Selection {
+                anchor: 1,
+                cursor: 3,
+            },
+            Selection {
+                anchor: 3,
+                cursor: 1,
+            },
+        ] {
+            let mut app = page(&["title", "one", " two", "three", "tail"]);
+            app.selection = Some(selection);
+            app.cursor = selection.cursor;
+
+            handle_key(
+                &mut app,
+                &ctx,
+                modified(KeyCode::Right, KeyModifiers::CONTROL),
+            );
+            drain_jobs(&mut app);
+            finish_outline(&mut app, &ctx);
+
+            assert!(undo(&mut app, &ctx));
+            assert_eq!(
+                app.selection,
+                Some(selection),
+                "undo preserves anchor and active end"
+            );
+            assert_eq!(
+                app.cursor, selection.cursor,
+                "undo follows the active selection endpoint"
+            );
+
+            assert!(redo(&mut app, &ctx));
+            assert_eq!(
+                app.selection,
+                Some(selection),
+                "redo preserves anchor and active end"
+            );
+            assert_eq!(
+                app.cursor, selection.cursor,
+                "redo follows the active selection endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn outline_keys_require_exact_modifiers_and_prefix_is_one_shot() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.cursor = 1;
+        let original: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
+
+        for modifiers in [
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            handle_key(&mut app, &ctx, modified(KeyCode::Down, modifiers));
+            assert_eq!(
+                app.lines
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .collect::<Vec<_>>(),
+                original
+            );
+            assert_eq!(app.cursor, 1, "modified arrows never become plain arrows");
+        }
+        handle_key(
+            &mut app,
+            &ctx,
+            modified(KeyCode::Char('j'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.cursor, 1, "Alt+j is intentionally not bound");
+        assert!(drain_jobs(&mut app).is_empty());
+
+        handle_key(&mut app, &ctx, ctrl('g'));
+        assert!(app.outline_prefix);
+        assert!(app.hint_body(&[]).contains("h/j/k/l"));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
+        assert!(!app.outline_prefix);
+        assert!(app.status.contains("取り消しました"));
+        assert_eq!(app.cursor, 1, "the unknown second key was consumed");
+
+        handle_key(&mut app, &ctx, ctrl('g'));
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(!app.outline_prefix);
+        assert!(app.status.contains("取り消しました"));
+
+        handle_key(&mut app, &ctx, ctrl('g'));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+        assert_eq!(app.lines[1].text, " one");
+        assert_eq!(drain_jobs(&mut app).len(), 1);
+
+        let mut block = page(&["title", " root", "  child", "peer"]);
+        block.cursor = 1;
+        handle_key(&mut block, &ctx, ctrl('g'));
+        handle_key(
+            &mut block,
+            &ctx,
+            modified(KeyCode::Char('L'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(block.lines[1].text, "  root");
+        assert_eq!(block.lines[2].text, "   child");
+        assert_eq!(drain_jobs(&mut block).len(), 1);
     }
 
     #[test]
