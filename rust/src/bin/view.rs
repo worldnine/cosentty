@@ -13807,6 +13807,43 @@ mod tests {
         finish_outline(&mut app, &ctx);
     }
 
+    /// The step is one SOURCE LINE even when the grab holds several lines
+    /// and the line below has children of its own. This is the shape where
+    /// a line step and a sibling step visibly differ.
+    #[test]
+    fn a_multi_line_grab_still_steps_one_line_at_a_time() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "A", " A1", "B", " B1"]);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
+        assert_eq!(move_block_range(&app), Some((1, 2)), "the grab is A and its child");
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(
+            texts(&app),
+            vec!["title", "B", "A", " A1", " B1"],
+            "one line: the block sits between B and B1"
+        );
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(
+            texts(&app),
+            vec!["title", "B", " B1", "A", " A1"],
+            "a second press clears B1 as well"
+        );
+        handle_key(&mut app, &ctx, key(KeyCode::Char('k')));
+        assert_eq!(texts(&app), vec!["title", "B", "A", " A1", " B1"], "and back");
+
+        // `J` from the start would have cleared B's whole subtree at once.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('k')));
+        assert_eq!(texts(&app), vec!["title", "A", " A1", "B", " B1"]);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('J')));
+        assert_eq!(texts(&app), vec!["title", "B", " B1", "A", " A1"]);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert_eq!(drain_jobs(&mut app).len(), 1, "one commit for the whole drag");
+        finish_outline(&mut app, &ctx);
+    }
+
     /// Nothing in the mode can lose the grabbed lines, so if they are gone
     /// the page has drifted: the pre-grab arrangement goes back rather than
     /// leaving a half-dragged order that exists nowhere but the screen.
