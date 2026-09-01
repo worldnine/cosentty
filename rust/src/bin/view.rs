@@ -25,8 +25,9 @@
 //             a double-click enters EDIT at the character clicked, and
 //             only there (no selection): in EDIT a double-click takes a
 //             word, a triple the line
-//   drag      select a range; a drag that comes back to its own line
-//             takes the characters selection back
+//   drag      select a range (READ: lines; EDIT: characters on the line
+//             the drag started, clamped to its edge when the pointer
+//             wanders off)
 //   scrollbar click the track to jump, drag the thumb to scrub
 //
 // The cursor addresses SOURCE lines (akapen's ViewState model: `cursor` is a
@@ -9028,38 +9029,37 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             let Some(end) = app.src_at_screen_row(clamped_row) else { return };
             if app.session.is_some() {
                 let col = m.column.saturating_sub(text.x) as usize;
-                if end == anchor && end < app.lines.len() {
-                    // On the line the drag started on — a drag that
-                    // strayed to another line and came back included: the
-                    // CHARACTER range resumes, anchored where it was. Seat
-                    // the session on the anchor line FIRST: the caret
-                    // below belongs to THAT line's text, and assigning it
-                    // while the session stands on another line's buffer
-                    // lands mid-character on CJK — which panics the next
-                    // draw. Nothing is typed during a drag, so the seating
-                    // commits nothing.
-                    session_move_to_line(app, ctx, anchor);
-                    let caret = click_caret(app, anchor, col, clamped_row);
-                    if let Some(s) = app.session.as_mut() {
-                        s.input.cur = caret.min(s.input.buf.len());
-                        s.sel_from = anchor_caret;
-                        if s.sel_from == Some(s.input.cur) {
-                            s.sel_from = None;
-                        }
-                        s.want_col = None;
-                    }
-                    app.selection = None;
-                } else if end < app.lines.len() {
-                    // Crossing lines: hand over to the LINE range, which is
-                    // the unit an edit across lines works in.
-                    if let Some(s) = app.session.as_mut() {
+                // EDIT selects CHARACTERS, and its characters live on one
+                // line: the drag never leaves the line it started on and
+                // never builds a line range (that is READ's unit). Off the
+                // anchor line the selection clamps to that line's edge —
+                // below its end, above its start — so a wobble grows and
+                // shrinks a familiar character range instead of a band
+                // nobody can shake off. Seat the session on the anchor
+                // FIRST: the caret click_caret answers belongs to THAT
+                // line's text, and assigning it while the session stands
+                // on another line's buffer lands mid-character on CJK —
+                // the classic next-draw panic. (It also makes the seat
+                // here a no-op: a drag starts from button-down, which
+                // seats and commits already, and nothing is typed while
+                // the button is held.)
+                session_move_to_line(app, ctx, anchor);
+                let on_line = (end == anchor && end < app.lines.len()).then(|| {
+                    click_caret(app, anchor, col, clamped_row)
+                });
+                if let Some(s) = app.session.as_mut() {
+                    s.input.cur = match on_line {
+                        Some(c) => c.min(s.input.buf.len()),
+                        None if end < anchor => 0,
+                        None => s.input.buf.len(),
+                    };
+                    s.sel_from = anchor_caret;
+                    if s.sel_from == Some(s.input.cur) {
                         s.sel_from = None;
                     }
-                    session_move_to_line(app, ctx, end);
-                    app.selection = Some(Selection { anchor, cursor: end });
+                    s.want_col = None;
                 }
-                // Anything else addresses no body line: the selection
-                // stays as it is.
+                app.selection = None;
                 app.laid_width = 0;
                 app.follow = true;
                 return;
@@ -16107,12 +16107,13 @@ mod tests {
         assert_eq!(app.lines[2].text, "Y", "CRLF is normalised on the way in");
     }
 
-    /// Selecting text with the mouse inside EDIT: drag on one line takes
-    /// characters, double-click a word, triple-click the line, and a drag
-    /// across lines falls back to the LINE range — the unit an edit across
-    /// lines works in.
+    /// Selecting text with the mouse inside EDIT is character-unit, on
+    /// the line the drag started: a double-click takes a word, a
+    /// triple-click the line, and a drag that wanders off the line just
+    /// clamps the character range to that line's edge — the LINE range is
+    /// READ's unit, not the session's.
     #[test]
-    fn the_mouse_selects_characters_on_a_line_and_lines_across_them() {
+    fn the_mouse_in_edit_selects_characters_and_clamps_to_its_line() {
         let ctx = test_ctx();
         let mut app = page(&["title", "hello world", "second line", "third"]);
         app.rebuild(42);
@@ -16135,21 +16136,34 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none());
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world", "the line, as before");
 
-        // Dragging onto another line hands over to the line range.
+        // Dragging onto other lines clamps to the anchor line's end —
+        // still a character range, still the same line, no line band.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 3, 3));
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 3, 5));
-        assert!(app.session.as_ref().unwrap().sel_span().is_none(), "characters gave way");
-        assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
-        assert_eq!(copy_payload(&app, false).unwrap().0, "hello world\nsecond line\nthird");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1, "the session stays on the line the drag began on");
+        assert_eq!(
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
+            Some("llo world".into())
+        );
+        assert!(app.selection.is_none(), "EDIT never selects a line range with the mouse");
+        assert_eq!(copy_payload(&app, false).unwrap().0, "llo world");
+        // …and up past the top clamps to its start.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 3, 2));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
+            Some("he".into())
+        );
     }
 
-    /// Drag off the anchor line and back: the character selection has to
-    /// come home with it, and NOTHING may panic in between. (The caret
-    /// click_caret answers for the anchor line's text must never be
-    /// assigned to the session buffer of another line: mid-character on
-    /// CJK, the next draw panics.)
+    /// A drag in EDIT is characters all the way down: straying off the
+    /// anchor line clamps the range to that line's edge and back, and
+    /// NOTHING may panic in between. (The caret click_caret answers for
+    /// the anchor line's text used to be assigned to the session buffer
+    /// of another line: mid-character on CJK, the next draw panicked.)
     #[test]
-    fn a_drag_that_wobbles_across_lines_returns_to_characters() {
+    fn a_drag_that_wobbles_across_lines_stays_characters() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
         let mut app = page(&["title", "hello world", "あいx", "after"]);
@@ -16171,27 +16185,40 @@ mod tests {
         };
 
         // Press at column 7 of "hello world" (caret byte 7, on the "o")
-        // and drag one line down: the line range takes over.
+        // and drag one line down: the range clamps to the line's end.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 8, 4));
         draw(&mut app);
-        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)));
-        assert_eq!(app.session.as_ref().unwrap().line, 2);
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1, "the session never left the anchor line");
+        assert_eq!(
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
+            Some("orld".into()),
+            "below the line: the rest of it"
+        );
+        assert!(app.selection.is_none(), "no line band in EDIT");
 
-        // Drag back onto the anchor line, two characters left of the press:
-        // characters again, anchored where the button went down (byte 7)
-        // and extended to byte 5. The pre-fix code wrote byte 5 as the
-        // caret into "あいx"'s buffer and died mid-'い' on this draw.
+        // Drag back onto the anchor line: column-accurate again. Byte 5
+        // is where the pre-fix code sliced "あいx" mid-'い' and died on
+        // this draw.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 6, 3));
         draw(&mut app);
         let s = app.session.as_ref().unwrap();
-        assert_eq!(s.line, 1, "the session came home to the anchor line");
         assert_eq!(
             s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
             Some(" w".into()),
-            "character selection resumed from the press point"
+            "the character range tracks the pointer again"
         );
-        assert!(app.selection.is_none(), "the line range gave way");
+
+        // And above the anchor line: from the line's start to the anchor.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 6, 2));
+        draw(&mut app);
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
+            Some("hello w".into()),
+            "above the line: from its start"
+        );
     }
 
     /// Double-click takes the word, triple-click the whole line — inside
