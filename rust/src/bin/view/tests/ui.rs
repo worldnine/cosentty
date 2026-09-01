@@ -109,14 +109,51 @@ use super::support::*;
         assert!(app.web_rescaling.is_empty());
     }
 
+    /// READ の枠は ANSI ロール色、EDIT では同じ枠がヘッダのアクセント色に
+    /// 変わる。「枠が消える」のではなく「色が変わる」のがモードサイン。
     #[test]
-    fn edit_session_removes_the_ansi_colored_page_frame() {
-        assert!(page_frame_visible(false));
-        assert!(!page_frame_visible(true));
-        let style = page_frame_style();
-        assert_eq!(style.fg, Some(Color::DarkGray));
-        assert_eq!(style.bg, None);
-        assert!(!matches!(style.fg, Some(Color::Rgb(..))), "chrome must follow ANSI palette");
+    fn edit_session_recolors_the_page_frame_with_the_header_accent() {
+        let header = HeaderColors { fg: Color::Black, bg: Color::Rgb(20, 120, 200) };
+        let read = page_frame_style(false, header);
+        assert_eq!(read.fg, Some(Color::DarkGray));
+        assert_eq!(read.bg, None);
+        assert!(!matches!(read.fg, Some(Color::Rgb(..))), "READ chrome must follow ANSI palette");
+        let edit = page_frame_style(true, header);
+        assert_eq!(edit.fg, Some(header.bg), "EDIT frame wears the page's own colour");
+        assert_eq!(edit.bg, None);
+    }
+
+    /// EDIT を見分ける残り二つのサイン: フッタのモードタグはヘッダ配色の
+    /// バッジになり、キャレットのセルはソフト描画(REVERSED)でも塗られる
+    /// — ハードウェアカーソルの形状変更に応えない端末のための併走。
+    #[test]
+    fn edit_shows_a_header_colored_badge_and_a_software_caret() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "hello world"]);
+        let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let footer_y = 9;
+        let read_tag = term.backend().buffer().cell((1, footer_y)).unwrap().clone();
+        assert_ne!(read_tag.bg, app.header_colors.bg, "READ tag stays quiet");
+
+        enter_session(&mut app, &ctx, 1, 0);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let badge = buf.cell((1, footer_y)).unwrap();
+        assert_eq!(badge.bg, app.header_colors.bg, "EDIT tag wears the header colours");
+        assert_eq!(badge.fg, app.header_colors.fg);
+
+        // キャレット行のどこかのセルが REVERSED で塗られていること。
+        let reversed = (0..buf.area.height).any(|y| {
+            (0..buf.area.width).any(|x| {
+                buf.cell((x, y))
+                    .map(|c| c.modifier.contains(Modifier::REVERSED))
+                    .unwrap_or(false)
+            })
+        });
+        assert!(reversed, "the caret cell is painted, not only the hardware cursor");
     }
 
     /// The block being carried is marked on screen the way a selection is:
@@ -350,6 +387,10 @@ use super::support::*;
         enter_session(&mut app, &ctx, 0, 0);
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = terminal.backend().buffer();
-        assert_eq!(buf.cell((20, 1)).unwrap().symbol(), " ", "EDIT removes the top frame");
-        assert_eq!(buf.cell((41, 3)).unwrap().symbol(), " ", "EDIT removes the side frame");
+        // EDIT keeps the frame and recolors it with the header accent:
+        // the frame itself is the mode signal now. (The top rule is still
+        // scrolled off here, as in the READ passage above — the sides are
+        // what remains on screen.)
+        assert_eq!(buf.cell((41, 3)).unwrap().symbol(), "│", "EDIT keeps the side frame");
+        assert_eq!(buf.cell((41, 3)).unwrap().fg, app.header_colors.bg);
     }

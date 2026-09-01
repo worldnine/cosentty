@@ -395,12 +395,15 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     lines
 }
 
-pub(crate) fn page_frame_visible(editing: bool) -> bool {
-    !editing
-}
-
-/// Page chrome uses an ANSI role color; the terminal theme supplies its RGB.
-pub(crate) fn page_frame_style() -> Style {
+/// Page chrome. READ uses an ANSI role color (the terminal theme supplies
+/// its RGB); EDIT keeps the SAME frame but recolors it with the page
+/// header's own accent. A frame that changes colour is a mode signal one
+/// can see; a frame that merely disappears asks the reader to notice an
+/// absence.
+pub(crate) fn page_frame_style(editing: bool, header: HeaderColors) -> Style {
+    if editing {
+        return Style::default().fg(header.bg);
+    }
     Style::default().fg(CHROME_DIM)
 }
 
@@ -488,9 +491,21 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     };
     let cur_links = if app.session.is_some() { Vec::new() } else { app.cursor_line_links() };
     let hint = app.hint_text(&cur_links);
+    // EDIT のタグはヘッダと同じ配色の反転バッジで示す: 枠色・キャレットと
+    // 並ぶ三つ目のモードサイン。READ は従来どおり控えめに。
+    let mode_style = if app.session.is_some() {
+        Style::default()
+            .fg(app.header_colors.fg)
+            .bg(app.header_colors.bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(CHROME_DIM)
+    };
     f.render_widget(
-        Paragraph::new(format!(" {} {} · {}", mode_tag, pos, hint))
-            .style(Style::default().fg(CHROME_DIM)),
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {} ", mode_tag), mode_style),
+            Span::styled(format!("{} · {}", pos, hint), Style::default().fg(CHROME_DIM)),
+        ])),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 
@@ -533,12 +548,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
     let band_h = (band_bot - band_top + 1).max(1) as u16; // visible rows
-    if page_frame_visible(app.session.is_some()) {
+    {
         let buf = f.buffer_mut();
-        // READ has a terminal-colored page boundary. EDIT removes that
-        // boundary entirely; the absence is the mode signal and does not
-        // depend on a particular terminal palette.
-        let frame_style = page_frame_style();
+        // READ has a terminal-colored page boundary. EDIT keeps it and
+        // recolors it with the header accent — the frame itself says which
+        // mode this is, in the page's own colour.
+        let frame_style = page_frame_style(app.session.is_some(), app.header_colors);
         let right_x = body.x + body.width.saturating_sub(1);
         let set = |buf: &mut ratatui::buffer::Buffer, x: u16, y: i32, s: &str| {
             if y < band_top || y > band_bot {
@@ -946,6 +961,19 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             let x = text.x as i32 + (ccol as i32).min(text.width.saturating_sub(1) as i32);
             if y >= band_top && y <= band_bot {
                 f.set_cursor_position(ratatui::layout::Position::new(x as u16, y as u16));
+                // ソフト描画のキャレット: 同じセルの REVERSED をトグルする。
+                // ハードウェアカーソルの形状変更(点滅バー)に応えない端末
+                // でもキャレットが見えるように、常に併走させる。選択の
+                // REVERSED の中では反転が外れて「素」に戻り、そこでも際立つ。
+                if let Some(c) = f.buffer_mut().cell_mut((x as u16, y as u16)) {
+                    let st = c.style();
+                    let st = if st.add_modifier.contains(Modifier::REVERSED) {
+                        st.remove_modifier(Modifier::REVERSED)
+                    } else {
+                        st.add_modifier(Modifier::REVERSED)
+                    };
+                    c.set_style(st);
+                }
             }
         }
     }

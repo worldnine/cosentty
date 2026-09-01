@@ -63,6 +63,7 @@ use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
@@ -386,7 +387,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   3. `Stop` ends the worker loop, and the join makes "no browser and
     //      no worker outlive this process" a fact rather than a hope.
     web_backend.shutdown();
-    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        SetCursorStyle::DefaultUserShape,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     if let Some(worker) = web_worker {
         let _ = app.web_job_tx.send(WebJob::Stop);
@@ -480,7 +486,23 @@ enum Action {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Result<(), Box<dyn Error>> {
+    // EDIT の出入りでハードウェアカーソルの形を切り替える: 点滅する縦棒が
+    // 見えている=編集中、という一次サイン。応えない端末のために ui 側が
+    // 同じセルを REVERSED でも塗る(ソフト描画キャレット)。
+    let mut was_editing = false;
     loop {
+        let editing = app.session.is_some();
+        if editing != was_editing {
+            let _ = execute!(
+                std::io::stdout(),
+                if editing {
+                    SetCursorStyle::BlinkingBar
+                } else {
+                    SetCursorStyle::DefaultUserShape
+                }
+            );
+            was_editing = editing;
+        }
         // Keep command mode in ASCII (retried while the IME helper builds).
         if !app.ime_ready && app.composing.is_none() && app.session.is_none() {
             app.ime_ready = app.session_ime.force_ascii();
