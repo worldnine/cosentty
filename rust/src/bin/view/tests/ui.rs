@@ -211,6 +211,19 @@ use super::support::*;
         // 間の行: 本文の全文字が反転。
         let two = row_cells("two");
         assert!(two.iter().all(|(_, r)| *r), "a middle line is wholly selected: {two:?}");
+
+        // EDIT の文字選択は行の帯(READ の選択色)を敷かない: 文字の
+        // 反転だけが選択の形を語る。
+        let sel = selection_bg(ctx.terminal_bg);
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                assert_ne!(
+                    buf.cell((x, y)).unwrap().bg,
+                    sel,
+                    "no line band in EDIT char selection (cell {x},{y})"
+                );
+            }
+        }
     }
 
     /// The block being carried is marked on screen the way a selection is:

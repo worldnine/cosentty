@@ -632,19 +632,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // the thing being carried around, which is what a selection means
     // here. The footer says the mode and its keys in words, so this colour
     // is never the only thing telling the reader what is going on.
-    let sel_range = move_block_range(app)
-        .or_else(|| app.selection.map(|s| s.range()))
-        // EDIT has no line-range, but a character range across lines
-        // still BANDS the lines it covers: the caret line carries its
-        // exact reversed characters (`caret_sel_bytes`), the others read
-        // as whole lines — the honest shape of a selection whose ends
-        // are not on them.
-        .or_else(|| {
-            app.session
-                .as_ref()
-                .and_then(|s| s.sel_ends())
-                .map(|((a, _), (b, _))| (a, b))
-        });
+    // EDIT の文字選択はここに合流させない: かつては行の帯で「選択が
+    // 通っている行」を示していたが、いまは選択された文字そのものが
+    // 全行で反転する(sess_sel と reverse_cols)。文字の範囲が正確に
+    // 見えるのに行全体へ帯を敷くと、選択が行単位に見えてしまう。
+    let sel_range =
+        move_block_range(app).or_else(|| app.selection.map(|s| s.range()));
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
     let mut carets: Vec<(u16, Style)> = Vec::new();
