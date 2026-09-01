@@ -612,6 +612,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         app.follow = false;
     }
 
+    // EDIT の行またぎ文字選択の両端。キャレット行は自分の行の反転を
+    // session 描画(caret_sel_bytes)が行うので、ここではそれ以外の行 —
+    // 遠端の行と間の行 — の文字反転に使う。
+    let sess_sel: Option<((usize, usize), (usize, usize))> = app
+        .session
+        .as_ref()
+        .and_then(|s| s.sel_ends())
+        .filter(|((la, _), (lb, _))| la != lb);
+
     let view_top = app.scroll as i32;
     // Row coordinates exclude the top rule, while drawing uses
     // `text.y + row - scroll`. Therefore one row above `view_top` remains
@@ -756,7 +765,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         };
 
         match row {
-            Row::Line { line, src, .. } => {
+            Row::Line { line, src, start, hang } => {
                 if let Some(r) = one_row(screen_y) {
                     // A diagram being rendered dims its code and lets a band
                     // of brightness run down it: the reader sees the work
@@ -764,6 +773,39 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     let painted = match app.web_shimmer.get(src) {
                         Some((pos, len)) => shimmer(line, *pos, *len, app, ctx),
                         None => line.clone(),
+                    };
+                    // EDIT の行またぎ文字選択: キャレット行以外も選択された
+                    // 文字そのものを反転する。遠端の行は境界の文字から
+                    // (または境界の文字まで)、間の行は本文の全文字。境界の
+                    // 表示列は click_caret と同じ物差し(session_display)で
+                    // 測るので、クリックが置いた端と食い違わない。
+                    let painted = match (sess_sel, app.session.as_ref()) {
+                        (Some(((la, ba), (lb, bb))), Some(sess))
+                            if *src != sess.line && *src >= la && *src <= lb =>
+                        {
+                            let raw =
+                                app.lines.get(*src).map(|l| l.text.as_str()).unwrap_or("");
+                            let code = app.raw_span_at_line(*src);
+                            let text_col = session_hang(raw, code);
+                            let (lo, hi) = if *src == la {
+                                (sel_boundary_col(raw, ba, code), usize::MAX)
+                            } else if *src == lb {
+                                (text_col, sel_boundary_col(raw, bb, code))
+                            } else {
+                                (text_col, usize::MAX)
+                            };
+                            let w = painted.width();
+                            let x0 = hang + lo.saturating_sub(*start);
+                            let x1 = if hi == usize::MAX {
+                                w
+                            } else if hi <= *start {
+                                0
+                            } else {
+                                (hang + hi.saturating_sub(*start)).min(w)
+                            };
+                            reverse_cols(painted, x0.min(w), x1)
+                        }
+                        _ => painted,
                     };
                     f.render_widget(Paragraph::new(painted).style(base), r);
                 }
@@ -1132,6 +1174,56 @@ pub(crate) fn bullet_pad(indent: usize, item: bool) -> String {
 
 /// One row of a block the web renderer is still working on/// One row of a block the web renderer is still working on, with the
 /// brightness band applied to every span.
+/// EDIT の行またぎ選択の境界(行内バイト位置)を、折り返し前の表示列に
+/// 変換する。rendered な行の列とは厳密には一致しないことがある(記法が
+/// 隠れる行など)が、click_caret がアンカーを置くときと同じ近似なので、
+/// マウスが選んだ端と描画は食い違わない。
+pub(crate) fn sel_boundary_col(raw: &str, byte: usize, code: Option<CodeSpan>) -> usize {
+    let disp = session_display(raw, code);
+    let d = display_caret(raw, byte, code);
+    str_width(&disp[..floor_boundary(&disp, d)])
+}
+
+/// 1つの表示行の [from, to) 列を REVERSED にする。スパンは表示列で
+/// 切り分け、境界をまたぐスパンだけ分割する。
+pub(crate) fn reverse_cols(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
+    if from >= to {
+        return line;
+    }
+    let style = line.style;
+    let alignment = line.alignment;
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut at = 0usize;
+    for sp in line.spans {
+        let w = str_width(sp.content.as_ref());
+        let (s, e) = (at, at + w);
+        at = e;
+        if e <= from || s >= to || w == 0 {
+            out.push(sp);
+            continue;
+        }
+        let text = sp.content.into_owned();
+        let cut_a = byte_at_col(&text, from.saturating_sub(s));
+        let cut_b = byte_at_col(&text, to.saturating_sub(s).min(w));
+        if cut_a > 0 {
+            out.push(Span::styled(text[..cut_a].to_string(), sp.style));
+        }
+        if cut_b > cut_a {
+            out.push(Span::styled(
+                text[cut_a..cut_b].to_string(),
+                sp.style.add_modifier(Modifier::REVERSED),
+            ));
+        }
+        if cut_b < text.len() {
+            out.push(Span::styled(text[cut_b..].to_string(), sp.style));
+        }
+    }
+    let mut line = Line::from(out);
+    line.style = style;
+    line.alignment = alignment;
+    line
+}
+
 pub(crate) fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: &Ctx) -> Line<'static> {
     let level = cosense::theme::shimmer_level(pos, len, app.web_anim.elapsed().as_secs_f32());
     let spans: Vec<Span<'static>> = line

@@ -156,6 +156,63 @@ use super::support::*;
         assert!(reversed, "the caret cell is painted, not only the hardware cursor");
     }
 
+    /// EDIT の行またぎ文字選択は、キャレット行だけでなく全ての行で選択
+    /// された文字そのものが反転する: アンカーの行は境界の文字から行末
+    /// まで、間の行は本文全部。帯だけでは「どこから選んだか」「途中の行が
+    /// 入っているか」が読めなかった。
+    #[test]
+    fn a_cross_line_selection_reverses_its_characters_on_every_line() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three"]);
+        app.rebuild(40);
+        // アンカーは 1 行目 "one" の 'e' の手前(byte 2)。そこから下へ
+        // 2 行伸ばすと、キャレットは 3 行目 "three" に居る。
+        enter_session(&mut app, &ctx, 1, 2);
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        assert_eq!(app.session.as_ref().unwrap().sel_from, Some((1, 2)));
+
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // 行の本文セルを (シンボル, REVERSED か) で拾う。
+        let row_cells = |needle: &str| -> Vec<(String, bool)> {
+            for y in 0..buf.area.height {
+                let text: String = (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect();
+                if text.contains(needle) {
+                    let x0 = (0..buf.area.width)
+                        .find(|&x| {
+                            let rest: String = (x..buf.area.width)
+                                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                                .collect();
+                            rest.starts_with(needle)
+                        })
+                        .unwrap();
+                    return (x0..x0 + needle.len() as u16)
+                        .map(|x| {
+                            let c = buf.cell((x, y)).unwrap();
+                            (c.symbol().to_string(), c.modifier.contains(Modifier::REVERSED))
+                        })
+                        .collect();
+                }
+            }
+            panic!("row containing {needle:?} not on screen");
+        };
+
+        // アンカー行: 'on' は選択外、'e' から行末が反転。
+        let one = row_cells("one");
+        assert!(!one[0].1 && !one[1].1, "before the anchor stays plain: {one:?}");
+        assert!(one[2].1, "from the anchor on it reads as selected: {one:?}");
+
+        // 間の行: 本文の全文字が反転。
+        let two = row_cells("two");
+        assert!(two.iter().all(|(_, r)| *r), "a middle line is wholly selected: {two:?}");
+    }
+
     /// The block being carried is marked on screen the way a selection is:
     /// the same highlight, on every line of it. (The mode's name and its
     /// keys are in the footer, so this colour never carries the news
