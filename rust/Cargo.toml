@@ -32,7 +32,7 @@ path = "src/bin/probe.rs"
 
 [[bin]]
 name = "view"
-path = "src/bin/view.rs"
+path = "src/bin/view/main.rs"
 
 [[bin]]
 name = "edit_smoke"
