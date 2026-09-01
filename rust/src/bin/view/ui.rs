@@ -395,16 +395,12 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     lines
 }
 
-/// Page chrome. READ uses an ANSI role color (the terminal theme supplies
-/// its RGB); EDIT keeps the SAME frame but recolors it with the page
-/// header's own accent. A frame that changes colour is a mode signal one
-/// can see; a frame that merely disappears asks the reader to notice an
-/// absence.
-pub(crate) fn page_frame_style(editing: bool, header: HeaderColors) -> Style {
-    if editing {
-        return Style::default().fg(header.bg);
-    }
-    Style::default().fg(CHROME_DIM)
+/// Page chrome: READ のページ枠は、ページヘッダ自身のアクセント色を
+/// まとう — サイト(cosense web)でページがプロジェクト色の中に置かれて
+/// いるのと同じ言い方。EDIT は枠を持たず、本文全域の下敷き
+/// (theme::edit_backdrop)がモードを語る。
+pub(crate) fn page_frame_style(header: HeaderColors) -> Style {
+    Style::default().fg(header.bg)
 }
 
 pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
@@ -551,12 +547,25 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
     let band_h = (band_bot - band_top + 1).max(1) as u16; // visible rows
-    {
+    // EDIT の下敷き: 本文領域の全幅に、キャレット行の帯より暗い背景を
+    // 敷く。読む画面と書く画面で「紙の色」が変わるのが持続的なモード
+    // サイン。行の帯(CURSOR_BG)はこの上に明るく浮く。
+    if app.session.is_some() {
+        let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg);
         let buf = f.buffer_mut();
-        // READ has a terminal-colored page boundary. EDIT keeps it and
-        // recolors it with the header accent — the frame itself says which
-        // mode this is, in the page's own colour.
-        let frame_style = page_frame_style(app.session.is_some(), app.header_colors);
+        for y in band_top..=band_bot {
+            for x in body.x..body.x + body.width {
+                if let Some(c) = buf.cell_mut((x, y as u16)) {
+                    c.set_bg(backdrop);
+                }
+            }
+        }
+    } else {
+        let buf = f.buffer_mut();
+        // READ のページ枠はヘッダのアクセント色(サイトでページが
+        // プロジェクト色の中に置かれているのと同じ)。EDIT は枠なし —
+        // 下敷きがモードを語る。
+        let frame_style = page_frame_style(app.header_colors);
         let right_x = body.x + body.width.saturating_sub(1);
         let set = |buf: &mut ratatui::buffer::Buffer, x: u16, y: i32, s: &str| {
             if y < band_top || y > band_bot {
@@ -712,16 +721,6 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
         if in_edit_sel {
             base = base.bg(CURSOR_BG);
-        }
-        // EDIT のスポットライト: キャレット行と選択が通っている行以外を
-        // DIM で一段沈める。読んでいる画面と書いている画面が「常に」
-        // 違って見えることが、EDIT に居ることを忘れて j/k や q を打って
-        // しまう事故への持続的な防波堤になる。色は端末テーマに任せる
-        // (DIM は修飾であって色ではない)。
-        if let Some(sess) = app.session.as_ref() {
-            if row.src() != Some(sess.line) && !in_edit_sel {
-                base = base.add_modifier(Modifier::DIM);
-            }
         }
         if is_cursor {
             base = base.bg(CURSOR_BG);

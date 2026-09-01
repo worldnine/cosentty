@@ -109,18 +109,15 @@ use super::support::*;
         assert!(app.web_rescaling.is_empty());
     }
 
-    /// READ の枠は ANSI ロール色、EDIT では同じ枠がヘッダのアクセント色に
-    /// 変わる。「枠が消える」のではなく「色が変わる」のがモードサイン。
+    /// READ のページ枠はヘッダ自身のアクセント色をまとう(サイトでページが
+    /// プロジェクト色の中に置かれているのと同じ)。EDIT は枠を持たず、
+    /// 本文全域の下敷きがモードを語る(描画側のテストは別)。
     #[test]
-    fn edit_session_recolors_the_page_frame_with_the_header_accent() {
+    fn the_read_frame_wears_the_pages_own_accent() {
         let header = HeaderColors { fg: Color::Black, bg: Color::Rgb(20, 120, 200) };
-        let read = page_frame_style(false, header);
-        assert_eq!(read.fg, Some(Color::DarkGray));
+        let read = page_frame_style(header);
+        assert_eq!(read.fg, Some(header.bg), "the frame is the page's colour");
         assert_eq!(read.bg, None);
-        assert!(!matches!(read.fg, Some(Color::Rgb(..))), "READ chrome must follow ANSI palette");
-        let edit = page_frame_style(true, header);
-        assert_eq!(edit.fg, Some(header.bg), "EDIT frame wears the page's own colour");
-        assert_eq!(edit.bg, None);
     }
 
     /// EDIT では行カーソル `>` を出さず、帯もキャレットが実際に届く
@@ -169,23 +166,25 @@ use super::support::*;
         }
     }
 
-    /// EDIT のスポットライト: 編集中はキャレット行以外が DIM で沈み、
-    /// ヘッダに [✎ 編集中] が出る。読んでいる画面と書いている画面が
-    /// 常に違って見えることが、EDIT に居ることを忘れて j/k を打って
-    /// しまう事故への持続的な防波堤。
+    /// EDIT の下敷き: 編集中は本文全域に、カーソル行の帯より暗い背景が
+    /// 敷かれ(紙の色が変わる)、ヘッダに [✎ 編集中] が出る。キャレット
+    /// 行の帯はその上に明るく浮く。読んでいる画面と書いている画面が常に
+    /// 違って見えることが、EDIT に居ることを忘れて j/k を打ってしまう
+    /// 事故への持続的な防波堤。
     #[test]
-    fn edit_dims_every_line_but_the_caret_one_and_says_so_in_the_header() {
+    fn edit_lays_a_darker_backdrop_and_says_so_in_the_header() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
         let mut app = page(&["title", "one", "two"]);
         let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg);
 
-        let dimmed = |buf: &ratatui::buffer::Buffer, needle: &str| -> bool {
+        let bg_of = |buf: &ratatui::buffer::Buffer, needle: &str| -> Color {
             for y in 0..buf.area.height {
                 let text: String = (0..buf.area.width)
                     .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
                     .collect();
-                if let Some(_) = text.find(needle) {
+                if text.contains(needle) {
                     let x = (0..buf.area.width)
                         .find(|&x| {
                             let rest: String = (x..buf.area.width)
@@ -194,7 +193,7 @@ use super::support::*;
                             rest.starts_with(needle)
                         })
                         .unwrap();
-                    return buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM);
+                    return buf.cell((x, y)).unwrap().bg;
                 }
             }
             panic!("{needle:?} not on screen");
@@ -219,18 +218,18 @@ use super::support::*;
             out
         };
 
-        // READ: 何も沈まない。
+        // READ: 下敷きは無い。
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = term.backend().buffer().clone();
-        assert!(!dimmed(&buf, "one") && !dimmed(&buf, "two"), "READ dims nothing");
+        assert_ne!(bg_of(&buf, "two"), backdrop, "READ lays no backdrop");
         assert!(!screen(&term).contains("編集中"));
 
-        // EDIT: キャレット行(one)は素のまま、他(two)は沈む。
+        // EDIT: キャレット行(one)は帯、他(two)は下敷きの上に居る。
         enter_session(&mut app, &ctx, 1, 0);
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = term.backend().buffer().clone();
-        assert!(!dimmed(&buf, "one"), "the caret line stays bright");
-        assert!(dimmed(&buf, "two"), "every other line steps back");
+        assert_eq!(bg_of(&buf, "one"), CURSOR_BG, "the caret line floats on its band");
+        assert_eq!(bg_of(&buf, "two"), backdrop, "every other line sits on the backdrop");
         assert!(screen(&term).contains("✎ 編集中"), "the header says so too");
     }
 
@@ -555,7 +554,11 @@ use super::support::*;
             }
             // The thumb starts below the top frame rule instead of overwriting it.
             assert_eq!(buf.cell((40, 1)).unwrap().symbol(), "─");
-            assert_eq!(buf.cell((40, 1)).unwrap().fg, Color::DarkGray);
+            assert_eq!(
+                buf.cell((40, 1)).unwrap().fg,
+                app.header_colors.bg,
+                "READ frame wears the page's accent"
+            );
             assert_eq!(buf.cell((40, 2)).unwrap().symbol(), "▐");
             assert_eq!(buf.cell((40, 2)).unwrap().fg, Color::Gray);
         }
@@ -583,10 +586,12 @@ use super::support::*;
         enter_session(&mut app, &ctx, 0, 0);
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = terminal.backend().buffer();
-        // EDIT keeps the frame and recolors it with the header accent:
-        // the frame itself is the mode signal now. (The top rule is still
-        // scrolled off here, as in the READ passage above — the sides are
-        // what remains on screen.)
-        assert_eq!(buf.cell((41, 3)).unwrap().symbol(), "│", "EDIT keeps the side frame");
-        assert_eq!(buf.cell((41, 3)).unwrap().fg, app.header_colors.bg);
+        // EDIT has no frame: the backdrop (a paper darker than the cursor
+        // band) is the mode signal, and it runs to the pane's edge.
+        assert_ne!(buf.cell((41, 3)).unwrap().symbol(), "│", "EDIT drops the frame");
+        assert_eq!(
+            buf.cell((41, 3)).unwrap().bg,
+            cosense::theme::edit_backdrop(ctx.terminal_bg),
+            "the backdrop reaches the edge"
+        );
     }

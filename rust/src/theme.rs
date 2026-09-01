@@ -635,6 +635,21 @@ pub fn selection_band(terminal_bg: (u8, u8, u8)) -> Color {
     }
 }
 
+/// EDIT モードの下敷き(本文領域全体の背景)。「編集中は紙の色が違う」を
+/// 敷きで語る。キャレット行の帯(ANSI の DarkGray)より暗い側に置くのが
+/// 約束: 帯が下敷きの上で明るく浮き、キャレット行がスポットライトになる。
+/// 暗い端末では背景をわずかに持ち上げたパネルに(それでも帯よりずっと
+/// 暗い)、明るい端末では一段沈めたグレーのパネルにする。code_wash より
+/// 一歩大きく動かして「領域」ではなく「状態」として読めるようにする。
+pub fn edit_backdrop(terminal_bg: (u8, u8, u8)) -> Color {
+    let (r, g, b) = terminal_bg;
+    if relative_luminance(terminal_bg) > 0.179 {
+        Color::Rgb(r.saturating_sub(24), g.saturating_sub(24), b.saturating_sub(22))
+    } else {
+        Color::Rgb(r.saturating_add(16), g.saturating_add(16), b.saturating_add(20))
+    }
+}
+
 /// Apply `shimmer_level` to one span's style: an RGB foreground is mixed
 /// toward the terminal background, which is the only way to modulate
 /// brightness without inventing a color the theme never chose.
