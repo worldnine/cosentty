@@ -1,0 +1,644 @@
+use super::*;
+
+/// A commit came back from the worker (drained per frame).
+pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
+    app.inflight = app.inflight.saturating_sub(1);
+    // Take the structural gate only for the job it is actually waiting on.
+    // An ordinary commit may have been in flight when the action started, or
+    // been queued behind it, and either could come back first — arrival
+    // order says nothing about ownership, the job id does.
+    let outline = match app.outline_pending.as_ref() {
+        Some(pending) if pending.job == outcome.job() => {
+            app.outline_pending.take().map(|pending| pending.snapshot)
+        }
+        _ => None,
+    };
+    match outcome {
+        CommitOutcome::Done { job: _, label, title, commit_id } => {
+            // Navigation may still happen while the gate is up. In that case
+            // this result belongs wholly to the old page: clearing the gate
+            // is the only current-app state it may touch.
+            if let Some(pending) = outline.as_ref() {
+                let same_page = app.project == pending.project && app.page_id == pending.page_id;
+                let same_install = same_page && app.gen_now() == pending.install_gen;
+                if !same_install {
+                    // Navigation is allowed while saving. Even an away/back
+                    // trip to the same page installed a snapshot from before
+                    // this commit, so the old outcome must not rename or
+                    // otherwise mutate that installation. If it is the same
+                    // page, reload once to reveal the successful move.
+                    if same_page {
+                        // The commit succeeded after this installation was
+                        // fetched. Until an authoritative reload lands, its
+                        // line IDs are stale and neither edits nor web
+                        // rendering may trust them.
+                        app.bump_server_epoch();
+                        app.mark_desynced();
+                        app.outline_refresh_needed = true;
+                        if reload_page(app, ctx) {
+                            if !commit_id.is_empty() {
+                                app.own_commits.push_back(commit_id);
+                                while app.own_commits.len() > OWN_COMMIT_MEMORY {
+                                    app.own_commits.pop_front();
+                                }
+                            }
+                            app.status = format!("✓ {label}");
+                        }
+                    }
+                    return;
+                }
+            }
+            let outline_done = outline.is_some();
+            if !commit_id.is_empty() {
+                app.own_commits.push_back(commit_id);
+                while app.own_commits.len() > OWN_COMMIT_MEMORY {
+                    app.own_commits.pop_front();
+                }
+            }
+            // The server now holds something a poll started before this may
+            // not know about.
+            app.bump_server_epoch();
+            // Title-line edits rename the page (auto-suffix included).
+            if !title.is_empty() && title != app.title {
+                app.title = title;
+                if let Ok(mut t) = app.poll_target.lock() {
+                    *t = (app.project.clone(), app.title.clone());
+                }
+            }
+            if outline_done
+                || app.status.is_empty()
+                || app.status.starts_with('✓')
+                || app.status.starts_with("EDIT")
+            {
+                app.status = format!("✓ {label}");
+            }
+            // A page that just came into being has an id we do not know
+            // yet, and every edit until we do has to wait. Waiting for the
+            // next poll means up to 3 s (60 s on websocket sync) of held
+            // edits that a quit would take with it — so fetch it now.
+            if page_is_uncreated(app) && app.create_state == CreateState::Sent {
+                adopt_after_create(app, ctx);
+            }
+        }
+        CommitOutcome::Skipped { job: _ } => {
+            if let Some(pending) = outline {
+                recover_outline_action(app, ctx, pending, t!("処理が失効", "invalidated"));
+            }
+        }
+        CommitOutcome::Failed { job: _, label, msg } => {
+            if let Some(pending) = outline {
+                recover_outline_action(
+                    app,
+                    ctx,
+                    pending,
+                    t!("送信失敗: {label} — {msg}", "commit failed: {label} — {msg}"),
+                );
+            } else {
+                app.status = t!("コミットに失敗しました: {label} — {msg}", "commit failed: {label} — {msg}");
+                app.mark_desynced();
+                if app.create_state == CreateState::Sent && page_is_uncreated(app) {
+                    // The page was never made. Let the next edit try again
+                    // rather than retrying in a loop against a dead network.
+                    app.create_state = CreateState::Idle;
+                }
+            }
+        }
+        CommitOutcome::Conflict { job: _ } => {
+            if let Some(pending) = outline {
+                recover_outline_action(app, ctx, pending, t!("競合", "conflict"));
+            } else {
+                recover_conflict(app, ctx);
+            }
+        }
+    }
+}
+
+/// Fetch the page we just created and take its id. One blocking request,
+/// once per created page: the alternative is holding every later edit
+/// until a poll happens to notice, and losing them if the viewer quits
+/// first. A failure is not fatal — the poller adopts it later.
+pub(crate) fn adopt_after_create(app: &mut App, ctx: &Ctx) {
+    if let Ok(page) = ctx.client.get_page_in(&app.project, &app.title) {
+        adopt_created_page(app, ctx, &page);
+    }
+}
+
+/// The page we typed now exists on the server. Take its id and its line
+/// ids as the base, then commit whatever was typed after the create left —
+/// those keystrokes were never part of it.
+///
+/// The lines come back with the ids WE generated (the create names its own
+/// lines), so the cursor, the session and the telomere all survive this.
+pub(crate) fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::Page) {
+    if !page.persistent {
+        return; // a provisional id is not a page (see `live_page_id`)
+    }
+    let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
+    let session_id =
+        app.session.as_ref().and_then(|s| app.lines.get(s.line)).map(|l| l.id.clone());
+    let local: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
+    let server: Vec<(String, String)> =
+        page.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    app.page_id = page.id.clone();
+    app.lines = page.lines.clone();
+    app.create_state = CreateState::Idle;
+    // It exists now. Pages that link here are drawing it as uncreated on
+    // the strength of a reading that is one commit out of date.
+    app.links.learn(&app.title.clone(), true);
+    app.bump_server_epoch();
+    app.mark_synced();
+    let ops = cosense::editops::diff_to_ops(&server, &local);
+    if ops.is_empty() {
+        rerender(app, ctx);
+        app.status = t!("✓ ページを作成しました", "✓ page created");
+    } else {
+        // `do_edit` applies locally, stacks the undo and queues the commit
+        // — the same path any other edit takes, now that there is a page.
+        do_edit(app, ctx, &t!("新規ページの同期", "sync new page"), ops);
+        app.status = t!("✓ ページを作成しました", "✓ page created");
+    }
+    reanchor_cursor_session(app, cursor_id, session_id);
+}
+
+/// The shared apply gate: never install remote state while the local
+/// model is at stake — viewing history, a commit in flight, a composer
+/// open, or a dirty caret line. Polling drops the page when gated (it
+/// refetches soon anyway); websocket commits are BUFFERED instead and
+/// flushed the moment the gate drops (`ws_flush_pending`).
+pub(crate) fn remote_gate_clear(app: &App) -> bool {
+    app.time.is_none()
+        && app.inflight == 0
+        && app.composing.is_none()
+        // A grabbed block is uncommitted local work exactly like a dirty
+        // caret line: installing someone else's page under it would drag
+        // the block against lines the reader never saw.
+        && app.move_mode.is_none()
+        && !app.session.as_ref().map(|s| s.input.buf != s.orig).unwrap_or(false)
+}
+
+/// Replace the local page model with `page`'s lines, keeping the cursor and
+/// a clean session on THEIR line ids (a vanished line closes the session),
+/// clearing the local undo lineage (its anchors came from the old state),
+/// and re-rendering. Polled pages and websocket resyncs both land here.
+pub(crate) fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, status: &str) {
+    // A full page from the server replaces the local lines wholesale, so
+    // whatever a failed commit had left diverging is resolved here. This
+    // and `set_page` are the only places the desync flag clears.
+    app.bump_server_epoch();
+    app.mark_synced();
+    let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
+    let session_id = app
+        .session
+        .as_ref()
+        .and_then(|s| app.lines.get(s.line))
+        .map(|l| l.id.clone());
+
+    app.related = build_related(page, &app.project);
+    app.virtual_items = app
+        .related
+        .iter()
+        .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+        .collect();
+    app.lines = page.lines.clone();
+    // Remote lineage: an entry whose anchor line the server no longer has
+    // cannot be replayed, but the rest still can. Dropping the WHOLE
+    // history here is what made `^r` look dead: a single web-side edit (or
+    // one 3 s poll that differed) silently took the redo stack with it.
+    let live: std::collections::HashSet<&str> =
+        app.lines.iter().map(|l| l.id.as_str()).collect();
+    let before = app.undo_stack.len() + app.redo_stack.len();
+    app.undo_stack.retain(|(_, ops)| ops_replayable(ops, &live));
+    app.redo_stack.retain(|(_, ops)| ops_replayable(ops, &live));
+    if app.undo_stack.len() + app.redo_stack.len() < before {
+        app.history_dropped = true;
+    }
+    rerender(app, ctx);
+    reanchor_cursor_session(app, cursor_id, session_id);
+    app.follow = true;
+    app.status = status.into();
+}
+
+/// Re-anchor the cursor and a clean session onto their line ids after the
+/// page model changed (full install or remote diff); a vanished session
+/// line closes the session.
+pub(crate) fn reanchor_cursor_session(app: &mut App, cursor_id: Option<String>, session_id: Option<String>) {
+    // Keep the cursor on ITS line (by id), not its number.
+    if let Some(id) = cursor_id {
+        if let Some(i) = app.lines.iter().position(|l| l.id == id) {
+            app.cursor = i;
+        }
+    }
+    // Re-anchor the session the same way; a vanished line closes it.
+    if let Some(sid) = session_id {
+        match app.lines.iter().position(|l| l.id == sid) {
+            Some(i) => {
+                let text = app.lines[i].text.clone();
+                if let Some(s) = app.session.as_mut() {
+                    s.line = i;
+                    let cur = s.input.cur.min(text.len());
+                    let cur = (0..=cur).rev().find(|&b| text.is_char_boundary(b)).unwrap_or(0);
+                    s.input = Input { buf: text.clone(), cur };
+                    s.orig = text;
+                    s.want_col = None;
+                }
+                app.cursor = i;
+            }
+            None => {
+                app.session = None;
+                app.ime_guard = None;
+            }
+        }
+    }
+}
+
+/// Reflect a polled page: WEB EDITS APPEAR ON SCREEN within seconds.
+/// Applied only when nothing local is at stake — the page matches, no
+/// commit is in flight, no line is dirty, no composer is open — so the
+/// local-authoritative model is never overwritten mid-thought. Remote
+/// lines keep their per-line `updated`, so the telomere shows the new
+/// lines as unread, exactly like a browser revisit.
+pub(crate) fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
+    if polled.project != app.project || polled.title != app.title {
+        return;
+    }
+    if page_is_uncreated(app) {
+        // Until the create lands, every poll is the same empty template.
+        // Installing it would wipe the page being typed.
+        adopt_created_page(app, ctx, &polled.page);
+        return;
+    }
+    // The snapshot was taken before something newer landed — a commit of
+    // ours, a websocket commit, a page install. Installing it now would
+    // undo that on screen. It is not an error; the next poll is seconds
+    // away and will carry the newer state.
+    if polled.epoch != app.server_epoch_now() {
+        return;
+    }
+    if !remote_gate_clear(app) {
+        return;
+    }
+    let same = polled.page.lines.len() == app.lines.len()
+        && polled
+            .page
+            .lines
+            .iter()
+            .zip(&app.lines)
+            .all(|(a, b)| a.id == b.id && a.text == b.text);
+    if same {
+        // Identical — nothing to install. But this IS a fresh, authoritative
+        // full snapshot (the epoch guard above proved it is not stale), and
+        // it agrees with the screen line for line. So if a failed commit had
+        // left us believing the page had drifted, that belief is now
+        // demonstrably wrong: an undo, a retry or a web-side revert brought
+        // the two back together. Clearing it here is what lets diagrams
+        // render again — without it the flag is sticky for the session.
+        //
+        // Only the flag is touched: no lines, no cursor, no undo lineage.
+        if app.web_unsynced {
+            app.mark_synced();
+        }
+        return;
+    }
+    install_remote_lines(app, ctx, &polled.page, &t!("⟳ web側の編集を反映", "⟳ applying a web edit"));
+}
+
+// -------------------------------------------------------------------------
+// Websocket push sync (NOTE-websocket-sync.md)
+// -------------------------------------------------------------------------
+
+/// One event from the ws thread → the event loop.
+pub(crate) fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
+    match ev {
+        // A state for the room the reader has already left says nothing
+        // about the one they are on — and a late `Live` from the old room
+        // would hold the NEW page on the 60 s poll.
+        WsEvent::State { project, title, state } => {
+            if project == app.project && title == app.title {
+                app.set_sync_state(state);
+            }
+        }
+        WsEvent::Status(s) => {
+            // Never clobber the session hint (EDIT — …): connection notes
+            // are transient and can wait.
+            if !app.status.starts_with("EDIT") {
+                app.status = s;
+            }
+        }
+        WsEvent::Resynced(res) => ws_on_resync(app, ctx, res),
+        WsEvent::Commit(c) => ws_on_commit(app, ctx, c),
+    }
+}
+
+/// The ws thread (re)joined the room, served a resync request, or hit its
+/// periodic catch-up: install the fetched page (fills any commits missed
+/// while away), resume the commit chain at `head`, and — when gated — hold
+/// the LATEST page for the moment the gate drops instead of dropping it.
+pub(crate) fn ws_on_resync(app: &mut App, ctx: &Ctx, res: ws::ResyncPage) {
+    if res.page.id != app.page_id {
+        return; // stale room
+    }
+    if resync_is_stale(app, &res) {
+        return;
+    }
+    if !remote_gate_clear(app) {
+        // Buffered commits so far precede this full page (their effects are
+        // inside it); commits received after it are in the channel still.
+        app.ws_held_resync = Some((res, app.ws_pending.len()));
+        return;
+    }
+    app.ws_pending.clear();
+    app.ws_head = res.head;
+    install_remote_lines(app, ctx, &res.page, &t!("⟳ websocket 全同期", "⟳ full websocket resync"));
+}
+
+/// A held resync (arrived while a gate was up) applies now that the gate is
+/// down. Buffered commits that PRECEDED it are superseded by the page and
+/// dropped; commits after it stay buffered and apply against the new state.
+pub(crate) fn ws_apply_held_resync(app: &mut App, ctx: &Ctx) {
+    let Some((res, pre)) = app.ws_held_resync.take() else { return };
+    if !remote_gate_clear(app) {
+        app.ws_held_resync = Some((res, pre)); // still gated — keep holding
+        return;
+    }
+    // Waiting for the gate is exactly when the page moves on underneath.
+    if resync_is_stale(app, &res) {
+        return;
+    }
+    for _ in 0..pre.min(app.ws_pending.len()) {
+        app.ws_pending.pop_front();
+    }
+    app.ws_head = res.head;
+    install_remote_lines(app, ctx, &res.page, &t!("⟳ websocket 全同期", "⟳ full websocket resync"));
+}
+
+/// A remote commit arrived — from ANY user, including ourselves. Commit
+/// events are applied through the same gate as polling: our own echoes are
+/// just idempotent no-ops (the local model already has them), and a commit
+/// from the same account edited in the browser applies like any other.
+pub(crate) fn ws_on_commit(app: &mut App, ctx: &Ctx, c: RemoteCommit) {
+    if c.page_id != app.page_id {
+        return; // stale room (navigation is one step ahead of the events)
+    }
+    if !remote_gate_clear(app) {
+        app.ws_pending.push_back(c);
+        return;
+    }
+    ws_flush_pending(app, ctx);
+    ws_apply_one(app, ctx, c);
+}
+
+/// Apply buffered commits now that the gates are clear, oldest first.
+pub(crate) fn ws_flush_pending(app: &mut App, ctx: &Ctx) {
+    while !app.ws_pending.is_empty() {
+        let next = app.ws_pending.pop_front().expect("non-empty");
+        if !ws_apply_one(app, ctx, next) {
+            break; // a gate came up mid-flush — the rest stay buffered
+        }
+    }
+}
+
+/// Apply ONE remote commit. Returns false if it had to be re-buffered (a
+/// gate is up); true if it was applied, dropped, or queued a resync.
+pub(crate) fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
+    if c.page_id != app.page_id {
+        return true; // stale room
+    }
+    if !remote_gate_clear(app) {
+        app.ws_pending.push_front(c);
+        return false;
+    }
+    // Our own commit, coming back to us. Its ops are already in the local
+    // model — that is where they came from — and re-applying them is not
+    // harmless: an echo can arrive AFTER we have edited past it, and a
+    // `Replace` then puts the older text back. (Type, press Enter to
+    // split, and let the first commit's echo land afterwards: the line
+    // grows its old tail back and the caret ends up a line below the
+    // text. Reported from the IME, where confirming and splitting happen
+    // a keystroke apart.) So it only moves the head along.
+    if let Some(i) = app.own_commits.iter().position(|id| *id == c.commit_id) {
+        app.own_commits.remove(i);
+        app.ws_head = Some(c.commit_id);
+        return true;
+    }
+    if app.ws_head.as_deref() == Some(c.parent_id.as_str()) {
+        // Contiguous: this commit extends the state we are known to be at.
+        // Apply its ops as a diff (idempotent: our own echo changes
+        // nothing) and mark the new head.
+        let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
+        let session_id = app
+            .session
+            .as_ref()
+            .and_then(|s| app.lines.get(s.line))
+            .map(|l| l.id.clone());
+        cosense::ws::apply_remote_ops(&mut app.lines, &c.ops, &c.user_id);
+        // The screen now holds a state newer than any poll already out.
+        app.bump_server_epoch();
+        app.ws_head = Some(c.commit_id.clone());
+        rerender(app, ctx);
+        reanchor_cursor_session(app, cursor_id, session_id);
+        app.follow = true;
+        app.status = t!("⟳ websocket で更新を反映", "⟳ applying a websocket update");
+        return true;
+    }
+    // Chain broke (reconnect gap, join replay, meta-only commits in
+    // between): the event is NOT applied and NOT silently dropped — a
+    // background full-page resync is requested, and the fetched page will
+    // carry this commit's effect.
+    app.ws_resync_pending = true;
+    app.status = t!("⟳ websocket 差分に欠落 — 再同期します", "⟳ a websocket diff was missing — resyncing");
+    true
+}
+
+/// Was this full page fetched before something newer landed here?
+///
+/// A resync replaces the local lines wholesale, so a page fetched before
+/// our last commit would delete the line we are typing on — and deleting
+/// the session's line closes the session, dropping the reader out of EDIT
+/// mid-word. (Reported as \"pressing Enter twice quickly throws me back to
+/// view mode\".) Polls have carried this guard from the start; the
+/// websocket's resync had not.
+///
+/// A stale page is not an error and not a loss: another resync is asked
+/// for at once, and the ws thread's own backoff keeps that from becoming
+/// a storm while someone is typing.
+pub(crate) fn resync_is_stale(app: &mut App, res: &ws::ResyncPage) -> bool {
+    if res.epoch == app.server_epoch_now() {
+        return false;
+    }
+    app.ws_resync_pending = true;
+    true
+}
+
+/// Ship one outstanding resync request to the ws thread (which is the only
+/// side that talks to the network). The flag is one-shot per frame; the
+/// result arrives back as a `WsEvent::Resynced`.
+pub(crate) fn ws_send_resync_request(app: &mut App) {
+    if app.ws_resync_pending {
+        app.ws_resync_pending = false;
+        let _ = app.ws_req_tx.send(ws::WsRequest::Resync);
+    }
+}
+
+/// 409 NotFastForward: someone else moved the page. Invalidate the queue,
+/// reload the server truth, and re-anchor the session by line id — the
+/// caret text is NEVER lost: if its line is gone, it becomes a fresh line
+/// at the end and the session continues there.
+pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
+    app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // 409 means the server moved and our ops did not land: local and server
+    // disagree from this moment. Marked BEFORE the reload, because if the
+    // reload fails we are still divergent and must not render — a browser
+    // would screenshot the server's text and file it under ours.
+    app.mark_desynced();
+    let stash = app.session.as_ref().map(|s| {
+        (app.lines.get(s.line).map(|l| l.id.clone()).unwrap_or_default(), s.input.buf.clone(), s.input.cur)
+    });
+    if !reload_page(app, ctx) {
+        // `reload_page` already said why on the status line; saying anything
+        // else here would bury it. The reader keeps their text, the flag
+        // stays set, and the next successful install clears it.
+        return;
+    }
+    // set_page cleared session + undo lineage and marked us synced again.
+    match stash {
+        None => {
+            app.status = t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded");
+        }
+        Some((id, buf, caret)) => {
+            if let Some(idx) = app.lines.iter().position(|l| l.id == id) {
+                enter_session(app, ctx, idx, 0);
+                if let Some(s) = app.session.as_mut() {
+                    s.input = Input { buf: buf.clone(), cur: caret.min(buf.len()) };
+                }
+                app.status = t!("他の人がページを更新しました — 読み直し、編集中の行はそのままです", "page changed by someone else — reloaded, your line kept");
+            } else if !buf.trim().is_empty() {
+                // The line is gone: rescue the text as a fresh last line.
+                let new_id = new_line_id();
+                let ops = vec![EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![(new_id.clone(), buf.clone())],
+                }];
+                do_edit(app, ctx, "退避", ops);
+                if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
+                    enter_session(app, ctx, idx, buf.len());
+                }
+                app.status = t!("編集中の行が他の人に削除されました — 内容はページ末尾に退避しました", "your line was deleted by someone else — text rescued at the end");
+            } else {
+                app.status = t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded");
+            }
+        }
+    }
+}
+
+/// ←/→: travel the page's snapshot history (dir = -1 older, +1 newer).
+/// First ← enters the machine at the newest snapshot; → past the newest
+/// exits back to NOW (live page, refetched). The timeline is fetched once
+/// per visit and snapshots are cached, so scrubbing is instant.
+pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
+    if app.time.is_none() {
+        if dir > 0 {
+            app.status = t!("すでに最新です", "already at NOW");
+            return;
+        }
+        match ctx.client.list_snapshots(&app.project, &app.page_id) {
+            Ok(points) if !points.is_empty() => {
+                let last = points.len() - 1;
+                app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
+                show_snapshot(app, ctx, last);
+            }
+            Ok(_) => app.status = t!("このページに履歴はありません", "no snapshots for this page"),
+            Err(e) => app.status = t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}"),
+        }
+        return;
+    }
+    let (pos, len) = {
+        let tm = app.time.as_ref().unwrap();
+        (tm.pos, tm.points.len())
+    };
+    if dir < 0 {
+        if pos == 0 {
+            app.status = t!("最も古い履歴です", "oldest snapshot");
+        } else {
+            show_snapshot(app, ctx, pos - 1);
+        }
+    } else if pos + 1 >= len {
+        // Past the newest snapshot is NOW — but only if NOW can be fetched.
+        // See the Esc path: a failed reload keeps the snapshot, read-only.
+        if reload_page(app, ctx) {
+            app.status = t!("最新", "NOW");
+        }
+    } else {
+        show_snapshot(app, ctx, pos + 1);
+    }
+}
+
+/// Install snapshot `idx` of the time machine: swap the page body for the
+/// historical lines (rendered normally — the UI always consumes complete
+/// documents, akapen's history model), drop the related list (it describes
+/// the PRESENT graph), and keep the cursor's line number.
+pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
+    let (ts_id, created, len) = {
+        let tm = app.time.as_ref().unwrap();
+        (tm.points[idx].id.clone(), tm.points[idx].created, tm.points.len())
+    };
+    let cached = app.time.as_ref().unwrap().cache.get(&ts_id).cloned();
+    let snap = match cached {
+        Some(s) => s,
+        None => match ctx.client.get_snapshot(&app.project, &app.page_id, &ts_id) {
+            Ok(s) => {
+                app.time.as_mut().unwrap().cache.insert(ts_id.clone(), s.clone());
+                s
+            }
+            Err(e) => {
+                app.status = t!("履歴を取得できません: {e}", "snapshot fetch failed: {e}");
+                return;
+            }
+        },
+    };
+    let texts: Vec<String> = snap.lines.iter().map(|l| l.text.clone()).collect();
+    // A snapshot is the page as it was; which of its links exist is only
+    // known for NOW, so an old revision says nothing about it.
+    let rendered =
+        render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &LinkTruth::default());
+    app.lines = snap.lines;
+    app.blocks = rendered.blocks;
+    app.srcs = rendered.srcs;
+    app.hits = rendered.hits;
+    app.related = Vec::new();
+    app.virtual_items = Vec::new();
+    app.images.clear();
+    app.image_errors.clear();
+    app.pending.clear();
+    app.web_pending.clear();
+    app.web_errors.clear();
+    app.selection = None;
+    app.laid_width = 0; // rebuild (clamps the cursor)
+    app.follow = true;
+    app.start_image_loads(ctx);
+    app.time.as_mut().unwrap().pos = idx;
+    app.status = t!("⏪ {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新", "⏪ {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
+        idx + 1,
+        len,
+        cosense::theme::format_local(created),
+        relative_age(created),
+    );
+}
+
+/// Refetch the current page in place, keeping the cursor's line number and
+/// following it (used after edits, edit conflicts, and ws re-sync).
+/// Returns whether the refetch succeeded.
+pub(crate) fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
+    let cur = app.cursor;
+    match load_page(ctx, &app.project.clone(), &app.title.clone()) {
+        Ok(l) => {
+            app.set_page(l, ctx);
+            app.cursor = cur; // clamped on the next rebuild
+            app.follow = true;
+            true
+        }
+        Err(e) => {
+            app.status = t!("読み直しに失敗しました: {e}", "reload failed: {e}");
+            false
+        }
+    }
+}
