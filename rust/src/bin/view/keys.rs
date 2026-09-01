@@ -242,9 +242,14 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         // ---- move (akapen parity) ----
         // Shift+↑/↓ selects, in READ as in EDIT: the same fingers, the same
         // result. `v` then j/k (akapen) still works — this is the version
-        // people try first.
+        // people try first. J/K are the same act for j/k hands: Shift is
+        // already the "and select" modifier here, so the shifted letter
+        // must not mean something else. (In the move mode J/K step over a
+        // whole sibling — that state is handled before this match.)
         (KeyCode::Down, false) if k.modifiers == KeyModifiers::SHIFT => read_select_line(app, true),
         (KeyCode::Up, false) if k.modifiers == KeyModifiers::SHIFT => read_select_line(app, false),
+        (KeyCode::Char('J'), false) => read_select_line(app, true),
+        (KeyCode::Char('K'), false) => read_select_line(app, false),
         (KeyCode::Char('j'), false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(true),
         (KeyCode::Down, false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(true),
         (KeyCode::Char('k'), false) if k.modifiers == KeyModifiers::NONE => app.move_cursor(false),

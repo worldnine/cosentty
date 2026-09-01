@@ -1,6 +1,10 @@
 use super::*;
 
-pub(crate) const SEL_BG: Color = Color::DarkGray;
+/// READ の選択バンド背景。カーソル行の帯(`CURSOR_BG` の DarkGray)と
+/// 見分けがつくよう、端末背景から作った寒色を使う(theme::selection_band)。
+pub(crate) fn selection_bg(terminal_bg: (u8, u8, u8)) -> Color {
+    cosense::theme::selection_band(terminal_bg)
+}
 
 /// The list marker, in the one place both the drawing and its tests read.
 pub(crate) const BULLET: &str = "\u{2022}";
@@ -635,6 +639,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // is showing (the caret line included, uncommitted and all).
     let code_flags = cosense::render::code_line_flags(&app.source_texts());
     let wash = cosense::theme::code_wash(ctx.terminal_bg);
+    let sel_bg = selection_bg(ctx.terminal_bg);
 
     let mut y = 0i32;
     for row in app.rows.iter() {
@@ -676,7 +681,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             }
         }
         if in_sel {
-            base = base.bg(SEL_BG);
+            base = base.bg(sel_bg);
         }
         if is_cursor {
             base = base.bg(CURSOR_BG);
@@ -1446,9 +1451,9 @@ impl App {
                     }
                     if selected {
                         // REVERSED, not a background colour: the caret line
-                        // is already painted with the cursor band, and
-                        // `SEL_BG` is that same grey — a selection drawn
-                        // with it is invisible exactly where it always is.
+                        // is already painted with the cursor band, and a
+                        // band-coloured selection is invisible exactly where
+                        // it always is (the caret's own line).
                         // Swapping fg/bg contrasts against any background,
                         // on any terminal, without inventing a colour.
                         st = st.add_modifier(Modifier::REVERSED);

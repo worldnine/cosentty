@@ -1409,7 +1409,7 @@ use super::support::*;
             .map(|sp| sp.content.as_ref())
             .collect();
         assert_eq!(rest, " world");
-        assert_ne!(SEL_BG, Color::Reset);
+        assert_ne!(selection_bg((24, 24, 24)), Color::Reset);
     }
 
     /// Quitting straight after writing a new page must still create it:

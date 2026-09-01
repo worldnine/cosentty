@@ -135,7 +135,7 @@ use super::support::*;
             let x = app.text_rect.x;
             let buf = term.backend().buffer().clone();
             (0..buf.area.height)
-                .filter(|&y| buf.cell((x, y)).map(|cell| cell.bg == SEL_BG).unwrap_or(false))
+                .filter(|&y| buf.cell((x, y)).map(|cell| cell.bg == selection_bg(ctx.terminal_bg)).unwrap_or(false))
                 .count()
         };
 

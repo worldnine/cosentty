@@ -1067,8 +1067,9 @@ use super::support::*;
                 let cell = buf.cell((x, y)).unwrap();
                 row.push_str(cell.symbol());
             }
+            let sel_bg = selection_bg(ctx.terminal_bg);
             let held = (0..buf.area.width)
-                .any(|x| buf.cell((x, y)).map(|c| c.bg == SEL_BG).unwrap_or(false));
+                .any(|x| buf.cell((x, y)).map(|c| c.bg == sel_bg).unwrap_or(false));
             // "HELD" marks the rows carrying the grabbed block's highlight.
             println!("{}|{row}|", if held { "HELD" } else { "    " });
         }

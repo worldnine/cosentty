@@ -621,6 +621,20 @@ pub fn code_wash(terminal_bg: (u8, u8, u8)) -> Color {
     Color::Rgb(step(r), step(g), step(b))
 }
 
+/// 選択バンドの背景色。カーソル行の帯(ANSI の DarkGray)と同系だと
+/// 「どこまでが選択で、いまどこにいるか」が読めなくなるので、端末背景から
+/// 寒色(青)寄りに寄せた別の色を作る。code_wash と同じ流儀 — 端末背景を
+/// 起点に数%だけ動かす — だが、こちらは「選択」と分かる程度に振れ幅を
+/// 大きくし、色相も変える。明るい背景は青みへ沈め、暗い背景は青みへ持ち上げる。
+pub fn selection_band(terminal_bg: (u8, u8, u8)) -> Color {
+    let (r, g, b) = terminal_bg;
+    if relative_luminance(terminal_bg) > 0.179 {
+        Color::Rgb(r.saturating_sub(40), g.saturating_sub(20), b.saturating_sub(2))
+    } else {
+        Color::Rgb(r.saturating_add(12), g.saturating_add(28), b.saturating_add(56))
+    }
+}
+
 /// Apply `shimmer_level` to one span's style: an RGB foreground is mixed
 /// toward the terminal background, which is the only way to modulate
 /// brightness without inventing a color the theme never chose.
@@ -652,6 +666,22 @@ pub fn shimmer_style(base: Style, terminal_bg: (u8, u8, u8), level: f32) -> Styl
 mod tests {
     use super::*;
     use crate::highlight::Highlighter;
+
+    /// 選択バンドは「端末背景」「コードの wash」「カーソル行の DarkGray」の
+    /// どれとも見分けがつくこと。明・暗どちらの背景でも。
+    #[test]
+    fn selection_band_is_its_own_color() {
+        for bg in [(250u8, 250u8, 250u8), (24u8, 24u8, 24u8)] {
+            let sel = selection_band(bg);
+            assert_ne!(sel, Color::Rgb(bg.0, bg.1, bg.2));
+            assert_ne!(sel, code_wash(bg));
+            assert_ne!(sel, Color::DarkGray);
+            // 寒色寄り: 青成分が最も強く残る(明では最も削られない)方向。
+            if let Color::Rgb(r, _, b) = sel {
+                assert!(b >= r, "selection should lean cool: {sel:?}");
+            }
+        }
+    }
 
     #[test]
     fn parse_osc11_forms() {

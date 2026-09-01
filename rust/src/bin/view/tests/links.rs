@@ -174,6 +174,32 @@ use super::support::*;
         assert!(app.selection.is_none());
     }
 
+    /// J/K are Shift+↓/↑ for j/k hands: the same selection, grown and
+    /// shrunk line by line. (In the move mode J/K belong to the drag and
+    /// step over a whole sibling — that state is checked first.)
+    #[test]
+    fn shift_j_and_k_select_lines_like_the_shifted_arrows() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three"]);
+        app.rebuild(40);
+        app.cursor = 1;
+
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 3)));
+        assert_eq!(app.cursor, 3, "the cursor carries the far end");
+
+        handle_key(&mut app, &ctx, modified(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)));
+
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.selection.is_none());
+
+        // Plain j still only moves.
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert!(app.selection.is_none());
+    }
+
     /// OSC 52 is the only clipboard that reaches the machine the user is
     /// sitting at when the viewer runs over SSH, so its encoding has to be
     /// right.
