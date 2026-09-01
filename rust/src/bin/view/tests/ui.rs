@@ -123,6 +123,71 @@ use super::support::*;
         assert_eq!(edit.bg, None);
     }
 
+    /// EDIT のスポットライト: 編集中はキャレット行以外が DIM で沈み、
+    /// ヘッダに [✎ 編集中] が出る。読んでいる画面と書いている画面が
+    /// 常に違って見えることが、EDIT に居ることを忘れて j/k を打って
+    /// しまう事故への持続的な防波堤。
+    #[test]
+    fn edit_dims_every_line_but_the_caret_one_and_says_so_in_the_header() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+
+        let dimmed = |buf: &ratatui::buffer::Buffer, needle: &str| -> bool {
+            for y in 0..buf.area.height {
+                let text: String = (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect();
+                if let Some(_) = text.find(needle) {
+                    let x = (0..buf.area.width)
+                        .find(|&x| {
+                            let rest: String = (x..buf.area.width)
+                                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                                .collect();
+                            rest.starts_with(needle)
+                        })
+                        .unwrap();
+                    return buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM);
+                }
+            }
+            panic!("{needle:?} not on screen");
+        };
+        // ワイド文字の継続セルには古い内容が残ることがあるので、
+        // 文字幅ぶんセルを読み飛ばして画面を文字列化する。
+        let screen = |term: &Terminal<TestBackend>| -> String {
+            let buf = term.backend().buffer();
+            let mut out = String::new();
+            for y in 0..buf.area.height {
+                let mut skip = 0usize;
+                for x in 0..buf.area.width {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    let sym = buf.cell((x, y)).unwrap().symbol().to_string();
+                    skip = str_width(&sym).saturating_sub(1);
+                    out.push_str(&sym);
+                }
+            }
+            out
+        };
+
+        // READ: 何も沈まない。
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer().clone();
+        assert!(!dimmed(&buf, "one") && !dimmed(&buf, "two"), "READ dims nothing");
+        assert!(!screen(&term).contains("編集中"));
+
+        // EDIT: キャレット行(one)は素のまま、他(two)は沈む。
+        enter_session(&mut app, &ctx, 1, 0);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer().clone();
+        assert!(!dimmed(&buf, "one"), "the caret line stays bright");
+        assert!(dimmed(&buf, "two"), "every other line steps back");
+        assert!(screen(&term).contains("✎ 編集中"), "the header says so too");
+    }
+
     /// EDIT を見分ける残り二つのサイン: フッタのモードタグはヘッダ配色の
     /// バッジになり、キャレットのセルはソフト描画(REVERSED)でも塗られる
     /// — ハードウェアカーソルの形状変更に応えない端末のための併走。

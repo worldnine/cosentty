@@ -450,11 +450,14 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         .unwrap_or_default();
     f.render_widget(
         Paragraph::new(Line::from(t!(
-            " {}/{}{}{}{}  （コメント {}）{}{} ",
-            " {}/{}{}{}{}  ({} comment(s)){}{} ",
+            " {}/{}{}{}{}{}  （コメント {}）{}{} ",
+            " {}/{}{}{}{}{}  ({} comment(s)){}{} ",
             app.project,
             app.title,
             time_badge,
+            // 画面の上下でモードを挟む: フッタのバッジと対になる、
+            // ヘッダ側の「編集中」サイン。
+            if app.session.is_some() { ts!("  [✎ 編集中]", "  [✎ editing]") } else { "" },
             if app.mode == Mode::Source { ts!("  [ソース]", "  [source]") } else { "" },
             if app.editable { "" } else { ts!("  [読み取り専用]", "  [read-only]") },
             app.comments.len(),
@@ -709,6 +712,16 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
         if in_edit_sel {
             base = base.bg(CURSOR_BG);
+        }
+        // EDIT のスポットライト: キャレット行と選択が通っている行以外を
+        // DIM で一段沈める。読んでいる画面と書いている画面が「常に」
+        // 違って見えることが、EDIT に居ることを忘れて j/k や q を打って
+        // しまう事故への持続的な防波堤になる。色は端末テーマに任せる
+        // (DIM は修飾であって色ではない)。
+        if let Some(sess) = app.session.as_ref() {
+            if row.src() != Some(sess.line) && !in_edit_sel {
+                base = base.add_modifier(Modifier::DIM);
+            }
         }
         if is_cursor {
             base = base.bg(CURSOR_BG);
