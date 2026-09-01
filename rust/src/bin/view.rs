@@ -21,8 +21,10 @@
 //             is saved to the download dir and opened, an http(s) URL (↗)
 //             opens in the browser (a gyazo image → its gyazo page)
 //   wheel     scroll the viewport only (the cursor keeps its line)
-//   click     open a link under the pointer, otherwise move the cursor
-//             (in EDIT a double-click takes the word, a triple the line)
+//   click     open a link under the pointer, otherwise move the cursor;
+//             a double-click enters EDIT at the character clicked, and
+//             only there (no selection): in EDIT a double-click takes a
+//             word, a triple the line
 //   drag      select a range; a drag that comes back to its own line
 //             takes the characters selection back
 //   scrollbar click the track to jump, drag the thumb to scrub
@@ -8989,27 +8991,20 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                             return;
                         }
                     }
-                    // READ: a double-click enters the session at the
-                    // clicked character AND takes the word under it (the
-                    // cosense-web gesture); the third click of the series
-                    // lands in that session, where it takes the line. A
-                    // single click moves the line cursor as before.
+                    // READ: a double-click ENTERS the session at the
+                    // clicked character — the view→edit transition — and
+                    // nothing more: it just parks the caret where the
+                    // pointer was, with no selection. (Taking the word on
+                    // the gesture that only meant to open EDIT surprised
+                    // the reader; selecting is a gesture for once you are
+                    // already IN edit — see the session branch above, where
+                    // a double-click takes the word and a triple the line.)
+                    // A single click moves the line cursor as before.
                     let count =
                         register_click(&mut app.last_click, Instant::now(), m.column, m.row);
                     if count >= 2 && src < app.lines.len() && app.time.is_none() {
                         let caret = click_caret(app, src, col, screen_row);
                         enter_session(app, ctx, src, caret);
-                        if let Some(s) = app.session.as_mut() {
-                            if count == 2 {
-                                if let Some((a, b)) = word_span(&s.input.buf, s.input.cur) {
-                                    s.sel_from = Some(a);
-                                    s.input.cur = b;
-                                }
-                            } else {
-                                s.sel_from = Some(0);
-                                s.input.cur = s.input.buf.len();
-                            }
-                        }
                         return;
                     }
                     app.selection = None;
@@ -16238,12 +16233,12 @@ mod tests {
         assert_eq!(selected(&app), None, "and plain again");
     }
 
-    /// READ's double-click still ENTERS the session at the clicked
-    /// character — and now leaves the word selected there (cosense web),
-    /// so `[` can link it at once. The third click of the series lands
-    /// inside that session, where it takes the line.
+    /// The double-click that turns READ into EDIT does NOT select: it
+    /// parks the caret where the pointer was and nothing more. Selecting
+    /// is a gesture for a line you are already editing — the third click
+    /// of the series lands in the open session, where it takes the line.
     #[test]
-    fn a_read_double_click_opens_the_session_on_the_word() {
+    fn a_read_double_click_only_places_the_caret() {
         let ctx = test_ctx();
         let mut app = page(&["title", "hello world", "next"]);
         app.rebuild(42);
@@ -16254,19 +16249,24 @@ mod tests {
             handle_mouse_content(app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), col, 3));
             handle_mouse_content(app, &ctx, mouse(MouseEventKind::Up(MouseButton::Left), col, 3));
         };
-        let selected = |app: &App| {
-            let s = app.session.as_ref().unwrap();
-            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string())
-        };
 
         click(&mut app, 7);
         assert!(app.session.is_none(), "a single click only moves the cursor");
         assert_eq!(app.cursor, 1);
         click(&mut app, 7);
-        assert!(app.session.is_some(), "the second click opens EDIT");
-        assert_eq!(selected(&app).as_deref(), Some("world"));
+        let s = app.session.as_ref().unwrap();
+        assert!(s.sel_from.is_none(), "the transition selects nothing");
+        assert_eq!(s.input.cur, 6, "the caret sits on the clicked character");
+        assert_eq!(s.line, 1, "and on the clicked line");
+        // The same spot again: now inside EDIT, the gesture is a triple
+        // click, and it takes the line.
         click(&mut app, 7);
-        assert_eq!(selected(&app).as_deref(), Some("hello world"));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(
+            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
+            Some("hello world".into()),
+            "the third click selects the whole line"
+        );
     }
 
     #[test]
