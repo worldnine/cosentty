@@ -272,6 +272,12 @@ pub struct Page {
     #[serde(default, rename = "projectLinks")]
     pub project_links: Vec<String>,
     /// Related-pages list as scrapbox.io computes it (see `RelatedPages`).
+    ///
+    /// `None` for anything read through `get_page_in`: the v2 page endpoint
+    /// does not carry this block. Fill it in from `get_related_in` (that is
+    /// what `sync::merge_related` does) — `Option` is the "not fetched yet"
+    /// state, and code that colors links by it must treat `None` as "don't
+    /// know", never as "no backlinks".
     #[serde(default, rename = "relatedPages")]
     pub related: Option<RelatedPages>,
     #[serde(default)]
@@ -493,14 +499,64 @@ impl Client {
     }
 
     /// `get_page` for any project (see `list_pages_in`).
+    ///
+    /// Reads through **v2** (`/api/pages/v2/<project>/<title>`), the same
+    /// generation the edit API lives on. v2 answers with the identical page
+    /// body as v1 — same fields, same `lines`, same `persistent: false`
+    /// template for a title nobody has written yet (measured; both even mint
+    /// the same kind of throwaway id) — with ONE difference that matters:
+    /// **it omits `relatedPages`**, which is most of v1's payload (井戸端 on
+    /// villagepump: 13.7 KB against 364 KB). So `Page::related` is always
+    /// `None` here and the related list is a second, separate request
+    /// (`get_related_in`), which is what lets the body paint before the
+    /// backlinks are in. PAT reads v2 on a private project fine (verified).
     pub fn get_page_in(&self, project: &str, title: &str) -> Result<Page, Box<dyn Error>> {
+        let url = format!(
+            "{}/pages/v2/{}/{}",
+            self.cfg.base(),
+            urlencoding(project),
+            urlencoding(title)
+        );
+        self.get_json(&url, project)
+    }
+
+    /// The related-pages block for `project/title` — the half of the page
+    /// response v2 does not carry (see `get_page_in`).
+    ///
+    /// Still asked of the **v1** page endpoint, which is the only thing that
+    /// reports it; the body that comes back with it is thrown away. A title
+    /// nothing points at answers 404, and that is an ANSWER (no back links),
+    /// so it degrades to an empty block rather than an error — same
+    /// convention as `backlink_ids`.
+    pub fn get_related_in(
+        &self,
+        project: &str,
+        title: &str,
+    ) -> Result<RelatedPages, Box<dyn Error>> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default, rename = "relatedPages")]
+            related: RelatedPages,
+        }
         let url = format!(
             "{}/pages/{}/{}",
             self.cfg.base(),
             urlencoding(project),
             urlencoding(title)
         );
-        self.get_json(&url, project)
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send()?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(RelatedPages::default());
+        }
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        Ok(res.json::<Wrapper>()?.related)
     }
 
     /// Has anyone written `project/title`?
@@ -543,37 +599,14 @@ impl Client {
 
     /// The ids of the pages that link to `project/title`.
     ///
-    /// For a title nobody has written, the page endpoint still answers
+    /// For a title nobody has written, the v1 page endpoint still answers
     /// with its back links (`persistent: false` and a `relatedPages`
     /// block), which is how "is this word used anywhere else?" is
     /// answered without an index of the whole project. A title nothing
     /// points at answers 404 — no back links, and no error.
     pub fn backlink_ids(&self, project: &str, title: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        #[derive(Deserialize)]
-        struct Backlinks {
-            #[serde(default, rename = "relatedPages")]
-            related: RelatedPages,
-        }
-        let url = format!(
-            "{}/pages/{}/{}",
-            self.cfg.base(),
-            urlencoding(project),
-            urlencoding(title)
-        );
-        let mut req = self.http.get(&url).header("Accept", "application/json");
-        if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
-            let (name, value) = cred.header();
-            req = req.header(name, value);
-        }
-        let res = req.send()?;
-        if res.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(Vec::new());
-        }
-        if !res.status().is_success() {
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
-        }
-        let b: Backlinks = res.json()?;
-        Ok(b.related.links1hop.into_iter().map(|p| p.id).collect())
+        let related = self.get_related_in(project, title)?;
+        Ok(related.links1hop.into_iter().map(|p| p.id).collect())
     }
 
     /// Project members, for resolving line author ids to display names.
