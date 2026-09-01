@@ -25,9 +25,9 @@
 //             a double-click enters EDIT at the character clicked, and
 //             only there (no selection): in EDIT a double-click takes a
 //             word, a triple the line
-//   drag      select a range (READ: lines; EDIT: characters on the line
-//             the drag started, clamped to its edge when the pointer
-//             wanders off)
+//   drag      select a range (READ: whole lines; EDIT: characters that
+//             may cross lines — the caret follows the pointer, the
+//             anchor holds where the button came down)
 //   scrollbar click the track to jump, drag the thumb to scrub
 //
 // The cursor addresses SOURCE lines (akapen's ViewState model: `cursor` is a
@@ -807,7 +807,8 @@ struct App {
     /// SOURCE line under the cursor (0-based). Display rows are derived —
     /// see `cursor_rows`. akapen's `ViewState.cursor`.
     cursor: usize,
-    /// Range selection over SOURCE lines.
+    /// Range selection over SOURCE lines — READ's unit. EDIT selects
+    /// characters instead (`EditSession::sel_from`); the two never coexist.
     selection: Option<Selection>,
     /// What is known about the pages this page's links lead to. Seeded by
     /// each page load and filled in by background lookups; kept for the
@@ -1154,21 +1155,48 @@ struct EditSession {
     orig: String,
     /// Sticky display column for ↑/↓ over lines of differing length.
     want_col: Option<usize>,
-    /// Character selection ON THIS LINE: the fixed end of the span, with
-    /// `input.cur` as the moving one. `None` = no selection. A range that
-    /// spans several LINES is `App::selection` instead — the two are
-    /// mutually exclusive, so there is always one answer to "what is
-    /// selected".
-    sel_from: Option<usize>,
+    /// Character selection: the fixed end of the range as a
+    /// (line, byte) position, with the caret as the moving one. EDIT has
+    /// no line-range concept at all — a range may cross lines, and every
+    /// operation on it (typing, ⌫, Enter, paste, copy) is text-unit: the
+    /// lines it spans merge or split the way a textarea's would. `None`,
+    /// or an anchor sitting exactly on the caret, selects nothing.
+    sel_from: Option<(usize, usize)>,
 }
 
 impl EditSession {
-    /// The selected byte range on the caret line, normalised. `None` when
-    /// nothing is selected (an anchor equal to the caret selects nothing).
-    fn sel_span(&self) -> Option<(usize, usize)> {
+    /// The selection as two (line, byte) ends in DOCUMENT order (top
+    /// first), `None` when nothing is selected. The caret is always one of
+    /// the two ends — the head a drag or a Shift-move last reached.
+    fn sel_ends(&self) -> Option<((usize, usize), (usize, usize))> {
         let from = self.sel_from?;
-        let (a, b) = (from.min(self.input.cur), from.max(self.input.cur));
-        (a != b).then_some((a, b))
+        let head = (self.line, self.input.cur);
+        (from != head).then(|| if from <= head { (from, head) } else { (head, from) })
+    }
+
+    /// The selected byte range WHEN IT FITS ON THE CARET LINE, normalised
+    /// — the unit the local, uncommitted edits (cut, wrap, bracket math)
+    /// work in. A range that crossed into another line answers `None`:
+    /// touching it is structural, and structural edits commit.
+    fn sel_span(&self) -> Option<(usize, usize)> {
+        let ((a, x), (b, y)) = self.sel_ends()?;
+        (a == b).then_some((x, y))
+    }
+
+    /// The covered byte range OF THE CARET LINE for whatever selection
+    /// exists: the caret line is always one end of the range, so a range
+    /// off this line reaches from the caret to that line's near edge.
+    /// This is what draws reversed on the raw caret line; the other lines
+    /// the range covers are painted as whole-line bands.
+    fn caret_sel_bytes(&self) -> Option<(usize, usize)> {
+        let ((tl, tb), (bl, bb)) = self.sel_ends()?;
+        if tl == bl {
+            Some((tb, bb))
+        } else if self.line == tl {
+            Some((tb, self.input.buf.len()))
+        } else {
+            Some((0, bb))
+        }
     }
 }
 
@@ -2686,8 +2714,13 @@ impl App {
         // The character selection, in DISPLAY byte offsets — the caret line
         // is drawn through `session_display`, so the span has to be mapped
         // the same way the caret is.
+        // The character selection, in DISPLAY byte offsets — the caret
+        // line is drawn through `session_display`, so the span has to be
+        // mapped the same way the caret is. A range across lines reaches
+        // the caret line to its near edge; that is what `caret_sel_bytes`
+        // answers even when the range does not fit on the line.
         let sel_disp: Option<(usize, usize)> = self.session.as_ref().and_then(|s| {
-            let (a, b) = s.sel_span()?;
+            let (a, b) = s.caret_sel_bytes()?;
             Some((
                 display_caret(&s.input.buf, a, edit_code),
                 display_caret(&s.input.buf, b, edit_code),
@@ -5095,6 +5128,20 @@ fn copy_payload(app: &App, whole_page: bool) -> Option<(String, String)> {
         if let Some((a, b)) = s.sel_span() {
             return Some((s.input.buf[a..b].to_string(), "selection".into()));
         }
+        // A range across lines copies as text too: the anchor line's
+        // tail, the lines between whole, the far line's head — what the
+        // range really holds, joinable back into one paste.
+        if let Some(((tl, tb), (bl, bb))) = s.sel_ends() {
+            if tl != bl && bl < app.lines.len() {
+                let top = text_of(tl);
+                let mut parts = vec![top[floor_boundary(&top, tb)..].to_string()];
+                parts.extend((tl + 1..bl).map(&text_of));
+                let bot = text_of(bl);
+                parts.push(bot[..floor_boundary(&bot, bb)].to_string());
+                let label = format!("selection ({} lines)", parts.len());
+                return Some((parts.join("\n"), label));
+            }
+        }
     }
     let (a, b) = match app.selection {
         Some(sel) => sel.range(),
@@ -7006,7 +7053,7 @@ fn session_cut_span_in(s: &mut EditSession) {
     }
 }
 
-/// Drop the character selection's text from the caret line./// Drop the character selection's text from the caret line. Stays local
+/// Drop the character selection's text from the caret line. Stays local
 /// (the line is simply dirty afterwards), like any other typing: the line
 /// commits when the caret leaves it.
 fn session_cut_span(app: &mut App) -> bool {
@@ -7017,6 +7064,122 @@ fn session_cut_span(app: &mut App) -> bool {
     session_cut_span_in(s);
     s.want_col = None;
     app.laid_width = 0;
+    app.follow = true;
+    true
+}
+
+/// The one answer to "type over a selection": the range disappears and
+/// `text` stands in its place, the caret after it. A range inside one
+/// line is just the buffer editing it was made of — local, dirty, it
+/// commits when the caret leaves. A range ACROSS lines is structural: it
+/// is the anchor line's head, `text`, and the far line's tail, with every
+/// line wholly between them deleted — one commit, one undo step, exactly
+/// as every split and join already is. (Cosense web's textarea does the
+/// same; here a page's lines ARE the units, so "merge" is the honest
+/// spelling of "replace".) Returns whether a selection was consumed.
+fn session_replace_selection(app: &mut App, ctx: &Ctx, text: &str) -> bool {
+    let Some(((tl, tb), (bl, bb))) =
+        app.session.as_ref().and_then(|s| s.sel_ends())
+    else {
+        return false;
+    };
+    if tl == bl {
+        let Some(s) = app.session.as_mut() else { return false };
+        let Some((a, b)) = s.sel_span() else { return false };
+        s.input.buf.replace_range(a..b, text);
+        s.input.cur = a + text.len();
+        s.sel_from = None;
+        s.want_col = None;
+        app.laid_width = 0;
+        app.follow = true;
+        return true;
+    }
+    // The endpoints' lines: the caret line's working buffer is the truth
+    // for its own end (nothing is typed while a selection lives — every
+    // key that makes one commits on the way — but the seat itself can
+    // carry an uncommitted split). Commit anyway: it is a no-op unless so.
+    if bl >= app.lines.len() {
+        // Stale far end (a remote edit reshaped the page mid-selection):
+        // the range dies here, unseen, and the keystroke goes unfed.
+        if let Some(s) = app.session.as_mut() {
+            s.sel_from = None;
+        }
+        return false;
+    }
+    session_commit_dirty(app, ctx);
+    let (top_text, bot_text) = (
+        app.lines[tl].text.clone(),
+        app.lines[bl].text.clone(),
+    );
+    let prefix = top_text[..floor_boundary(&top_text, tb)].to_string();
+    let suffix = bot_text[floor_boundary(&bot_text, bb)..].to_string();
+    let merged = format!("{prefix}{text}{suffix}");
+    let mut ops = vec![EditOp::Replace {
+        id: app.lines[tl].id.clone(),
+        text: merged.clone(),
+    }];
+    ops.extend((tl + 1..=bl).map(|i| EditOp::Delete { id: app.lines[i].id.clone() }));
+    do_edit(app, ctx, &t!("選択範囲の置換", "replace selection"), ops);
+    if let Some(s) = app.session.as_mut() {
+        s.line = tl;
+        s.input = Input { buf: merged.clone(), cur: prefix.len() + text.len() };
+        s.orig = merged;
+        s.want_col = None;
+        s.sel_from = None;
+    }
+    app.cursor = tl;
+    app.follow = true;
+    true
+}
+
+/// Enter with a selection across lines: the range is replaced by the
+/// line break itself — the anchor line keeps its head, the far line its
+/// tail, the lines wholly between are deleted, and the caret opens the
+/// tail. (A same-line range answers false: cutting it and splitting at
+/// the junction is the very same edit, and `session_split` does that on
+/// its way through.)
+fn session_enter_selection(app: &mut App, ctx: &Ctx) -> bool {
+    let Some(((tl, tb), (bl, bb))) =
+        app.session.as_ref().and_then(|s| s.sel_ends())
+    else {
+        return false;
+    };
+    if tl == bl {
+        return false;
+    }
+    // A remote edit that reshaped the page can leave the far end standing
+    // past its last line. The range was about to die at the next draw
+    // anyway; it dies here, unseen.
+    if bl >= app.lines.len() {
+        if let Some(s) = app.session.as_mut() {
+            s.sel_from = None;
+        }
+        return false;
+    }
+    session_commit_dirty(app, ctx);
+    let (top_text, bot_text) = (
+        app.lines[tl].text.clone(),
+        app.lines[bl].text.clone(),
+    );
+    let prefix = top_text[..floor_boundary(&top_text, tb)].to_string();
+    let suffix = bot_text[floor_boundary(&bot_text, bb)..].to_string();
+    let mut ops = vec![
+        EditOp::Replace { id: app.lines[tl].id.clone(), text: prefix },
+        EditOp::Replace { id: app.lines[bl].id.clone(), text: suffix.clone() },
+    ];
+    ops.extend((tl + 1..bl).map(|i| EditOp::Delete { id: app.lines[i].id.clone() }));
+    do_edit(app, ctx, &t!("改行", "new line"), ops);
+    // The middle lines are gone: the far line now sits one below the
+    // anchor, and it is where the caret goes on.
+    let seat = tl + 1;
+    if let Some(s) = app.session.as_mut() {
+        s.line = seat;
+        s.input = Input { buf: suffix.clone(), cur: 0 };
+        s.orig = suffix;
+        s.want_col = None;
+        s.sel_from = None;
+    }
+    app.cursor = seat;
     app.follow = true;
     true
 }
@@ -7119,14 +7282,22 @@ fn empty_pair_at_caret(app: &App) -> bool {
 /// Brackets are how everything is written in Cosense — links, images,
 /// decoration — so typing the closing half by hand every time is the
 /// single most repeated keystroke there is.
-fn session_type_char(app: &mut App, ch: char) {
+fn session_type_char(app: &mut App, ctx: &Ctx, ch: char) {
     // Not inside a `code:` block. There, notation is off by contract —
     // links, images and quotes all stop working — and brackets are just
     // characters someone is typing on purpose (`[0]`, `[\n`). Helping
     // would be the one place the block leaks.
     let in_code = session_in_code(app);
+    // A typed character replaces the selection — all of it, wherever the
+    // range ends. The bracket habits below only make sense inside one
+    // line; a range across lines just takes the character the plain way.
+    let cross = app
+        .session
+        .as_ref()
+        .and_then(|s| s.sel_ends())
+        .is_some_and(|((a, _), (b, _))| a != b);
     match ch {
-        '[' if !in_code => {
+        '[' if !in_code && !cross => {
             // With a selection, the brackets go AROUND it: selecting a word
             // and pressing `[` is how a link gets made.
             let selected = app.session.as_ref().and_then(|s| {
@@ -7149,6 +7320,7 @@ fn session_type_char(app: &mut App, ch: char) {
             }
         }
         ']' if !in_code
+            && !cross
             && app
                 .session
                 .as_ref()
@@ -7162,10 +7334,12 @@ fn session_type_char(app: &mut App, ch: char) {
             }
         }
         _ => {
-            session_cut_span(app);
-            if let Some(s) = app.session.as_mut() {
-                s.input.insert_char(ch);
-                s.want_col = None;
+            let mut tmp = [0u8; 4];
+            if !session_replace_selection(app, ctx, ch.encode_utf8(&mut tmp)) {
+                if let Some(s) = app.session.as_mut() {
+                    s.input.insert_char(ch);
+                    s.want_col = None;
+                }
             }
         }
     }
@@ -7173,11 +7347,11 @@ fn session_type_char(app: &mut App, ch: char) {
     app.follow = true;
 }
 
-/// Shift+←/→: grow (or start) the character selection/// Shift+←/→: grow (or start) the character selection/// Shift+←/→: grow (or start) the character selection as the caret moves.
+/// Shift+←/→: grow (or start) the character selection as the caret moves.
 fn session_select_char(app: &mut App, right: bool) {
     if let Some(s) = app.session.as_mut() {
         if s.sel_from.is_none() {
-            s.sel_from = Some(s.input.cur);
+            s.sel_from = Some((s.line, s.input.cur));
         }
         if right {
             s.input.right();
@@ -7186,7 +7360,7 @@ fn session_select_char(app: &mut App, right: bool) {
         }
         s.want_col = None;
         // A selection collapsed back onto its anchor is no selection.
-        if s.sel_from == Some(s.input.cur) {
+        if s.sel_from == Some((s.line, s.input.cur)) {
             s.sel_from = None;
         }
     }
@@ -7196,62 +7370,32 @@ fn session_select_char(app: &mut App, right: bool) {
 }
 
 /// Shift+↑/↓ inside the session: carry the caret one line and grow the
-/// selection with it (anchored where it started). The caret line commits
-/// on the way, exactly as a plain ↑/↓ does — selecting must never be the
-/// thing that loses a keystroke.
+/// CHARACTER range with it — the very selection the mouse drags, ended
+/// in (line, byte) positions and covering the lines between. The caret
+/// line commits on the way, exactly as a plain ↑/↓ does — selecting must
+/// never be the thing that loses a keystroke.
 fn session_select_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let Some(s) = app.session.as_ref() else { return };
-    let anchor = app.selection.map(|sel| sel.anchor).unwrap_or(s.line);
+    let anchor = s.sel_from.unwrap_or((s.line, s.input.cur));
     session_move_line(app, ctx, delta);
-    let Some(s) = app.session.as_ref() else { return };
-    app.selection = Some(Selection { anchor, cursor: s.line });
-    let (a, b) = (anchor.min(s.line), anchor.max(s.line));
-    app.status = t!("{} 行を選択 · ⌫ 削除 · Esc 解除", "selected {} line(s) · ⌫ delete · Esc clear", b - a + 1);
-}
-
-/// ⌫ / Del with a selection: delete every selected line at once. This is
-/// the range delete READ's `x` was carrying — now available where the
-/// editing happens.
-///
-/// The title line is skipped for the same reason `x` skips it: deleting it
-/// renames the page and moves its URL.
-fn session_delete_selection(app: &mut App, ctx: &Ctx) {
-    let Some(sel) = app.selection else { return };
-    let (a, b) = sel.range();
-    let b = b.min(app.lines.len().saturating_sub(1));
-    let title_skipped = a == 0;
-    let ids: Vec<String> = (a.max(1)..=b).map(|i| app.lines[i].id.clone()).collect();
-    app.selection = None;
-    if ids.is_empty() {
-        app.status = t!("タイトル行は削除できません", "the title line cannot be deleted");
+    let Some(head) = app.session.as_ref().map(|s| (s.line, s.input.cur)) else {
+        return;
+    };
+    if head == anchor {
+        // The caret could not move (the page's edge): the press anchors
+        // nothing, and whatever the move said about being at the end
+        // stands.
         return;
     }
-    // The caret line may be inside the range; commit its text first so undo
-    // gives back the lines as they were on screen.
-    session_commit_dirty(app, ctx);
-    let n = ids.len();
-    let ops: Vec<EditOp> = ids.into_iter().map(|id| EditOp::Delete { id }).collect();
-    do_edit(app, ctx, &t!("複数行の削除", "delete lines"), ops);
-    // Seat the caret where the range was, as `^k` does for one line.
-    let seat = a.max(1).min(app.lines.len().saturating_sub(1));
-    let text = app.lines[seat].text.clone();
     if let Some(s) = app.session.as_mut() {
-        s.line = seat;
-        s.input = Input { buf: text.clone(), cur: 0 };
-        s.orig = text;
-        s.want_col = None;
+        s.sel_from = Some(anchor);
     }
-    app.cursor = seat;
-    app.follow = true;
-    app.laid_width = 0;
-    app.status = if title_skipped {
-        t!("✓ {n} 行削除（タイトル行は残しました）· ^z で戻せます", "✓ deleted {n} line(s) (the title stays) · ^z to undo")
-    } else {
-        t!("✓ {n} 行削除 · ^z で戻せます", "✓ deleted {n} line(s) · ^z to undo")
-    };
+    app.selection = None;
+    let n = anchor.0.abs_diff(head.0) + 1;
+    app.status = t!("{} 行を選択 · ⌫ 削除 · Esc 解除", "selected {} line(s) · ⌫ delete · Esc clear", n);
 }
 
-/// `^k` inside the session/// `^k` inside the session — the emacs contract, one line at a time:
+/// `^k` inside the session — the emacs contract, one line at a time:
 /// kill to the end of the line, and when there is nothing left to kill,
 /// kill the line itself. So `^k^k` deletes a line without leaving EDIT,
 /// which is what makes deletion an editing gesture rather than a READ-mode
@@ -7321,6 +7465,9 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
         if let Some(s) = app.session.as_mut() {
             s.input.cur = raw_caret_from_display(&buf, off, code);
             s.want_col = Some(want);
+            // A plain move collapses a selection to the caret — the
+            // range was the shift-key's, and the shift is gone.
+            s.sel_from = None;
         }
         app.follow = true;
         app.laid_width = 0;
@@ -7366,6 +7513,19 @@ fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
 /// bullet dissolves into a true blank line (its spaces are removed) and
 /// the fresh line starts flush, with no indent.
 fn session_split(app: &mut App, ctx: &Ctx) {
+    // Enter replaces the selection the way every typed character does —
+    // with the line break this time. Across lines that is the range
+    // collapsing into exactly one break; on one line, cutting the range
+    // and splitting at the junction left behind is the identical edit,
+    // which the ordinary path below then performs.
+    if session_enter_selection(app, ctx) {
+        return;
+    }
+    if let Some(s) = app.session.as_mut() {
+        if s.sel_span().is_some() {
+            session_cut_span_in(s);
+        }
+    }
     let Some(s) = app.session.as_ref() else { return };
     let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
     // In a `code:` block the indent is content, not list structure. Enter
@@ -7565,6 +7725,11 @@ fn session_join_down(app: &mut App, ctx: &Ctx) {
 /// Tab / Shift+Tab: indent or outdent by one logical level (one source
 /// space, rendered as a two-cell nesting step).
 fn session_indent(app: &mut App, delta: i32) {
+    // Indenting is a whole-line act; a live selection would only end up
+    // pointing at bytes that moved, so it is dropped first.
+    if let Some(s) = app.session.as_mut() {
+        s.sel_from = None;
+    }
     // In a table a TAB is what separates one cell from the next, so that
     // is what Tab types there. (Shift+Tab takes the separator back, and
     // once there is none left it outdents — which is how a row leaves the
@@ -7666,6 +7831,10 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (k.code, shift, ctrl),
         (KeyCode::Left, true, _)
             | (KeyCode::Right, true, _)
+            | (KeyCode::Up, true, _)
+            | (KeyCode::Down, true, _)
+            | (KeyCode::Esc, _, _)
+            | (KeyCode::Enter, _, _)
             | (KeyCode::Char('y'), _, true)
             | (KeyCode::Backspace, _, _)
             | (KeyCode::Delete, _, _)
@@ -7711,13 +7880,18 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             if app.selection.is_some() {
                 app.selection = None;
                 app.status = t!("選択を解除しました", "selection cleared");
+            } else if app.session.as_ref().and_then(|s| s.sel_ends()).is_some() {
+                if let Some(s) = app.session.as_mut() {
+                    s.sel_from = None;
+                }
+                app.status = t!("選択を解除しました", "selection cleared");
             } else {
                 leave_session(app, ctx);
             }
         }
         (KeyCode::Enter, _) => session_split(app, ctx),
-        // Shift+↑/↓ grows a LINE range from the caret — the one thing EDIT
-        // could not do, and the reason range deletion still lived in READ.
+        // Shift+↑/↓ grows the CHARACTER range from the caret — the same
+        // selection the mouse drags, reachable from the keyboard too.
         (KeyCode::Up, _) if shift => session_select_line(app, ctx, -1),
         (KeyCode::Down, _) if shift => session_select_line(app, ctx, 1),
         (KeyCode::Up, _) => session_move_line(app, ctx, -1),
@@ -7745,12 +7919,10 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Char('z'), true) => session_history(app, ctx, true),
         (KeyCode::Char('r'), true) => session_history(app, ctx, false),
         (KeyCode::Backspace, _) | (KeyCode::Delete, _)
-            if app.session.as_ref().and_then(|s| s.sel_span()).is_some() =>
+            if app.session.as_ref().and_then(|s| s.sel_ends()).is_some() =>
         {
-            session_cut_span(app);
+            session_replace_selection(app, ctx, "");
         }
-        (KeyCode::Backspace, _) if app.selection.is_some() => session_delete_selection(app, ctx),
-        (KeyCode::Delete, _) if app.selection.is_some() => session_delete_selection(app, ctx),
         (KeyCode::Backspace, _) => {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
@@ -7778,7 +7950,7 @@ fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         }
         (KeyCode::Tab, _) => session_indent(app, 1),
         (KeyCode::BackTab, _) => session_indent(app, -1),
-        (KeyCode::Char(ch), false) => session_type_char(app, ch),
+        (KeyCode::Char(ch), false) => session_type_char(app, ctx, ch),
         _ => {
             reset_col(app);
         }
@@ -7795,17 +7967,19 @@ fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
         // it by hand after every paste is the kind of chore cosense web
         // already spares you.
         let text = paste_shape(app, clean);
-        if let Some(s) = app.session.as_mut() {
-            if s.sel_span().is_some() {
-                session_cut_span_in(s);
+        if !session_replace_selection(app, ctx, &text) {
+            if let Some(s) = app.session.as_mut() {
+                s.input.insert_str(&text);
+                s.want_col = None;
+                s.sel_from = None;
             }
-            s.input.insert_str(&text);
-            s.want_col = None;
-            s.sel_from = None;
         }
         app.laid_width = 0;
         return;
     }
+    // Multi-line: a live selection goes first — the paste replaces it,
+    // as any typed character's would — then the fragments land plain.
+    session_replace_selection(app, ctx, "");
     let Some(s) = app.session.as_ref() else { return };
     let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
     let mut parts = clean.split('\n');
@@ -8956,20 +9130,20 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                                     2 => match word_span(&s.input.buf, s.input.cur) {
                                         Some((a, b)) => {
                                             s.input.cur = b;
-                                            Some(a)
+                                            Some((src, a))
                                         }
                                         None => None,
                                     },
                                     3 => {
                                         s.input.cur = s.input.buf.len();
-                                        Some(0)
+                                        Some((src, 0))
                                     }
-                                    _ => Some(s.input.cur),
+                                    _ => Some((src, s.input.cur)),
                                 };
-                                if s.sel_from == Some(s.input.cur) {
+                                if s.sel_ends().is_none() {
                                     s.sel_from = None;
                                 }
-                                anchor_caret = s.sel_from.or(Some(s.input.cur));
+                                anchor_caret = s.sel_from.map(|(_, b)| b).or(Some(s.input.cur));
                             }
                             app.drag_anchor = Some((src, anchor_caret));
                             app.cursor = src;
@@ -9029,35 +9203,30 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             let Some(end) = app.src_at_screen_row(clamped_row) else { return };
             if app.session.is_some() {
                 let col = m.column.saturating_sub(text.x) as usize;
-                // EDIT selects CHARACTERS, and its characters live on one
-                // line: the drag never leaves the line it started on and
-                // never builds a line range (that is READ's unit). Off the
-                // anchor line the selection clamps to that line's edge —
-                // below its end, above its start — so a wobble grows and
-                // shrinks a familiar character range instead of a band
-                // nobody can shake off. Seat the session on the anchor
-                // FIRST: the caret click_caret answers belongs to THAT
-                // line's text, and assigning it while the session stands
-                // on another line's buffer lands mid-character on CJK —
-                // the classic next-draw panic. (It also makes the seat
-                // here a no-op: a drag starts from button-down, which
-                // seats and commits already, and nothing is typed while
-                // the button is held.)
-                session_move_to_line(app, ctx, anchor);
-                let on_line = (end == anchor && end < app.lines.len()).then(|| {
-                    click_caret(app, anchor, col, clamped_row)
-                });
-                if let Some(s) = app.session.as_mut() {
-                    s.input.cur = match on_line {
-                        Some(c) => c.min(s.input.buf.len()),
-                        None if end < anchor => 0,
-                        None => s.input.buf.len(),
-                    };
-                    s.sel_from = anchor_caret;
-                    if s.sel_from == Some(s.input.cur) {
-                        s.sel_from = None;
+                if end < app.lines.len() {
+                    // Characters, across lines: the caret — the range's
+                    // moving end — follows the pointer wherever it
+                    // wanders, and the anchor stays exactly where the
+                    // button came down. Drifting back onto the anchor
+                    // line collapses the range right back into the
+                    // character selection it started as: there is no line
+                    // mode to get stuck in, because there is no line
+                    // mode. Seat the session on the pointer's line FIRST:
+                    // the caret below belongs to THAT line's text, and
+                    // writing a foreign buffer's offset is the
+                    // mid-character panic the draws used to die of. (A
+                    // drag types nothing, so the seat's commit is a
+                    // no-op.)
+                    session_move_to_line(app, ctx, end);
+                    let caret = click_caret(app, end, col, clamped_row);
+                    if let Some(s) = app.session.as_mut() {
+                        s.input.cur = caret.min(s.input.buf.len());
+                        s.sel_from = anchor_caret.map(|b| (anchor, b));
+                        if s.sel_ends().is_none() {
+                            s.sel_from = None;
+                        }
+                        s.want_col = None;
                     }
-                    s.want_col = None;
                 }
                 app.selection = None;
                 app.laid_width = 0;
@@ -9089,7 +9258,7 @@ fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             app.drag_anchor = None;
             // A plain click arms an anchor but selects nothing.
             if let Some(s) = app.session.as_mut() {
-                if s.sel_from == Some(s.input.cur) {
+                if s.sel_ends().is_none() {
                     s.sel_from = None;
                 }
             }
@@ -9690,7 +9859,19 @@ fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // the thing being carried around, which is what a selection means
     // here. The footer says the mode and its keys in words, so this colour
     // is never the only thing telling the reader what is going on.
-    let sel_range = move_block_range(app).or_else(|| app.selection.map(|s| s.range()));
+    let sel_range = move_block_range(app)
+        .or_else(|| app.selection.map(|s| s.range()))
+        // EDIT has no line-range, but a character range across lines
+        // still BANDS the lines it covers: the caret line carries its
+        // exact reversed characters (`caret_sel_bytes`), the others read
+        // as whole lines — the honest shape of a selection whose ends
+        // are not on them.
+        .or_else(|| {
+            app.session
+                .as_ref()
+                .and_then(|s| s.sel_ends())
+                .map(|((a, _), (b, _))| (a, b))
+        });
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
     let mut carets: Vec<(u16, Style)> = Vec::new();
@@ -13833,7 +14014,6 @@ mod tests {
         let ctx = test_ctx();
         let mut app = page(&["title", " a", " b", " c"]);
         enter_session(&mut app, &ctx, 2, 1);
-        app.selection = Some(Selection { anchor: 1, cursor: 2 });
 
         for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
             for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
@@ -13841,19 +14021,18 @@ mod tests {
                 assert_eq!(texts(&app), vec!["title", " a", " b", " c"]);
                 assert_eq!(app.session.as_ref().map(|s| s.line), Some(2), "the caret line");
                 assert_eq!(app.session.as_ref().map(|s| s.input.cur), Some(1), "and the caret");
-                assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)), "and the selection");
+                assert!(app.session.as_ref().unwrap().sel_from.is_none(), "and no selection");
                 assert!(app.status.contains("移動モード"), "status: {}", app.status);
             }
         }
         assert!(drain_jobs(&mut app).is_empty());
 
-        // Shift keeps its own meaning: it selects, and always did.
+        // Shift keeps its own meaning: it selects — across the line now.
         handle_session_key(&mut app, &ctx, modified(KeyCode::Up, KeyModifiers::SHIFT));
-        assert_eq!(
-            app.selection.map(|s| s.range()),
-            Some((1, 1)),
-            "Shift+Up still moves the selection's active end"
-        );
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1, "Shift+Up carried the caret");
+        assert_eq!(s.sel_from, Some((2, 1)), "and dragged the range's active end with it");
+        assert!(app.selection.is_none(), "no line band in EDIT anymore");
         assert!(app.session.is_some(), "and EDIT is untouched throughout");
     }
 
@@ -15360,10 +15539,11 @@ mod tests {
         assert_eq!(app.cursor, 1, "the cursor went to the line that changed");
     }
 
-    /// The last thing READ's `x` was still needed for: deleting a RANGE.
-    /// Shift+↑↓ grows one in EDIT, ⌫ deletes it, `^z` brings it back.
+    /// Shift+↑↓ grows a character range that crosses lines — the very
+    /// one the mouse drags. ⌫ deletes it, lines merging the way a
+    /// textarea's would, and `^z` brings it all back.
     #[test]
-    fn shift_arrows_select_lines_and_backspace_deletes_them() {
+    fn shift_arrows_select_characters_across_lines_and_backspace_deletes_them() {
         let ctx = test_ctx();
         let mut app = page(&["title", "one", "two", "three", "four"]);
         app.rebuild(40);
@@ -15371,54 +15551,129 @@ mod tests {
 
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
-        let sel = app.selection.expect("a range");
-        assert_eq!(sel.range(), (1, 3), "anchored where it started");
-        assert_eq!(app.session.as_ref().unwrap().line, 3, "the caret came along");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 3, "the caret came along");
+        assert_eq!(s.sel_from, Some((1, 0)), "anchored where it started");
+        assert!(app.selection.is_none(), "EDIT has no line band");
+        assert!(app.status.contains("3 行を選択"), "status: {}", app.status);
 
         handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
         assert_eq!(
-            app.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
-            vec!["title", "four"],
-            "the whole range went",
+            texts(&app),
+            vec!["title", "three", "four"],
+            "one and two are gone, absorbed into three's start",
         );
-        assert!(app.selection.is_none(), "and the range with it");
         let s = app.session.as_ref().expect("still editing");
         assert_eq!(s.line, 1, "the caret took the range's place");
-        assert_eq!(s.input.buf, "four");
+        assert_eq!(s.input.buf, "three");
+        assert_eq!(s.input.cur, 0);
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "the merge is one commit");
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Replace { .. }, EditOp::Delete { .. }, EditOp::Delete { .. }]),
+            "ops: {:?}",
+            jobs[0].1
+        );
 
         handle_session_key(&mut app, &ctx, ctrl('z'));
         assert_eq!(app.lines.len(), 5, "^z brings the lines back");
     }
 
-    /// A selection must not outlive the keystroke it was made for, and it
-    /// must never take the title line with it.
+    /// Enter over a range across lines cuts it out and keeps exactly one
+    /// break: the anchor line its head, the far line its tail, the lines
+    /// between gone — one cut, one commit, one undo step.
     #[test]
-    fn a_session_selection_is_dropped_by_anything_else_and_spares_the_title() {
+    fn enter_over_a_range_cuts_it_out_and_keeps_one_break() {
         let ctx = test_ctx();
-        let mut app = page(&["title", "one", "two"]);
+        let mut app = page(&["t", "abcdef", "ghijkl", "mnopqr", "end"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3); // abc|def
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        // head on line 3, same sticky column: mno|pqr
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(texts(&app), vec!["t", "abc", "pqr", "end"]);
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (2, 0), "the caret opens the tail");
+        let jobs = drain_jobs(&mut app);
+        assert_eq!(jobs.len(), 1, "one commit for the whole cut");
+        assert!(
+            matches!(&jobs[0].1[..], [EditOp::Replace { .. }, EditOp::Replace { .. }, EditOp::Delete { .. }]),
+            "ops: {:?}",
+            jobs[0].1
+        );
+    }
+
+    /// Typing replaces a range (that is what "type over a selection"
+    /// means), Esc drops it before it leaves, and a range that reaches
+    /// the title merges INTO the title: its line always survives — EDIT
+    /// has no gesture that deletes the page's first line.
+    #[test]
+    fn a_cross_line_selection_reacts_like_a_textareas() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "end"]);
         app.rebuild(40);
 
-        // Typing drops it (and does not delete anything).
+        // Typing swallows the range: the character lands at its start
+        // and the lines merge.
         enter_session(&mut app, &ctx, 1, 0);
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
-        assert!(app.selection.is_some());
+        assert!(app.session.as_ref().unwrap().sel_ends().is_some());
         type_str(&mut app, &ctx, "x");
-        assert!(app.selection.is_none(), "typing drops the range");
-        assert_eq!(app.lines.len(), 3, "and deletes nothing");
+        assert!(
+            app.session.as_ref().unwrap().sel_from.is_none(),
+            "the range was spent"
+        );
+        assert_eq!(texts(&app), vec!["title", "xtwo", "end"], "typed over the range");
 
-        // Esc drops the range before it leaves the session.
-        handle_session_key(&mut app, &ctx, shift(KeyCode::Up));
-        assert!(app.selection.is_some());
+        // Esc drops the selection first; it never un-selects and leaves
+        // in one press.
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        assert!(app.session.as_ref().unwrap().sel_ends().is_some());
         handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
-        assert!(app.selection.is_none());
+        assert!(app.session.as_ref().unwrap().sel_ends().is_none());
         assert!(app.session.is_some(), "one Esc, one job");
 
-        // A range that starts at the title deletes the body only.
+        // A range that reaches the title renames the title line — which
+        // is what typing on it does too — but the line itself stays.
         enter_session(&mut app, &ctx, 0, 0);
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
         handle_session_key(&mut app, &ctx, key(KeyCode::Delete));
-        assert_eq!(app.lines[0].text, "title", "the title stayed");
-        assert!(app.status.contains("タイトル行は残しました"), "status: {}", app.status);
+        assert_eq!(texts(&app), vec!["xtwo", "end"]);
+        assert_eq!(app.lines[0].id, "id0", "still the title's own line");
+    }
+
+    /// Enter over a range replaces it with the break just typed: across
+    /// lines, the anchor keeps its head and the far line its tail (the
+    /// lines between are gone); on one line, the cut range splits at its
+    /// own start — the junction the caret fell to.
+    #[test]
+    fn enter_replaces_the_range_with_one_break() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "abcdef", "ghijkl", "x"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 3);
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(texts(&app), vec!["t", "abc", "jkl", "x"]);
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 2, "the caret opens the far line's tail");
+        assert_eq!(s.input.buf, "jkl");
+        assert_eq!(s.input.cur, 0);
+
+        // One line: "abc" selected by Shift+→, Enter cuts it and splits
+        // at the junction its start left behind.
+        let mut app = page(&["t", "abcdef"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        for _ in 0..3 {
+            handle_session_key(&mut app, &ctx, shift(KeyCode::Right));
+        }
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(texts(&app), vec!["t", "", "def"], "the range's text left the page");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 2);
+        assert_eq!(s.input.cur, 0);
     }
 
     /// "Web edits are slow" has three different causes, and the footer
@@ -16107,13 +16362,13 @@ mod tests {
         assert_eq!(app.lines[2].text, "Y", "CRLF is normalised on the way in");
     }
 
-    /// Selecting text with the mouse inside EDIT is character-unit, on
-    /// the line the drag started: a double-click takes a word, a
-    /// triple-click the line, and a drag that wanders off the line just
-    /// clamps the character range to that line's edge — the LINE range is
-    /// READ's unit, not the session's.
+    /// Selecting text with the mouse inside EDIT is character-unit even
+    /// across lines: the caret — the range's moving end — follows the
+    /// pointer, the anchor stays where the button came down. A
+    /// double-click takes a word, a triple-click the line. There is no
+    /// line band in EDIT at all — that is READ's unit.
     #[test]
-    fn the_mouse_in_edit_selects_characters_and_clamps_to_its_line() {
+    fn the_mouse_in_edit_selects_characters_across_lines() {
         let ctx = test_ctx();
         let mut app = page(&["title", "hello world", "second line", "third"]);
         app.rebuild(42);
@@ -16136,39 +16391,44 @@ mod tests {
         assert!(app.session.as_ref().unwrap().sel_span().is_none());
         assert_eq!(copy_payload(&app, false).unwrap().0, "hello world", "the line, as before");
 
-        // Dragging onto other lines clamps to the anchor line's end —
-        // still a character range, still the same line, no line band.
+        // Dragging onto other lines keeps selecting CHARACTERS: the range
+        // crosses the line break, the caret rides the pointer, and the
+        // copy carries the very text the range holds.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 3, 3));
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 3, 5));
         let s = app.session.as_ref().unwrap();
-        assert_eq!(s.line, 1, "the session stays on the line the drag began on");
+        assert_eq!(s.line, 3, "the caret followed the pointer");
+        assert_eq!(s.sel_from, Some((1, 2)), "the anchor stayed at the press");
+        assert!(app.selection.is_none(), "EDIT never selects a line band with the mouse");
         assert_eq!(
-            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
-            Some("llo world".into())
+            copy_payload(&app, false).unwrap().0,
+            "llo world\nsecond line\nth",
+            "tail, whole lines, head — what the range really covers"
         );
-        assert!(app.selection.is_none(), "EDIT never selects a line range with the mouse");
-        assert_eq!(copy_payload(&app, false).unwrap().0, "llo world");
-        // …and up past the top clamps to its start.
-        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 3, 2));
+        // …back onto the anchor line and it is a plain one-line range
+        // again, exactly where the button went down.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 5, 3));
         let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1);
         assert_eq!(
             s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
-            Some("he".into())
+            Some("ll".into())
         );
     }
 
-    /// A drag in EDIT is characters all the way down: straying off the
-    /// anchor line clamps the range to that line's edge and back, and
-    /// NOTHING may panic in between. (The caret click_caret answers for
-    /// the anchor line's text used to be assigned to the session buffer
-    /// of another line: mid-character on CJK, the next draw panicked.)
+    /// A drag in EDIT is characters, across lines: the caret follows the
+    /// pointer, the anchor holds, and drifting back onto the anchor line
+    /// collapses the range right back into the plain one-line selection.
+    /// NOTHING may panic in between. (The caret click_caret answers used
+    /// to be written into whatever buffer the session happened to stand
+    /// on: mid-character on CJK, the next draw died.)
     #[test]
     fn a_drag_that_wobbles_across_lines_stays_characters() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
         let mut app = page(&["title", "hello world", "あいx", "after"]);
         app.rebuild(42);
-        let mut set_screen = |app: &mut App| {
+        let set_screen = |app: &mut App| {
             app.text_rect = Rect::new(1, 2, 40, 8);
             app.bar_rect = Rect::new(41, 1, 1, 10);
             app.view_h = 10;
@@ -16185,39 +16445,45 @@ mod tests {
         };
 
         // Press at column 7 of "hello world" (caret byte 7, on the "o")
-        // and drag one line down: the range clamps to the line's end.
+        // and drag one line down: the caret follows onto "あいx" (its
+        // end — the click's column is past the line), the anchor stays.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), 8, 3));
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 8, 4));
         draw(&mut app);
         let s = app.session.as_ref().unwrap();
-        assert_eq!(s.line, 1, "the session never left the anchor line");
+        assert_eq!(s.line, 2, "the caret follows the pointer");
+        assert_eq!(s.sel_from, Some((1, 7)), "the anchor stayed put");
+        assert!(app.selection.is_none(), "no line band to escape from");
         assert_eq!(
-            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
-            Some("orld".into()),
-            "below the line: the rest of it"
+            copy_payload(&app, false).unwrap().0,
+            "orld\n\u{3042}\u{3044}x",
+            "the range's text, across the line break"
         );
-        assert!(app.selection.is_none(), "no line band in EDIT");
 
-        // Drag back onto the anchor line: column-accurate again. Byte 5
-        // is where the pre-fix code sliced "あいx" mid-'い' and died on
-        // this draw.
+        // Drag back onto the anchor line: column-accurate characters
+        // again. Byte 5 is where the pre-fix code sliced "あいx"
+        // mid-'い' and died on this draw.
         handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 6, 3));
         draw(&mut app);
         let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 1, "the caret came back with the pointer");
         assert_eq!(
             s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
             Some(" w".into()),
             "the character range tracks the pointer again"
         );
 
-        // And above the anchor line: from the line's start to the anchor.
-        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 6, 2));
+        // And one line above the anchor: the range crosses upward —
+        // title's tail, then the anchor line's head.
+        handle_mouse_content(&mut app, &ctx, mouse(MouseEventKind::Drag(MouseButton::Left), 3, 2));
         draw(&mut app);
         let s = app.session.as_ref().unwrap();
+        assert_eq!(s.line, 0);
+        assert_eq!(s.sel_from, Some((1, 7)));
         assert_eq!(
-            s.sel_span().map(|(a, b)| s.input.buf[a..b].to_string()),
-            Some("hello w".into()),
-            "above the line: from its start"
+            copy_payload(&app, false).unwrap().0,
+            "tle\nhello w",
+            "upward too: the range's text, not a line band"
         );
     }
 
