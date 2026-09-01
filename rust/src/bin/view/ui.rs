@@ -1208,10 +1208,12 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "move        j/k · g/G · ^u/^d · PgUp/PgDn"),
                 t!("リンク      Enter/f で開く: ページ · 📎 ファイル → 保存先 · ↗ URL → ブラウザ",
                    "link        Enter/f open: page · 📎 file → download dir · ↗ URL → browser"),
+                t!("            Tab/S-Tab 次/前のリンク行へ",
+                   "            Tab/S-Tab next/previous link line"),
                 t!("マウス      クリックでリンク/行移動 · ドラッグで選択 · ホイールでスクロール",
                    "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
                 t!("移動履歴    [ 戻る · ] 進む", "history     [ back · ] forward"),
-                t!("表示切替    Tab 表示⇄ソース", "mode        Tab view⇄source"),
+                t!("表示切替    s 表示⇄ソース（行番号つき raw）", "source      s view⇄source (raw with line numbers)"),
                 t!("ページ一覧  ^o 一覧＋抜粋 · Esc/[ 戻る · ] 進む",
                    "index       ^o list + excerpt · Esc/[ back · ] forward"),
             ];

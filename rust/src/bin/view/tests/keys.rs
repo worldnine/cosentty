@@ -312,3 +312,49 @@ use super::support::*;
         handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 10, 0));
         assert_eq!(app.cursor, 5);
     }
+
+    /// READ の Tab はブラウザの Tab: リンクのある行へ巡回する。端では
+    /// 折り返し、Shift+Tab は逆回り。リンクが1つも無いページでは動かず、
+    /// ソース表示の引っ越し先(`s`)を教える。
+    #[test]
+    fn tab_cycles_through_link_lines_and_teaches_s_when_there_are_none() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "plain", "see [alpha]", "plain2", "[beta] too"]);
+        app.rebuild(40);
+        app.cursor = 0;
+
+        handle_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.cursor, 2, "Tab lands on the first link line");
+        handle_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.cursor, 4);
+        handle_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.cursor, 2, "and wraps around");
+        handle_key(&mut app, &ctx, key(KeyCode::BackTab));
+        assert_eq!(app.cursor, 4, "Shift+Tab goes the other way");
+
+        let mut bare = page(&["title", "plain", "still plain"]);
+        bare.rebuild(40);
+        bare.cursor = 1;
+        handle_key(&mut bare, &ctx, key(KeyCode::Tab));
+        assert_eq!(bare.cursor, 1, "nowhere to go");
+        assert!(bare.status.contains("ソース表示は s"), "status: {}", bare.status);
+    }
+
+    /// ソース表示はモードから表示オプションへ降格: `s` でトグルし、
+    /// Tab はもうモードを切り替えない。
+    #[test]
+    fn s_toggles_the_raw_source_view_instead_of_tab() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "body"]);
+        app.rebuild(40);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
+        assert_eq!(app.mode, Mode::Source);
+        assert_eq!(app.status, "source");
+        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
+        assert_eq!(app.mode, Mode::View);
+
+        // Tab はリンク巡回であってモード切替ではない。
+        handle_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.mode, Mode::View, "Tab no longer toggles source");
+    }

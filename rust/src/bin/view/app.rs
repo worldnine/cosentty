@@ -60,8 +60,8 @@ impl Row {
 
 /// View shows rendered Scrapbox notation; Source shows the raw lines with
 /// numbers. Both address the same source lines, so the cursor, comments, and
-/// telomere carry across the toggle (akapen's `Tab view⇄source`).
-#[derive(Clone, Copy, PartialEq)]
+/// telomere carry across the toggle (akapen's `Tab view⇄source`, now on `s`).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mode {
     View,
     Source,

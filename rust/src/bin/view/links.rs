@@ -684,6 +684,33 @@ pub(crate) fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str
     }
 }
 
+/// READ の Tab / Shift+Tab: リンクのある行へカーソルを巡回させる
+/// (ブラウザの Tab と同じ意味論)。端で折り返す。related 行のリンクも
+/// `links_at_src` が数えるので巡回に含まれる。開くのは従来どおり Enter/f。
+pub(crate) fn cycle_link_line(app: &mut App, forward: bool) {
+    let n = app.src_count();
+    if n > 0 {
+        for step in 1..=n {
+            let src = if forward {
+                (app.cursor + step) % n
+            } else {
+                (app.cursor + n - step) % n
+            };
+            if !app.links_at_src(src).is_empty() {
+                if src != app.cursor {
+                    app.goto_src(src);
+                }
+                // 唯一のリンク行に既に居るなら、動かず騒がない。
+                return;
+            }
+        }
+    }
+    app.status = t!(
+        "リンクのある行がありません（ソース表示は s）",
+        "no link lines (source view is on s)"
+    );
+}
+
 impl App {
     /// Install images that finished loading. Returns true if anything
     /// changed (the caller rebuilds the layout, since heights shift). Cheap:

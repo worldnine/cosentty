@@ -289,8 +289,14 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::Char('['), false) => go_history(app, ctx, true),
         (KeyCode::Char(']'), false) => go_history(app, ctx, false),
 
-        // ---- mode toggle (akapen's `Tab view⇄source`) ----
-        (KeyCode::Tab, _) => {
+        // ---- link cycling (the browser's Tab: the next link line) ----
+        (KeyCode::Tab, _) => cycle_link_line(app, true),
+        (KeyCode::BackTab, _) => cycle_link_line(app, false),
+
+        // ---- raw source view (akapen's `Tab view⇄source`, demoted from a
+        //      mode on Tab to a display option on `s`: what only it can do
+        //      is show raw text with line numbers) ----
+        (KeyCode::Char('s'), false) => {
             // The cursor is a source line, so it carries over as is; the
             // re-layout additionally keeps that line on the same physical
             // screen row (akapen's `replace_view_preserving_cursor`).
