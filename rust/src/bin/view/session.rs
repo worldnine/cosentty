@@ -1475,3 +1475,51 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
         app.status = t!("✓ エディタの変更を {n} 件コミットしました · u で戻せます", "✓ editor: {n} op(s) committed · u to undo");
     }
 }
+
+impl App {
+    /// Is the edit session's caret on one of these source lines? Such a
+    /// line is being typed into, so `app.lines` still holds the committed
+    /// text while the session's buffer holds the reader's — the block is not
+    /// renderable until the caret leaves and the commit lands.
+    pub(crate) fn caret_is_inside(&self, rows: &[(usize, Line<'static>)]) -> bool {
+        let Some(s) = &self.session else { return false };
+        rows.iter().any(|(src, _)| *src == s.line)
+    }
+
+    /// Put the caret on an edit's own location (see `edit_focus`). The
+    /// session moves with it, so undo/redo show what changed instead of
+    /// leaving the caret wherever it happened to be. Returns whether the
+    /// line was still there to stand on.
+    pub(crate) fn focus_edit(&mut self, focus: Option<(String, usize)>) -> bool {
+        let Some((id, caret)) = focus else { return false };
+        let Some(line) = self.lines.iter().position(|l| l.id == id) else { return false };
+        let text = self.lines[line].text.clone();
+        self.cursor = line;
+        self.follow = true;
+        self.laid_width = 0;
+        if let Some(s) = self.session.as_mut() {
+            s.line = line;
+            s.input = Input { buf: text.clone(), cur: caret.min(text.len()) };
+            s.orig = text;
+            s.want_col = None;
+            s.sel_from = None;
+        }
+        true
+    }
+
+    /// The width the body rows are wrapped at. After an edit the layout is
+    /// stale (`laid_width = 0`) until the next draw; the last text rect is
+    /// the honest answer in between.
+    pub(crate) fn session_wrap_width(&self) -> usize {
+        if self.laid_width > 0 {
+            return Self::text_width(self.mode, self.laid_width);
+        }
+        if self.text_rect.width > 0 {
+            return self.text_rect.width as usize;
+        }
+        // No geometry at all (nothing has been drawn yet): treat lines as
+        // unwrapped rather than as one column wide, which would turn every
+        // line into a stack of single characters.
+        usize::MAX
+    }
+}

@@ -617,21 +617,6 @@ impl App {
         }
     }
 
-    /// Number of cursor-addressable source indices: body lines, plus the
-    /// related entries in view mode (virtual lines after the body). The
-    /// edit session hides the related section, so its rows are not
-    /// addressable then either — exactly like source mode.
-    /// Where the reader is right now, for the back stack.
-    pub(crate) fn here(&self) -> Place {
-        match self.index.as_ref() {
-            Some(index) => Place::Index {
-                project: self.index_project.clone(),
-                state: Box::new(index.clone()),
-            },
-            None => Place::Page { project: self.project.clone(), title: self.title.clone() },
-        }
-    }
-
     pub(crate) fn src_count(&self) -> usize {
         self.lines.len()
             + if self.mode == Mode::View && self.session.is_none() {
@@ -639,113 +624,6 @@ impl App {
             } else {
                 0
             }
-    }
-
-    /// Read state for a cursor-addressable related row. The flattening order
-    /// is exactly the same as `virtual_items`.
-    pub(crate) fn related_unread(&self, src: usize) -> Option<bool> {
-        let index = src.checked_sub(self.lines.len())?;
-        self.related
-            .iter()
-            .flat_map(|section| section.entries.iter())
-            .nth(index)
-            .map(|entry| entry.unread)
-    }
-
-    /// Install a freshly loaded page, resetting view state (keeps comments).
-    /// Install a freshly loaded page and immediately kick off its image
-    /// downloads. Loading is folded in here so no navigation path can forget
-    /// it (back/forward included).
-    pub(crate) fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
-        self.bump_server_epoch();
-        self.time = None; // installing a live page always exits history
-        self.outline_prefix = false;
-        self.move_mode = None;
-        self.outline_refresh_needed = false;
-        // A page install ends any edit session and cuts the undo lineage:
-        // undo ops reference THIS page's line ids.
-        self.session = None;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-        // Echoes of the last page's commits say nothing about this one.
-        self.own_commits.clear();
-        self.history_dropped = false;
-        // Whatever the last page was waiting to become, it is not this one.
-        self.create_state = CreateState::Idle;
-        // A different project is a different set of capabilities: what we
-        // learned about the old one (visibility, a refused browser) says
-        // nothing here. The sid is a property of the SESSION and survives.
-        if self.project != l.project {
-            self.caps = self.caps.for_new_project();
-            self.vis_asked = None;
-        }
-        self.project = l.project;
-        self.title = l.title;
-        self.header_colors = l.header_colors;
-        self.page_id = l.page_id;
-        self.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Navigating leaves the joined room. Until the thread has re-joined
-        // the new one AND caught it up, there is no push channel here, so
-        // the fast poll covers the gap — and `absorb_interval` fetches at
-        // once on the way down rather than waiting out a 60 s nap.
-        self.set_sync_state(SyncState::Polling);
-        self.lines = l.lines;
-        self.blocks = l.blocks;
-        self.srcs = l.srcs;
-        self.hits = l.hits;
-        self.read_at = l.read_at;
-        self.editable = l.editable;
-        // Answers that were only true of the page we are leaving go now;
-        // the page arriving may be the second one writing that word.
-        self.links.forget_dead();
-        self.links.absorb(l.links);
-        // ...so those titles must be askable again.
-        self.link_pending.clear();
-        if let Ok(mut t) = self.poll_target.lock() {
-            *t = (self.project.clone(), self.title.clone());
-        }
-        // A fresh page install severs the websocket commit lineage: the
-        // room re-joins on the new target, and any remote head we tracked,
-        // events buffered, or resync held for the OLD page are meaningless.
-        self.ws_head = None;
-        self.ws_pending.clear();
-        self.ws_resync_pending = false;
-        self.ws_held_resync = None;
-        self.related = l.related;
-        self.virtual_items = self
-            .related
-            .iter()
-            .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
-            .collect();
-        self.images.clear();
-        self.image_errors.clear();
-        self.pending.clear();
-        self.web_pending.clear();
-        self.web_errors.clear();
-        self.web_rescaling.clear();
-        self.web_missing.clear();
-        self.web_manual_wanted = false;
-        // Once per page, not once per diagram.
-        self.web_notice_shown = false;
-        // A freshly fetched page IS the server's state.
-        self.mark_synced();
-        self.laid_width = 0; // force rebuild
-        self.scroll = 0;
-        self.cursor = 0;
-        self.selection = None;
-        self.follow = true;
-        self.web_dark = !ctx.light;
-        self.start_image_loads(ctx);
-        self.start_web_renders(capability::Trigger::Auto);
-    }
-
-    /// Is the edit session's caret on one of these source lines? Such a
-    /// line is being typed into, so `app.lines` still holds the committed
-    /// text while the session's buffer holds the reader's — the block is not
-    /// renderable until the caret leaves and the commit lands.
-    pub(crate) fn caret_is_inside(&self, rows: &[(usize, Line<'static>)]) -> bool {
-        let Some(s) = &self.session else { return false };
-        rows.iter().any(|(src, _)| *src == s.line)
     }
 
     pub(crate) fn hint_text(&self, cursor_links: &[LinkItem]) -> String {
@@ -832,69 +710,6 @@ impl App {
 }
 
 impl App {
-    /// Make sure the CURRENT project's member table is usable for resolving
-    /// `want` (a userId), fetching or refetching when:
-    /// - the project has no table yet (first `t` in this project), or
-    /// - the table is older than `MEMBERS_TTL`, or
-    /// - `want` is not in the table and the table is older than
-    ///   `MEMBERS_MISS_COOLDOWN` (a newly joined member; the cooldown
-    ///   stops an id that will never resolve from refetching every time).
-    /// A failed fetch stores an empty table so the same rules pace retries.
-    /// Called on demand (the `t` overlay), never per frame.
-    pub(crate) fn ensure_members(&mut self, ctx: &Ctx, want: Option<&str>) {
-        let stale = match self.members.get(&self.project) {
-            None => true,
-            Some(m) => {
-                let age = m.fetched_at.elapsed();
-                let missing = want.map_or(false, |id| !id.is_empty() && !m.names.contains_key(id));
-                age > MEMBERS_TTL || (missing && age > MEMBERS_MISS_COOLDOWN)
-            }
-        };
-        if !stale {
-            return;
-        }
-        let names: HashMap<String, String> = match ctx.client.list_members_in(&self.project) {
-            Ok(ms) => ms
-                .into_iter()
-                .map(|m| {
-                    let name = if m.display_name.is_empty() { m.name } else { m.display_name };
-                    (m.id, name)
-                })
-                .collect(),
-            Err(e) => {
-                // Say so: a silent empty table would look like "unknown
-                // member" and hide a permission or network problem.
-                self.status = t!("メンバー一覧を取得できません: {} — {e}", "member list failed for {}: {e}", self.project);
-                HashMap::new()
-            }
-        };
-        self.members
-            .insert(self.project.clone(), MembersCache { names, fetched_at: Instant::now() });
-    }
-
-    /// Display name for a userId in the current project, from the cached
-    /// table; an unresolved id shows its first 8 characters.
-    pub(crate) fn member_name(&self, id: &str) -> String {
-        if id.is_empty() {
-            return "(unknown)".into();
-        }
-        self.members
-            .get(&self.project)
-            .and_then(|m| m.names.get(id))
-            .cloned()
-            .unwrap_or_else(|| format!("({}…)", &id[..id.len().min(8)]))
-    }
-
-    /// True if the line was edited after the user last saw this page (or
-    /// the page was never seen). Drives the telomere tint.
-    pub(crate) fn line_unread(&self, l: &PageLine) -> bool {
-        unread_since(l.updated, self.read_at)
-    }
-
-    /// Number of unread lines on this page.
-    pub(crate) fn unread_count(&self) -> usize {
-        self.lines.iter().filter(|l| self.line_unread(l)).count()
-    }
 
     /// True if a source line is covered by any saved comment.
     pub(crate) fn src_has_comment(&self, src: usize) -> bool {
@@ -954,43 +769,6 @@ impl App {
     /// hangs from the block's own gutter.
     pub(crate) fn raw_span_at_line(&self, line: usize) -> Option<CodeSpan> {
         self.code_span_at_line(line).or_else(|| self.table_span_at_line(line))
-    }
-
-    /// Put the caret on an edit's own location (see `edit_focus`). The
-    /// session moves with it, so undo/redo show what changed instead of
-    /// leaving the caret wherever it happened to be. Returns whether the
-    /// line was still there to stand on.
-    pub(crate) fn focus_edit(&mut self, focus: Option<(String, usize)>) -> bool {
-        let Some((id, caret)) = focus else { return false };
-        let Some(line) = self.lines.iter().position(|l| l.id == id) else { return false };
-        let text = self.lines[line].text.clone();
-        self.cursor = line;
-        self.follow = true;
-        self.laid_width = 0;
-        if let Some(s) = self.session.as_mut() {
-            s.line = line;
-            s.input = Input { buf: text.clone(), cur: caret.min(text.len()) };
-            s.orig = text;
-            s.want_col = None;
-            s.sel_from = None;
-        }
-        true
-    }
-
-    /// The width the body rows are wrapped at. After an edit the layout is
-    /// stale (`laid_width = 0`) until the next draw; the last text rect is
-    /// the honest answer in between.
-    pub(crate) fn session_wrap_width(&self) -> usize {
-        if self.laid_width > 0 {
-            return Self::text_width(self.mode, self.laid_width);
-        }
-        if self.text_rect.width > 0 {
-            return self.text_rect.width as usize;
-        }
-        // No geometry at all (nothing has been drawn yet): treat lines as
-        // unwrapped rather than as one column wide, which would turn every
-        // line into a stack of single characters.
-        usize::MAX
     }
 
     /// Convenience for the places that only care whether it is code.
