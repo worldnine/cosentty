@@ -174,3 +174,23 @@ lib(`cosense`)側には手を入れない。全モジュールは同一 bin ク�
 最終構成(実測): main 676 / app 2,445 / session 1,477 / ui 1,316 / links 685 /
 sync 644 / outline 629 / keys 615 / editing 559 / mouse 493 / nav 473 /
 web 454 / images 154、tests/ は最大 1,780(app)。
+
+## フェーズ 5 実施記録(2026-09-01)
+
+impl App のメソッドを関心事別に再配置した(5 コミット、各コミット green)。
+
+- web.rs: web レンダラ系 11 メソッド(web_request、start_web_renders、
+  drain_web_renders、可視性プローブ、通知系など)
+- sync.rs: 同期状態と epoch 系 11 メソッド(set_sync_state、sync_label、
+  mark_(de)synced、src/server epoch、gen_now)
+- images.rs: start_image_loads / drain_images
+- links.rs: リンクプローブ・ダウンロード・画面座標からのリンク解決など 9 メソッド
+- nav.rs: here / set_page、既読管理、メンバー表の 7 メソッド
+- session.rs: focus_edit / session_wrap_width / caret_is_inside
+- ui.rs: 行レイアウト・row 構築系 15 メソッド(content_view、rebuild、
+  row⇄src 対応、hint_text/hint_body、text_width)
+
+カーソル移動・スクロールの状態操作(move_cursor、follow_cursor、
+wheel_scroll など)は App の本分として app.rs に残した。
+
+結果: app.rs 2,445 → 930 行。最大ファイルは ui.rs の 1,846 行。
