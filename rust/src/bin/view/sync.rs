@@ -642,3 +642,124 @@ pub(crate) fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
         }
     }
 }
+
+impl App {
+    /// Adopt the push channel's new state: retune the poller and, when the
+    /// status line is showing the session summary, refresh its `sync:` tag.
+    ///
+    /// The retune is what makes a stale sid cheap. The old code picked 60 s
+    /// from the mere existence of a cookie; now the interval is a function
+    /// of a state the websocket thread has actually demonstrated.
+    pub(crate) fn set_sync_state(&mut self, st: SyncState) {
+        if self.sync_state == st {
+            return;
+        }
+        self.sync_state = st;
+        // A dead channel just means the poller is gone (shutdown).
+        let _ = self.poll_ctrl_tx.send(st.poll_interval());
+        self.refresh_sync_tag();
+    }
+
+    /// The `sync:` word inside the session summary, kept truthful as the
+    /// state moves. Only that summary is rewritten — a live status message
+    /// (a commit result, an auth note) is left alone.
+    pub(crate) fn refresh_sync_tag(&mut self) {
+        // Either wording may be on screen: the status was written in the
+        // reader's language, and a test may have seeded the other one.
+        let Some((at, tag)) = ["同期: ", "sync: "]
+            .iter()
+            .find_map(|p| self.status.find(p).map(|i| (i, *p)))
+        else {
+            return;
+        };
+        let Some(rest) = self.status.get(at + tag.len()..) else { return };
+        let end = rest.find(' ').map(|i| at + tag.len() + i).unwrap_or(self.status.len());
+        self.status.replace_range(at + tag.len()..end, self.sync_label());
+    }
+
+    /// What to call the live-update channel. A session with no sid is not
+    /// "reconnecting" — it never had a push channel to lose.
+    pub(crate) fn sync_label(&self) -> &'static str {
+        if self.ws_attempted {
+            self.sync_state.label()
+        } else {
+            SyncState::Polling.label()
+        }
+    }
+
+    /// What the bottom row should say, in priority order: the edit
+    /// session's keys, then the links on the cursor line, then whatever
+    /// wrote to `status` (commits, auth, resync — the things a reader must
+    /// not miss), then a diagram note, and finally the key hints.
+    /// Why the page might not be showing the newest state, in a few
+    /// characters — or nothing at all when it is.
+    ///
+    /// Live sync with nothing held is the quiet, normal case. Everything
+    /// else is worth a word: `poll` means web-side edits take up to three
+    /// seconds, and `held` means they have ARRIVED and are waiting for the
+    /// caret line to be committed (remote state is never installed over an
+    /// unsaved line). Without this, both look like "the viewer got slow".
+    pub(crate) fn sync_notice(&self) -> Option<String> {
+        if !self.ws_pending.is_empty() {
+            let dirty = self
+                .session
+                .as_ref()
+                .map(|s| s.input.buf != s.orig)
+                .unwrap_or(false);
+            let why = if self.move_mode.is_some() {
+                // A drag holds the whole page's order, so remote edits wait
+                // for it exactly as they wait for an unsaved line.
+                ts!("つかんでいるブロックを待っています", "waiting on the grabbed block")
+            } else if dirty {
+                ts!("編集中の行を待っています", "waiting on the line being edited")
+            } else {
+                ts!("適用待ち", "waiting to apply")
+            };
+            return Some(t!("⟳ {} 件{}", "⟳ {} update(s) — {}", self.ws_pending.len(), why));
+        }
+        match self.sync_state {
+            capability::SyncState::Live => None,
+            capability::SyncState::Polling => Some(t!("同期: poll", "sync: poll")),
+            capability::SyncState::Reconnecting => Some(t!("同期: 再接続中", "sync: reconnecting")),
+        }
+    }
+
+    /// The local model may have drifted from the server. Deliberately
+    /// sticky: a later commit succeeding says nothing about the edit that
+    /// did not, so only an authoritative page install clears it.
+    pub(crate) fn mark_desynced(&mut self) {
+        self.web_unsynced = true;
+    }
+
+    /// A whole page arrived from the server and replaced the local lines,
+    /// so whatever had drifted is gone. This is the ONLY way the flag
+    /// clears; it must never be called on a partial or local-only update,
+    /// which would re-open the window it exists to close.
+    pub(crate) fn mark_synced(&mut self) {
+        self.web_unsynced = false;
+    }
+
+    /// The page source has changed: any render queued before this moment
+    /// would be filed under a hash it no longer matches.
+    pub(crate) fn bump_src_epoch(&self) {
+        self.src_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn src_epoch_now(&self) -> u64 {
+        self.src_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The server's state has moved on: any poll response fetched before
+    /// this moment is stale.
+    pub(crate) fn bump_server_epoch(&self) {
+        self.server_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn server_epoch_now(&self) -> u64 {
+        self.server_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn gen_now(&self) -> u64 {
+        self.web_gen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
