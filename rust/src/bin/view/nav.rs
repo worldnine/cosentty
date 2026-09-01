@@ -678,6 +678,12 @@ impl App {
                 continue;
             }
             self.related_pending = false;
+            // Parked on a snapshot: the related list describes the PRESENT
+            // graph, and `show_snapshot` cleared it for that reason. Leaving
+            // the time machine reloads the page, which asks again.
+            if self.time.is_some() {
+                continue;
+            }
             // The gate is down: whatever links this block does not answer
             // are asked about now, not on the next slow beat.
             self.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
