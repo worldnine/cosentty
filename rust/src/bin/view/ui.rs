@@ -632,10 +632,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // the thing being carried around, which is what a selection means
     // here. The footer says the mode and its keys in words, so this colour
     // is never the only thing telling the reader what is going on.
-    // EDIT の文字選択はここに合流させない: かつては行の帯で「選択が
-    // 通っている行」を示していたが、いまは選択された文字そのものが
-    // 全行で反転する(sess_sel と reverse_cols)。文字の範囲が正確に
-    // 見えるのに行全体へ帯を敷くと、選択が行単位に見えてしまう。
+    // EDIT の文字選択はここに合流させない(READ の選択色を継がない)。
+    // 正確な範囲は文字反転(sess_sel と reverse_cols)が語り、行の帯は
+    // 下の in_edit_sel が「選択が通っている行」— 反転する文字を持たない
+    // 空行も含めて — をカーソル行と同じグレーで示す。
     let sel_range =
         move_block_range(app).or_else(|| app.selection.map(|s| s.range()));
     // Telomeres and frame-column carets are painted after the rows.
@@ -676,6 +676,13 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .src()
             .and_then(|s| sel_range.map(|(a, b)| a <= s && s <= b))
             .unwrap_or(false);
+        // EDIT の文字選択が通っている行。正確な範囲は文字反転が示すので、
+        // 帯は「この行が含まれている」— 反転する文字を持たない空行も —
+        // をカーソル行と全く同じグレーで静かに言うだけでよい。
+        let in_edit_sel = row
+            .src()
+            .and_then(|s| sess_sel.map(|((a, _), (b, _))| a <= s && s <= b))
+            .unwrap_or(false);
         let has_comment = row.src().map(|s| app.src_has_comment(s)).unwrap_or(false);
         // Telomere: age + read state of this row's source line (None for
         // synthesized rows).
@@ -688,7 +695,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         let mut base = Style::default();
         // The wash goes down first: selection and the cursor band are
         // stronger signals and paint over it.
-        if in_code && !in_sel && !is_cursor {
+        if in_code && !in_sel && !in_edit_sel && !is_cursor {
             base = base.bg(wash);
             for k in 0..h {
                 let y = text.y as i32 + screen_y + k;
@@ -699,6 +706,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
         if in_sel {
             base = base.bg(sel_bg);
+        }
+        if in_edit_sel {
+            base = base.bg(CURSOR_BG);
         }
         if is_cursor {
             base = base.bg(CURSOR_BG);

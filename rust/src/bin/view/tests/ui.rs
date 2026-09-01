@@ -164,11 +164,13 @@ use super::support::*;
     fn a_cross_line_selection_reverses_its_characters_on_every_line() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
-        let mut app = page(&["title", "one", "two", "three"]);
+        let mut app = page(&["title", "one", "two", "", "five"]);
         app.rebuild(40);
         // アンカーは 1 行目 "one" の 'e' の手前(byte 2)。そこから下へ
-        // 2 行伸ばすと、キャレットは 3 行目 "three" に居る。
+        // 3 行伸ばすと、キャレットは "five" に居て、間には "two" と
+        // 空行が挟まる。
         enter_session(&mut app, &ctx, 1, 2);
+        handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
         handle_session_key(&mut app, &ctx, shift(KeyCode::Down));
         assert_eq!(app.session.as_ref().unwrap().sel_from, Some((1, 2)));
@@ -177,8 +179,8 @@ use super::support::*;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = term.backend().buffer().clone();
 
-        // 行の本文セルを (シンボル, REVERSED か) で拾う。
-        let row_cells = |needle: &str| -> Vec<(String, bool)> {
+        // 行の本文セルを (画面行, [(シンボル, REVERSED か, 背景)]) で拾う。
+        let row_cells = |needle: &str| -> (u16, Vec<(String, bool, Color)>) {
             for y in 0..buf.area.height {
                 let text: String = (0..buf.area.width)
                     .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
@@ -192,35 +194,48 @@ use super::support::*;
                             rest.starts_with(needle)
                         })
                         .unwrap();
-                    return (x0..x0 + needle.len() as u16)
+                    let cells = (x0..x0 + needle.len() as u16)
                         .map(|x| {
                             let c = buf.cell((x, y)).unwrap();
-                            (c.symbol().to_string(), c.modifier.contains(Modifier::REVERSED))
+                            (
+                                c.symbol().to_string(),
+                                c.modifier.contains(Modifier::REVERSED),
+                                c.bg,
+                            )
                         })
                         .collect();
+                    return (y, cells);
                 }
             }
             panic!("row containing {needle:?} not on screen");
         };
 
         // アンカー行: 'on' は選択外、'e' から行末が反転。
-        let one = row_cells("one");
+        let (_, one) = row_cells("one");
         assert!(!one[0].1 && !one[1].1, "before the anchor stays plain: {one:?}");
         assert!(one[2].1, "from the anchor on it reads as selected: {one:?}");
 
-        // 間の行: 本文の全文字が反転。
-        let two = row_cells("two");
-        assert!(two.iter().all(|(_, r)| *r), "a middle line is wholly selected: {two:?}");
+        // 間の行: 本文の全文字が反転し、カーソル行と同じグレーの帯が乗る。
+        let (two_y, two) = row_cells("two");
+        assert!(two.iter().all(|(_, r, _)| *r), "a middle line is wholly selected: {two:?}");
+        assert!(
+            two.iter().all(|(_, _, bg)| *bg == CURSOR_BG),
+            "the band is the cursor grey: {two:?}"
+        );
 
-        // EDIT の文字選択は行の帯(READ の選択色)を敷かない: 文字の
-        // 反転だけが選択の形を語る。
+        // 空行にも帯: 反転する文字が無くても、選択に入っていることは見える。
+        // "two" の直下の画面行を、本文領域内の列で突く。
+        let blank_probe = buf.cell((app.text_rect.x + 2, two_y + 1)).unwrap();
+        assert_eq!(blank_probe.bg, CURSOR_BG, "a blank line still wears the band");
+
+        // READ の選択色はどこにも出ない: EDIT の帯はグレー一色。
         let sel = selection_bg(ctx.terminal_bg);
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
                 assert_ne!(
                     buf.cell((x, y)).unwrap().bg,
                     sel,
-                    "no line band in EDIT char selection (cell {x},{y})"
+                    "EDIT char selection never wears the READ colour (cell {x},{y})"
                 );
             }
         }
