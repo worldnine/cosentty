@@ -107,3 +107,22 @@ PLAN-view-split.md の分割により、各変更はほぼ1ファイルに閉じ
 2. SOURCE トグルのキーは `s` で良いか(mnemonic: source)
 3. EDIT の枠色: 緑(CHROME_ACTIVE)で良いか、もっと控えめ(DarkGray 枠)にするか
 4. cursor style 非対応端末向けのソフト描画キャレットを最初から入れるか、様子見か
+
+## 実施記録(2026-09-01)
+
+段階①〜③を mode-ux ブランチで実装した(3コミット、各コミット green)。
+未決事項はユーザー決定を反映: Tab=リンク巡回 / `s`=ソース切替 /
+EDIT 枠色=ヘッダのアクセント色(テーマ由来) / ソフト描画キャレット=最初から入れる。
+
+- ①: J/K = read_select_line。theme::selection_band(端末背景から作る寒色)を
+  導入し、READ の選択と移動モードの帯を CURSOR_BG(DarkGray)から分色
+- ②: EDIT の出入りで SetCursorStyle::BlinkingBar⇄Default(run ループで監視、
+  終了時復元)。キャレットセルの REVERSED トグル描画。page_frame_style(editing,
+  header) で枠をヘッダ色に再着色(消さない)。フッタの EDIT タグをヘッダ配色の
+  反転バッジ化
+- ③: Tab/S-Tab = cycle_link_line(links.rs)。s = view⇄source。ヘルプ・KEYMAP 更新
+
+既知の小さな残り:
+- ^e($EDITOR 往復)後にカーソル形状が外部エディタの設定に上書きされたままに
+  なる可能性がある(次の EDIT 出入りで直る)。気になったら run ループの
+  再発行条件を「毎フレーム比較」から「roundtrip 後に強制再発行」へ広げる
