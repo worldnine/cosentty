@@ -726,6 +726,13 @@ impl App {
     /// * **cross-project links**, whose existence this reading of
     ///   `relatedPages` never covered.
     pub(crate) fn probe_unknown_links(&mut self) {
+        // The page's own answer about its links is already on its way (see
+        // `related_pending`). Asking now would fire one HEAD per link on
+        // every page open — the very burst the related block exists to
+        // avoid — and every answer would be superseded a moment later.
+        if self.related_pending {
+            return;
+        }
         let Some(tx) = self.link_probe_tx.as_ref() else { return };
         // Scan at once when something could have changed the answer — the
         // text was edited, or the caret left the line it was writing on,

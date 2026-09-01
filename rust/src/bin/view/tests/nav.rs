@@ -54,7 +54,7 @@ use super::support::*;
             lines_count: 0,
             last_accessed: None,
         };
-        let secs = build_related(&page, "proj");
+        let secs = build_related(&PageFacts::of(&page), page.related.as_ref(), "proj");
         let heads: Vec<&str> = secs.iter().map(|s| s.heading.as_str()).collect();
         assert_eq!(
             heads,
@@ -112,7 +112,11 @@ use super::support::*;
             lines_count: 0,
             last_accessed: None,
         };
-        let m = link_truth(&page);
+        // The body and the related block arrive separately now (v2 does not
+        // ship the block), so the reading is always "these facts, against
+        // this block".
+        let truth = |p: &Page| link_truth(&PageFacts::of(p), p.related.as_ref());
+        let m = truth(&page);
         assert!(m.missing("732"), "a tag with no page behind it");
         assert!(!m.missing("テスト"), "listed as a neighbour");
         assert!(
@@ -137,7 +141,7 @@ use super::support::*;
             }),
             ..page
         };
-        let m = link_truth(&shared);
+        let m = truth(&shared);
         assert!(
             !m.missing("実況"),
             "another page writes the same word: a shared word is not empty"
@@ -150,12 +154,95 @@ use super::support::*;
         // is, after all, the page being read) would tell the page we came
         // from that its link is fine.
         let template = Page { persistent: false, ..page };
-        assert_eq!(link_truth(&template).exists("改善案"), Some(false));
+        assert_eq!(truth(&template).exists("改善案"), Some(false));
 
         // A response without relatedPages must not turn every link red.
         let bare = Page { related: None, ..template };
-        assert!(!link_truth(&bare).missing("732"));
-        assert!(link_truth(&bare).is_empty());
+        assert!(!truth(&bare).missing("732"));
+        assert!(truth(&bare).is_empty());
+    }
+
+    /// The body (v2) arrives WITHOUT the related block, so the sections
+    /// below the page and the colour of its links both come out of a second
+    /// request that lands a beat later. That merge is the only thing that
+    /// ever puts them on screen — and because `Page::related` is an
+    /// `Option`, losing it would be silent: the related list would simply
+    /// never appear again.
+    #[test]
+    fn the_related_block_landing_after_the_body_fills_in_sections_and_link_colours() {
+        use cosense::api::{RelatedPage, RelatedPages};
+        let rp = |title: &str, links: &[&str]| RelatedPage {
+            id: String::new(),
+            title: title.into(),
+            title_lc: title.to_lowercase(),
+            descriptions: vec![],
+            links_lc: links.iter().map(|s| s.to_lowercase()).collect(),
+            linked: 0,
+            updated: 0,
+        };
+        let block = || RelatedPages {
+            links1hop: vec![rp("Direct", &[])],
+            links2hop: vec![rp("Shared", &["hub"])],
+            has_back_links_or_icons: true,
+        };
+
+        let mut app = App::new("proj".into());
+        app.title = "me".into();
+        app.facts = PageFacts {
+            title: "me".into(),
+            persistent: true,
+            links: vec!["Hub".into(), "だれも書いていない".into()],
+            project_links: vec![],
+        };
+        app.related_pending = true;
+        assert!(app.related.is_empty(), "nothing is known while the fetch is out");
+
+        // A block for a page the reader has already left says nothing about
+        // this one, and must not lower the gate either.
+        app.related_tx.send(("proj".into(), "other".into(), Some(block()))).unwrap();
+        assert!(!app.drain_related());
+        assert!(app.related_pending, "that answer was about another page");
+        assert!(app.related.is_empty());
+
+        app.related_tx.send(("proj".into(), "me".into(), Some(block()))).unwrap();
+        assert!(app.drain_related(), "the page has to be laid out and coloured again");
+        assert!(!app.related_pending);
+        let heads: Vec<&str> = app.related.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(heads, vec!["Links (1)", "Hub (1)"]);
+        assert_eq!(app.virtual_items.len(), 2, "related rows are addressable");
+        assert!(app.links.missing("だれも書いていない"), "nobody but this page says it");
+        assert!(!app.links.missing("Hub"), "a neighbour shares the word");
+    }
+
+    /// A failed related fetch has to come back all the same: it is what
+    /// lowers the gate, and only then may the link prober go and ask about
+    /// the links one at a time.
+    #[test]
+    fn a_failed_related_fetch_lowers_the_gate_and_hands_the_links_to_the_prober() {
+        let mut app = App::new("proj".into());
+        app.title = "me".into();
+        app.page_id = "P".into();
+        app.lines = vec![PageLine {
+            id: "l0".into(),
+            text: "[だれも書いていない]".into(),
+            user_id: String::new(),
+            created: 0,
+            updated: 0,
+        }];
+        let (tx, probes) = mpsc::channel();
+        app.link_probe_tx = Some(tx);
+
+        // Nothing is asked while the page's own answer is still coming —
+        // that burst is exactly what the related block exists to prevent.
+        app.related_pending = true;
+        app.probe_unknown_links();
+        assert!(probes.try_recv().is_err());
+
+        app.related_tx.send(("proj".into(), "me".into(), None)).unwrap();
+        assert!(!app.drain_related(), "a failure changes nothing on screen");
+        assert!(!app.related_pending);
+        app.probe_unknown_links();
+        assert_eq!(probes.try_recv().unwrap().title, "だれも書いていない");
     }
 
     #[test]

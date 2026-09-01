@@ -721,6 +721,7 @@ use super::support::*;
                 read_at: None,
                 editable: true,
                 related: Vec::new(),
+                facts: PageFacts::default(),
                 links: LinkTruth::default(),
             },
             &ctx,

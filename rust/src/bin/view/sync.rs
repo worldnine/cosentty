@@ -200,12 +200,12 @@ pub(crate) fn install_remote_lines(
         .and_then(|s| app.lines.get(s.line))
         .map(|l| l.id.clone());
 
-    app.related = build_related(page, &app.project);
-    app.virtual_items = app
-        .related
-        .iter()
-        .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
-        .collect();
+    // The related list is deliberately NOT rebuilt here. A resync brings
+    // the body (v2), which carries no `relatedPages` at all — rebuilding
+    // from it would silently empty the sections every time a remote commit
+    // landed. The graph below the page is the one already fetched at page
+    // install (`App::start_related_load`), and a line edited on the web
+    // does not change who links here.
     app.lines = page.lines.clone();
     // Remote lineage: an entry whose anchor line the server no longer has
     // cannot be replayed, but the rest still can. Dropping the WHOLE

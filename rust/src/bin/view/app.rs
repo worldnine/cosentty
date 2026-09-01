@@ -408,6 +408,23 @@ pub(crate) struct App {
     /// Related-pages sections below the body (view mode only; hidden while
     /// the edit session is open).
     pub(crate) related: Vec<RelSection>,
+    /// The page-level facts the related block is read against when it
+    /// arrives (see `PageFacts`).
+    pub(crate) facts: PageFacts,
+    /// The related block for this page is still in flight. While it is up,
+    /// nothing may be concluded about the page's links — every link keeps
+    /// its ordinary colour, and `probe_unknown_links` holds its questions
+    /// rather than firing one request per link at a page the answer is
+    /// already on its way for.
+    pub(crate) related_pending: bool,
+    /// Whether a page install may go and fetch its related block. Set once
+    /// the viewer is really running; `false` in tests, which makes
+    /// `start_related_load` a no-op — installing a page in a test must not
+    /// put a request on the wire. Same reason `link_probe_tx` is an
+    /// `Option`.
+    pub(crate) related_fetch: bool,
+    pub(crate) related_tx: mpsc::Sender<RelatedMsg>,
+    pub(crate) related_rx: mpsc::Receiver<RelatedMsg>,
     /// Flattened related entries in render order. Entry `i` renders with
     /// the VIRTUAL source index `lines.len() + i`, so the cursor, Enter and
     /// mouse clicks address related rows exactly like body lines.
@@ -500,6 +517,7 @@ impl App {
         let (ws_tx, ws_rx) = mpsc::channel();
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         let (link_probe_res_tx, link_probe_rx) = mpsc::channel();
+        let (related_tx, related_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -612,6 +630,11 @@ impl App {
             last_click: None,
             pressed_link: None,
             related: Vec::new(),
+            facts: PageFacts::default(),
+            related_pending: false,
+            related_fetch: false,
+            related_tx,
+            related_rx,
             virtual_items: Vec::new(),
             light: false,
         }

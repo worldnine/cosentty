@@ -322,6 +322,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (probe_tx, probe_rx) = mpsc::channel();
     app.link_probe_tx = Some(probe_tx);
     spawn_link_prober(ctx.client.clone(), probe_rx, app.link_probe_res_tx.clone());
+    // …and from here on, every page install also goes and gets its related
+    // block, which is the other half of that answer (`start_related_load`).
+    app.related_fetch = true;
     if let Some(sid) = &sid {
         let ws_req_rx = app
             .ws_req_rx
@@ -535,6 +538,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // Install any images that finished downloading, then draw.
         if app.drain_images() | app.drain_web_renders() {
             app.laid_width = 0; // heights changed — rebuild layout
+        }
+        // The related-pages block came back: sections below the page, and
+        // the page's own word on which of its links are live.
+        if app.drain_related() {
+            rerender(app, ctx);
+            app.laid_width = 0; // related rows joined the layout
         }
         // A link's fate came back: the page has to be coloured again.
         if app.drain_link_probes() {

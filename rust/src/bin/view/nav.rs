@@ -20,6 +20,38 @@ pub(crate) struct RelEntry {
     pub(crate) unread: bool,
 }
 
+/// A finished background related-pages fetch: which page it describes, and
+/// the block itself — `None` when the request failed, which still has to
+/// come back so the page stops waiting on it.
+pub(crate) type RelatedMsg = (String, String, Option<cosense::api::RelatedPages>);
+
+/// The page-level facts the related-pages block has to be read against.
+///
+/// v2 does not ship `relatedPages` with the body (see
+/// `api::Client::get_related_in`), so the block lands after the page is
+/// already on screen — and by then the `Page` is gone. These four fields
+/// are all that `build_related` and `link_truth` ever wanted from it, so
+/// the viewer keeps them and throws the rest of the response away as
+/// before.
+#[derive(Default)]
+pub(crate) struct PageFacts {
+    pub(crate) title: String,
+    pub(crate) persistent: bool,
+    pub(crate) links: Vec<String>,
+    pub(crate) project_links: Vec<String>,
+}
+
+impl PageFacts {
+    pub(crate) fn of(page: &cosense::api::Page) -> Self {
+        PageFacts {
+            title: page.title.clone(),
+            persistent: page.persistent,
+            links: page.links.clone(),
+            project_links: page.project_links.clone(),
+        }
+    }
+}
+
 /// Everything produced by loading one page.
 pub(crate) struct Loaded {
     pub(crate) project: String,
@@ -37,10 +69,17 @@ pub(crate) struct Loaded {
     pub(crate) read_at: Option<i64>,
     /// Whether this credential may edit the loaded project.
     pub(crate) editable: bool,
-    /// Related-pages sections (see `build_related`).
+    /// Related-pages sections (see `build_related`). EMPTY on arrival: the
+    /// related block is a second request that has not landed yet
+    /// (`App::start_related_load`).
     pub(crate) related: Vec<RelSection>,
-    /// What this page's response said about the pages it links to.
+    /// What this page's response said about the pages it links to. Also
+    /// waiting on the related block, so this starts out knowing nothing but
+    /// the page's own existence.
     pub(crate) links: LinkTruth,
+    /// Kept so the related block can be read against this page when it
+    /// arrives (see `PageFacts`).
+    pub(crate) facts: PageFacts,
 }
 
 /// Build the related-pages sections the way scrapbox.io presents them:
@@ -66,7 +105,11 @@ pub(crate) fn related_is_unread(
         .map_or(true, |&seen_at| updated > 0 && updated > seen_at)
 }
 
-pub(crate) fn build_related(page: &cosense::api::Page, project: &str) -> Vec<RelSection> {
+pub(crate) fn build_related(
+    facts: &PageFacts,
+    related: Option<&cosense::api::RelatedPages>,
+    project: &str,
+) -> Vec<RelSection> {
     let mut secs: Vec<RelSection> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let visits = load_visits();
@@ -83,7 +126,7 @@ pub(crate) fn build_related(page: &cosense::api::Page, project: &str) -> Vec<Rel
         age: p.updated,
         unread: unread(project, &p.title, p.updated),
     };
-    if let Some(rel) = &page.related {
+    if let Some(rel) = related {
         if !rel.links1hop.is_empty() {
             for p in &rel.links1hop {
                 seen.insert(key_of(p));
@@ -95,7 +138,7 @@ pub(crate) fn build_related(page: &cosense::api::Page, project: &str) -> Vec<Rel
         }
         // 2-hop groups, one per link of this page (page order). `links_lc`
         // of an entry lists which links it shares.
-        for hub in &page.links {
+        for hub in &facts.links {
             let hub_lc = hub.to_lowercase();
             let group: Vec<&cosense::api::RelatedPage> = rel
                 .links2hop
@@ -124,8 +167,8 @@ pub(crate) fn build_related(page: &cosense::api::Page, project: &str) -> Vec<Rel
             });
         }
     }
-    if !page.project_links.is_empty() {
-        let entries: Vec<RelEntry> = page
+    if !facts.project_links.is_empty() {
+        let entries: Vec<RelEntry> = facts
             .project_links
             .iter()
             .filter_map(|pl| {
@@ -335,7 +378,10 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         }
     }
     let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
-    let links = link_truth(&page);
+    let facts = PageFacts::of(&page);
+    // The related block is not in a v2 response, so nothing is known about
+    // the links yet; `App::start_related_load` fills both in.
+    let links = link_truth(&facts, None);
     let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &links);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
@@ -344,7 +390,6 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     };
-    let related = build_related(&page, project);
     let editable = ctx.can_edit_in(project);
     let site_theme = ctx.project_theme(project);
     let (header_fg, header_bg) =
@@ -360,8 +405,9 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         hits: rendered.hits,
         read_at,
         editable,
-        related,
+        related: Vec::new(),
         links,
+        facts,
     })
 }
 
@@ -396,28 +442,33 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
 /// SAVED with. Links written since — the ones a reader is most likely to
 /// be looking at — are not in it at all, and `probe_unknown_links` goes
 /// and asks about those one at a time.
-pub(crate) fn link_truth(page: &cosense::api::Page) -> LinkTruth {
+pub(crate) fn link_truth(
+    facts: &PageFacts,
+    related: Option<&cosense::api::RelatedPages>,
+) -> LinkTruth {
     // No related-pages block, no reading: every link keeps its ordinary
-    // colour rather than all of them turning red at once.
-    let Some(r) = page.related.as_ref() else { return LinkTruth::default() };
+    // colour rather than all of them turning red at once. That is also the
+    // state a page is in for the first moment it is on screen, before the
+    // related fetch lands.
+    let Some(r) = related else { return LinkTruth::default() };
     let neighbours = || r.links1hop.iter().chain(r.links2hop.iter());
     let mut existing: Vec<&str> = neighbours().map(|p| p.title.as_str()).collect();
     // Titles this page links to that a neighbour ALSO links to: shared
     // words, live whether or not anyone wrote the page.
     let ours: HashSet<String> =
-        page.links.iter().map(|l| cosense::render::title_lc(l)).collect();
+        facts.links.iter().map(|l| cosense::render::title_lc(l)).collect();
     existing.extend(
         neighbours()
             .flat_map(|p| p.links_lc.iter())
             .filter(|c| ours.contains(c.as_str()))
             .map(|c| c.as_str()),
     );
-    let mut truth = LinkTruth::seed(page.links.iter().map(|s| s.as_str()), existing);
+    let mut truth = LinkTruth::seed(facts.links.iter().map(|s| s.as_str()), existing);
     // And this page itself, which is not in its own 1-hop list. Reading a
     // page is the most direct answer there is about it — including the
     // uncreated one opened through a link, which is exactly the title the
     // page we came from is drawing.
-    truth.learn(&page.title, page.persistent);
+    truth.learn(&facts.title, facts.persistent);
     truth
 }
 
@@ -559,6 +610,7 @@ impl App {
         self.ws_resync_pending = false;
         self.ws_held_resync = None;
         self.related = l.related;
+        self.facts = l.facts;
         self.virtual_items = self
             .related
             .iter()
@@ -584,6 +636,62 @@ impl App {
         self.web_dark = !ctx.light;
         self.start_image_loads(ctx);
         self.start_web_renders(capability::Trigger::Auto);
+        self.start_related_load(ctx);
+    }
+
+    /// Go and get this page's related-pages block, which the v2 body does
+    /// not carry (see `api::Client::get_related_in`).
+    ///
+    /// On a background thread on purpose: it is the request the old v1 read
+    /// spent most of its bytes and most of its wait on (井戸端: 364 KB and
+    /// 0.7 s against 13.7 KB and 0.2 s), and none of it is needed to put
+    /// the page on screen. The sections appear a beat later, from the
+    /// bottom of the page where nobody is looking yet.
+    pub(crate) fn start_related_load(&mut self, ctx: &Ctx) {
+        if !self.related_fetch {
+            return; // tests: no page install goes to the network
+        }
+        self.related_pending = true;
+        let tx = self.related_tx.clone();
+        let client = ctx.client.clone();
+        let project = self.project.clone();
+        let title = self.title.clone();
+        std::thread::spawn(move || {
+            let rel = client.get_related_in(&project, &title).ok();
+            let _ = tx.send((project, title, rel));
+        });
+    }
+
+    /// Install a related block that arrived. `true` = the page has to be
+    /// laid out and coloured again.
+    ///
+    /// A failed fetch (`None`) only lowers the gate: the related list stays
+    /// empty and every link keeps its ordinary colour, and the link prober
+    /// is then free to ask about them one at a time — the same degradation
+    /// as a page whose response never said anything about its links.
+    pub(crate) fn drain_related(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((project, title, rel)) = self.related_rx.try_recv() {
+            // A block for a page the reader has already left says nothing
+            // about the one on screen.
+            if project != self.project || title != self.title {
+                continue;
+            }
+            self.related_pending = false;
+            // The gate is down: whatever links this block does not answer
+            // are asked about now, not on the next slow beat.
+            self.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
+            let Some(rel) = rel else { continue };
+            self.related = build_related(&self.facts, Some(&rel), &self.project);
+            self.virtual_items = self
+                .related
+                .iter()
+                .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+                .collect();
+            self.links.absorb(link_truth(&self.facts, Some(&rel)));
+            changed = true;
+        }
+        changed
     }
 
     /// Make sure the CURRENT project's member table is usable for resolving
