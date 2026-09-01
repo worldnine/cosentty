@@ -725,19 +725,25 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
         if is_cursor {
             base = base.bg(CURSOR_BG);
-            // Paint the WHOLE row between the frame columns before drawing
-            // its content: telomere, the blank after it, text-side padding,
-            // and the scrollbar column must read as one cursor band.
-            let left = body.x.saturating_add(1);
-            let right = body.x.saturating_add(body.width).saturating_sub(1);
-            let buf = f.buffer_mut();
-            for k in 0..h {
-                let sy = screen_y + k;
-                let y = text.y as i32 + sy;
-                if y >= band_top && y <= band_bot {
-                    for x in left..right {
-                        if let Some(c) = buf.cell_mut((x, y as u16)) {
-                            c.set_bg(CURSOR_BG);
+            // READ: paint the WHOLE row between the frame columns before
+            // drawing its content: telomere, the blank after it, text-side
+            // padding, and the scrollbar column must read as one cursor
+            // band. EDIT: the band is the caret's runway, so it covers only
+            // the columns the caret can actually reach — the text area,
+            // which `base` already paints — and the telomere and the
+            // scrollbar column stay bare.
+            if app.session.is_none() {
+                let left = body.x.saturating_add(1);
+                let right = body.x.saturating_add(body.width).saturating_sub(1);
+                let buf = f.buffer_mut();
+                for k in 0..h {
+                    let sy = screen_y + k;
+                    let y = text.y as i32 + sy;
+                    if y >= band_top && y <= band_bot {
+                        for x in left..right {
+                            if let Some(c) = buf.cell_mut((x, y as u16)) {
+                                c.set_bg(CURSOR_BG);
+                            }
                         }
                     }
                 }
@@ -755,11 +761,18 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 if y >= band_top && y <= band_bot {
                     let (glyph, mut style) =
                         gutter_cell(has_comment, age, related_unread, ctx.light);
+                    // EDIT の帯は本文領域だけ(上のコメント参照)なので、
+                    // テロメアには帯の色を継がせない。
                     if let Some(bg) = base.bg {
-                        style = style.bg(bg);
+                        if app.session.is_none() {
+                            style = style.bg(bg);
+                        }
                     }
                     gutter.push((y as u16, glyph, style));
-                    if is_cursor {
+                    // 行カーソル `>`(左フレーム列)は READ のもの。EDIT
+                    // ではキャレット(点滅バー+反転セル)が居場所を語る
+                    // ので、二重に指さない。
+                    if is_cursor && app.session.is_none() {
                         let mut caret_style =
                             Style::default().fg(CHROME_CARET).add_modifier(Modifier::BOLD);
                         if let Some(bg) = base.bg {

@@ -123,6 +123,52 @@ use super::support::*;
         assert_eq!(edit.bg, None);
     }
 
+    /// EDIT では行カーソル `>` を出さず、帯もキャレットが実際に届く
+    /// 本文領域だけに塗る: テロメアやその右の余白、スクロールバー列には
+    /// キャレットは届かないので、そこまで帯を伸ばさない。READ は従来
+    /// どおり行全体がひとつの帯。
+    #[test]
+    fn edit_drops_the_line_caret_and_bands_only_where_the_caret_can_go() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.cursor = 1;
+        let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
+
+        let cursor_row_y = |app: &App| -> u16 {
+            let (first, _) = app.src_rows(1).unwrap();
+            // text.y = 2(ヘッダ+枠上辺)から scroll 0 で並ぶ。
+            app.text_rect.y + first as u16 - app.scroll
+        };
+
+        // READ: `>` が左フレーム列に出て、帯はテロメア列にも及ぶ。
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = term.backend().buffer();
+            let y = cursor_row_y(&app);
+            assert_eq!(buf.cell((0, y)).unwrap().symbol(), ">");
+            assert_eq!(buf.cell((1, y)).unwrap().bg, CURSOR_BG, "telomere joins the READ band");
+        }
+
+        // EDIT: `>` は消え、テロメア列・右端(スクロールバー列)は素のまま。
+        // 本文領域は帯のまま。
+        enter_session(&mut app, &ctx, 1, 0);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = term.backend().buffer();
+            let y = cursor_row_y(&app);
+            assert_ne!(buf.cell((0, y)).unwrap().symbol(), ">", "no line caret in EDIT");
+            assert_ne!(buf.cell((1, y)).unwrap().bg, CURSOR_BG, "telomere stays bare");
+            let right = app.text_rect.x + app.text_rect.width;
+            assert_ne!(buf.cell((right, y)).unwrap().bg, CURSOR_BG, "right margin stays bare");
+            assert_eq!(
+                buf.cell((app.text_rect.x, y)).unwrap().bg,
+                CURSOR_BG,
+                "the caret's runway keeps the band"
+            );
+        }
+    }
+
     /// EDIT のスポットライト: 編集中はキャレット行以外が DIM で沈み、
     /// ヘッダに [✎ 編集中] が出る。読んでいる画面と書いている画面が
     /// 常に違って見えることが、EDIT に居ることを忘れて j/k を打って
