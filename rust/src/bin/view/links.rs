@@ -683,3 +683,233 @@ pub(crate) fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str
         }
     }
 }
+
+impl App {
+    /// Install images that finished loading. Returns true if anything
+    /// changed (the caller rebuilds the layout, since heights shift). Cheap:
+    /// the worker already did the decoding and encoding.
+    /// Ask about every page link on the page whose fate is not known yet.
+    ///
+    /// Two things are deliberately left out:
+    ///
+    /// * **the caret line**, while a session is open. That line is being
+    ///   written; `[新` on the way to `[新しいページ]` is not a question
+    ///   worth asking, and the line is drawn as raw source anyway, so no
+    ///   answer could show. Moving off the line is what submits it.
+    /// * **cross-project links**, whose existence this reading of
+    ///   `relatedPages` never covered.
+    pub(crate) fn probe_unknown_links(&mut self) {
+        let Some(tx) = self.link_probe_tx.as_ref() else { return };
+        // Scan at once when something could have changed the answer — the
+        // text was edited, or the caret left the line it was writing on,
+        // which is the moment a new link becomes a question worth asking.
+        // Otherwise keep a slow beat: with nothing to ask (the usual case)
+        // the scan itself is the only cost, and it should not run every
+        // frame.
+        let key = (self.session.as_ref().map(|s| s.line), self.src_epoch_now());
+        if key == self.link_scan_key && self.link_scan_at.elapsed() < LINK_SCAN_EVERY {
+            return;
+        }
+        self.link_scan_key = key;
+        self.link_scan_at = Instant::now();
+        let editing = self.session.as_ref().map(|s| s.line);
+        for (i, line) in self.lines.iter().enumerate() {
+            if Some(i) == editing {
+                continue;
+            }
+            for item in links_on_line(&mask_inline_code(&line.text)) {
+                let LinkItem::Page(title) = item else { continue };
+                if self.links.exists(&title).is_some() {
+                    continue;
+                }
+                let key = cosense::render::title_lc(&title);
+                if !self.link_pending.insert(key) {
+                    continue;
+                }
+                let _ = tx.send(LinkProbe {
+                    project: self.project.clone(),
+                    title,
+                    asked_by: self.page_id.clone(),
+                });
+            }
+        }
+    }
+
+    /// Take the answers that came back. `true` = something changed, so the
+    /// page has to be rendered again with them.
+    pub(crate) fn drain_link_probes(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((probe, live)) = self.link_probe_rx.try_recv() {
+            self.link_pending.remove(&cosense::render::title_lc(&probe.title));
+            // An answer about a project we have since left says nothing
+            // about the page on screen.
+            if probe.project != self.project {
+                continue;
+            }
+            // "Nobody but the asking page writes this" is only an answer
+            // for the page that asked (see `LinkTruth::forget_dead`); if
+            // the reader has moved on, this page may be the second one
+            // writing it, and that is a different question.
+            if !live && probe.asked_by != self.page_id {
+                continue;
+            }
+            self.links.learn(&probe.title, live);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Everything Enter/f or a mouse click can follow at one source index.
+    /// On a related row (virtual line below the body) this is its one target.
+    pub(crate) fn links_at_src(&self, src: usize) -> Vec<LinkItem> {
+        if src >= self.lines.len() {
+            if self.mode == Mode::View {
+                if let Some(item) = self.virtual_items.get(src - self.lines.len()) {
+                    return vec![item.clone()];
+                }
+            }
+            return Vec::new();
+        }
+        let Some(text) = self.lines.get(src).map(|l| l.text.as_str()) else {
+            return Vec::new();
+        };
+        let text = &mask_inline_code(text);
+        let mut items: Vec<LinkItem> = Vec::new();
+        // A code block or a table is a file Cosense will hand over.
+        if let Some(item) = block_export_link(text, src) {
+            items.push(item);
+        }
+        items.extend(links_on_line(text));
+        items.extend(labelled_urls(text).into_iter().map(|(label, url)| {
+            link_item_for_url(label, url)
+        }));
+        items
+    }
+
+    pub(crate) fn cursor_line_links(&self) -> Vec<LinkItem> {
+        self.links_at_src(self.cursor)
+    }
+
+    /// Save an uploaded file to the download directory in the background;
+    /// the result lands in `file_rx` and is reported (and opened) by the
+    /// event loop.
+    pub(crate) fn start_download(&mut self, ctx: &Ctx, label: String, url: String) {
+        let dest = download_path_in(&ctx.download_dir, &label, &url);
+        let tx = self.file_tx.clone();
+        let fetcher = Arc::clone(&ctx.fetcher);
+        self.status = t!("ダウンロード中 {label}…", "downloading {label}…");
+        std::thread::spawn(move || {
+            let res = fetcher.download_to(&url, &dest).map(|_| dest).map_err(|e| e.to_string());
+            let _ = tx.send((label, res));
+        });
+    }
+
+    /// Report finished downloads: open the file and say where it went.
+    pub(crate) fn drain_downloads(&mut self) {
+        while let Ok((label, res)) = self.file_rx.try_recv() {
+            match res {
+                Ok(path) => {
+                    let shown = path.display().to_string();
+                    let opened = open_in_browser(&shown);
+                    self.status = if opened {
+                        t!("保存しました {shown} · 開きました", "saved {shown} · opened")
+                    } else {
+                        t!("保存しました {shown}", "saved {shown}")
+                    };
+                }
+                Err(e) => self.status = t!("ダウンロードに失敗しました: {label} — {e}", "download failed: {label} — {e}"),
+            }
+        }
+    }
+
+    /// Browser URL for the current page, deep-linked to the cursor line.
+    pub(crate) fn cursor_url(&self) -> String {
+        let title = urlencode_component(&self.title);
+        match self.cursor_src().and_then(|s| self.lines.get(s)) {
+            Some(l) if !l.id.is_empty() => {
+                format!("https://scrapbox.io/{}/{}#{}", self.project, title, l.id)
+            }
+            _ => format!("https://scrapbox.io/{}/{}", self.project, title),
+        }
+    }
+
+    /// What a mouse cell leads to, in VIEW mode.
+    ///
+    /// The answer comes from what the renderer said it drew (`Hit`: a
+    /// span index per followable thing), not from how the row looks. The
+    /// click is turned into a column of the unwrapped rendered line, and
+    /// the hit whose span covers that column wins.
+    ///
+    /// It used to be done by comparing the clicked span's colour with the
+    /// palette and counting equal labels. That made the click path depend
+    /// on the styling: giving uncreated links their own colour quietly
+    /// made them the one thing on a page that could not be followed.
+    pub(crate) fn link_at_screen_position(&self, screen_row: i32, col: usize) -> Option<(usize, LinkItem)> {
+        if self.mode != Mode::View || self.session.is_some() {
+            return None;
+        }
+        let Row::Line { line, src, start, hang } = self.row_at_screen_row(screen_row)? else {
+            return None;
+        };
+        // A related-page row (a virtual line below the page) has exactly
+        // one target and no notation to speak of.
+        if *src >= self.lines.len() {
+            // One target per row, and the whole row is it — there is no
+            // prose here to click past.
+            if line.spans.iter().all(|sp| sp.content.trim().is_empty()) {
+                return None;
+            }
+            return self.links_at_src(*src).into_iter().next().map(|item| (*src, item));
+        }
+        // A table is laid out against the pane at draw time, so its
+        // `table:` header is not a Text block and has no hits of its own.
+        // The header is still followable (Enter saves the CSV), and its
+        // label is the row's first span — so the column decides, as it
+        // does everywhere else here.
+        if self.text_block_at(*src).is_none() {
+            let label_w = line.spans.first().map(|s| str_width(s.content.as_ref()))?;
+            if col >= label_w {
+                return None;
+            }
+            let text = mask_inline_code(&self.lines.get(*src)?.text);
+            return block_export_link(&text, *src).map(|item| (*src, item));
+        }
+        // Screen column → column of the line as it was rendered before
+        // wrapping. A continuation row carries the hanging indent in
+        // front, which belongs to no span of the original.
+        if col < *hang {
+            return None;
+        }
+        let want = start + (col - hang);
+        // The hit's span is an index into the UNWRAPPED line, so measure
+        // there: this row only holds a slice of it.
+        let (full, hits) = self.text_block_at(*src)?;
+        let mut at = 0usize;
+        let mut spans = Vec::with_capacity(full.spans.len());
+        for sp in &full.spans {
+            let w = str_width(sp.content.as_ref());
+            spans.push((at, w));
+            at += w;
+        }
+        let hit = hits.iter().find(|h| {
+            spans.get(h.span).is_some_and(|(from, w)| *from <= want && want < from + w)
+        })?;
+        self.item_for_hit(*src, &hit.target).map(|item| (*src, item))
+    }
+
+    /// Turn what the renderer drew into what this viewer does with it: a
+    /// page is opened, an upload is downloaded, a `code:`/`table:` header
+    /// is saved as a file.
+    pub(crate) fn item_for_hit(&self, src: usize, target: &cosense::render::HitTarget) -> Option<LinkItem> {
+        use cosense::render::HitTarget;
+        match target {
+            HitTarget::Page(text) => Some(page_link_item(text)),
+            HitTarget::Url { label, url } => {
+                Some(link_item_for_url(label.clone(), url.clone()))
+            }
+            HitTarget::BlockLabel => {
+                block_export_link(&mask_inline_code(&self.lines.get(src)?.text), src)
+            }
+        }
+    }
+}

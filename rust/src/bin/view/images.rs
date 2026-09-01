@@ -152,3 +152,68 @@ pub(crate) fn build_image(
         })
         .map_err(|e| e.to_string())
 }
+
+impl App {
+    /// Kick off background downloads for every image on the page. Each
+    /// finishes independently and is installed by the event loop, so the page
+    /// is readable immediately and images fill in as they arrive.
+    pub(crate) fn start_image_loads(&mut self, ctx: &Ctx) {
+        // Every picture on the page, INCLUDING the ones inside a mixed
+        // text-and-picture line. Reading only `Block::Image` meant a
+        // picture written beside text was laid out (its box reserved) and
+        // then never fetched — it simply never appeared.
+        let urls: Vec<String> = self
+            .blocks
+            .iter()
+            .flat_map(|b| match b {
+                Block::Image { url, .. } => vec![url.clone()],
+                Block::Inline { parts, .. } => parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        cosense::render::InlinePart::Image(url) => Some(url.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for url in urls {
+            if self.images.contains_key(&url)
+                || self.image_errors.contains_key(&url)
+                || self.pending.contains(&url)
+            {
+                continue;
+            }
+            self.pending.insert(url.clone());
+            let tx = self.image_tx.clone();
+            let fetcher = Arc::clone(&ctx.fetcher);
+            let picker = ctx.picker.clone();
+            std::thread::spawn(move || {
+                // download → decode → resize → protocol-encode, all here
+                let res = fetcher
+                    .fetch(&url)
+                    .map_err(|e| e.to_string())
+                    .and_then(|img| build_image(&picker, img, IMAGE_MAX_COLS));
+                let _ = tx.send((url, res));
+            });
+        }
+    }
+
+    pub(crate) fn drain_images(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((url, res)) = self.image_rx.try_recv() {
+            self.pending.remove(&url);
+            match res {
+                Ok(info) => {
+                    self.images.insert(url, info);
+                }
+                Err(e) => {
+                    self.image_errors
+                        .insert(url.clone(), format!("[image failed: {} — {e}]", short(&url)));
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+}
