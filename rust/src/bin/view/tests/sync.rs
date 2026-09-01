@@ -274,6 +274,70 @@ use super::support::*;
     }
 
     // ---- websocket push (NOTE-websocket-sync.md) ----
+    /// meta-only コミット(linesCount / charsCount / タイトル変更など)は
+    /// 適用するものが無いが、チェーンの頭は進める。これを落とすと、次の
+    /// 本文コミットが必ず「親不一致=チェーン切れ」になり、meta コミット
+    /// 1つごとに全ページ再取得(full resync)を払わされる。
+    #[test]
+    fn ws_meta_only_commit_advances_the_head_without_a_resync() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.ws_head = Some("c0".into());
+        let pid = app.page_id.clone();
+        app.status = "quiet".into();
+
+        // meta コミット: ops は空。頭だけ進み、resync は要求されず、
+        // status も騒がない。
+        ws_on_commit(&mut app, &ctx, commit("c1", "c0", &pid, "other", vec![]));
+        assert_eq!(app.ws_head.as_deref(), Some("c1"));
+        assert!(!app.ws_resync_pending, "no resync for a meta commit");
+        assert_eq!(app.status, "quiet", "and nothing to announce");
+
+        // その直後の本文コミットは contiguous のまま差分適用される。
+        ws_on_commit(
+            &mut app,
+            &ctx,
+            commit(
+                "c2",
+                "c1",
+                &pid,
+                "other",
+                vec![EditOp::Replace { id: "id1".into(), text: "ONE!".into() }],
+            ),
+        );
+        assert_eq!(app.lines[1].text, "ONE!", "the text commit still rides the chain");
+        assert_eq!(app.ws_head.as_deref(), Some("c2"));
+        assert!(!app.ws_resync_pending);
+    }
+
+    /// 定期の保険 resync(60秒ごと)は、何も変わっていなければ黙って
+    /// 差し替える。毎分「⟳ websocket 全同期」と言い続けると異常のサイン
+    /// に見えてしまう。変わっていれば従来どおり告げる。
+    #[test]
+    fn a_resync_that_changes_nothing_says_nothing() {
+        let ctx = test_ctx();
+        let mut app = page(&["t", "one"]);
+        app.rebuild(40);
+        app.status = "quiet".into();
+        let pid = app.page_id.clone();
+
+        // 同一内容のページ(id・text とも現状と一致)。
+        let mut same = polled(&[("id0", "t"), ("id1", "one")]).page;
+        same.id = pid.clone();
+        ws_on_resync(&mut app, &ctx, resync(same, Some("h1")));
+        assert_eq!(app.ws_head.as_deref(), Some("h1"), "the head still resumes");
+        assert_eq!(app.status, "quiet", "an unchanged install is silent");
+
+        // 内容が変わっていれば従来どおり告げる(epoch は現在値を運ぶ)。
+        let mut differs = polled(&[("id0", "t"), ("id1", "CHANGED")]).page;
+        differs.id = pid;
+        let now = app.server_epoch_now();
+        ws_on_resync(&mut app, &ctx, resync_at(differs, Some("h2"), now));
+        assert_eq!(app.lines[1].text, "CHANGED");
+        assert!(app.status.contains("全同期"), "status: {}", app.status);
+    }
+
     #[test]
     fn ws_contiguous_commit_applies_a_diff_and_advances_head() {
         let ctx = test_ctx();

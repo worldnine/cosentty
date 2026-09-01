@@ -189,17 +189,19 @@ pub struct RemoteCommit {
     pub ops: Vec<EditOp>,
 }
 
-/// Parse one `42["commit",{…}]` event. Meta-only commits (no line ops) or
-/// non-page commits return `None` — there is nothing to apply.
+/// Parse one `42["commit",{…}]` event. Malformed / non-page commits return
+/// `None`. A meta-only commit (linesCount / charsCount / a title change —
+/// no line ops) parses to `ops: []`: there is nothing to APPLY, but the
+/// commit still advances the page's chain, and dropping it here is what
+/// used to break contiguity — the next text commit's parent pointed at the
+/// meta commit nobody remembered, and every such gap cost a full-page
+/// resync over HTTP.
 pub fn parse_commit(data: &serde_json::Value) -> Option<RemoteCommit> {
     let commit_id = data.get("id")?.as_str()?.to_string();
     let parent_id = data.get("parentId")?.as_str()?.to_string();
     let page_id = data.get("pageId")?.as_str()?.to_string();
     let user_id = data.get("userId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let ops = parse_changes(data.get("changes")?.as_array()?);
-    if ops.is_empty() {
-        return None;
-    }
     Some(RemoteCommit { commit_id, parent_id, page_id, user_id, ops })
 }
 
@@ -1139,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn meta_only_commit_parses_to_none() {
+    fn meta_only_commit_parses_with_empty_ops_and_keeps_the_chain() {
         let data = serde_json::json!({
             "kind": "page",
             "parentId": "p0",
@@ -1148,7 +1150,10 @@ mod tests {
             "userId": "me",
             "id": "c1",
         });
-        assert!(parse_commit(&data).is_none());
+        let c = parse_commit(&data).expect("meta commits still carry the chain");
+        assert_eq!(c.commit_id, "c1");
+        assert_eq!(c.parent_id, "p0");
+        assert!(c.ops.is_empty(), "nothing to apply");
     }
 
     #[test]

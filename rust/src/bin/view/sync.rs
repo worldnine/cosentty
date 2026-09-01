@@ -180,7 +180,14 @@ pub(crate) fn remote_gate_clear(app: &App) -> bool {
 /// a clean session on THEIR line ids (a vanished line closes the session),
 /// clearing the local undo lineage (its anchors came from the old state),
 /// and re-rendering. Polled pages and websocket resyncs both land here.
-pub(crate) fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api::Page, status: &str) {
+/// `status: None` installs silently (the periodic insurance resync says
+/// nothing when it changed nothing).
+pub(crate) fn install_remote_lines(
+    app: &mut App,
+    ctx: &Ctx,
+    page: &cosense::api::Page,
+    status: Option<&str>,
+) {
     // A full page from the server replaces the local lines wholesale, so
     // whatever a failed commit had left diverging is resolved here. This
     // and `set_page` are the only places the desync flag clears.
@@ -215,7 +222,9 @@ pub(crate) fn install_remote_lines(app: &mut App, ctx: &Ctx, page: &cosense::api
     rerender(app, ctx);
     reanchor_cursor_session(app, cursor_id, session_id);
     app.follow = true;
-    app.status = status.into();
+    if let Some(s) = status {
+        app.status = s.into();
+    }
 }
 
 /// Re-anchor the cursor and a clean session onto their line ids after the
@@ -299,7 +308,7 @@ pub(crate) fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
         }
         return;
     }
-    install_remote_lines(app, ctx, &polled.page, &t!("⟳ web側の編集を反映", "⟳ applying a web edit"));
+    install_remote_lines(app, ctx, &polled.page, Some(&t!("⟳ web側の編集を反映", "⟳ applying a web edit")));
 }
 
 // -------------------------------------------------------------------------
@@ -348,7 +357,21 @@ pub(crate) fn ws_on_resync(app: &mut App, ctx: &Ctx, res: ws::ResyncPage) {
     }
     app.ws_pending.clear();
     app.ws_head = res.head;
-    install_remote_lines(app, ctx, &res.page, &t!("⟳ websocket 全同期", "⟳ full websocket resync"));
+    let note = resync_note(app, &res.page);
+    install_remote_lines(app, ctx, &res.page, note.as_deref());
+}
+
+/// resync の status 文言 — ただし本文が実際に変わったときだけ。定期の
+/// 保険同期(60秒ごと)は何も変わっていなくてもページを差し替えるので、
+/// 毎分「全同期」と言い続けると異常のサインに見えてしまう。
+fn resync_note(app: &App, page: &cosense::api::Page) -> Option<String> {
+    let changed = page.lines.len() != app.lines.len()
+        || page
+            .lines
+            .iter()
+            .zip(&app.lines)
+            .any(|(a, b)| a.id != b.id || a.text != b.text);
+    changed.then(|| t!("⟳ websocket 全同期", "⟳ full websocket resync"))
 }
 
 /// A held resync (arrived while a gate was up) applies now that the gate is
@@ -368,7 +391,8 @@ pub(crate) fn ws_apply_held_resync(app: &mut App, ctx: &Ctx) {
         app.ws_pending.pop_front();
     }
     app.ws_head = res.head;
-    install_remote_lines(app, ctx, &res.page, &t!("⟳ websocket 全同期", "⟳ full websocket resync"));
+    let note = resync_note(app, &res.page);
+    install_remote_lines(app, ctx, &res.page, note.as_deref());
 }
 
 /// A remote commit arrived — from ANY user, including ourselves. Commit
@@ -421,6 +445,14 @@ pub(crate) fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
         return true;
     }
     if app.ws_head.as_deref() == Some(c.parent_id.as_str()) {
+        // Meta-only commit (linesCount / charsCount / title …): nothing to
+        // apply, but the chain moves — following it HERE is what keeps the
+        // next text commit contiguous. Dropping these used to force a
+        // full-page resync per meta commit.
+        if c.ops.is_empty() {
+            app.ws_head = Some(c.commit_id);
+            return true;
+        }
         // Contiguous: this commit extends the state we are known to be at.
         // Apply its ops as a diff (idempotent: our own echo changes
         // nothing) and mark the new head.
@@ -440,10 +472,9 @@ pub(crate) fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
         app.status = t!("⟳ websocket で更新を反映", "⟳ applying a websocket update");
         return true;
     }
-    // Chain broke (reconnect gap, join replay, meta-only commits in
-    // between): the event is NOT applied and NOT silently dropped — a
-    // background full-page resync is requested, and the fetched page will
-    // carry this commit's effect.
+    // Chain broke (reconnect gap, join replay): the event is NOT applied
+    // and NOT silently dropped — a background full-page resync is
+    // requested, and the fetched page will carry this commit's effect.
     app.ws_resync_pending = true;
     app.status = t!("⟳ websocket 差分に欠落 — 再同期します", "⟳ a websocket diff was missing — resyncing");
     true

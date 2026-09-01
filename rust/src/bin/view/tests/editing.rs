@@ -173,7 +173,7 @@ use super::support::*;
                 updated: 0,
             })
             .collect();
-        install_remote_lines(&mut app, &ctx, &page, "⟳ resync");
+        install_remote_lines(&mut app, &ctx, &page, Some("⟳ resync"));
         assert!(!app.web_unsynced, "an authoritative install resolves the drift");
         app.rebuild(80);
         app.start_web_renders(capability::Trigger::Auto);
@@ -639,7 +639,7 @@ use super::support::*;
 
         // Someone edits an UNRELATED line in the browser.
         let remote = polled(&[("id0", "title"), ("id1", "one"), ("id2", "TWO")]);
-        install_remote_lines(&mut app, &ctx, &remote.page, "⟳ remote");
+        install_remote_lines(&mut app, &ctx, &remote.page, Some("⟳ remote"));
         assert_eq!(app.redo_stack.len(), 1, "the entry still names a live line");
         assert!(!app.history_dropped);
 
@@ -661,7 +661,7 @@ use super::support::*;
 
         // The browser deletes that very line.
         let remote = polled(&[("id0", "title"), ("id2", "two")]);
-        install_remote_lines(&mut app, &ctx, &remote.page, "⟳ remote");
+        install_remote_lines(&mut app, &ctx, &remote.page, Some("⟳ remote"));
         assert!(app.redo_stack.is_empty());
         assert!(app.history_dropped);
 
