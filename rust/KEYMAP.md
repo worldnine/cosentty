@@ -53,6 +53,10 @@ akapen と同じ Swift ヘルパ（Carbon TIS、アクセシビリティ権限�
 3. `users[]` の Personal Access Token（origin 一致、`x-personal-access-token`）
 4. `COSENSE_SID` 環境変数（connect.sid cookie、レガシーフォールバック）
 
+読み・書き・検索は 1〜3 だけで完結する。sid が**必要**なのは websocket push 同期と
+web レンダラ（非公開プロジェクトの mmd 描画）の2つで、どちらも無ければ縮退する
+（`同期: poll` / 「非公開の図を描画するには connect.sid が必要です」）。
+
 起動時のステータス行に `認証: pat`（英語表示では `auth: pat`）のように表示される。未認証なら公開プロジェクトの
 読み取り専用（`cosense login https://scrapbox.io` で有効化）。非公開プロジェクトの閲覧・
 編集・スナップショット・ファイル/画像取得のすべてがこの認証を通る。認証情報があっても、
@@ -62,8 +66,6 @@ akapen と同じ Swift ヘルパ（Carbon TIS、アクセシビリティ権限�
 **リアルタイム反映（websocket push）**: `connect.sid` で認証しているときは
 3秒ポーリングの代わりに websocket push 同期が動く（ステータス行に `同期: ws`）。
 scrapbox.io の room に join し、commit イベントを `/socket.io/` の生フレームから
-直接受信して行差分を即時適用する（ブラウザでの編集が**1秒以内**に画面へ。未読行は
-スクラップの room に join し、commit イベントを `/socket.io/` の生フレームから
 直接受信して行差分を即時適用する（ブラウザでの編集が**1秒以内**に画面へ。未読行は
 テロメアで青く表示）。自分の編集のエコーは冪等適用で二重化しない。切断時は指数
 バックオフで自動復帰。

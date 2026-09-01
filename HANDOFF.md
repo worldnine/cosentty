@@ -9,7 +9,11 @@ cd rust
 cargo run --bin view <project> [title]     # またはページ URL をそのまま渡す
 ```
 
-- 引数なしは `help-jp` の索引。非公開プロジェクトは `COSENSE_SID` に connect.sid
+- 引数なしは `help-jp` の索引
+- 非公開プロジェクトの読み・書き・検索は `cosense login` の PAT / Service Account
+  で完結する(`~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」)。
+  `COSENSE_SID` の connect.sid が要るのは **ws push 同期**と **web レンダラ(mmd)**
+  だけで、無ければ 3秒ポーリングと「非公開の図は描けない」に縮退する
 - 主なフラグ: `--light`/`--dark`/`--theme`、`--preview`、`--ime jp|en`、`--lang`、`--download-dir`
 - キー一覧は `rust/KEYMAP.md`(READ で `?` でも引ける)
 
