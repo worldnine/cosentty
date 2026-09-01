@@ -70,7 +70,7 @@ impl WebKind {
     /// *line id* it hangs off. Verified live on scrapbox.io/help-jp/Mermaid:
     /// `div.mermaid-preview#mermaid-preview-<lineId>` sits inside
     /// `div.line#L<lineId>`, and that line is the code block's LAST content
-    /// line — not its `code:` header (see HANDOFF.md).
+    /// line — not its `code:` header (see NOTE-webrender-handoff.md).
     pub fn selector(self, line_id: &str) -> String {
         match self {
             WebKind::Mermaid => format!("#mermaid-preview-{line_id}"),

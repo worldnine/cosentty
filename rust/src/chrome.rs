@@ -6,7 +6,7 @@
 //! plus a child process, so the whole backend costs ZERO new dependencies
 //! and no Node runtime at install time. A crate like `headless_chrome` or
 //! `chromiumoxide` would pull an async runtime and a large tree for the four
-//! commands we actually send. See HANDOFF.md.
+//! commands we actually send. See NOTE-webrender-handoff.md.
 //!
 //! The flow mirrors what Puppeteer's `elementHandle.screenshot` does:
 //! navigate, wait for the element Cosense drew, read its bounding box, then

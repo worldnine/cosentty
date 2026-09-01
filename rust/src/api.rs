@@ -261,7 +261,7 @@ pub struct Page {
     /// The page's current commit. Reported by the `web_smoke` binary as
     /// page metadata. NOT part of any diagram's cache key: Cosense commits
     /// on every keystroke-level edit, so keying on it re-rendered every
-    /// diagram on a page whenever any line was touched (see HANDOFF.md §2).
+    /// diagram on a page whenever any line was touched (see NOTE-webrender-handoff.md §2).
     #[serde(default, rename = "commitId")]
     pub commit_id: String,
     #[serde(default)]

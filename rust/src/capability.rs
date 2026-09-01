@@ -8,7 +8,7 @@
 //! are tracked apart and combined only at the point of a decision.
 //!
 //! Everything in this module is pure: no network, no clock, no I/O. The
-//! state machine in HANDOFF.md §5b is these functions.
+//! state machine in NOTE-webrender-handoff.md §5b is these functions.
 
 use std::time::Duration;
 
@@ -118,7 +118,7 @@ pub enum RenderCapability {
     Anonymous,
 }
 
-/// The outcome of the table in HANDOFF.md §5b.
+/// The outcome of the table in NOTE-webrender-handoff.md §5b.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// Ask the backend; a cache miss may launch a browser.

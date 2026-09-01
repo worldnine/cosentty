@@ -46,7 +46,7 @@ pub enum Block {
         rows: Vec<(usize, Line<'static>)>,
         /// Source line of the block's LAST content line. Cosense hangs the
         /// preview element off THAT line's id, not the header's (verified
-        /// live — see HANDOFF.md).
+        /// live — see NOTE-webrender-handoff.md).
         last_src: usize,
     },
 }
