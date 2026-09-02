@@ -2,17 +2,48 @@ use super::*;
 
 /// Keys while the index owns the screen.
 ///
-/// A picker's keys: move, type to narrow, Enter to go. Typing goes to the
-/// filter rather than to commands, so there is no mode to remember. The
-/// exceptions are navigation (`[`/`]`, Esc, Enter, Tab) and movement keys;
-/// back must remain back on every screen rather than becoming filter text.
+/// A picker's keys: move, `/` to narrow, Enter to go. The filter is a
+/// LINE YOU OPEN rather than something every printable key falls into
+/// (see `Index::filter_editing`), so the letters stay available as
+/// commands — which is how `q` quits from here at all.
 pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     use cosense::index::{Pane, Row};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let page_rows = app.index_list_rect.height.max(1) as i32;
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
     let Some(ix) = app.index.as_mut() else { return Action::Continue };
+    // ---- the filter line, while it is open ----------------------------
+    //
+    // Everything printable is text here. Only the keys that cannot be
+    // text act: Enter keeps it, Esc drops it, and `^c` still quits — the
+    // interrupt habit must not be a dead key just because a line is open
+    // (ashiato's on_filter_key makes the same exception).
+    if ix.filter_editing {
+        match (k.code, ctrl) {
+            (KeyCode::Char('c'), true) => return Action::Quit,
+            (KeyCode::Esc, _) => ix.cancel_filter(),
+            (KeyCode::Enter, _) => ix.commit_filter(),
+            (KeyCode::Backspace, _) => ix.pop_filter(),
+            (KeyCode::Char('u'), true) => ix.set_filter(String::new()),
+            // The cursor may still be moved while typing: the list under a
+            // filter is a list, and the excerpt follows it. Only the arrows
+            // and their `^n`/`^p` twins do it — the letters are text.
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
+                ix.move_cursor(1);
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
+                ix.move_cursor(-1);
+            }
+            (KeyCode::Char(c), false) => ix.push_filter(c),
+            _ => {}
+        }
+        return Action::Continue;
+    }
     match (k.code, ctrl) {
+        // ---- quit ---- (as on the page: `q` quits, and `^c` with it)
+        (KeyCode::Char('q'), false) => return Action::Quit,
+        (KeyCode::Char('c'), true) => return Action::Quit,
+        (KeyCode::Char('/'), false) => ix.begin_filter(),
         (KeyCode::Char('['), false) => go_history(app, ctx, true),
         (KeyCode::Char(']'), false) => go_history(app, ctx, false),
         (KeyCode::Esc, _) => {
@@ -56,16 +87,16 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
         (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
             ix.move_cursor(-1);
         }
-        (KeyCode::Char('j'), false) if ix.filter.is_empty() => {
+        (KeyCode::Char('j'), false) => {
             ix.move_cursor(1);
         }
-        (KeyCode::Char('k'), false) if ix.filter.is_empty() => {
+        (KeyCode::Char('k'), false) => {
             ix.move_cursor(-1);
         }
-        (KeyCode::Char('g'), false) if ix.filter.is_empty() => {
+        (KeyCode::Char('g'), false) => {
             ix.move_cursor(i32::MIN / 2);
         }
-        (KeyCode::Char('G'), false) if ix.filter.is_empty() => {
+        (KeyCode::Char('G'), false) => {
             ix.move_cursor(i32::MAX / 2);
         }
         (KeyCode::PageDown, _) | (KeyCode::Char('d'), true) => {
@@ -74,20 +105,9 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
         (KeyCode::PageUp, _) => {
             ix.move_cursor(-page_rows);
         }
-        (KeyCode::Backspace, _) => {
-            let mut f = ix.filter.clone();
-            f.pop();
-            ix.set_filter(f);
-        }
-        // `^u` clears the filter, as it clears a line everywhere else.
+        // `^u` clears the filter, as it clears a line everywhere else —
+        // without having to open the line again to empty it.
         (KeyCode::Char('u'), true) => ix.set_filter(String::new()),
-        // Anything printable narrows the list. A filter is one line, so
-        // there is nothing else it could be.
-        (KeyCode::Char(c), false) => {
-            let mut f = ix.filter.clone();
-            f.push(c);
-            ix.set_filter(f);
-        }
         _ => {}
     }
     Action::Continue
@@ -216,6 +236,11 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
     match (k.code, ctrl) {
         // ---- quit ---- (akapen default: q quits, Esc only cancels)
         (KeyCode::Char('q'), false) => return Action::Quit,
+        // `^c` too. In raw mode the terminal hands it over as a key rather
+        // than a signal, so without this arm the interrupt habit is a dead
+        // key. NOT wired into the edit session or the composer, where the
+        // reflex is "cancel what I am typing", not "leave".
+        (KeyCode::Char('c'), true) => return Action::Quit,
         (KeyCode::Esc, false) => {
             if app.time.is_some() {
                 // Leaving history means the live page replaces the snapshot.

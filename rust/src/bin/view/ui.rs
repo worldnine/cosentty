@@ -176,15 +176,20 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- header ------------------------------------------------------
     let shown = rows.len();
-    let head = if ix.filter.is_empty() {
+    // The caret belongs to the OPEN line only: a filter that is merely in
+    // force is a state, and a state that wears a caret reads as "still
+    // typing" (see `Index::filter_editing`).
+    let head = if ix.filter.is_empty() && !ix.filter_editing {
         let more = if ix.total > ix.entries.len() {
             format!(" of {}", ix.total)
         } else {
             String::new()
         };
         format!(" {} — {} pages{}", app.project, ix.entries.len(), more)
+    } else if ix.filter_editing {
+        format!(" {} — /{}_ ({} match)", app.project, ix.filter, shown)
     } else {
-        format!(" {} — {}_ ({} match)", app.project, ix.filter, shown)
+        format!(" {} — /{} ({} match)", app.project, ix.filter, shown)
     };
     f.render_widget(
         Paragraph::new(head).style(
@@ -312,19 +317,26 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
-    let hint = match (layout.preview.is_some(), ix.focus) {
-        (true, Pane::List) => ts!(
-            "j/k · 文字で絞り込み · Enter 開く · Tab 抜粋 · Esc/[ 戻る · ] 進む",
-            "j/k · type to filter · Enter open · Tab excerpt · Esc/[ back · ] forward"
-        ),
-        (true, Pane::Preview) => ts!(
-            "j/k 抜粋をスクロール · Tab 一覧 · Enter 開く · Esc/[ 戻る · ] 進む",
-            "j/k scroll excerpt · Tab list · Enter open · Esc/[ back · ] forward"
-        ),
-        (false, _) => ts!(
-            "j/k · 文字で絞り込み · Enter 開く · Esc/[ 戻る · ] 進む",
-            "j/k · type to filter · Enter open · Esc/[ back · ] forward"
-        ),
+    let hint = if ix.filter_editing {
+        ts!(
+            "絞り込み中 — Enter 確定 · Esc 解除 · ↑/↓ 移動",
+            "filtering — Enter apply · Esc clear · ↑/↓ move"
+        )
+    } else {
+        match (layout.preview.is_some(), ix.focus) {
+            (true, Pane::List) => ts!(
+                "j/k · / 絞り込み · Enter 開く · Tab 抜粋 · Esc/[ 戻る · q 終了",
+                "j/k · / filter · Enter open · Tab excerpt · Esc/[ back · q quit"
+            ),
+            (true, Pane::Preview) => ts!(
+                "j/k 抜粋をスクロール · Tab 一覧 · Enter 開く · Esc/[ 戻る · q 終了",
+                "j/k scroll excerpt · Tab list · Enter open · Esc/[ back · q quit"
+            ),
+            (false, _) => ts!(
+                "j/k · / 絞り込み · Enter 開く · Esc/[ 戻る · q 終了",
+                "j/k · / filter · Enter open · Esc/[ back · q quit"
+            ),
+        }
     };
     // Where in the list the reader is — the footer's job here as on the
     // page (`L12/205`), which is why the list needs no scrollbar.
@@ -1334,8 +1346,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
                 t!("移動履歴    [ 戻る · ] 進む", "history     [ back · ] forward"),
                 t!("表示切替    s 表示⇄ソース（行番号つき raw）", "source      s view⇄source (raw with line numbers)"),
-                t!("ページ一覧  ^o 一覧＋抜粋 · Esc/[ 戻る · ] 進む",
-                   "index       ^o list + excerpt · Esc/[ back · ] forward"),
+                t!("ページ一覧  ^o 一覧＋抜粋 · 一覧内で / 絞り込み · q 終了",
+                   "index       ^o list + excerpt · / filter inside · q quit"),
             ];
             if app.editable {
                 keys.extend([

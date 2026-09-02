@@ -122,6 +122,15 @@ pub struct Index {
     pub entries: Vec<Entry>,
     /// What has been typed. Empty = the whole project.
     pub filter: String,
+    /// Is the filter line open for typing? (`/` opens it, ashiato's key.)
+    ///
+    /// The index used to narrow on every printable key with no mode at
+    /// all. Two things were wrong with that. Cosense titles are Japanese,
+    /// and an IME's preedit reaches the list as the ASCII keys being
+    /// composed — so the list thrashed while a word was still being
+    /// written. And it spent every printable key: `q` could not quit
+    /// because `q` was filter text.
+    pub filter_editing: bool,
     /// Cursor over the FILTERED rows.
     pub cursor: usize,
     /// First visible row of the list.
@@ -214,6 +223,37 @@ impl Index {
             self.preview_scroll = 0;
         }
         moved
+    }
+
+    /// `/`: open the filter line for typing.
+    pub fn begin_filter(&mut self) {
+        self.filter_editing = true;
+    }
+
+    /// Enter: keep what was typed and hand the keys back to the list, so
+    /// j/k and Enter mean the list again while the filter still holds.
+    pub fn commit_filter(&mut self) {
+        self.filter_editing = false;
+    }
+
+    /// Esc: drop the filter and close the line — ashiato's 解除. Esc on a
+    /// narrowed list means "show me everything again", which is why it is
+    /// not also the key that leaves the index while the line is open.
+    pub fn cancel_filter(&mut self) {
+        self.filter_editing = false;
+        self.set_filter(String::new());
+    }
+
+    pub fn push_filter(&mut self, c: char) {
+        let mut f = self.filter.clone();
+        f.push(c);
+        self.set_filter(f);
+    }
+
+    pub fn pop_filter(&mut self) {
+        let mut f = self.filter.clone();
+        f.pop();
+        self.set_filter(f);
     }
 
     /// Typing (or deleting) narrows the list under the cursor, so the

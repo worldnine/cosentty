@@ -1009,6 +1009,68 @@ use super::support::*;
         assert!(app.index.is_none(), "Esc uses the same back route");
     }
 
+    /// The filter is a line you OPEN. That is what gives the letters back
+    /// to the index: `q` could not quit while every printable key was
+    /// filter text.
+    #[test]
+    fn the_index_filter_is_a_line_that_slash_opens_and_q_quits_beside_it() {
+        let ctx = test_ctx();
+        let mut app = page(&["A", "one"]);
+        app.project = "proj".into();
+        let entries: Vec<_> = ["quick", "quiet", "other"]
+            .iter()
+            .map(|t| cosense::index::Entry {
+                title: (*t).into(),
+                updated: now_secs(),
+                descriptions: vec![],
+                unread: false,
+            })
+            .collect();
+        app.index = Some(cosense::index::Index::new(entries, 3));
+
+        // Closed line: letters are commands, not text.
+        assert!(matches!(
+            handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
+            Action::Quit
+        ));
+        assert!(matches!(handle_index_key(&mut app, &ctx, ctrl('c')), Action::Quit));
+        handle_index_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert_eq!(app.index.as_ref().unwrap().cursor, 1, "j moves even under a filter");
+        assert!(app.index.as_ref().unwrap().filter.is_empty(), "nothing was typed");
+
+        // `/` opens it, and now the same letters are text.
+        handle_index_key(&mut app, &ctx, key(KeyCode::Char('/')));
+        for c in "qui".chars() {
+            handle_index_key(&mut app, &ctx, key(KeyCode::Char(c)));
+        }
+        let ix = app.index.as_ref().unwrap();
+        assert!(ix.filter_editing);
+        assert_eq!(ix.filter, "qui");
+        assert_eq!(ix.len(), 3, "two matches plus the create offer");
+
+        // ↑/↓ still pick while typing; `^c` still leaves.
+        handle_index_key(&mut app, &ctx, key(KeyCode::Down));
+        assert_eq!(app.index.as_ref().unwrap().cursor, 1);
+        assert!(matches!(handle_index_key(&mut app, &ctx, ctrl('c')), Action::Quit));
+
+        // Enter keeps the filter and hands the keys back to the list.
+        handle_index_key(&mut app, &ctx, key(KeyCode::Enter));
+        let ix = app.index.as_ref().unwrap();
+        assert!(!ix.filter_editing);
+        assert_eq!(ix.filter, "qui");
+        assert!(matches!(
+            handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
+            Action::Quit
+        ));
+
+        // Esc on an open line drops the filter rather than leaving the index.
+        handle_index_key(&mut app, &ctx, key(KeyCode::Char('/')));
+        handle_index_key(&mut app, &ctx, key(KeyCode::Esc));
+        let ix = app.index.as_ref().expect("Esc closed the line, not the index");
+        assert!(!ix.filter_editing);
+        assert!(ix.filter.is_empty());
+    }
+
     /// The same screen answers in English when the environment asks for
     /// it. Only the words change: keys, flags and notation are names, not
     /// words, and stay put in both.
