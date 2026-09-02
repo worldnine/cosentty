@@ -204,11 +204,13 @@ cosense-cli の `uploadFile` を読んで確かめた送信手順(3往復):
   既に100件以上ある)
 - **済**: 既定は `gcs`(閉じるから)。sid があればプロジェクト設定に従い、
   上書きは自前の TOML(キーバインドの設定と同じファイル)で吸収する
-- Gyazo へ上げるトークンは `GYAZO_TEAMS_ACCESS_TOKEN` でよいか。ブラウザは
-  ユーザーごとの **OAuth 接続**(User Settings の「Gyazo OAuth Upload」)で
-  上げていて、そこでは acme-inc に接続済み・個人 gyazo.com は未接続。
-  TUI がトークンで上げると**別の経路で同じ場所へ入る**ことになる
-  (実害は無いはずだが、意図しておく)
+- **済**: Gyazo へ上げるトークンは `GYAZO_TEAMS_ACCESS_TOKEN`
+  (無ければ `GYAZO_ACCESS_TOKEN`)。読む側が既にその順で見ているので、
+  読み書きで同じトークンになる。ブラウザはユーザーごとの **OAuth 接続**
+  (User Settings の「Gyazo OAuth Upload」)で上げているので、TUI は
+  **別の経路で同じ場所へ入る**ことになる——実害は無いはずだが、意図の上
+
+**これで 2. の未決は無くなった。** 着手してよい。
 
 ### 3. コメントモードの置き場所(P3 の残り)
 
