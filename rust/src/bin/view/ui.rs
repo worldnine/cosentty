@@ -161,6 +161,7 @@ pub(crate) fn wrap_plain(s: &str, width: usize) -> Vec<String> {
 pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     use cosense::index::{Pane, Row};
     let Some(ix) = app.index.as_mut() else { return };
+    use unicode_width::UnicodeWidthStr;
     let body_h = area.height.saturating_sub(2); // header + footer
     let layout = cosense::index::layout(ctx.preview, area.width, body_h);
     if layout.preview.is_none() {
@@ -195,6 +196,9 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // because the moment it explains the most is while a new name is being
     // typed and nothing is offered to create.
     let ro = if ix.can_create { "" } else { ts!("  [読み取り専用]", "  [read-only]") };
+    // Where the typed text ends, in display columns — the caret's column.
+    // Only meaningful while the line is open.
+    let mut caret_col: Option<u16> = None;
     let head = if ix.filter_editing {
         // A full-text query has no count yet — the list on screen is still
         // the unsearched one, and calling its length a match count would be
@@ -205,7 +209,16 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 ts!("(Enter で本文を検索)", "(Enter searches bodies)").to_string()
             }
         };
-        format!(" {} — {sigil}{}_ {tail}{ro}", app.project, ix.filter)
+        // Built in two pieces so the caret's column is MEASURED off the
+        // text that precedes it rather than recomputed from the parts —
+        // the two could not then disagree. Japanese titles are two columns
+        // per character, which is exactly where a re-derivation goes wrong.
+        let lead = format!(" {} — {sigil}{}", app.project, ix.filter);
+        caret_col = Some(
+            UnicodeWidthStr::width(lead.as_str())
+                .min(area.width.saturating_sub(1) as usize) as u16,
+        );
+        format!("{lead}_ {tail}{ro}")
     } else if let Some(q) = ix.search.as_deref() {
         // The endpoint caps the hit list — and caps its `count` with it —
         // so a full page of hits means "at least this many". Saying "100
@@ -234,7 +247,6 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     } else {
         format!("{} ↓ ", ix.sort.name())
     };
-    use unicode_width::UnicodeWidthStr;
     let pad = (area.width as usize)
         .saturating_sub(UnicodeWidthStr::width(head.as_str()))
         .saturating_sub(UnicodeWidthStr::width(order.as_str()));
@@ -419,6 +431,16 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         Paragraph::new(format!(" {} {pos} · {hint}", ts!("一覧", "index"))).style(Style::default().fg(CHROME_DIM)),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
+
+    // The filter line's caret: put the HARDWARE cursor on it. Terminal
+    // IMEs anchor their inline composition to the hardware cursor, so this
+    // is what makes 日本語入力 appear where the word is being typed instead
+    // of wherever the cursor was last left (the same technique the edit
+    // session uses — see `set_cursor_position` in `draw_page`). The `_` is
+    // kept as a soft caret for terminals that draw no cursor at all.
+    if let Some(col) = caret_col {
+        f.set_cursor_position(ratatui::layout::Position::new(area.x + col, area.y));
+    }
 
     // ---- the sort menu, over the list --------------------------------
     //
@@ -1174,6 +1196,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             t!(" {}-{} 行目へのコメント ", " comment on lines {}-{} ", a + 1, b + 1)
         };
         let (before, after) = input.parts();
+        // …and the same hardware cursor, for the same reason: this is the
+        // viewer's main Japanese surface, and its composition window was
+        // landing wherever the cursor happened to be. `"> "` is two columns
+        // and the caret sits after `before`, measured in display columns.
+        let caret_x = 2 + unicode_width::UnicodeWidthStr::width(before);
+        let cx = r.x + (caret_x.min(r.width.saturating_sub(1) as usize)) as u16;
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -1191,6 +1219,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             ]),
             r,
         );
+        f.set_cursor_position(ratatui::layout::Position::new(cx, r.y + 1));
     }
 
     // Modal overlay (comments list / link picker / help) on top.

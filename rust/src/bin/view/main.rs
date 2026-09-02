@@ -489,12 +489,17 @@ enum Action {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Result<(), Box<dyn Error>> {
-    // EDIT の出入りでハードウェアカーソルの形を切り替える: 点滅する縦棒が
-    // 見えている=編集中、という一次サイン。応えない端末のために ui 側が
-    // 同じセルを REVERSED でも塗る(ソフト描画キャレット)。
+    // 文字を打ち込める場所に入る/出るでハードウェアカーソルの形を
+    // 切り替える: 点滅する縦棒が見えている=入力中、という一次サイン。
+    // 応えない端末のために ui 側が同じセルを REVERSED でも塗る
+    // (ソフト描画キャレット)。EDIT セッションだけでなく、コメント入力欄と
+    // 一覧の絞り込み行も同じ扱い——どれも日本語を打つ場所で、どれも
+    // ハードウェアカーソルを置いている(IME の変換窓がそこに付く)。
     let mut was_editing = false;
     loop {
-        let editing = app.session.is_some();
+        let editing = app.session.is_some()
+            || app.composing.is_some()
+            || app.index.as_ref().is_some_and(|ix| ix.filter_editing);
         if editing != was_editing {
             let _ = execute!(
                 std::io::stdout(),

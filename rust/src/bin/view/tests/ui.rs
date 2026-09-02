@@ -1,6 +1,54 @@
 use crate::*;
 use super::support::*;
 
+    /// 日本語は端末の IME が「変換窓」をハードウェアカーソルの位置に出す。
+    /// だから文字を打ち込める場所は、必ずそこにカーソルを置かなければ
+    /// ならない。EDIT セッションは元からそうしていたが、一覧の絞り込み行と
+    /// コメント入力欄は置いておらず、変換中の文字が見当違いの場所に出ていた。
+    #[test]
+    fn the_hardware_cursor_sits_on_the_caret_wherever_japanese_can_be_typed() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.project = "proj".into();
+        let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+
+        // （何も打てない READ で隠れることは TestBackend では見えない——
+        //  ratatui が show/hide を投げるだけで、位置は保持される。実機の
+        //  pty では hidden=True になるのを確認済み。）
+
+        // --- 一覧の絞り込み行 ---
+        let mut ix = cosense::index::Index::new(
+            vec![cosense::index::Entry {
+                title: "改善案".into(),
+                updated: now_secs(),
+                ..Default::default()
+            }],
+            1,
+            cosense::index::SortKey::Updated,
+        );
+        ix.begin_filter();
+        ix.push_filter('改');
+        ix.push_filter('善');
+        app.index = Some(ix);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        // " proj — /" は9桁、全角2文字で4桁。キャレットはその次。
+        assert_eq!(term.get_cursor_position().unwrap().x, 13);
+        assert_eq!(term.get_cursor_position().unwrap().y, 0);
+        app.index = None;
+
+        // --- コメント入力欄 ---
+        let mut input = Input::new(String::new());
+        input.insert_char('あ');
+        input.insert_char('い');
+        app.composing = Some(input);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let pos = term.get_cursor_position().unwrap();
+        // "> " の2桁 + 全角2文字の4桁。行は入力欄の2行目。
+        assert_eq!(pos.x, 6, "全角は2桁で数える");
+        assert_eq!(pos.y, 12 - 1 - 3 + 1);
+    }
+
     #[test]
     fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
         let ctx = test_ctx();
