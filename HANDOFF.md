@@ -20,7 +20,9 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 ## コード構成
 
 - lib(`cosense`): `api` `render` `wrap` `theme` `ws` `webrender` `chrome`
-  `capability` `outline` `editops` `comment` `highlight` ほか
+  `capability` `outline` `editops` `comment` `index`(一覧の状態・並び順・
+  絞り込み/検索の一致) `highlight`(コードブロックの syntect。検索語の
+  ハイライトとは別物) ほか
 - viewer(`rust/src/bin/view/`): `main`(起動+イベントループ)/ `app`(状態)/
   `keys` / `mouse` / `session`(EDIT)/ `editing`(コミット・undo)/ `outline` /
   `sync`(ws・resync)/ `nav` / `links` / `images` / `web` / `ui`(描画)/
@@ -29,8 +31,8 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 ## ビルドとテスト
 
 ```bash
-cd rust && cargo test --bin view   # viewer(220+ tests)
-cargo test                          # lib 含む全部
+cd rust && cargo test --bin view   # viewer(228 tests)
+cargo test                          # lib(163)含む全部
 ```
 
 - ツールチェーンは `rust/` の rustup override で 1.90.0。
@@ -54,3 +56,11 @@ cargo test                          # lib 含む全部
 - テストページ: `my-sandbox/テスト`(実編集してよい)
 - `cargo run --bin ws_smoke -- <project> <title>` — ws push の実測
   (実編集して自動で元に戻す)
+- **画面そのものを読む**: `python3 rust/scripts/tui_shot.py <view のパス> [引数]`
+  (要 `pip install pyte`)。pty で起動して端末をエミュレートし、キーを
+  送って**実際に描かれた画面**・ハードウェアカーソルの位置・セルの属性
+  (太字/前景/背景)を取り出す。テストが緑でも「そう見えるか」は別問題で、
+  日本語の桁数・テロメアの太さ・一致の敷き・IME のキャレット位置は
+  ここでしか確かめられない。ファイル冒頭に使い方がある
+- `rust/scripts/ime.swift` — macOS の入力ソース切替ヘルパ(swiftc でビルド)。
+  クリップボード画像のヘルパを足すなら、この経路に乗せる
