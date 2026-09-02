@@ -12,11 +12,27 @@ use super::support::*;
         // No timestamp (external project link): a recorded visit is enough.
         assert!(!related_is_unread(&visits, "proj", "Page", 0));
 
-        let (ug, us) = gutter_cell(false, None, Some(true), false);
-        let (rg, rs) = gutter_cell(false, None, Some(false), false);
-        assert_eq!((ug, rg), ("▏", "▏"), "read state must not encode thickness");
-        assert_eq!(us.fg, Some(Color::LightBlue));
-        assert_eq!(rs.fg, Some(Color::DarkGray));
+        // A related row now wears the SAME mark as a body line and as an
+        // index row: thickness = how recently that page changed, colour =
+        // whether it has been seen. It used to be a flat hairline with
+        // colour only, which made the one gutter column mean two different
+        // things depending on where you were looking.
+        let mark = |updated: i64, unread: bool| {
+            gutter_cell(false, Some((related_age(updated), unread)), false)
+        };
+        let now = now_secs();
+        assert_eq!(mark(now - 60, true).0, "█", "edited a minute ago: thick");
+        assert_eq!(mark(now - 86_400 * 3, true).0, "▌", "three days ago: thinner");
+        // Unread keeps its blue at every thickness; read is the gutter gray.
+        assert_eq!(mark(now - 60, true).1.fg, Some(cosense::theme::telomere(60, true, false).1));
+        assert_eq!(
+            mark(now - 60, false).1.fg,
+            Some(cosense::theme::border_color(false))
+        );
+        // An undated entry (a cross-project link: the related list carries
+        // no timestamp for those) must not claim to be brand new.
+        assert_eq!(mark(0, false).0, "▏");
+        assert_eq!(related_age(0), UNDATED_AGE);
     }
 
     #[test]

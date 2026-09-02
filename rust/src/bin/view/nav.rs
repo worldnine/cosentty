@@ -199,6 +199,22 @@ pub(crate) fn build_related(
     secs
 }
 
+/// Age in seconds for a related row's telomere.
+///
+/// A cross-project link has no timestamp in the related list (`age == 0`),
+/// and neither has anything else the API declined to date. Those report the
+/// OLDEST bucket rather than "brand new": the thickness axis means "how
+/// recently did this change", and the honest answer is "no idea, so do not
+/// claim it is fresh". That is also the hairline those rows already wore.
+pub(crate) const UNDATED_AGE: i64 = 100 * 365 * 86_400;
+
+pub(crate) fn related_age(updated: i64) -> i64 {
+    match updated {
+        0 => UNDATED_AGE,
+        t => (now_secs() - t).max(0),
+    }
+}
+
 /// A line is unread if it was edited after `read_at`, or the page was never
 /// seen at all (`None`).
 pub(crate) fn unread_since(updated: i64, read_at: Option<i64>) -> bool {
@@ -558,13 +574,14 @@ impl App {
 
     /// Read state for a cursor-addressable related row. The flattening order
     /// is exactly the same as `virtual_items`.
-    pub(crate) fn related_unread(&self, src: usize) -> Option<bool> {
+    pub(crate) fn related_telomere(&self, src: usize) -> Option<(i64, bool)> {
         let index = src.checked_sub(self.lines.len())?;
-        self.related
+        let entry = self
+            .related
             .iter()
             .flat_map(|section| section.entries.iter())
-            .nth(index)
-            .map(|entry| entry.unread)
+            .nth(index)?;
+        Some((related_age(entry.age), entry.unread))
     }
 
     /// Install a freshly loaded page, resetting view state (keeps comments).

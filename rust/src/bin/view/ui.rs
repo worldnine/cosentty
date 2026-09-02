@@ -756,12 +756,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .unwrap_or(false);
         let has_comment = row.src().map(|s| app.src_has_comment(s)).unwrap_or(false);
         // Telomere: age + read state of this row's source line (None for
-        // synthesized rows).
-        let age = row
-            .src()
-            .and_then(|s| app.lines.get(s))
-            .map(|l| ((now_secs() - l.updated).max(0), app.line_unread(l)));
-        let related_unread = row.src().and_then(|src| app.related_unread(src));
+        // synthesized rows). A row BELOW the body is a related page, and it
+        // answers the same two questions about itself — how recently it
+        // changed, and whether it has been seen — so it wears the same
+        // mark. One encoding for the whole viewer: body lines, the index's
+        // list, and the related sections.
+        let age = row.src().and_then(|s| match app.lines.get(s) {
+            Some(l) => Some(((now_secs() - l.updated).max(0), app.line_unread(l))),
+            None => app.related_telomere(s),
+        });
         let in_code = row.src().map(|s| code_flags.get(s) == Some(&true)).unwrap_or(false);
         let mut base = Style::default();
         // The wash goes down first: selection and the cursor band are
@@ -817,8 +820,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 let sy = screen_y + k;
                 let y = text.y as i32 + sy;
                 if y >= band_top && y <= band_bot {
-                    let (glyph, mut style) =
-                        gutter_cell(has_comment, age, related_unread, ctx.light);
+                    let (glyph, mut style) = gutter_cell(has_comment, age, ctx.light);
                     // EDIT の帯は本文領域だけ(上のコメント参照)なので、
                     // テロメアには帯の色を継がせない。
                     if let Some(bg) = base.bg {
@@ -1521,6 +1523,12 @@ pub(crate) fn draw_menu_panel(
 /// since the edit, plus whether the line is unread). The cursor does not
 /// compete for this cell: its `>` is painted separately on the frame column.
 ///
+/// The SAME cell serves the related-page rows below the body (their age is
+/// their page's, see `App::related_telomere`) and, through
+/// `theme::telomere`, the index's list. Thickness is always "how recently
+/// did this change" and colour is always "have I seen it" — a mark that
+/// meant different things on different screens would be worse than no mark.
+///
 /// A comment marker is deliberately NOT drawn yet: akapen colors comments
 /// yellow (`▌`) and reserves green for changed lines, so guessing a color
 /// before the telomere/comment balance is settled would bake in a wrong
@@ -1529,15 +1537,8 @@ pub(crate) fn draw_menu_panel(
 pub(crate) fn gutter_cell(
     _has_comment: bool,
     age: Option<(i64, bool)>,
-    related_unread: Option<bool>,
     light: bool,
 ) -> (&'static str, Style) {
-    // Related rows deliberately have no age encoding: read and unread use
-    // the SAME thin mark; color alone carries the read state.
-    if let Some(unread) = related_unread {
-        let color = if unread { CHROME_CARET } else { CHROME_DIM };
-        return ("▏", Style::default().fg(color));
-    }
     match age {
         Some((a, unread)) => {
             let (glyph, color) = cosense::theme::telomere(a, unread, light);
