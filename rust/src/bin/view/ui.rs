@@ -65,17 +65,24 @@ pub(crate) fn truncate_width(s: &str, w: usize) -> String {
     out
 }
 
-/// One related-pages row: `title · age  description`, the title in
+/// One related-pages row: `title · value  description` (the value being
+/// the one the section is sorted on, see `RelEntry::sort_meta`), the title in
 /// `title_style` (see `related_rows`: blue while unread, plain once seen)
 /// and the rest dim, truncated to the pane width — related rows do not
 /// wrap, being a scannable list rather than body text.
-pub(crate) fn related_row(e: &RelEntry, text_w: usize, title_style: Style) -> Line<'static> {
+pub(crate) fn related_row(
+    e: &RelEntry,
+    text_w: usize,
+    title_style: Style,
+    sort: cosense::index::SortKey,
+) -> Line<'static> {
     let dim = Style::default().fg(CHROME_DIM);
     let title = truncate_width(&e.title, text_w);
     let mut spans = vec![Span::styled(title.clone(), title_style)];
     let mut used = str_width(&title);
-    if e.age > 0 {
-        let meta = format!(" · {}", relative_age(e.age));
+    let value = e.sort_meta(sort);
+    if !value.is_empty() {
+        let meta = format!(" · {value}");
         if used + str_width(&meta) <= text_w {
             used += str_width(&meta);
             spans.push(Span::styled(meta, dim));
@@ -2043,7 +2050,12 @@ impl App {
             });
             for e in &sec.entries {
                 let style = if e.unread { unread_style } else { read_style };
-                rows.push(Row::Line { line: related_row(e, text_w, style), src: vsrc, start: 0, hang: 0 });
+                rows.push(Row::Line {
+                    line: related_row(e, text_w, style, self.index_sort),
+                    src: vsrc,
+                    start: 0,
+                    hang: 0,
+                });
                 vsrc += 1;
             }
             rows.push(Row::Card { line: Line::from("") });

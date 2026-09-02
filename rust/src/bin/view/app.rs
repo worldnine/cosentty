@@ -423,6 +423,10 @@ pub(crate) struct App {
     /// Related-pages sections below the body (view mode only; hidden while
     /// the edit session is open).
     pub(crate) related: Vec<RelSection>,
+    /// The related block as it arrived, kept so `rebuild_related` can lay
+    /// it out again in a new sort order without another request. `None`
+    /// until it lands (and after a page install clears it).
+    pub(crate) related_block: Option<cosense::api::RelatedPages>,
     /// The page-level facts the related block is read against when it
     /// arrives (see `PageFacts`).
     pub(crate) facts: PageFacts,
@@ -636,6 +640,7 @@ impl App {
             last_click: None,
             pressed_link: None,
             related: Vec::new(),
+            related_block: None,
             facts: PageFacts::default(),
             related_pending: false,
             related_fetch: false,

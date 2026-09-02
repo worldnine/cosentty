@@ -46,6 +46,8 @@ use super::support::*;
             links_lc: links.iter().map(|s| s.to_lowercase()).collect(),
             linked: 0,
             updated: 0,
+            accessed: 0,
+            created: 0,
         };
         let page = Page {
             id: String::new(),
@@ -70,7 +72,7 @@ use super::support::*;
             lines_count: 0,
             last_accessed: None,
         };
-        let secs = build_related(&PageFacts::of(&page), page.related.as_ref(), "proj");
+        let secs = build_related(&PageFacts::of(&page), page.related.as_ref(), "proj", cosense::index::SortKey::Updated);
         let heads: Vec<&str> = secs.iter().map(|s| s.heading.as_str()).collect();
         assert_eq!(
             heads,
@@ -86,6 +88,72 @@ use super::support::*;
         assert_eq!(secs[2].entries[0].title, "OnlyHub2");
         assert_eq!(secs[3].entries[0].title, "Orphan");
         assert_eq!(secs[4].entries[0].title, "/other/Page", "bare /project is not a page");
+    }
+
+    /// The list's sort order reaches the related sections too: each
+    /// section is reordered on the same key (the block carries `accessed`
+    /// and `created` next to `updated` and `linked`), while the sections
+    /// themselves keep their place — Links, then one group per hub in
+    /// page order. `views` is not in the block, so that order leaves the
+    /// server's (updated, newest first) alone. The row shows the value it
+    /// is sorted on.
+    #[test]
+    fn related_sections_follow_the_index_sort_order_within_each_section() {
+        use cosense::api::{Page, RelatedPage, RelatedPages};
+        use cosense::index::SortKey;
+        let rp = |title: &str, updated: i64, accessed: i64, created: i64, linked: i64| RelatedPage {
+            id: String::new(),
+            title: title.into(),
+            title_lc: title.to_lowercase(),
+            descriptions: vec![],
+            links_lc: vec!["hub".into()],
+            linked,
+            updated,
+            accessed,
+            created,
+        };
+        let page = Page {
+            id: String::new(),
+            persistent: true,
+            title: "me".into(),
+            commit_id: String::new(),
+            lines: vec![],
+            links: vec!["Hub".into()],
+            project_links: vec!["/z/Page".into(), "/a/Page".into()],
+            related: Some(RelatedPages {
+                // Server order: updated, newest first.
+                links1hop: vec![rp("bee", 30, 1, 3, 5), rp("Ant", 20, 3, 1, 9), rp("cat", 10, 2, 2, 7)],
+                links2hop: vec![rp("Two", 2, 1, 2, 1), rp("One", 1, 2, 1, 2)],
+                ..Default::default()
+            }),
+            updated: 0,
+            created: 0,
+            lines_count: 0,
+            last_accessed: None,
+        };
+        let facts = PageFacts::of(&page);
+        let titles = |sort: SortKey| -> Vec<Vec<String>> {
+            build_related(&facts, page.related.as_ref(), "proj", sort)
+                .iter()
+                .map(|s| s.entries.iter().map(|e| e.title.clone()).collect())
+                .collect()
+        };
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(titles(SortKey::Updated), vec![v(&["bee", "Ant", "cat"]), v(&["Two", "One"]), v(&["/z/Page", "/a/Page"])]);
+        assert_eq!(titles(SortKey::Views), titles(SortKey::Updated), "views is not reported: server order");
+        assert_eq!(titles(SortKey::Accessed)[0], v(&["Ant", "cat", "bee"]));
+        assert_eq!(titles(SortKey::Created)[0], v(&["bee", "cat", "Ant"]));
+        assert_eq!(titles(SortKey::Linked)[0], v(&["Ant", "cat", "bee"]));
+        let by_title = titles(SortKey::Title);
+        assert_eq!(by_title[0], v(&["Ant", "bee", "cat"]), "A→Z, case-insensitive");
+        assert_eq!(by_title[1], v(&["One", "Two"]), "sections stay put, each sorted on its own");
+        assert_eq!(by_title[2], v(&["/a/Page", "/z/Page"]), "external links have only a title to sort on");
+
+        // The dim value after the title is the one being sorted on.
+        let secs = build_related(&facts, page.related.as_ref(), "proj", SortKey::Linked);
+        assert_eq!(secs[0].entries[0].sort_meta(SortKey::Linked), "linked 9");
+        assert!(secs[0].entries[0].sort_meta(SortKey::Accessed).ends_with('y'), "an epoch-3 stamp is years old");
+        assert_eq!(secs[2].entries[0].sort_meta(SortKey::Linked), "", "no count for a cross-project link");
     }
 
     /// The uncreated links of a page are read out of the same response
@@ -104,6 +172,8 @@ use super::support::*;
             links_lc: vec![],
             linked: 0,
             updated: 0,
+            accessed: 0,
+            created: 0,
         };
         let page = Page {
             id: "P".into(),
@@ -195,6 +265,8 @@ use super::support::*;
             links_lc: links.iter().map(|s| s.to_lowercase()).collect(),
             linked: 0,
             updated: 0,
+            accessed: 0,
+            created: 0,
         };
         let block = || RelatedPages {
             links1hop: vec![rp("Direct", &[])],

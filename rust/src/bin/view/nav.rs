@@ -13,11 +13,54 @@ pub(crate) struct RelEntry {
     pub(crate) title: String,
     /// First description line (the page's own first body line), dimmed.
     pub(crate) desc: String,
-    /// `updated` epoch seconds (0 = unknown, no age shown).
+    /// `updated` epoch seconds (0 = unknown, no age shown). The telomere
+    /// reads this whatever the sort order, as the index's does.
     pub(crate) age: i64,
+    /// The other two stamps and the count the related block reports, so
+    /// the row can show the value it is being sorted ON
+    /// (`sort_meta`). 0 = the API did not say.
+    pub(crate) accessed: i64,
+    pub(crate) created: i64,
+    pub(crate) linked: i64,
     /// Two-state telomere for related rows. RelatedPages has no per-user
     /// lastAccessed, so this is based on this TUI's persisted visit record.
     pub(crate) unread: bool,
+}
+
+impl RelEntry {
+    /// The dim `· …` after the title: the value the section is sorted on,
+    /// on the index's principle that sorting by a number the reader cannot
+    /// see is no help. Time orders show that stamp's age; `linked` shows
+    /// the count; `title` and `views` (which the related block does not
+    /// report) fall back to the updated age the row always showed. Empty
+    /// when the API did not fill the field.
+    pub(crate) fn sort_meta(&self, sort: cosense::index::SortKey) -> String {
+        use cosense::index::{relative_age, SortKey};
+        match sort {
+            SortKey::Accessed => relative_age(self.accessed),
+            SortKey::Created => relative_age(self.created),
+            SortKey::Linked if self.age > 0 => format!("linked {}", self.linked),
+            _ => relative_age(self.age),
+        }
+    }
+}
+
+/// Order one section's pages by `sort`, in place. The related block comes
+/// back in the server's own order (updated, newest first), so that key is
+/// a no-op and `views`, which the block does not report, keeps it too —
+/// the honest answer to "sort by a number I do not have" is "leave it as
+/// the server sent it", and the default order is what that is. Sections
+/// themselves (Links, one per hub in page order, External links) are not
+/// reordered: the grouping IS the information there.
+pub(crate) fn sort_related(pages: &mut [&cosense::api::RelatedPage], sort: cosense::index::SortKey) {
+    use cosense::index::SortKey;
+    match sort {
+        SortKey::Updated | SortKey::Views => {}
+        SortKey::Title => pages.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        SortKey::Linked => pages.sort_by(|a, b| b.linked.cmp(&a.linked)),
+        SortKey::Accessed => pages.sort_by(|a, b| b.accessed.cmp(&a.accessed)),
+        SortKey::Created => pages.sort_by(|a, b| b.created.cmp(&a.created)),
+    }
 }
 
 /// A finished background related-pages fetch: which page it describes, and
@@ -109,6 +152,7 @@ pub(crate) fn build_related(
     facts: &PageFacts,
     related: Option<&cosense::api::RelatedPages>,
     project: &str,
+    sort: cosense::index::SortKey,
 ) -> Vec<RelSection> {
     let mut secs: Vec<RelSection> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -124,17 +168,23 @@ pub(crate) fn build_related(
         title: p.title.clone(),
         desc: p.descriptions.first().cloned().unwrap_or_default(),
         age: p.updated,
+        accessed: p.accessed,
+        created: p.created,
+        linked: p.linked,
         unread: unread(project, &p.title, p.updated),
+    };
+    // Each section is ordered on its own; see `sort_related` for why the
+    // sections themselves stay put.
+    let section = |heading: String, mut group: Vec<&cosense::api::RelatedPage>| {
+        sort_related(&mut group, sort);
+        RelSection { heading, entries: group.into_iter().map(&entry_of).collect() }
     };
     if let Some(rel) = related {
         if !rel.links1hop.is_empty() {
             for p in &rel.links1hop {
                 seen.insert(key_of(p));
             }
-            secs.push(RelSection {
-                heading: format!("Links ({})", rel.links1hop.len()),
-                entries: rel.links1hop.iter().map(&entry_of).collect(),
-            });
+            secs.push(section(format!("Links ({})", rel.links1hop.len()), rel.links1hop.iter().collect()));
         }
         // 2-hop groups, one per link of this page (page order). `links_lc`
         // of an entry lists which links it shares.
@@ -151,24 +201,18 @@ pub(crate) fn build_related(
             for p in &group {
                 seen.insert(key_of(p));
             }
-            secs.push(RelSection {
-                heading: format!("{hub} ({})", group.len()),
-                entries: group.into_iter().map(&entry_of).collect(),
-            });
+            secs.push(section(format!("{hub} ({})", group.len()), group));
         }
         // 2-hop entries whose hubs did not match any current link (rename
         // races and the like) still deserve a place.
         let rest: Vec<&cosense::api::RelatedPage> =
             rel.links2hop.iter().filter(|p| !seen.contains(&key_of(p))).collect();
         if !rest.is_empty() {
-            secs.push(RelSection {
-                heading: format!("2 hop links ({})", rest.len()),
-                entries: rest.into_iter().map(&entry_of).collect(),
-            });
+            secs.push(section(format!("2 hop links ({})", rest.len()), rest));
         }
     }
     if !facts.project_links.is_empty() {
-        let entries: Vec<RelEntry> = facts
+        let mut entries: Vec<RelEntry> = facts
             .project_links
             .iter()
             .filter_map(|pl| {
@@ -185,10 +229,18 @@ pub(crate) fn build_related(
                     title: pl.clone(),
                     desc: String::new(),
                     age: 0,
+                    accessed: 0,
+                    created: 0,
+                    linked: 0,
                     unread: unread(project, title, 0),
                 })
             })
             .collect();
+        // Cross-project links come with no stamps and no counts, so the
+        // only order that means anything for them is A→Z.
+        if sort == cosense::index::SortKey::Title {
+            entries.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        }
         if !entries.is_empty() {
             secs.push(RelSection {
                 heading: format!("External links ({})", entries.len()),
@@ -457,6 +509,8 @@ pub(crate) fn resort_index(app: &mut App, ctx: &Ctx, sort: cosense::index::SortK
     let project = app.index_project.clone();
     let filter = app.index.as_ref().map(|ix| ix.filter.clone()).unwrap_or_default();
     app.index_sort = sort;
+    app.rebuild_related();
+    app.laid_width = 0; // related rows may have moved
     open_index(app, ctx, &project, filter);
 }
 
@@ -710,6 +764,7 @@ impl App {
         self.ws_resync_pending = false;
         self.ws_held_resync = None;
         self.related = l.related;
+        self.related_block = None;
         self.facts = l.facts;
         self.virtual_items = self
             .related
@@ -788,16 +843,26 @@ impl App {
             // are asked about now, not on the next slow beat.
             self.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
             let Some(rel) = rel else { continue };
-            self.related = build_related(&self.facts, Some(&rel), &self.project);
-            self.virtual_items = self
-                .related
-                .iter()
-                .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
-                .collect();
             self.links.absorb(link_truth(&self.facts, Some(&rel)));
+            self.related_block = Some(rel);
+            self.rebuild_related();
             changed = true;
         }
         changed
+    }
+
+    /// Lay the kept related block out as sections in the session's sort
+    /// order (`index_sort`). Called when the block lands and again when
+    /// the order changes, so the page under the index does not keep the
+    /// old order while the list shows the new one.
+    pub(crate) fn rebuild_related(&mut self) {
+        let Some(rel) = self.related_block.as_ref() else { return };
+        self.related = build_related(&self.facts, Some(rel), &self.project, self.index_sort);
+        self.virtual_items = self
+            .related
+            .iter()
+            .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+            .collect();
     }
 
     /// Make sure the CURRENT project's member table is usable for resolving

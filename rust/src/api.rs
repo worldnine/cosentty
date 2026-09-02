@@ -238,6 +238,15 @@ pub struct RelatedPage {
     pub linked: i64,
     #[serde(default)]
     pub updated: i64,
+    /// Last opened by anyone in the project (epoch seconds). The related
+    /// block carries these two stamps as the list endpoint does, which is
+    /// what lets the viewer impose the list's sort order on it. `views` it
+    /// does NOT carry — see `index::SortKey` for what that order falls
+    /// back to here.
+    #[serde(default)]
+    pub accessed: i64,
+    #[serde(default)]
+    pub created: i64,
 }
 
 /// `relatedPages` of a page response. 1-hop = direct links + backlinks
