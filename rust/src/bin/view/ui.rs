@@ -191,6 +191,10 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         cosense::index::FilterMode::Title => "/",
         cosense::index::FilterMode::FullText => "?",
     };
+    // The same badge the page wears. It rides EVERY form of this header,
+    // because the moment it explains the most is while a new name is being
+    // typed and nothing is offered to create.
+    let ro = if ix.can_create { "" } else { ts!("  [読み取り専用]", "  [read-only]") };
     let head = if ix.filter_editing {
         // A full-text query has no count yet — the list on screen is still
         // the unsearched one, and calling its length a match count would be
@@ -201,23 +205,23 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 ts!("(Enter で本文を検索)", "(Enter searches bodies)").to_string()
             }
         };
-        format!(" {} — {sigil}{}_ {tail}", app.project, ix.filter)
+        format!(" {} — {sigil}{}_ {tail}{ro}", app.project, ix.filter)
     } else if let Some(q) = ix.search.as_deref() {
         // The endpoint caps the hit list — and caps its `count` with it —
         // so a full page of hits means "at least this many". Saying "100
         // hits" for a word that is on a thousand pages would be a plain
         // untruth, and the `+` is the whole correction it needs.
         let more = if ix.search_capped { "+" } else { "" };
-        format!(" {} — ?{q} ({}{more} hits)", app.project, ix.entries.len())
+        format!(" {} — ?{q} ({}{more} hits){ro}", app.project, ix.entries.len())
     } else if ix.filter.is_empty() {
         let more = if ix.total > ix.entries.len() {
             format!(" of {}", ix.total)
         } else {
             String::new()
         };
-        format!(" {} — {} pages{}", app.project, ix.entries.len(), more)
+        format!(" {} — {} pages{}{ro}", app.project, ix.entries.len(), more)
     } else {
-        format!(" {} — /{} ({} match)", app.project, ix.filter, shown)
+        format!(" {} — /{} ({} match){ro}", app.project, ix.filter, shown)
     };
     // The order rides at the right end of the header, where it does not
     // push the project and the count around as it changes length. `↓`

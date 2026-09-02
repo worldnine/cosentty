@@ -1031,7 +1031,9 @@ use super::support::*;
                 ..Default::default()
             })
             .collect();
-        app.index = Some(cosense::index::Index::new(entries, 3, cosense::index::SortKey::Updated));
+        let mut ix = cosense::index::Index::new(entries, 3, cosense::index::SortKey::Updated);
+        ix.can_create = true; // a project this session may write in
+        app.index = Some(ix);
 
         // Closed line: letters are commands, not text.
         assert!(matches!(

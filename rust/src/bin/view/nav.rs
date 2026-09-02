@@ -378,6 +378,9 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
     Index::sort_entries(&mut entries, sort);
     let mut ix = Index::new(entries, count.max(0) as usize, sort);
     ix.filter_mode = carried_filter_mode(app);
+    // Cached per project after the first probe, so this is not a request
+    // per index open (see `Ctx::can_edit_in`).
+    ix.can_create = ctx.can_edit_in(project);
     if !filter.is_empty() {
         ix.set_filter(filter);
     }
@@ -426,6 +429,7 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
     let mut ix = Index::new(entries, count.max(0) as usize, app.index_sort);
     ix.search = Some(query.clone());
     ix.search_capped = capped;
+    ix.can_create = ctx.can_edit_in(&project);
     // `/` over a set of hits means "search again", so the line has to open
     // asking the same question it just answered.
     ix.filter_mode = carried_filter_mode(app);

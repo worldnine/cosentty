@@ -286,6 +286,14 @@ pub struct Index {
     pub filter: String,
     /// What the open line searches. `Tab` swaps them.
     pub filter_mode: FilterMode,
+    /// May this credential write in the listed project? `false` hides the
+    /// `＋ create` row: offering to write a page into a project you cannot
+    /// write to is an offer that can only end in an error.
+    ///
+    /// Defaults to `false` on purpose — a list that has not been told is
+    /// not entitled to promise. `open_index` sets it from the project's own
+    /// answer (`Ctx::can_edit_in`).
+    pub can_create: bool,
     /// The hit list was cut off by the search endpoint's limit, so its
     /// count is a floor. Only meaningful while `search` is set.
     pub search_capped: bool,
@@ -390,8 +398,11 @@ impl Index {
 
     /// Does the list offer to create what was typed? Only when nothing is
     /// named that already — an exact match IS the page, and two pages
-    /// cannot share a title.
+    /// cannot share a title — and only where a page could be written.
     pub fn offers_create(&self) -> bool {
+        if !self.can_create {
+            return false; // a read-only project has nothing to offer here
+        }
         if self.filter_editing && self.filter_mode == FilterMode::FullText {
             return false; // that word is a query, not a page name
         }
@@ -551,11 +562,13 @@ mod tests {
     }
 
     fn index(titles: &[&str]) -> Index {
-        Index::new(
+        let mut ix = Index::new(
             titles.iter().enumerate().map(|(i, t)| entry(t, 100 - i as i64)).collect(),
             titles.len(),
             SortKey::Updated,
-        )
+        );
+        ix.can_create = true; // a project this session may write in
+        ix
     }
 
     #[test]
@@ -694,6 +707,22 @@ mod tests {
     /// place a title filter cannot see — so narrowing on the titles would
     /// hide exactly the pages the search is about to report, and offer to
     /// CREATE the word as a page on top of that.
+    /// A project this session may only read never offers to create: the
+    /// row would be a promise the API is going to refuse.
+    #[test]
+    fn a_read_only_project_never_offers_to_create() {
+        let mut ix = index(&["改善案", "テスト"]);
+        ix.set_filter("まだ無いページ".into());
+        assert!(ix.offers_create(), "writable: the offer is the point of typing");
+        assert_eq!(ix.len(), 1);
+
+        ix.can_create = false;
+        assert!(!ix.offers_create());
+        assert_eq!(ix.len(), 0, "nothing matches, and nothing is offered");
+        // …and an untold list promises nothing.
+        assert!(!Index::default().can_create);
+    }
+
     #[test]
     fn a_full_text_query_does_not_narrow_the_titles_on_screen() {
         let mut ix = index(&["改善案", "画像表示テスト", "テスト"]);
