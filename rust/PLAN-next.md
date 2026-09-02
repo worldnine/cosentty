@@ -51,7 +51,57 @@
 かなりの場面が埋まる。**先にこちらを作れば、ヘルパのビルド経路を増やす
 判断を後ろへ倒せる。**
 
-#### (b) どこへ上げるか — Cosense のファイル保管が既定(本家と同じ)
+#### (b) どこへ上げるか — Cosense のファイル保管 と Gyazo Teams
+
+**先に決まったこと(2026-09-02、ユーザー判断)**: (a) は**パス貼り付けだけで
+v1 を切る**。macOS ヘルパのビルド経路は増やさない。
+
+アップロード先は「プロジェクトごとに変えたい」——例えば acme の
+プロジェクトは acme の Gyazo(Teams)へ上げたい、という要望。
+
+##### Gyazo Teams へ上げられるか — 調べた(2026-09-02)
+
+**上げられる。** 確かめたこと:
+
+- アップロード先は個人でも Teams でも同じ `POST https://upload.gyazo.com/api/upload`
+  (multipart、`access_token` フィールド)。**どの Gyazo に入るかはトークンが
+  決める**。エンドポイントを分ける必要はない
+- `GYAZO_TEAMS_ACCESS_TOKEN` はこの環境に既にある。API 疎通も確認(200)
+- **落とし穴**: 応答の `permalink_url` は Teams でも `gyazo.com/<id>` で返り、
+  そのURLは 404 になる(実測。上の API 応答で確認)。Teams の permalink は
+  `https://<org>.gyazo.com/<id>` に**こちらで組み直す**必要があり、そのために
+  **org 名を知っていなければならない**。API は org 名を返さない
+- **読む側は既に出来ている**。`render.rs` の `find_gyazo` は
+  `<org>.gyazo.com/<id>` を Teams として正しく拾い(サービス用サブドメイン
+  `i`/`t`/`thumb`/`www`/`api`/`upload` は除外)、`image_fetch.rs` は
+  トークン付きの Gyazo API を先に叩いてから oEmbed へ落ちる。
+  `main.rs` は `GYAZO_TEAMS_ACCESS_TOKEN` → `GYAZO_ACCESS_TOKEN` の順で読む。
+  **つまり足りないのは書く側だけ**
+
+##### まだ確かめていない1点
+
+`[https://<org>.gyazo.com/<id>]` を **scrapbox.io の web が画像として描くか**、
+そして**その画像が Cosense プロジェクトの他のメンバーに見えるか**。
+Teams の画像は Gyazo の org でアクセス制御されるので、Cosense の
+プロジェクトメンバー ⊃ Gyazo org のメンバー だと、一部の人には壊れた画像に
+なる。TUI では出るが web では出ない、という食い違いもありうる。
+
+確かめるには acme の Gyazo に実際に1枚上げて、テストページに貼って
+ブラウザで見るしかない。**会社アカウントへの書き込みなので、着手時に
+明示の許可を取ること。**
+
+##### アップロード先の指定をどう持つか(未決)
+
+プロジェクトごとに変えたいので、単一の環境変数では足りない。
+
+- 案A `~/.config/cosense-tui/upload.toml` のような自前の設定。
+  `[project.acme] target = "gyazo-teams"` / `org = "acme"` 。
+  `~/.cosense/settings.json` は公式CLIのものなので書き込まない
+- 案B 環境変数 + フラグ(`--upload cosense|gyazo`、`GYAZO_TEAMS_ORG`)。
+  プロジェクトごとの出し分けはシェル側の仕事になる
+- どちらでも、**org 名を持てる形**であること(permalink の組み直しに要る)
+
+#### (b-2) Cosense のファイル保管(既定・本家と同じ)
 
 本家は「画像はデフォルトで Cosense にファイルアップロードされる。Gyazo に
 することもできる」で、プロジェクト設定に Upload タブがある。仕様ページの
@@ -90,12 +140,13 @@ cosense-cli の `uploadFile` を読んで確かめた送信手順(3往復):
 同じ形**(背景スレッド + チャネル + 世代/対象の照合)。`start_related_load` /
 `drain_related` がそのまま手本になる。
 
-#### 決めたいこと(仕様ページの「3. 決めたいこと」より)
+#### 決めたいこと
 
-- アップロード先は Cosense のファイル保管を既定にしてよいか(本家と同じ)。
-  Gyazo は `GYAZO_ACCESS_TOKEN` + フラグでよいか
-- クリップボード画像のために **macOS ヘルパをビルドする経路を増やしてよいか**
-  (IME で実績はある)。それとも (a) のパス貼り付けだけで v1 を切るか
+- **済**: (a) はパス貼り付けだけで v1 を切る。macOS ヘルパは作らない
+- アップロード先の指定を案A(自前の設定ファイル)と案B(環境変数+フラグ)の
+  どちらで持つか
+- `[https://<org>.gyazo.com/<id>]` が web でも画像になり、他のメンバーにも
+  見えるか——会社の Gyazo へ実際に1枚上げて確かめる(要許可)
 
 ### 3. コメントモードの置き場所(P3 の残り)
 
