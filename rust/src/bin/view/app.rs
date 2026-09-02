@@ -255,6 +255,12 @@ pub(crate) struct App {
     /// standing choice, which a fresh index has to be built from before
     /// there is an `Index` to ask.
     pub(crate) index_sort: cosense::index::SortKey,
+    /// A one-off notice for the index's footer, which has no status line of
+    /// its own. Deliberately NOT `status`: that one is also written by the
+    /// background sync, and a "同期: ws" arriving while the reader is
+    /// learning the list's keys would take the key hints away for no reason
+    /// they asked for. Cleared on the next key.
+    pub(crate) index_notice: String,
     /// The sort menu over the index, and where its cursor is. Deliberately
     /// NOT part of the saved `Index`: a menu is something you are doing,
     /// not somewhere you have been.
@@ -565,6 +571,7 @@ impl App {
             index_preview_rect: Rect::default(),
             index_project: String::new(),
             index_scrolled_at: None,
+            index_notice: String::new(),
             index_sort: cosense::index::SortKey::default(),
             index_sort_menu: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),

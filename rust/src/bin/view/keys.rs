@@ -7,6 +7,25 @@ use super::*;
 /// (see `Index::filter_editing`), so the letters stay available as
 /// commands — which is how `q` quits from here at all.
 pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
+    let action = index_key(app, ctx, k);
+    // The filter line is where Japanese gets typed, so it holds the IME
+    // guard: the input source switches on open and returns to ASCII on
+    // close, exactly as the comment composer does. Without this, `/` would
+    // still mean "toggle the IME by hand, twice" — which is the friction it
+    // exists to remove. Driven off the resulting state rather than set in
+    // each arm, so no way of opening or closing the line can forget it.
+    let editing = app.index.as_ref().is_some_and(|ix| ix.filter_editing);
+    match (editing, app.ime_guard.is_some()) {
+        (true, false) => {
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+        }
+        (false, true) => app.ime_guard = None,
+        _ => {}
+    }
+    action
+}
+
+fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     use cosense::index::{Pane, Row};
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let page_rows = app.index_list_rect.height.max(1) as i32;
@@ -14,7 +33,7 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
     // A notice sits in the index's footer until the next key (the index has
     // no status line of its own). Cleared here, so whatever this key has to
     // say replaces it.
-    app.status.clear();
+    app.index_notice.clear();
     // ---- the sort menu, while it is open ------------------------------
     //
     // Six orders is more than a cycle key can offer without counting
@@ -92,7 +111,7 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
                 // Re-ordering hits by date would answer a question nobody
                 // asked, and quietly re-listing the project would lose the
                 // ones found. So say what the state is.
-                app.status = t!(
+                app.index_notice = t!(
                     "検索結果は関連度順です（^u で一覧へ戻る）",
                     "hits are in relevance order (^u for the list)"
                 );

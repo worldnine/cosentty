@@ -337,6 +337,13 @@ pub struct SearchResult {
 struct SearchResponse {
     #[serde(default)]
     count: i64,
+    /// How many hits this reply was allowed to carry (100 in practice).
+    /// `count` is capped at it too — measured: villagepump/"Scrapbox"
+    /// answers `count: 100, limit: 100` with 100 pages, and there are
+    /// certainly more. So a full page of hits means "at least this many",
+    /// never "exactly this many".
+    #[serde(default)]
+    limit: i64,
     #[serde(default)]
     pages: Vec<SearchResult>,
 }
@@ -763,18 +770,22 @@ impl Client {
     pub fn search_pages(
         &self,
         query: &str,
-    ) -> Result<(i64, Vec<SearchResult>), Box<dyn Error>> {
+    ) -> Result<(i64, bool, Vec<SearchResult>), Box<dyn Error>> {
         let project = self.cfg.project.clone();
         self.search_pages_in(&project, query)
     }
 
     /// `search_pages` for any project — the index may be listing one this
     /// page is not in (a `[/other-project]` link opens its site top).
+    ///
+    /// Returns `(count, capped, pages)`. `capped` says the reply hit the
+    /// endpoint's limit, so `count` is a floor and not the total (see
+    /// `SearchResponse::limit`); a caller showing the number has to say so.
     pub fn search_pages_in(
         &self,
         project: &str,
         query: &str,
-    ) -> Result<(i64, Vec<SearchResult>), Box<dyn Error>> {
+    ) -> Result<(i64, bool, Vec<SearchResult>), Box<dyn Error>> {
         let url = format!(
             "{}/pages/{}/search/query?q={}",
             self.cfg.base(),
@@ -782,7 +793,8 @@ impl Client {
             urlencoding(query)
         );
         let data: SearchResponse = self.get_json(&url, project)?;
-        Ok((data.count, data.pages))
+        let capped = data.limit > 0 && data.pages.len() as i64 >= data.limit;
+        Ok((data.count, capped, data.pages))
     }
 }
 

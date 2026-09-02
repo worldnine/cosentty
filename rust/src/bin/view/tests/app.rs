@@ -1045,6 +1045,10 @@ use super::support::*;
 
         // `/` opens it, and now the same letters are text.
         handle_index_key(&mut app, &ctx, key(KeyCode::Char('/')));
+        // …and the line holds the IME guard while it is open, so a Japanese
+        // title can be typed without toggling the input source by hand —
+        // the whole reason the filter became a line you open.
+        assert!(app.ime_guard.is_some(), "the open line switches the input source");
         for c in "qui".chars() {
             handle_index_key(&mut app, &ctx, key(KeyCode::Char(c)));
         }
@@ -1060,6 +1064,7 @@ use super::support::*;
 
         // Enter keeps the filter and hands the keys back to the list.
         handle_index_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert!(app.ime_guard.is_none(), "closing the line returns to ASCII");
         let ix = app.index.as_ref().unwrap();
         assert!(!ix.filter_editing);
         assert_eq!(ix.filter, "qui");
@@ -1070,10 +1075,12 @@ use super::support::*;
 
         // Esc on an open line drops the filter rather than leaving the index.
         handle_index_key(&mut app, &ctx, key(KeyCode::Char('/')));
+        assert!(app.ime_guard.is_some());
         handle_index_key(&mut app, &ctx, key(KeyCode::Esc));
         let ix = app.index.as_ref().expect("Esc closed the line, not the index");
         assert!(!ix.filter_editing);
         assert!(ix.filter.is_empty());
+        assert!(app.ime_guard.is_none(), "Esc gives the input source back too");
     }
 
     /// The same screen answers in English when the environment asks for

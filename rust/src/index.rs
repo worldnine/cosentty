@@ -286,6 +286,9 @@ pub struct Index {
     pub filter: String,
     /// What the open line searches. `Tab` swaps them.
     pub filter_mode: FilterMode,
+    /// The hit list was cut off by the search endpoint's limit, so its
+    /// count is a floor. Only meaningful while `search` is set.
+    pub search_capped: bool,
     /// The full-text query these entries ARE the results of, when they are.
     ///
     /// A search result set is a different list from the project's: it is

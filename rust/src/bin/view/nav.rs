@@ -359,7 +359,11 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
         match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, sort.name()) {
             Ok(v) => v,
             Err(e) => {
+                // Both, because this is reached from two places: from a
+                // page (no index open — the page's own status line shows
+                // it) and from `s`/`^u` with the list already on screen.
                 app.status = t!("ページ一覧を取得できません: {e}", "page list failed: {e}");
+                app.index_notice = app.status.clone();
                 return;
             }
         };
@@ -403,10 +407,10 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
         return;
     }
     let project = app.index_project.clone();
-    let (count, hits) = match ctx.client.search_pages_in(&project, &query) {
+    let (count, capped, hits) = match ctx.client.search_pages_in(&project, &query) {
         Ok(v) => v,
         Err(e) => {
-            app.status = t!("本文検索に失敗しました: {e}", "full-text search failed: {e}");
+            app.index_notice = t!("本文検索に失敗しました: {e}", "full-text search failed: {e}");
             return;
         }
     };
@@ -421,11 +425,12 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
     let found = entries.len();
     let mut ix = Index::new(entries, count.max(0) as usize, app.index_sort);
     ix.search = Some(query.clone());
+    ix.search_capped = capped;
     // `/` over a set of hits means "search again", so the line has to open
     // asking the same question it just answered.
     ix.filter_mode = carried_filter_mode(app);
     app.index = Some(ix);
-    app.status = if found == 0 {
+    app.index_notice = if found == 0 {
         t!("「{}」は本文にありません", "no page's body has \"{}\"", query)
     } else {
         String::new()

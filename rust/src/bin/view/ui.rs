@@ -203,7 +203,12 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         };
         format!(" {} — {sigil}{}_ {tail}", app.project, ix.filter)
     } else if let Some(q) = ix.search.as_deref() {
-        format!(" {} — ?{q} ({} hits)", app.project, ix.entries.len())
+        // The endpoint caps the hit list — and caps its `count` with it —
+        // so a full page of hits means "at least this many". Saying "100
+        // hits" for a word that is on a thousand pages would be a plain
+        // untruth, and the `+` is the whole correction it needs.
+        let more = if ix.search_capped { "+" } else { "" };
+        format!(" {} — ?{q} ({}{more} hits)", app.project, ix.entries.len())
     } else if ix.filter.is_empty() {
         let more = if ix.total > ix.entries.len() {
             format!(" of {}", ix.total)
@@ -359,12 +364,11 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
-    let hint: String = if !app.status.is_empty() {
+    let hint: String = if !app.index_notice.is_empty() {
         // The index has no status line of its own, so a notice takes the
         // footer's hint slot. It lasts until the next key (cleared at the
-        // top of `handle_index_key`), which is what a transient notice
-        // should do.
-        app.status.clone()
+        // top of `index_key`), which is what a transient notice should do.
+        app.index_notice.clone()
     } else if ix.filter_editing {
         match ix.filter_mode {
             cosense::index::FilterMode::Title => ts!(
