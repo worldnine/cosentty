@@ -78,28 +78,45 @@ v1 を切る**。macOS ヘルパのビルド経路は増やさない。
   `main.rs` は `GYAZO_TEAMS_ACCESS_TOKEN` → `GYAZO_ACCESS_TOKEN` の順で読む。
   **つまり足りないのは書く側だけ**
 
-##### まだ確かめていない1点
+##### 「web で見えるか」は確かめるまでもなかった
 
-`[https://<org>.gyazo.com/<id>]` を **scrapbox.io の web が画像として描くか**、
-そして**その画像が Cosense プロジェクトの他のメンバーに見えるか**。
-Teams の画像は Gyazo の org でアクセス制御されるので、Cosense の
-プロジェクトメンバー ⊃ Gyazo org のメンバー だと、一部の人には壊れた画像に
-なる。TUI では出るが web では出ない、という食い違いもありうる。
+**本家がその経路で上げている。** プロジェクト設定に Upload タブがあり、
+acme は `Upload images to: gyazo.com` + `Upload to Gyazo Teams` +
+`Team name: acme-inc` になっている。実際 acme には
+`https://acme-inc.gyazo.com/<id>` を貼ったページが 100件以上ある(検索で
+実測)。つまり web が描くことも、メンバーに見えることも、既に日常の事実。
 
-確かめるには acme の Gyazo に実際に1枚上げて、テストページに貼って
-ブラウザで見るしかない。**会社アカウントへの書き込みなので、着手時に
-明示の許可を取ること。**
+TUI 側も読める。その id を Teams トークンで Gyazo API に投げると `url` が
+返る(実測)。`image_fetch.rs` はまさにその手順を踏んでいる。
 
-##### アップロード先の指定をどう持つか(未決)
+##### アップロード先を自分で持つ必要はない — **プロジェクトが知っている**
 
-プロジェクトごとに変えたいので、単一の環境変数では足りない。
+`/api/projects/<name>` に**そのままの3フィールド**がある(実測):
 
-- 案A `~/.config/cosense-tui/upload.toml` のような自前の設定。
-  `[project.acme] target = "gyazo-teams"` / `org = "acme"` 。
-  `~/.cosense/settings.json` は公式CLIのものなので書き込まない
-- 案B 環境変数 + フラグ(`--upload cosense|gyazo`、`GYAZO_TEAMS_ORG`)。
-  プロジェクトごとの出し分けはシェル側の仕事になる
-- どちらでも、**org 名を持てる形**であること(permalink の組み直しに要る)
+| フィールド | my-sandbox | acme |
+|---|---|---|
+| `uploadFileTo` | `gcs` | `gcs` |
+| `uploadImageTo` | `gyazo` | `gyazo` |
+| `gyazoTeamsName` | `null`(= 個人 gyazo.com) | `acme-inc` |
+
+だから設定ファイルも環境変数も要らない。**本家の設定をそのまま読んで従う**
+のが正解で、ブラウザと TUI で行き先が食い違うこともなくなる。
+`uploadImageTo` の語彙は `gcs` / `gyazo`。
+
+**ただし `/api/projects/<name>` は非公開プロジェクトで PAT を弾く(401、実測)。
+sid が要る。** これは `get_project_theme` と同じ制約で、**sid が必要なものの
+3つめ**になる(ws push・mmd 描画・これ)。縮退の設計が要る:
+
+- sid があるとき … プロジェクトの設定どおり(= ブラウザと同じ行き先)
+- sid が無いとき … `gcs`(Cosense のファイル保管)へ。PAT だけで必ず通り、
+  プロジェクトに属するので権限も揃う。行き先をステータスに出す
+- `--upload gcs|gyazo` で上書きできるようにする。`gyazoTeamsName` が
+  読めないときの Teams 指定は `GYAZO_TEAMS_ORG` で補う
+
+なお設定の読み取り結果はプロジェクト単位でキャッシュしてよい
+(`Ctx::project_themes` と同じ流儀。同じ `/api/projects/<name>` を叩くので、
+**1回の取得で theme と upload 設定の両方が手に入る**——いまの
+`get_project_theme` を「プロジェクト設定を取る」に育てるのが素直)
 
 #### (b-2) Cosense のファイル保管(既定・本家と同じ)
 
@@ -143,10 +160,16 @@ cosense-cli の `uploadFile` を読んで確かめた送信手順(3往復):
 #### 決めたいこと
 
 - **済**: (a) はパス貼り付けだけで v1 を切る。macOS ヘルパは作らない
-- アップロード先の指定を案A(自前の設定ファイル)と案B(環境変数+フラグ)の
-  どちらで持つか
-- `[https://<org>.gyazo.com/<id>]` が web でも画像になり、他のメンバーにも
-  見えるか——会社の Gyazo へ実際に1枚上げて確かめる(要許可)
+- **済**: アップロード先は自前で持たない。プロジェクト設定
+  (`uploadImageTo` / `gyazoTeamsName`)を読んで本家に従う
+- **済**: web でも見える(本家がその経路で上げていて、acme には
+  既に100件以上ある)
+- sid が無いときの縮退を `gcs` 固定でよいか。それとも
+  `GYAZO_TEAMS_ORG` を明示したときだけ Gyazo を許すか
+- Gyazo へ上げるトークンは `GYAZO_TEAMS_ACCESS_TOKEN` でよいか。ブラウザは
+  ユーザーごとの **OAuth 接続**(User Settings の「Gyazo OAuth Upload」)で
+  上げていて、そこでは acme-inc に接続済み・個人 gyazo.com は未接続。
+  TUI がトークンで上げると**別の経路で同じ場所へ入る**ことになる
 
 ### 3. コメントモードの置き場所(P3 の残り)
 
