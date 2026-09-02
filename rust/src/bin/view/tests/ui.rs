@@ -1,6 +1,47 @@
 use crate::*;
 use super::support::*;
 
+    /// 一致した語には敷きと太字が付き、そうでない字には付かない。
+    /// 「なぜこの行がここにあるか」を画面が答える印なので、消えたら
+    /// 検索結果はただの一覧に戻ってしまう。
+    #[test]
+    fn the_matched_word_wears_a_wash_and_the_rest_of_the_title_does_not() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.project = "proj".into();
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let wash = cosense::theme::match_wash(ctx.terminal_bg);
+
+        let mut ix = cosense::index::Index::new(
+            vec![cosense::index::Entry {
+                title: "改善案".into(),
+                updated: now_secs(),
+                ..Default::default()
+            }],
+            1,
+            cosense::index::SortKey::Updated,
+        );
+        ix.set_filter("改善".into());
+        app.index = Some(ix);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer();
+        // 行は " █  0s 改善案" の形。タイトルの開始桁を探す。カーソル行
+        // (帯が敷いてある)でも、一致の敷きはその上に乗って見分けがつく。
+        let row = 1u16;
+        let text: String = (0..buf.area.width)
+            .map(|x| buf.cell((x, row)).unwrap().symbol().to_string())
+            .collect();
+        let at = text.find("改").expect("タイトルが描かれている") as u16;
+        // ratatui は全角を1セル+空セルで置くので、桁は先頭だけ見る。
+        let marked = buf.cell((at, row)).unwrap().style();
+        assert_eq!(marked.bg, Some(wash), "一致には敷きが付く");
+        assert!(marked.add_modifier.contains(Modifier::BOLD));
+        // 「案」は一致していないので、敷きは付かない。
+        let plain = buf.cell((at + 4, row)).unwrap().style();
+        assert_ne!(plain.bg, Some(wash), "一致していない字に印は付かない");
+    }
+
     /// 日本語は端末の IME が「変換窓」をハードウェアカーソルの位置に出す。
     /// だから文字を打ち込める場所は、必ずそこにカーソルを置かなければ
     /// ならない。EDIT セッションは元からそうしていたが、一覧の絞り込み行と

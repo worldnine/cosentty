@@ -173,6 +173,15 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let rows_h = layout.list as usize;
     let scroll = ix.follow(rows_h);
     let rows = ix.rows();
+    // Collected before the rows are borrowed for drawing: `terms_for`
+    // borrows the index, and the draw loop already holds it.
+    let ix_terms: std::collections::HashMap<String, Vec<String>> = ix
+        .entries
+        .iter()
+        .map(|e| {
+            (e.title.clone(), ix.terms_for(e).into_iter().map(str::to_string).collect())
+        })
+        .collect();
     let focus = ix.focus;
     // Hits report their page's own age: they are not sorted on anything the
     // column could be showing instead.
@@ -273,6 +282,13 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     app.index_list_rect = Rect::new(area.x, area.y + 1, area.width, layout.list);
     let dim_when_away = |st: Style| if focus == Pane::List { st } else { st.fg(CHROME_DIM) };
     let app_light = app.light;
+    // Why this row is here: the words the search matched on it, or what was
+    // typed to narrow the list. Marked with a background wash, so the
+    // colours the row already uses (blue = unread) survive underneath.
+    let wash = cosense::theme::match_wash(ctx.terminal_bg);
+    let terms_of = |e: &cosense::index::Entry| -> Vec<String> {
+        ix_terms.get(&e.title).cloned().unwrap_or_default()
+    };
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut caret_rows: Vec<u16> = Vec::new();
@@ -295,17 +311,18 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 } else {
                     style
                 };
-                Line::from(vec![
+                // Truncate FIRST, then mark: the ranges have to index the
+                // text that is actually drawn, not the title it came from.
+                let shown_title = truncate_width(&e.title, text_w.saturating_sub(6) as usize);
+                let mut spans = vec![
                     Span::styled(glyph.to_string(), style.fg(tel)),
                     // Whatever the list is sorted ON — an age for the three
                     // time orders, the count itself for `linked`/`views`.
                     // Sorting by a number the reader cannot see is no help.
                     Span::styled(format!("{:>4} ", sort.column(e)), style.fg(CHROME_DIM)),
-                    Span::styled(
-                        truncate_width(&e.title, text_w.saturating_sub(6) as usize),
-                        title_style,
-                    ),
-                ])
+                ];
+                spans.extend(marked_spans(&shown_title, &terms_of(e), title_style, wash));
+                Line::from(spans)
             }
             Row::Create(name) => Line::from(Span::styled(
                 format!("  ＋ 「{name}」を作成"),
@@ -472,6 +489,52 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     }
 }
 
+/// Split `text` into spans, marking the parts that matched.
+///
+/// The mark is a BACKGROUND wash and bold, never a foreground colour: the
+/// index's rows already spend fg on "unread" and the excerpt's spans spend
+/// it on notation, and a match has to be readable on top of both rather
+/// than instead of them.
+pub(crate) fn marked_spans(
+    text: &str,
+    terms: &[String],
+    base: Style,
+    wash: Color,
+) -> Vec<Span<'static>> {
+    let refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+    cosense::index::split_on_terms(text, &refs)
+        .into_iter()
+        .map(|(piece, hit)| {
+            let st = if hit { base.bg(wash).add_modifier(Modifier::BOLD) } else { base };
+            Span::styled(piece.to_string(), st)
+        })
+        .collect()
+}
+
+/// The same, applied to an ALREADY RENDERED line: each span is split on its
+/// own displayed text.
+///
+/// It has to run after rendering, not before: a hit line arrives as raw
+/// notation (`[* 画像の挿入をテストする]`) and matching that would mark
+/// bracket positions instead of words. The cost is that a term straddling
+/// two spans — half inside a link, half outside — goes unmarked; flattening
+/// and re-splitting the whole line to catch that is not worth what it is
+/// worth.
+pub(crate) fn mark_line(line: Line<'static>, terms: &[String], wash: Color) -> Line<'static> {
+    if terms.is_empty() {
+        return line;
+    }
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .flat_map(|sp| {
+            let st = sp.style;
+            marked_spans(sp.content.as_ref(), terms, st, wash)
+        })
+        .collect();
+    Line::from(spans)
+}
+
 /// The excerpt dock for the page under the cursor: one compact heading and
 /// the first lines supplied by the pages API, rendered as the page would.
 pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Line<'static>> {
@@ -494,10 +557,14 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     let show_meta = width > str_width(&meta) + 8;
     let title_width = if show_meta { width - str_width(&meta) } else { width };
     let title = truncate_width(&entry.title, title_width);
-    let mut heading = vec![Span::styled(
-        title,
+    let terms: Vec<String> = ix.terms_for(entry).into_iter().map(str::to_string).collect();
+    let wash = cosense::theme::match_wash(ctx.terminal_bg);
+    let mut heading = marked_spans(
+        &title,
+        &terms,
         Style::default().fg(ctx.palette.title).add_modifier(Modifier::BOLD),
-    )];
+        wash,
+    );
     if show_meta {
         heading.push(Span::styled(meta, dim));
     }
@@ -512,7 +579,7 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
         match block {
             Block::Text(line) => {
                 for w in wrap_line_parts(line, width.saturating_sub(1), &hanging_prefix(line)) {
-                    lines.push(w.line);
+                    lines.push(mark_line(w.line, &terms, wash));
                 }
             }
             Block::Blank => lines.push(Line::from("")),

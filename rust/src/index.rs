@@ -237,6 +237,11 @@ pub struct Entry {
     pub descriptions: Vec<String>,
     /// Has this page changed since it was last seen here?
     pub unread: bool,
+    /// The words a full-text search matched ON THIS PAGE, as the endpoint
+    /// reported them. Empty for a row that came from the page list. They
+    /// are what gets marked in the row and the excerpt, so the reader can
+    /// see WHY this page is in the answer.
+    pub matched: Vec<String>,
 }
 
 impl Entry {
@@ -258,6 +263,7 @@ impl Entry {
             linked: r.linked,
             views: r.views,
             descriptions: r.lines,
+            matched: r.words,
         }
     }
 
@@ -271,6 +277,7 @@ impl Entry {
             linked: p.linked,
             views: p.views,
             descriptions: p.descriptions,
+            matched: Vec::new(), // a listed page matched nothing: it just IS
         }
     }
 }
@@ -480,6 +487,24 @@ impl Index {
         self.search.is_some()
     }
 
+    /// What to mark in `e`'s row and excerpt — the reason it is on screen.
+    ///
+    /// A hit is marked with the words the search actually matched on that
+    /// page; a narrowed list with what was typed. A full-text query still
+    /// being typed marks nothing: the list is not narrowed by it yet, so
+    /// there is no reason to point at.
+    pub fn terms_for<'a>(&'a self, e: &'a Entry) -> Vec<&'a str> {
+        if !e.matched.is_empty() {
+            return e.matched.iter().map(String::as_str).collect();
+        }
+        if self.filter_editing && self.filter_mode == FilterMode::FullText {
+            return Vec::new();
+        }
+        let typed = self.filter.trim();
+        if typed.is_empty() { Vec::new() } else { vec![typed] }
+    }
+
+
     pub fn push_filter(&mut self, c: char) {
         let mut f = self.filter.clone();
         f.push(c);
@@ -546,6 +571,72 @@ impl Index {
         self.scroll = self.scroll.min(n.saturating_sub(height));
         self.scroll
     }
+}
+
+
+/// Byte ranges of `terms` inside `text`, merged and in order.
+///
+/// Case-insensitive, by the SAME rule `rows()` filters with
+/// (`to_lowercase().contains`), so a mark can never disagree with the
+/// reason its row is listed.
+///
+/// The catch: lowercasing can change a string's LENGTH (`İ` becomes two
+/// chars, `K` becomes `k`), and then offsets found in the lowered text do
+/// not address the original. When that happens the search falls back to a
+/// case-sensitive one rather than marking the wrong bytes. ASCII and every
+/// CJK character keep their length, so the fallback is for the corner it
+/// exists to protect.
+pub fn match_ranges(text: &str, terms: &[&str]) -> Vec<(usize, usize)> {
+    let lower = text.to_lowercase();
+    let aligned = lower.len() == text.len();
+    let hay: &str = if aligned { &lower } else { text };
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for term in terms {
+        let needle = if aligned { term.to_lowercase() } else { (*term).to_string() };
+        if needle.is_empty() {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(at) = hay[from..].find(&needle) {
+            let start = from + at;
+            let end = start + needle.len();
+            spans.push((start, end));
+            from = end;
+        }
+    }
+    spans.sort();
+    // Two terms can overlap ("案" inside "改善案"), and a mark is a mark:
+    // one run of marked cells, not two fighting over the same bytes.
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some((_, prev_end)) if a <= *prev_end => *prev_end = (*prev_end).max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
+/// Split `text` into `(piece, marked)` runs on `terms`. Pieces are never
+/// empty, and concatenating them gives `text` back.
+pub fn split_on_terms<'a>(text: &'a str, terms: &[&str]) -> Vec<(&'a str, bool)> {
+    let ranges = match_ranges(text, terms);
+    if ranges.is_empty() {
+        return if text.is_empty() { Vec::new() } else { vec![(text, false)] };
+    }
+    let mut out: Vec<(&str, bool)> = Vec::new();
+    let mut at = 0;
+    for (a, b) in ranges {
+        if a > at {
+            out.push((&text[at..a], false));
+        }
+        out.push((&text[a..b], true));
+        at = b;
+    }
+    if at < text.len() {
+        out.push((&text[at..], false));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -709,6 +800,58 @@ mod tests {
     /// CREATE the word as a page on top of that.
     /// A project this session may only read never offers to create: the
     /// row would be a promise the API is going to refuse.
+    /// 一致の印は「なぜこの行がここにあるか」を指すもの。だから
+    /// `rows()` が絞り込むのと同じ規則(小文字化して contains)で探す。
+    #[test]
+    fn matches_are_found_by_the_same_rule_the_filter_narrows_with() {
+        let r = |t: &str, terms: &[&str]| match_ranges(t, terms);
+        // ASCII は大文字小文字を無視する。
+        assert_eq!(r("Kaizen an", &["kaizen"]), vec![(0, 6)]);
+        // 日本語。バイト範囲で返る。
+        assert_eq!(r("改善案", &["改善"]), vec![(0, 6)]);
+        assert_eq!(r("改善案", &["案"]), vec![(6, 9)]);
+        // 同じ語が何度も出れば、そのすべて。隣り合うものは1つの run に
+        // なる——画面の上では隣接した印は1本の帯にしか見えない。
+        assert_eq!(r("abab", &["ab"]), vec![(0, 4)]);
+        assert_eq!(r("ab-ab", &["ab"]), vec![(0, 2), (3, 5)]);
+        // 重なる2語は1つの run にまとめる——印は印であって、
+        // 同じバイトを2つが取り合うものではない。
+        assert_eq!(r("改善案", &["改善", "善案"]), vec![(0, 9)]);
+        assert!(r("改善案", &["無い"]).is_empty());
+        assert!(r("改善案", &[]).is_empty());
+
+        // 分割した破片をつなぐと元に戻る。
+        let pieces = split_on_terms("改善案4", &["善"]);
+        assert_eq!(pieces, vec![("改", false), ("善", true), ("案4", false)]);
+        let joined: String = pieces.iter().map(|(p, _)| *p).collect();
+        assert_eq!(joined, "改善案4");
+        assert_eq!(split_on_terms("", &["x"]), Vec::new());
+        assert_eq!(split_on_terms("abc", &[]), vec![("abc", false)]);
+    }
+
+    /// 何を指すかは行の出どころで決まる。ヒットはその**ページで**一致した
+    /// 語、絞り込みは打った語、打っている途中の本文検索は何も指さない
+    /// (まだ絞り込まれていないので、指す理由がない)。
+    #[test]
+    fn what_gets_marked_is_the_reason_the_row_is_listed() {
+        let mut ix = index(&["改善案", "テスト"]);
+        assert!(ix.terms_for(&ix.entries[0]).is_empty(), "素の一覧は何も指さない");
+
+        ix.set_filter("改善".into());
+        assert_eq!(ix.terms_for(&ix.entries[0]), vec!["改善"]);
+
+        ix.begin_filter();
+        ix.toggle_filter_mode();
+        assert!(
+            ix.terms_for(&ix.entries[0]).is_empty(),
+            "本文検索を打っている間は一覧を絞っていないので、指す理由がない"
+        );
+
+        // ヒットは自分が一致した語を持ってくる。
+        let hit = Entry { matched: vec!["画像".into()], ..ix.entries[0].clone() };
+        assert_eq!(ix.terms_for(&hit), vec!["画像"], "ヒットは絞り込みの状態に関わらず自前");
+    }
+
     #[test]
     fn a_read_only_project_never_offers_to_create() {
         let mut ix = index(&["改善案", "テスト"]);

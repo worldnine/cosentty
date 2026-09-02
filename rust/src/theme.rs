@@ -635,6 +635,22 @@ pub fn selection_band(terminal_bg: (u8, u8, u8)) -> Color {
     }
 }
 
+/// 検索語・絞り込み語に一致した部分の下敷き。
+///
+/// 一覧の行には既に意味を持った印が並んでいる——青い文字=未読、
+/// 反転=キャレットと選択、カーソル行の帯。だから一致は**前景色を奪わない**
+/// 敷きで語る(青い未読タイトルは青いまま一致を着られる)。selection_band と
+/// 同じ流儀で端末背景から作り、色相だけ**暖色側**へ振って寒色の選択と
+/// すれ違わないようにする。
+pub fn match_wash(terminal_bg: (u8, u8, u8)) -> Color {
+    let (r, g, b) = terminal_bg;
+    if relative_luminance(terminal_bg) > 0.179 {
+        Color::Rgb(r.saturating_sub(2), g.saturating_sub(22), b.saturating_sub(48))
+    } else {
+        Color::Rgb(r.saturating_add(64), g.saturating_add(34), b.saturating_add(6))
+    }
+}
+
 /// EDIT モードの下敷き(本文領域全体の背景)。「編集中は紙の色が違う」を
 /// 敷きで語る。キャレット行の帯(ANSI の DarkGray)より暗い側に置くのが
 /// 約束: 帯が下敷きの上で明るく浮き、キャレット行がスポットライトになる。
@@ -694,6 +710,24 @@ mod tests {
             // 寒色寄り: 青成分が最も強く残る(明では最も削られない)方向。
             if let Color::Rgb(r, _, b) = sel {
                 assert!(b >= r, "selection should lean cool: {sel:?}");
+            }
+        }
+    }
+
+    /// 一致の敷きは、選択・コード・端末背景・カーソル行のどれとも
+    /// 見分けがつき、選択とは色相で逆を向いていること。
+    #[test]
+    fn match_wash_is_warm_and_its_own_color() {
+        for bg in [(250u8, 250u8, 250u8), (24u8, 24u8, 24u8)] {
+            let m = match_wash(bg);
+            assert_ne!(m, Color::Rgb(bg.0, bg.1, bg.2));
+            assert_ne!(m, code_wash(bg));
+            assert_ne!(m, selection_band(bg));
+            assert_ne!(m, edit_backdrop(bg));
+            assert_ne!(m, Color::DarkGray);
+            // 暖色寄り: 選択(寒色 b >= r)とちょうど逆を向く。
+            if let Color::Rgb(r, _, b) = m {
+                assert!(r >= b, "match should lean warm: {m:?}");
             }
         }
     }
