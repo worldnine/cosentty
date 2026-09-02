@@ -373,6 +373,7 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
         .collect();
     Index::sort_entries(&mut entries, sort);
     let mut ix = Index::new(entries, count.max(0) as usize, sort);
+    ix.filter_mode = carried_filter_mode(app);
     if !filter.is_empty() {
         ix.set_filter(filter);
     }
@@ -380,6 +381,62 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
     app.index_project = project.to_string();
     app.index_sort_menu = None;
     app.overlay = None;
+}
+
+/// Which question the filter line opens with, carried across a rebuilt
+/// list. Building a fresh `Index` would otherwise silently drop back to
+/// the title filter every time the list was refetched. A `^o` from a page
+/// (no index yet) starts at the default, which is the title filter.
+pub(crate) fn carried_filter_mode(app: &App) -> cosense::index::FilterMode {
+    app.index.as_ref().map(|ix| ix.filter_mode).unwrap_or_default()
+}
+
+/// Run a full-text search and put its hits on screen in place of the list.
+///
+/// The hits keep the server's RELEVANCE order (they are not re-sorted): the
+/// question was "where is this word", and the best answer to it is not the
+/// most recently edited page. `^u` puts the project's own list back.
+pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
+    use cosense::index::{Entry, Index};
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return;
+    }
+    let project = app.index_project.clone();
+    let (count, hits) = match ctx.client.search_pages_in(&project, &query) {
+        Ok(v) => v,
+        Err(e) => {
+            app.status = t!("本文検索に失敗しました: {e}", "full-text search failed: {e}");
+            return;
+        }
+    };
+    let visits = load_visits();
+    let entries: Vec<Entry> = hits
+        .into_iter()
+        .map(|h| {
+            let seen = visits.get(&format!("{project}/{}", h.title)).copied();
+            Entry::from_search(h, seen)
+        })
+        .collect();
+    let found = entries.len();
+    let mut ix = Index::new(entries, count.max(0) as usize, app.index_sort);
+    ix.search = Some(query.clone());
+    // `/` over a set of hits means "search again", so the line has to open
+    // asking the same question it just answered.
+    ix.filter_mode = carried_filter_mode(app);
+    app.index = Some(ix);
+    app.status = if found == 0 {
+        t!("「{}」は本文にありません", "no page's body has \"{}\"", query)
+    } else {
+        String::new()
+    };
+}
+
+/// `^u`: back to the project's own list, whatever was narrowing or
+/// searching it.
+pub(crate) fn clear_index_search(app: &mut App, ctx: &Ctx) {
+    let project = app.index_project.clone();
+    open_index(app, ctx, &project, String::new());
 }
 
 /// Re-open the list in `sort` order, keeping the filter that is in force.

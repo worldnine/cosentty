@@ -11,6 +11,10 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let page_rows = app.index_list_rect.height.max(1) as i32;
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
+    // A notice sits in the index's footer until the next key (the index has
+    // no status line of its own). Cleared here, so whatever this key has to
+    // say replaces it.
+    app.status.clear();
     // ---- the sort menu, while it is open ------------------------------
     //
     // Six orders is more than a cycle key can offer without counting
@@ -44,10 +48,23 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
     // interrupt habit must not be a dead key just because a line is open
     // (ashiato's on_filter_key makes the same exception).
     if ix.filter_editing {
+        use cosense::index::FilterMode;
         match (k.code, ctrl) {
             (KeyCode::Char('c'), true) => return Action::Quit,
             (KeyCode::Esc, _) => ix.cancel_filter(),
-            (KeyCode::Enter, _) => ix.commit_filter(),
+            // Tab swaps which question the line is asking — the titles on
+            // screen, or every page's body. The typed word carries over.
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => ix.toggle_filter_mode(),
+            (KeyCode::Enter, _) => match ix.filter_mode {
+                FilterMode::Title => ix.commit_filter(),
+                FilterMode::FullText => {
+                    // The line closes either way: a search is a request,
+                    // and its answer is a different list.
+                    let query = ix.filter.clone();
+                    ix.commit_filter();
+                    search_index(app, ctx, &query);
+                }
+            },
             (KeyCode::Backspace, _) => ix.pop_filter(),
             (KeyCode::Char('u'), true) => ix.set_filter(String::new()),
             // The cursor may still be moved while typing: the list under a
@@ -71,8 +88,18 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
         (KeyCode::Char('/'), false) => ix.begin_filter(),
         // `s` names the order, as it names the display on the page.
         (KeyCode::Char('s'), false) => {
-            let at = cosense::index::SortKey::ALL.iter().position(|&k| k == ix.sort);
-            app.index_sort_menu = Some(at.unwrap_or(0));
+            if ix.is_search() {
+                // Re-ordering hits by date would answer a question nobody
+                // asked, and quietly re-listing the project would lose the
+                // ones found. So say what the state is.
+                app.status = t!(
+                    "検索結果は関連度順です（^u で一覧へ戻る）",
+                    "hits are in relevance order (^u for the list)"
+                );
+            } else {
+                let at = cosense::index::SortKey::ALL.iter().position(|&k| k == ix.sort);
+                app.index_sort_menu = Some(at.unwrap_or(0));
+            }
         }
         (KeyCode::Char('['), false) => go_history(app, ctx, true),
         (KeyCode::Char(']'), false) => go_history(app, ctx, false),
@@ -136,8 +163,16 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
             ix.move_cursor(-page_rows);
         }
         // `^u` clears the filter, as it clears a line everywhere else —
-        // without having to open the line again to empty it.
-        (KeyCode::Char('u'), true) => ix.set_filter(String::new()),
+        // without having to open the line again to empty it. Over a set of
+        // full-text hits it means the same thing one step up: put the
+        // project's own list back.
+        (KeyCode::Char('u'), true) => {
+            if ix.is_search() {
+                clear_index_search(app, ctx);
+            } else {
+                ix.set_filter(String::new());
+            }
+        }
         _ => {}
     }
     Action::Continue

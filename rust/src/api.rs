@@ -310,13 +310,27 @@ struct ListResponse {
     pages: Vec<PageSummary>,
 }
 
-#[derive(Debug, Deserialize)]
+/// One hit of the full-text search. Carries the same page metadata the
+/// list endpoint does (verified against a live reply) EXCEPT `accessed`,
+/// plus the two things only a search can say: the `words` it matched and
+/// the `lines` they were found on.
+#[derive(Debug, Clone, Deserialize)]
 pub struct SearchResult {
     pub title: String,
     #[serde(default)]
     pub words: Vec<String>,
+    /// The matched lines, in page order — a better excerpt than a page's
+    /// opening lines, because it is the part that answered the question.
     #[serde(default)]
     pub lines: Vec<String>,
+    #[serde(default)]
+    pub updated: i64,
+    #[serde(default)]
+    pub created: i64,
+    #[serde(default)]
+    pub views: i64,
+    #[serde(default)]
+    pub linked: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,14 +764,24 @@ impl Client {
         &self,
         query: &str,
     ) -> Result<(i64, Vec<SearchResult>), Box<dyn Error>> {
+        let project = self.cfg.project.clone();
+        self.search_pages_in(&project, query)
+    }
+
+    /// `search_pages` for any project — the index may be listing one this
+    /// page is not in (a `[/other-project]` link opens its site top).
+    pub fn search_pages_in(
+        &self,
+        project: &str,
+        query: &str,
+    ) -> Result<(i64, Vec<SearchResult>), Box<dyn Error>> {
         let url = format!(
             "{}/pages/{}/search/query?q={}",
             self.cfg.base(),
-            urlencoding(&self.cfg.project),
+            urlencoding(project),
             urlencoding(query)
         );
-        let project = self.cfg.project.clone();
-        let data: SearchResponse = self.get_json(&url, &project)?;
+        let data: SearchResponse = self.get_json(&url, project)?;
         Ok((data.count, data.pages))
     }
 }

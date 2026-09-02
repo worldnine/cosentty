@@ -9,7 +9,7 @@
 //! network: matching, cursor movement, the vertical budget, and row text.
 //! The viewer owns drawing, fetching and keys.
 
-use crate::api::PageSummary;
+use crate::api::{PageSummary, SearchResult};
 
 /// `auto` hides the preview below this terminal width. Keep ashiato's
 /// established switch even though the excerpt is now below the list: at
@@ -51,6 +51,30 @@ impl PreviewMode {
             PreviewMode::On => true,
             PreviewMode::Off => false,
             PreviewMode::Auto => width >= PREVIEW_MIN_WIDTH,
+        }
+    }
+}
+
+/// What the open line is asking for.
+///
+/// Two genuinely different questions, so two modes rather than one clever
+/// box: the title filter answers "which of these do I mean" over the list
+/// already on screen and costs nothing, while the full-text search asks
+/// the server about every page's body and takes a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FilterMode {
+    /// Narrow the titles already listed (local, live).
+    #[default]
+    Title,
+    /// Search page bodies (`search/query`); runs on Enter.
+    FullText,
+}
+
+impl FilterMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            FilterMode::Title => FilterMode::FullText,
+            FilterMode::FullText => FilterMode::Title,
         }
     }
 }
@@ -216,6 +240,27 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// One full-text hit as a list row. The excerpt is the matched LINES,
+    /// which is the part that answered the question — better than the
+    /// page's opening lines, and the only excerpt a search reply carries.
+    ///
+    /// `accessed` stays zero: the search endpoint does not report it (the
+    /// list endpoint does). `SortKey::Accessed` therefore has nothing to
+    /// order search results by, which is one reason a result set keeps the
+    /// server's relevance order instead.
+    pub fn from_search(r: SearchResult, seen_at: Option<i64>) -> Self {
+        Self {
+            unread: seen_at.is_none_or(|seen| r.updated > seen),
+            title: r.title,
+            updated: r.updated,
+            created: r.created,
+            accessed: 0,
+            linked: r.linked,
+            views: r.views,
+            descriptions: r.lines,
+        }
+    }
+
     pub fn from_summary(p: PageSummary, seen_at: Option<i64>) -> Self {
         Self {
             unread: seen_at.is_none_or(|seen| p.updated > seen),
@@ -239,6 +284,15 @@ pub struct Index {
     pub entries: Vec<Entry>,
     /// What has been typed. Empty = the whole project.
     pub filter: String,
+    /// What the open line searches. `Tab` swaps them.
+    pub filter_mode: FilterMode,
+    /// The full-text query these entries ARE the results of, when they are.
+    ///
+    /// A search result set is a different list from the project's: it is
+    /// ordered by the server's relevance, its excerpts are the matched
+    /// lines rather than each page's opening, and `sort` has nothing to say
+    /// about it. `^u` puts the project's own list back.
+    pub search: Option<String>,
     /// Is the filter line open for typing? (`/` opens it, ashiato's key.)
     ///
     /// The index used to narrow on every printable key with no mode at
@@ -311,6 +365,13 @@ impl Index {
     /// but this list is answering "which of these do I mean", where the
     /// eye is already on the titles.
     pub fn rows(&self) -> Vec<Row<'_>> {
+        // A full-text query is not a local narrowing: the list stays as it
+        // is until the server answers (Enter). Narrowing it by the typed
+        // word as well would hide the very pages the search is about to
+        // report, since the word is in their BODIES, not their titles.
+        if self.filter_editing && self.filter_mode == FilterMode::FullText {
+            return self.entries.iter().map(Row::Page).collect();
+        }
         let needle = self.filter.trim().to_lowercase();
         let mut rows: Vec<Row<'_>> = self
             .entries
@@ -328,6 +389,9 @@ impl Index {
     /// named that already — an exact match IS the page, and two pages
     /// cannot share a title.
     pub fn offers_create(&self) -> bool {
+        if self.filter_editing && self.filter_mode == FilterMode::FullText {
+            return false; // that word is a query, not a page name
+        }
         let typed = self.filter.trim();
         !typed.is_empty()
             && !self.entries.iter().any(|e| e.title.eq_ignore_ascii_case(typed))
@@ -384,6 +448,22 @@ impl Index {
     pub fn cancel_filter(&mut self) {
         self.filter_editing = false;
         self.set_filter(String::new());
+    }
+
+    /// `Tab`: swap what the open line is asking for. The typed word is
+    /// kept — "I meant the body, not the title" is the whole point, and
+    /// retyping it would be the cost of saying so.
+    pub fn toggle_filter_mode(&mut self) {
+        self.filter_mode = self.filter_mode.toggled();
+        self.cursor = 0;
+        self.scroll = 0;
+        self.preview_scroll = 0;
+        self.follow = true;
+    }
+
+    /// Is the list on screen a set of full-text hits?
+    pub fn is_search(&self) -> bool {
+        self.search.is_some()
     }
 
     pub fn push_filter(&mut self, c: char) {
@@ -606,6 +686,30 @@ mod tests {
     /// it on the WRONG key is the trap: the list used to sort by `updated`
     /// unconditionally, which would have shuffled an A→Z list back into
     /// date order.
+    /// While a full-text query is being typed, the list must NOT be
+    /// narrowed by it as well. The word is in those pages' BODIES — the one
+    /// place a title filter cannot see — so narrowing on the titles would
+    /// hide exactly the pages the search is about to report, and offer to
+    /// CREATE the word as a page on top of that.
+    #[test]
+    fn a_full_text_query_does_not_narrow_the_titles_on_screen() {
+        let mut ix = index(&["改善案", "画像表示テスト", "テスト"]);
+        ix.begin_filter();
+        ix.push_filter('図');
+        assert_eq!(ix.len(), 1, "no title has 図: the create offer is all that is left");
+        assert!(ix.offers_create());
+
+        ix.toggle_filter_mode();
+        assert_eq!(ix.filter_mode, FilterMode::FullText);
+        assert_eq!(ix.filter, "図", "the typed word carries over");
+        assert_eq!(ix.len(), 3, "the list stays as it is until the server answers");
+        assert!(!ix.offers_create(), "that word is a query, not a page name");
+
+        // Back again, and it is a title filter once more.
+        ix.toggle_filter_mode();
+        assert_eq!(ix.len(), 1);
+    }
+
     #[test]
     fn every_order_is_re_imposed_on_its_own_key_not_on_updated() {
         let mk = |title: &str, updated, created, accessed, linked, views| Entry {

@@ -173,30 +173,54 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let scroll = ix.follow(rows_h);
     let rows = ix.rows();
     let focus = ix.focus;
-    let sort = ix.sort;
+    // Hits report their page's own age: they are not sorted on anything the
+    // column could be showing instead.
+    let sort = if ix.is_search() { cosense::index::SortKey::Updated } else { ix.sort };
+    let searching = ix.is_search();
 
     // ---- header ------------------------------------------------------
     let shown = rows.len();
     // The caret belongs to the OPEN line only: a filter that is merely in
     // force is a state, and a state that wears a caret reads as "still
     // typing" (see `Index::filter_editing`).
-    let head = if ix.filter.is_empty() && !ix.filter_editing {
+    //
+    // The open line says which question it is asking, because the two look
+    // identical otherwise: `/` narrows the titles listed, `?` searches
+    // every page's body.
+    let sigil = match ix.filter_mode {
+        cosense::index::FilterMode::Title => "/",
+        cosense::index::FilterMode::FullText => "?",
+    };
+    let head = if ix.filter_editing {
+        // A full-text query has no count yet — the list on screen is still
+        // the unsearched one, and calling its length a match count would be
+        // a plain lie.
+        let tail = match ix.filter_mode {
+            cosense::index::FilterMode::Title => format!("({} match)", shown),
+            cosense::index::FilterMode::FullText => {
+                ts!("(Enter で本文を検索)", "(Enter searches bodies)").to_string()
+            }
+        };
+        format!(" {} — {sigil}{}_ {tail}", app.project, ix.filter)
+    } else if let Some(q) = ix.search.as_deref() {
+        format!(" {} — ?{q} ({} hits)", app.project, ix.entries.len())
+    } else if ix.filter.is_empty() {
         let more = if ix.total > ix.entries.len() {
             format!(" of {}", ix.total)
         } else {
             String::new()
         };
         format!(" {} — {} pages{}", app.project, ix.entries.len(), more)
-    } else if ix.filter_editing {
-        format!(" {} — /{}_ ({} match)", app.project, ix.filter, shown)
     } else {
         format!(" {} — /{} ({} match)", app.project, ix.filter, shown)
     };
     // The order rides at the right end of the header, where it does not
     // push the project and the count around as it changes length. `↓`
     // because five of the six read newest/most first; `title` is the one
-    // ascending order and says so.
-    let order = if ix.sort == cosense::index::SortKey::Title {
+    // ascending order and says so. Hits are not in any of those orders.
+    let order = if ix.is_search() {
+        ts!("関連度順 ", "relevance ").to_string()
+    } else if ix.sort == cosense::index::SortKey::Title {
         format!("{} ↑ ", ix.sort.name())
     } else {
         format!("{} ↓ ", ix.sort.name())
@@ -335,26 +359,46 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
-    let hint = if ix.filter_editing {
+    let hint: String = if !app.status.is_empty() {
+        // The index has no status line of its own, so a notice takes the
+        // footer's hint slot. It lasts until the next key (cleared at the
+        // top of `handle_index_key`), which is what a transient notice
+        // should do.
+        app.status.clone()
+    } else if ix.filter_editing {
+        match ix.filter_mode {
+            cosense::index::FilterMode::Title => ts!(
+                "タイトル絞り込み — Enter 確定 · Tab 本文検索へ · Esc 解除",
+                "filter titles — Enter apply · Tab full-text · Esc clear"
+            ),
+            cosense::index::FilterMode::FullText => ts!(
+                "本文検索 — Enter 検索 · Tab タイトル絞り込みへ · Esc 解除",
+                "search bodies — Enter search · Tab titles · Esc clear"
+            ),
+        }
+        .to_string()
+    } else if searching && ix.focus == Pane::List {
         ts!(
-            "絞り込み中 — Enter 確定 · Esc 解除 · ↑/↓ 移動",
-            "filtering — Enter apply · Esc clear · ↑/↓ move"
+            "j/k · Enter 開く · / 検索し直す · ^u 一覧へ · Esc/[ 戻る · q 終了",
+            "j/k · Enter open · / search again · ^u list · Esc/[ back · q quit"
         )
+        .to_string()
     } else {
         match (layout.preview.is_some(), ix.focus) {
             (true, Pane::List) => ts!(
-                "j/k · / 絞り込み · s 並び順 · Enter 開く · Tab 抜粋 · Esc/[ 戻る · q 終了",
-                "j/k · / filter · s order · Enter open · Tab excerpt · Esc/[ back · q quit"
+                "j/k · / 絞り込み・検索 · s 並び順 · Enter 開く · Tab 抜粋 · Esc/[ 戻る · q 終了",
+                "j/k · / filter or search · s order · Enter open · Tab excerpt · Esc/[ back · q quit"
             ),
             (true, Pane::Preview) => ts!(
                 "j/k 抜粋をスクロール · Tab 一覧 · Enter 開く · Esc/[ 戻る · q 終了",
                 "j/k scroll excerpt · Tab list · Enter open · Esc/[ back · q quit"
             ),
             (false, _) => ts!(
-                "j/k · / 絞り込み · s 並び順 · Enter 開く · Esc/[ 戻る · q 終了",
-                "j/k · / filter · s order · Enter open · Esc/[ back · q quit"
+                "j/k · / 絞り込み・検索 · s 並び順 · Enter 開く · Esc/[ 戻る · q 終了",
+                "j/k · / filter or search · s order · Enter open · Esc/[ back · q quit"
             ),
         }
+        .to_string()
     };
     // Where in the list the reader is — the footer's job here as on the
     // page (`L12/205`), which is why the list needs no scrollbar.
@@ -1395,8 +1439,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
                 t!("移動履歴    [ 戻る · ] 進む", "history     [ back · ] forward"),
                 t!("表示切替    s 表示⇄ソース（行番号つき raw）", "source      s view⇄source (raw with line numbers)"),
-                t!("ページ一覧  ^o 一覧＋抜粋 · 一覧内で / 絞り込み · s 並び順 · q 終了",
-                   "index       ^o list + excerpt · / filter · s order · q quit"),
+                t!("ページ一覧  ^o 一覧＋抜粋 · / 絞り込み（Tab で本文検索）· s 並び順 · q 終了",
+                   "index       ^o list + excerpt · / filter (Tab: full-text) · s order · q quit"),
             ];
             if app.editable {
                 keys.extend([
