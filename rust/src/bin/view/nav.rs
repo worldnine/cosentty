@@ -329,18 +329,24 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
 /// Open the project index: every page, newest first, with a short excerpt
 /// from the one under the cursor docked below the list.
 ///
-/// The list is one request (`/api/pages/<project>?limit=500&sort=updated`)
+/// The list is one request (`/api/pages/<project>?limit=500&sort=<key>`)
 /// and the excerpt costs nothing on top of it: the same response carries
 /// each page's first lines, which is what the reader is choosing between.
+///
+/// The order is the session's standing choice (`App::index_sort`), asked
+/// of the server so it covers the whole project rather than whichever
+/// pages one request happened to bring back.
 pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String) {
     use cosense::index::{Entry, Index};
-    let (count, pages) = match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, "updated") {
-        Ok(v) => v,
-        Err(e) => {
-            app.status = t!("ページ一覧を取得できません: {e}", "page list failed: {e}");
-            return;
-        }
-    };
+    let sort = app.index_sort;
+    let (count, pages) =
+        match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, sort.name()) {
+            Ok(v) => v,
+            Err(e) => {
+                app.status = t!("ページ一覧を取得できません: {e}", "page list failed: {e}");
+                return;
+            }
+        };
     let visits = load_visits();
     let mut entries: Vec<Entry> = pages
         .into_iter()
@@ -349,16 +355,27 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
             Entry::from_summary(p, seen)
         })
         .collect();
-    // The API floats pinned pages to the top even under sort=updated, so a
-    // pinned two-year-old page would head a "recently updated" list.
-    entries.sort_by(|a, b| b.updated.cmp(&a.updated));
-    let mut ix = Index::new(entries, count.max(0) as usize);
+    Index::sort_entries(&mut entries, sort);
+    let mut ix = Index::new(entries, count.max(0) as usize, sort);
     if !filter.is_empty() {
         ix.set_filter(filter);
     }
     app.index = Some(ix);
     app.index_project = project.to_string();
+    app.index_sort_menu = None;
     app.overlay = None;
+}
+
+/// Re-open the list in `sort` order, keeping the filter that is in force.
+///
+/// A refetch, not a local re-shuffle: the list holds at most
+/// `INDEX_PAGE_LIMIT` pages, so re-ordering what is already in hand would
+/// silently sort the wrong 500 pages of a bigger project.
+pub(crate) fn resort_index(app: &mut App, ctx: &Ctx, sort: cosense::index::SortKey) {
+    let project = app.index_project.clone();
+    let filter = app.index.as_ref().map(|ix| ix.filter.clone()).unwrap_or_default();
+    app.index_sort = sort;
+    open_index(app, ctx, &project, filter);
 }
 
 /// Fetch and render one page. Images are NOT downloaded here: they are

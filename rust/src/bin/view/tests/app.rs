@@ -862,12 +862,13 @@ use super::support::*;
             updated: now_secs(),
             descriptions: vec!["body".into()],
             unread: false,
+            ..Default::default()
         };
         let mut entries = vec![mk("最初"), mk("二番目"), mk("三番目")];
         // …and enough behind them that the list has somewhere to scroll.
         entries.extend((0..30).map(|i| mk(&format!("その他{i}"))));
         let n = entries.len();
-        app.index = Some(cosense::index::Index::new(entries, n));
+        app.index = Some(cosense::index::Index::new(entries, n, cosense::index::SortKey::Updated));
         // A frame has to have been drawn: the click is answered with the
         // geometry that was on screen.
         let mut t = Terminal::new(TestBackend::new(100, 10)).unwrap();
@@ -934,8 +935,10 @@ use super::support::*;
                 updated: now_secs(),
                 descriptions: vec![],
                 unread: false,
+                ..Default::default()
             }],
             1,
+            cosense::index::SortKey::Updated,
         ));
         assert!(matches!(
             app.here(),
@@ -984,9 +987,10 @@ use super::support::*;
                 updated: now_secs() - i,
                 descriptions: vec![format!("body {i}")],
                 unread: i % 2 == 0,
+                ..Default::default()
             })
             .collect();
-        let mut index = cosense::index::Index::new(entries, 12);
+        let mut index = cosense::index::Index::new(entries, 12, cosense::index::SortKey::Updated);
         index.cursor = 4;
         index.scroll = 2;
         index.preview_scroll = 1;
@@ -1024,9 +1028,10 @@ use super::support::*;
                 updated: now_secs(),
                 descriptions: vec![],
                 unread: false,
+                ..Default::default()
             })
             .collect();
-        app.index = Some(cosense::index::Index::new(entries, 3));
+        app.index = Some(cosense::index::Index::new(entries, 3, cosense::index::SortKey::Updated));
 
         // Closed line: letters are commands, not text.
         assert!(matches!(
@@ -1154,6 +1159,7 @@ use super::support::*;
             updated: now_secs() - mins * 60,
             descriptions: desc.iter().map(|s| s.to_string()).collect(),
             unread,
+            ..Default::default()
         };
         app.index = Some(cosense::index::Index::new(
             vec![
@@ -1164,6 +1170,7 @@ use super::support::*;
                 mk("テスト", 60 * 24 * 400, false, &["ここはテスト用のページ"]),
             ],
             137,
+            cosense::index::SortKey::Updated,
         ));
         // …and a real project's worth of pages, where the scrollbar has
         // something to say.
@@ -1202,15 +1209,18 @@ use super::support::*;
                     updated: now_secs() - 60,
                     descriptions: vec!["from [テスト]".into(), "進め方".into()],
                     unread: true,
+                    ..Default::default()
                 },
                 cosense::index::Entry {
                     title: "画像表示テスト".into(),
                     updated: now_secs() - 86_400,
                     descriptions: vec!["画像の出方を並べたページ".into()],
                     unread: false,
+                    ..Default::default()
                 },
             ],
             2,
+            cosense::index::SortKey::Updated,
         ));
 
         let draw = |app: &mut App, cols: u16| -> Vec<String> {

@@ -177,6 +177,15 @@ pub struct PageSummary {
     #[serde(default)]
     pub updated: i64,
     #[serde(default)]
+    pub created: i64,
+    /// When this page was last OPENED by anyone in the project (not the
+    /// requesting user — that is `Page::last_accessed`, which the list
+    /// endpoint does not carry). It is what `sort=accessed` orders by.
+    #[serde(default)]
+    pub accessed: i64,
+    #[serde(default)]
+    pub views: i64,
+    #[serde(default)]
     pub linked: i64,
 }
 

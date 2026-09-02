@@ -89,12 +89,125 @@ pub fn layout(mode: PreviewMode, width: u16, height: u16) -> IndexLayout {
     IndexLayout { list: height - gap - preview, gap, preview: Some(preview) }
 }
 
+/// How the list is ordered. All six are the page API's own `sort` values
+/// (verified against the server), so the order is the project's, not a
+/// re-shuffle of whatever page of it happened to be fetched.
+///
+/// Their names stay in English on screen. They are the API's vocabulary
+/// and the same words the site's own sort menu uses — names, not prose
+/// (see the note at the top of `view/main.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SortKey {
+    /// Most recently edited first — the site top's own default.
+    #[default]
+    Updated,
+    /// Most recently opened (by anyone in the project) first.
+    Accessed,
+    /// Newest page first.
+    Created,
+    /// Most linked-to first: the project's hubs.
+    Linked,
+    /// Most read first.
+    Views,
+    /// A→Z. The only ASCENDING order here.
+    Title,
+}
+
+impl SortKey {
+    /// Menu order, which is also the site's.
+    pub const ALL: [SortKey; 6] = [
+        SortKey::Updated,
+        SortKey::Accessed,
+        SortKey::Created,
+        SortKey::Linked,
+        SortKey::Views,
+        SortKey::Title,
+    ];
+
+    /// The `sort=` value the pages API knows this by, and the label shown
+    /// for it — deliberately the same string.
+    pub fn name(self) -> &'static str {
+        match self {
+            SortKey::Updated => "updated",
+            SortKey::Accessed => "accessed",
+            SortKey::Created => "created",
+            SortKey::Linked => "linked",
+            SortKey::Views => "views",
+            SortKey::Title => "title",
+        }
+    }
+
+    /// What the row's narrow right-of-telomere column says under this
+    /// order. Sorting by a number the reader cannot see is no help, so the
+    /// column shows the value being sorted ON.
+    pub fn column(self, e: &Entry) -> String {
+        match self {
+            SortKey::Linked => compact_count(e.linked),
+            SortKey::Views => compact_count(e.views),
+            _ => relative_age(self.stamp(e)),
+        }
+    }
+
+    /// The timestamp this order reads. `updated` for the orders that are
+    /// not about a time at all: the age column then means what it means
+    /// everywhere else in the viewer.
+    pub fn stamp(self, e: &Entry) -> i64 {
+        match self {
+            SortKey::Accessed => e.accessed,
+            SortKey::Created => e.created,
+            _ => e.updated,
+        }
+    }
+}
+
+/// `1`, `86`, `1.2k`, `13k` — a count in at most four columns, which is
+/// what the row has for it.
+pub fn compact_count(n: i64) -> String {
+    match n {
+        ..=999 => n.to_string(),
+        1_000..=9_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        10_000..=999_999 => format!("{}k", n / 1_000),
+        _ => format!("{}M", n / 1_000_000),
+    }
+}
+
+/// "3m" / "2h" / "5d" style age from an epoch-seconds timestamp. A zero
+/// stamp (a field the API did not fill) has no age to report.
+pub fn relative_age(stamp: i64) -> String {
+    if stamp <= 0 {
+        return String::new();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let secs = (now - stamp).max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else if secs < 86_400 * 365 {
+        format!("{}d", secs / 86_400)
+    } else {
+        format!("{}y", secs / (86_400 * 365))
+    }
+}
+
 /// One page in the index.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Entry {
     pub title: String,
     /// Server-side mtime (epoch seconds).
     pub updated: i64,
+    /// When the page was created, and when anyone last opened it. Both are
+    /// sort keys, and both are what the row's age column shows under them.
+    pub created: i64,
+    pub accessed: i64,
+    /// How many pages link here, and how often it has been read.
+    pub linked: i64,
+    pub views: i64,
     /// The first few lines, as the list API hands them over. This is the
     /// excerpt — it costs nothing and is enough to decide whether to open.
     pub descriptions: Vec<String>,
@@ -108,6 +221,10 @@ impl Entry {
             unread: seen_at.is_none_or(|seen| p.updated > seen),
             title: p.title,
             updated: p.updated,
+            created: p.created,
+            accessed: p.accessed,
+            linked: p.linked,
+            views: p.views,
             descriptions: p.descriptions,
         }
     }
@@ -146,6 +263,10 @@ pub struct Index {
     /// How many pages the project has, when the API said so — the list may
     /// hold fewer (see the viewer's paging).
     pub total: usize,
+    /// How the list is ordered. Kept here (not only on the App) so that
+    /// walking back to an index through the history restores the order it
+    /// was left in, along with the filter and the cursor.
+    pub sort: SortKey,
 }
 
 /// A row of the list: a page, or the offer to create what was typed.
@@ -157,8 +278,29 @@ pub enum Row<'a> {
 }
 
 impl Index {
-    pub fn new(entries: Vec<Entry>, total: usize) -> Self {
-        Self { entries, total, focus: Pane::List, follow: true, ..Self::default() }
+    pub fn new(entries: Vec<Entry>, total: usize, sort: SortKey) -> Self {
+        Self { entries, total, sort, focus: Pane::List, follow: true, ..Self::default() }
+    }
+
+    /// Put `entries` in `sort` order.
+    ///
+    /// The API already answered in this order, but it floats PINNED pages
+    /// to the top of every one of them (measured on villagepump: its three
+    /// pinned pages head `sort=title` and `sort=linked` alike). A pinned
+    /// page is still just a page in this list, so the order is re-imposed
+    /// here — on the same key the server was asked for, never on a
+    /// different one.
+    pub fn sort_entries(entries: &mut [Entry], sort: SortKey) {
+        match sort {
+            // The only ascending order, and the only one that is not a
+            // number. Case-insensitive, as the site's own A→Z is.
+            SortKey::Title => entries.sort_by(|a, b| {
+                a.title.to_lowercase().cmp(&b.title.to_lowercase())
+            }),
+            SortKey::Linked => entries.sort_by(|a, b| b.linked.cmp(&a.linked)),
+            SortKey::Views => entries.sort_by(|a, b| b.views.cmp(&a.views)),
+            _ => entries.sort_by(|a, b| sort.stamp(b).cmp(&sort.stamp(a))),
+        }
     }
 
     /// Rows matching the filter, in list order, with the create offer last
@@ -321,7 +463,7 @@ mod tests {
             title: title.into(),
             updated,
             descriptions: vec![format!("{title} の本文")],
-            unread: false,
+            ..Entry::default()
         }
     }
 
@@ -329,6 +471,7 @@ mod tests {
         Index::new(
             titles.iter().enumerate().map(|(i, t)| entry(t, 100 - i as i64)).collect(),
             titles.len(),
+            SortKey::Updated,
         )
     }
 
@@ -457,6 +600,76 @@ mod tests {
         assert_eq!(PreviewMode::default(), PreviewMode::Auto);
     }
 
+    /// Every order is re-imposed locally, because the API floats PINNED
+    /// pages to the top of all of them (measured on villagepump: its three
+    /// pinned pages head `sort=title` and `sort=linked` alike). Re-imposing
+    /// it on the WRONG key is the trap: the list used to sort by `updated`
+    /// unconditionally, which would have shuffled an A→Z list back into
+    /// date order.
+    #[test]
+    fn every_order_is_re_imposed_on_its_own_key_not_on_updated() {
+        let mk = |title: &str, updated, created, accessed, linked, views| Entry {
+            title: title.into(),
+            updated,
+            created,
+            accessed,
+            linked,
+            views,
+            ..Entry::default()
+        };
+        // Shaped like a pinned page heading a list it does not belong at
+        // the top of: "pinned" is oldest, least linked and least read.
+        let base = vec![
+            mk("pinned", 10, 10, 10, 1, 1),
+            mk("Zebra", 300, 100, 200, 50, 9),
+            mk("apple", 200, 300, 100, 90, 5),
+        ];
+        let titles = |sort| {
+            let mut e = base.clone();
+            Index::sort_entries(&mut e, sort);
+            e.into_iter().map(|x| x.title).collect::<Vec<_>>()
+        };
+        assert_eq!(titles(SortKey::Updated), ["Zebra", "apple", "pinned"]);
+        assert_eq!(titles(SortKey::Created), ["apple", "Zebra", "pinned"]);
+        assert_eq!(titles(SortKey::Accessed), ["Zebra", "apple", "pinned"]);
+        assert_eq!(titles(SortKey::Linked), ["apple", "Zebra", "pinned"]);
+        assert_eq!(titles(SortKey::Views), ["Zebra", "apple", "pinned"]);
+        // The one ascending order, and the one that ignores case: `apple`
+        // must not sort after `Zebra` just because of its byte value.
+        assert_eq!(titles(SortKey::Title), ["apple", "pinned", "Zebra"]);
+    }
+
+    /// The row's narrow column shows what the list is ordered ON. Sorting
+    /// by a number the reader cannot see tells them nothing.
+    #[test]
+    fn the_row_column_shows_the_value_being_sorted_on() {
+        let e = Entry {
+            title: "t".into(),
+            updated: 1,
+            created: 1,
+            accessed: 1,
+            linked: 1_234,
+            views: 17_221,
+            ..Entry::default()
+        };
+        assert_eq!(SortKey::Linked.column(&e), "1.2k");
+        assert_eq!(SortKey::Views.column(&e), "17k");
+        // The time orders read as an age, and each reads its OWN stamp.
+        assert!(SortKey::Updated.column(&e).ends_with('y'), "an age, not a count");
+        assert_eq!(SortKey::Created.stamp(&e), 1);
+        assert_eq!(SortKey::Accessed.stamp(&e), 1);
+        // `title` is not a number and not a time: the column keeps the
+        // meaning it has everywhere else in the viewer.
+        assert_eq!(SortKey::Title.stamp(&e), e.updated);
+        // A stamp the API never filled has no age to claim.
+        assert_eq!(relative_age(0), "");
+        // The API's own words are what the menu shows.
+        assert_eq!(
+            SortKey::ALL.map(SortKey::name),
+            ["updated", "accessed", "created", "linked", "views", "title"]
+        );
+    }
+
     #[test]
     fn a_page_is_unread_until_it_has_been_seen_since_its_last_edit() {
         let p = |updated| PageSummary {
@@ -465,6 +678,9 @@ mod tests {
             image: None,
             descriptions: vec![],
             updated,
+            created: 0,
+            accessed: 0,
+            views: 0,
             linked: 0,
         };
         assert!(Entry::from_summary(p(100), None).unread, "never opened");

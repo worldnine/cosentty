@@ -616,7 +616,7 @@ use super::support::*;
         assert_eq!(app.lines.len(), 2, "and nothing is written");
 
         // The index filters by what you paste (first line only).
-        app.index = Some(cosense::index::Index::new(Vec::new(), 0));
+        app.index = Some(cosense::index::Index::new(Vec::new(), 0, cosense::index::SortKey::Updated));
         app.index.as_mut().unwrap().cursor = 3;
         handle_paste(&mut app, &ctx, "Some Page\nsecond line");
         let ix = app.index.as_ref().expect("the index is still open");

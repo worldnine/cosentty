@@ -11,6 +11,31 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let page_rows = app.index_list_rect.height.max(1) as i32;
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
+    // ---- the sort menu, while it is open ------------------------------
+    //
+    // Six orders is more than a cycle key can offer without counting
+    // presses, and a menu also answers "which one am I in" by showing the
+    // mark next to it.
+    if let Some(cursor) = app.index_sort_menu {
+        use cosense::index::SortKey;
+        let last = SortKey::ALL.len() - 1;
+        match (k.code, ctrl) {
+            (KeyCode::Char('c'), true) => return Action::Quit,
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => app.index_sort_menu = None,
+            (KeyCode::Down, _) | (KeyCode::Char('j'), false) | (KeyCode::Char('n'), true) => {
+                app.index_sort_menu = Some((cursor + 1).min(last));
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
+                app.index_sort_menu = Some(cursor.saturating_sub(1));
+            }
+            (KeyCode::Enter, _) => {
+                app.index_sort_menu = None;
+                resort_index(app, ctx, SortKey::ALL[cursor.min(last)]);
+            }
+            _ => {}
+        }
+        return Action::Continue;
+    }
     let Some(ix) = app.index.as_mut() else { return Action::Continue };
     // ---- the filter line, while it is open ----------------------------
     //
@@ -44,6 +69,11 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
         (KeyCode::Char('q'), false) => return Action::Quit,
         (KeyCode::Char('c'), true) => return Action::Quit,
         (KeyCode::Char('/'), false) => ix.begin_filter(),
+        // `s` names the order, as it names the display on the page.
+        (KeyCode::Char('s'), false) => {
+            let at = cosense::index::SortKey::ALL.iter().position(|&k| k == ix.sort);
+            app.index_sort_menu = Some(at.unwrap_or(0));
+        }
         (KeyCode::Char('['), false) => go_history(app, ctx, true),
         (KeyCode::Char(']'), false) => go_history(app, ctx, false),
         (KeyCode::Esc, _) => {

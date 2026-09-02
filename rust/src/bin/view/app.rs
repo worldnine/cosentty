@@ -250,6 +250,15 @@ pub(crate) struct App {
     /// When the index was last scrolled. Its scrollbar appears briefly at
     /// the screen edge while the list moves, then gets out of the way.
     pub(crate) index_scrolled_at: Option<Instant>,
+    /// The order the next `^o` opens in. The open list carries its own copy
+    /// (`Index::sort`) so history restores it; this is the session's
+    /// standing choice, which a fresh index has to be built from before
+    /// there is an `Index` to ask.
+    pub(crate) index_sort: cosense::index::SortKey,
+    /// The sort menu over the index, and where its cursor is. Deliberately
+    /// NOT part of the saved `Index`: a menu is something you are doing,
+    /// not somewhere you have been.
+    pub(crate) index_sort_menu: Option<usize>,
 
     /// When this page was last seen by the user before this visit — the
     /// later of Cosense's `lastAccessed` (browser) and the local visit
@@ -486,22 +495,10 @@ pub(crate) fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// "3m" / "2h" / "5d" style age from an epoch-seconds timestamp.
-pub(crate) fn relative_age(updated: i64) -> String {
-    let now = now_secs();
-    let secs = (now - updated).max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86_400 {
-        format!("{}h", secs / 3600)
-    } else if secs < 86_400 * 365 {
-        format!("{}d", secs / 86_400)
-    } else {
-        format!("{}y", secs / (86_400 * 365))
-    }
-}
+/// "3m" / "2h" / "5d" style age from an epoch-seconds timestamp. The
+/// implementation lives in the lib because the index's row column needs
+/// it as well; re-exported here so the drawing code keeps the short name.
+pub(crate) use cosense::index::relative_age;
 
 impl App {
     pub(crate) fn new(project: String) -> Self {
@@ -568,6 +565,8 @@ impl App {
             index_preview_rect: Rect::default(),
             index_project: String::new(),
             index_scrolled_at: None,
+            index_sort: cosense::index::SortKey::default(),
+            index_sort_menu: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,
             web_pending: HashSet::new(),

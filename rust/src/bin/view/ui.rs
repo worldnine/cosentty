@@ -173,6 +173,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let scroll = ix.follow(rows_h);
     let rows = ix.rows();
     let focus = ix.focus;
+    let sort = ix.sort;
 
     // ---- header ------------------------------------------------------
     let shown = rows.len();
@@ -191,6 +192,20 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     } else {
         format!(" {} — /{} ({} match)", app.project, ix.filter, shown)
     };
+    // The order rides at the right end of the header, where it does not
+    // push the project and the count around as it changes length. `↓`
+    // because five of the six read newest/most first; `title` is the one
+    // ascending order and says so.
+    let order = if ix.sort == cosense::index::SortKey::Title {
+        format!("{} ↑ ", ix.sort.name())
+    } else {
+        format!("{} ↓ ", ix.sort.name())
+    };
+    use unicode_width::UnicodeWidthStr;
+    let pad = (area.width as usize)
+        .saturating_sub(UnicodeWidthStr::width(head.as_str()))
+        .saturating_sub(UnicodeWidthStr::width(order.as_str()));
+    let head = format!("{head}{}{order}", " ".repeat(pad));
     f.render_widget(
         Paragraph::new(head).style(
             Style::default().fg(app.header_colors.fg).bg(app.header_colors.bg),
@@ -237,7 +252,10 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 };
                 Line::from(vec![
                     Span::styled(glyph.to_string(), style.fg(tel)),
-                    Span::styled(format!("{:>4} ", relative_age(e.updated)), style.fg(CHROME_DIM)),
+                    // Whatever the list is sorted ON — an age for the three
+                    // time orders, the count itself for `linked`/`views`.
+                    // Sorting by a number the reader cannot see is no help.
+                    Span::styled(format!("{:>4} ", sort.column(e)), style.fg(CHROME_DIM)),
                     Span::styled(
                         truncate_width(&e.title, text_w.saturating_sub(6) as usize),
                         title_style,
@@ -325,16 +343,16 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     } else {
         match (layout.preview.is_some(), ix.focus) {
             (true, Pane::List) => ts!(
-                "j/k · / 絞り込み · Enter 開く · Tab 抜粋 · Esc/[ 戻る · q 終了",
-                "j/k · / filter · Enter open · Tab excerpt · Esc/[ back · q quit"
+                "j/k · / 絞り込み · s 並び順 · Enter 開く · Tab 抜粋 · Esc/[ 戻る · q 終了",
+                "j/k · / filter · s order · Enter open · Tab excerpt · Esc/[ back · q quit"
             ),
             (true, Pane::Preview) => ts!(
                 "j/k 抜粋をスクロール · Tab 一覧 · Enter 開く · Esc/[ 戻る · q 終了",
                 "j/k scroll excerpt · Tab list · Enter open · Esc/[ back · q quit"
             ),
             (false, _) => ts!(
-                "j/k · / 絞り込み · Enter 開く · Esc/[ 戻る · q 終了",
-                "j/k · / filter · Enter open · Esc/[ back · q quit"
+                "j/k · / 絞り込み · s 並び順 · Enter 開く · Esc/[ 戻る · q 終了",
+                "j/k · / filter · s order · Enter open · Esc/[ back · q quit"
             ),
         }
     };
@@ -349,6 +367,35 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         Paragraph::new(format!(" {} {pos} · {hint}", ts!("一覧", "index"))).style(Style::default().fg(CHROME_DIM)),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
+
+    // ---- the sort menu, over the list --------------------------------
+    //
+    // Drawn here rather than through `Overlay`: the index returns early in
+    // `ui`, so an overlay laid over the page would never appear above it.
+    if let Some(cursor) = app.index_sort_menu {
+        use cosense::index::SortKey;
+        let current = app.index.as_ref().map(|ix| ix.sort).unwrap_or_default();
+        // The names are the API's own words and stay in English; the mark
+        // is what says which order the list is actually in.
+        let items: Vec<String> = SortKey::ALL
+            .iter()
+            .map(|k| {
+                let here = if *k == current { "·" } else { " " };
+                format!("{here} {}", k.name())
+            })
+            .collect();
+        draw_menu_panel(
+            f,
+            area,
+            ts!("並び順", "order"),
+            &items,
+            cursor,
+            ts!(
+                " ↑/↓ 移動 · Enter 並べ替え · Esc 閉じる ",
+                " ↑/↓ move · Enter re-order · Esc close "
+            ),
+        );
+    }
 }
 
 /// The excerpt dock for the page under the cursor: one compact heading and
@@ -1346,8 +1393,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
                 t!("移動履歴    [ 戻る · ] 進む", "history     [ back · ] forward"),
                 t!("表示切替    s 表示⇄ソース（行番号つき raw）", "source      s view⇄source (raw with line numbers)"),
-                t!("ページ一覧  ^o 一覧＋抜粋 · 一覧内で / 絞り込み · q 終了",
-                   "index       ^o list + excerpt · / filter inside · q quit"),
+                t!("ページ一覧  ^o 一覧＋抜粋 · 一覧内で / 絞り込み · s 並び順 · q 終了",
+                   "index       ^o list + excerpt · / filter · s order · q quit"),
             ];
             if app.editable {
                 keys.extend([
@@ -1407,6 +1454,24 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
+    let footer = ts!(
+        " ↑/↓ 移動 · Enter 開く · Esc 閉じる ",
+        " ↑/↓ move · Enter open · Esc close "
+    );
+    draw_menu_panel(f, area, &title, &items, cursor, footer);
+}
+
+/// A centered menu panel: title bar, the items with a `▸` on the cursor,
+/// and one dim line of keys. `cursor == usize::MAX` marks nothing, which is
+/// how the read-only panels (help, line detail) use it.
+pub(crate) fn draw_menu_panel(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    items: &[String],
+    cursor: usize,
+    footer: &str,
+) {
     let w = area.width.saturating_sub(8).min(90).max(20);
     let want_h = items.len() as u16 + 2;
     let h = want_h.min(area.height.saturating_sub(4)).max(3);
@@ -1443,7 +1508,7 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(format!("{marker}{it}"), style)));
     }
     lines.push(Line::from(Span::styled(
-        ts!(" ↑/↓ 移動 · Enter 開く · Esc 閉じる ", " ↑/↓ move · Enter open · Esc close "),
+        footer.to_string(),
         Style::default().fg(CHROME_DIM),
     )));
     f.render_widget(
