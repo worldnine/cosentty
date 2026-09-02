@@ -249,6 +249,20 @@ pub struct RelatedPage {
     pub created: i64,
 }
 
+/// `/api/projects/<name>`: the settings the viewer reads off it. Fields
+/// absent from the response stay `None`; the site's `uploadImageTo`
+/// vocabulary is `gcs` / `gyazo`, and `gyazoTeamsName` is `null` for
+/// personal gyazo.com.
+#[derive(Debug, Default, Clone, Deserialize, PartialEq)]
+pub struct ProjectSettings {
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default, rename = "uploadImageTo")]
+    pub upload_image_to: Option<String>,
+    #[serde(default, rename = "gyazoTeamsName")]
+    pub gyazo_teams_name: Option<String>,
+}
+
 /// `relatedPages` of a page response. 1-hop = direct links + backlinks
 /// (existing pages only), 2-hop = pages sharing a link target with this
 /// page. Cross-project ("External links") entries are NOT here: the API's
@@ -681,12 +695,27 @@ impl Client {
         self.cfg.auth.sid()
     }
 
+    /// The HTTP client, for requests to hosts other than Cosense that want
+    /// to share its pool (Gyazo uploads).
+    pub fn http(&self) -> &reqwest::blocking::Client {
+        &self.http
+    }
+
     /// The project's selected Cosense site theme (`blue`, `paper-dark`, …).
-    /// `/api/projects/<name>` is public for public projects but refuses PAT
-    /// on private ones; when available, its browser `connect.sid` is therefore
-    /// used only for this cosmetic lookup. REST page/edit calls keep their
-    /// normal PAT / service-account precedence.
+    /// See `get_project_settings`, of which this is the one field.
     pub fn get_project_theme(&self, project: &str) -> Result<String, Box<dyn Error>> {
+        self.get_project_settings(project)?
+            .theme
+            .ok_or_else(|| "projects/<name>: no theme in response".into())
+    }
+
+    /// The project's settings page as `/api/projects/<name>` reports it:
+    /// the site theme and the Upload tab (where the browser sends pasted
+    /// images). The endpoint is public for public projects but refuses PAT
+    /// on private ones; when available, the browser `connect.sid` is
+    /// therefore used for this lookup and no other REST call. Page/edit
+    /// calls keep their normal PAT / service-account precedence.
+    pub fn get_project_settings(&self, project: &str) -> Result<ProjectSettings, Box<dyn Error>> {
         let url = format!("{}/projects/{}", self.cfg.base(), urlencoding(project));
         let mut req = self.http.get(&url).header("Accept", "application/json");
         let mut authenticated = false;
@@ -709,12 +738,81 @@ impl Client {
         if !res.status().is_success() {
             return Err(format!("HTTP {} for {}", res.status(), url).into());
         }
-        let value: serde_json::Value = res.json()?;
-        value
-            .get("theme")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "projects/<name>: no theme in response".into())
+        Ok(res.json::<ProjectSettings>()?)
+    }
+
+    /// Upload a file to the project's own storage and return the URL to
+    /// embed. The official CLI's `uploadFile` route, three requests:
+    /// `upload-request` (a file already there answers with `embedUrl` here
+    /// and the rest is skipped) → `PUT` to the signed URL (Content-Type
+    /// only; NO credential — it is a Google-signed URL) → `verify`.
+    /// Needs the project id, which `/api/projects/<name>/users` gives a PAT.
+    pub fn upload_gcs(
+        &self,
+        project: &str,
+        bytes: &[u8],
+        name: &str,
+        content_type: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        #[derive(Deserialize)]
+        struct Requested {
+            #[serde(default, rename = "embedUrl")]
+            embed_url: Option<String>,
+            #[serde(default, rename = "signedUrl")]
+            signed_url: Option<String>,
+            #[serde(default, rename = "fileId")]
+            file_id: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Verified {
+            #[serde(default, rename = "embedUrl")]
+            embed_url: Option<String>,
+        }
+        let project_id = self.get_project_id(project)?;
+        let md5 = crate::upload::md5_hex(bytes);
+        let auth = |mut req: reqwest::blocking::RequestBuilder| {
+            if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
+                let (name, value) = cred.header();
+                req = req.header(name, value);
+            }
+            req.header("Accept", "application/json")
+        };
+        let url = format!("{}/gcs/{project_id}/upload-request", self.cfg.base());
+        let res = auth(self.http.post(&url))
+            .json(&serde_json::json!({
+                "md5": md5, "size": bytes.len(), "contentType": content_type, "name": name,
+            }))
+            .send()?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for upload-request", res.status()).into());
+        }
+        let req: Requested = res.json()?;
+        if let Some(u) = req.embed_url {
+            return Ok(u);
+        }
+        let (Some(signed), Some(file_id)) = (req.signed_url, req.file_id) else {
+            return Err("upload-request: neither embedUrl nor signedUrl".into());
+        };
+        let put = self
+            .http
+            .put(&signed)
+            .header("Content-Type", content_type)
+            .body(bytes.to_vec())
+            .send()?;
+        if !put.status().is_success() {
+            let hint = if put.status().as_u16() == 403 { " (retrying a little later often works)" } else { "" };
+            return Err(format!("HTTP {} for signed PUT{hint}", put.status()).into());
+        }
+        let url = format!("{}/gcs/{project_id}/verify", self.cfg.base());
+        let res = auth(self.http.post(&url))
+            .json(&serde_json::json!({ "md5": md5, "fileId": file_id }))
+            .send()?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for verify", res.status()).into());
+        }
+        res.json::<Verified>()?
+            .embed_url
+            .ok_or_else(|| "verify: no embedUrl in response".into())
     }
 
     /// Whether the project can be read with no credential at all.
