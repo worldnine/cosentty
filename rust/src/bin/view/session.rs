@@ -1360,6 +1360,12 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
 /// the caret lands at the end of the last pasted fragment.
 pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
     if !clean.contains('\n') {
+        // A dragged-in file arrives as its path. If it is an image on this
+        // machine, the page wants the picture, not the path.
+        if let Some(path) = cosense::upload::image_path_from_paste(clean) {
+            app.start_upload(ctx, &path);
+            return;
+        }
         // A pasted URL usually wants brackets around it — that is what
         // makes an image a picture, and a selection a labelled link. Doing
         // it by hand after every paste is the kind of chore cosense web

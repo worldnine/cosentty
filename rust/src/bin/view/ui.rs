@@ -1734,9 +1734,15 @@ impl App {
         }
         if let Some(s) = self.session.as_ref() {
             let dirty = s.input.buf != s.orig;
-            return t!("{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了", "{}↑↓ move · Enter new line · ⌫@BOL join · Tab indent · Esc done",
+            let keys = t!("{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了", "{}↑↓ move · Enter new line · ⌫@BOL join · Tab indent · Esc done",
                 if dirty { "● " } else { "" }
             );
+            // An upload's progress and outcome arrive while the keys are
+            // being typed; they ride along behind the hint as MOVE's do.
+            return match self.status.is_empty() {
+                true => keys,
+                false => format!("{keys} · {}", self.status),
+            };
         }
         if !cursor_links.is_empty() {
             let listed: Vec<String> = cursor_links

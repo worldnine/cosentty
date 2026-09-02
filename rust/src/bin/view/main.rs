@@ -150,10 +150,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     };
     let sid = std::env::var("COSENSE_SID").ok().filter(|s| !s.is_empty());
-    let gyazo_token = std::env::var("GYAZO_TEAMS_ACCESS_TOKEN")
-        .ok()
-        .or_else(|| std::env::var("GYAZO_ACCESS_TOKEN").ok())
-        .filter(|s| !s.is_empty());
+    let env_token = |name: &str| std::env::var(name).ok().filter(|s| !s.is_empty());
+    let gyazo_teams_token = env_token("GYAZO_TEAMS_ACCESS_TOKEN");
+    let gyazo_personal_token = env_token("GYAZO_ACCESS_TOKEN");
+    // Reading is forgiving: either token can look a picture up.
+    let gyazo_token = gyazo_teams_token.clone().or_else(|| gyazo_personal_token.clone());
 
     // Auth: the official CLI's `cosense login` store (PAT / service
     // account), then the sid cookie fallback — see `AuthStore`.
@@ -176,6 +177,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let fetcher = Arc::new(ImageFetcher::new(gyazo_token, user_cred)?);
+    // The viewer's own settings file (upload destinations; key bindings
+    // later). A typo must not silently become the defaults, so the error
+    // is kept and shown once the screen is up.
+    let (config, config_error) = match cosense::config::Config::load() {
+        Ok(c) => (c, None),
+        Err(e) => (cosense::config::Config::default(), Some(e)),
+    };
 
     let mut terminal = ratatui::init();
     // Wheel scrolling moves the viewport (akapen parity); failure to enable
@@ -247,12 +255,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         preview,
         download_dir,
         editability: std::sync::Mutex::new(HashMap::new()),
-        project_themes: std::sync::Mutex::new(HashMap::new()),
+        project_settings: std::sync::Mutex::new(HashMap::new()),
+        gyazo_teams_token,
+        gyazo_personal_token,
+        config,
+        config_error,
     };
     let loaded = load_page(&ctx, &project, &title)?;
 
     let mut app = App::new(project.clone());
     app.light = ctx.light;
+    if let Some(e) = ctx.config_error.as_ref() {
+        app.status = t!("設定ファイルを読めませんでした: {e}", "could not read the config file: {e}");
+    }
     app.session_ime = cosense::ime::SessionIme::new(ime_mode);
     // The serial commit worker: owns its own Client clone and answers on
     // the outcome channel drained by the event loop.
@@ -325,6 +340,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // …and from here on, every page install also goes and gets its related
     // block, which is the other half of that answer (`start_related_load`).
     app.related_fetch = true;
+    app.uploads_on = true;
     if let Some(sid) = &sid {
         let ws_req_rx = app
             .ws_req_rx
@@ -431,23 +447,41 @@ struct Ctx {
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
     editability: std::sync::Mutex<HashMap<String, bool>>,
-    /// Selected Cosense site-theme id per project. `None` is cached too: a
-    /// PAT-only private project falls back without retrying on every page.
-    project_themes: std::sync::Mutex<HashMap<String, Option<String>>>,
+    /// `/api/projects/<name>` per project: the site theme and the Upload
+    /// tab. `None` is cached too: a PAT-only private project falls back
+    /// without retrying on every page.
+    project_settings: std::sync::Mutex<HashMap<String, Option<cosense::api::ProjectSettings>>>,
+    /// Gyazo tokens for uploads, kept APART: which Gyazo a picture lands
+    /// in is decided by the token, and the permalink the page gets is
+    /// built from the destination — so a Teams token must only ever serve
+    /// a Teams destination and a personal one a personal destination, or
+    /// the page points at a picture that is somewhere else (404).
+    /// `GYAZO_TEAMS_ACCESS_TOKEN` / `GYAZO_ACCESS_TOKEN`.
+    gyazo_teams_token: Option<String>,
+    gyazo_personal_token: Option<String>,
+    /// `~/.config/cosense-tui/config.toml`, or the defaults when there is
+    /// none. A file that failed to parse is the defaults too, and
+    /// `config_error` says so once on the status line.
+    config: cosense::config::Config,
+    config_error: Option<String>,
 }
 
 impl Ctx {
     fn project_theme(&self, project: &str) -> Option<String> {
-        if let Ok(cache) = self.project_themes.lock() {
-            if let Some(theme) = cache.get(project) {
-                return theme.clone();
+        self.project_settings(project).and_then(|s| s.theme)
+    }
+
+    fn project_settings(&self, project: &str) -> Option<cosense::api::ProjectSettings> {
+        if let Ok(cache) = self.project_settings.lock() {
+            if let Some(settings) = cache.get(project) {
+                return settings.clone();
             }
         }
-        let theme = self.client.get_project_theme(project).ok();
-        if let Ok(mut cache) = self.project_themes.lock() {
-            cache.insert(project.to_string(), theme.clone());
+        let settings = self.client.get_project_settings(project).ok();
+        if let Ok(mut cache) = self.project_settings.lock() {
+            cache.insert(project.to_string(), settings.clone());
         }
-        theme
+        settings
     }
 
     fn can_edit_in(&self, project: &str) -> bool {
@@ -564,6 +598,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         app.rescale_diagrams();
         app.expire_web_notice();
         app.drain_downloads();
+        app.drain_uploads(ctx);
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
         // promptly), then drain everything that queued up into ONE frame.
@@ -688,6 +723,8 @@ mod images;
 use images::*;
 mod links;
 use links::*;
+mod upload;
+use upload::*;
 mod web;
 use web::*;
 mod nav;

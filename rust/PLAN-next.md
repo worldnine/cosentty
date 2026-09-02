@@ -29,7 +29,7 @@ updated 降順)ので、手元で並べ替えられる。セクション内だ�
 サーバの順のまま。行の薄い値も並べている値に変える。生ブロックを App に
 持ち、`s` で順を変えたら取り直さずに並べ直す(`rebuild_related`)。
 
-### 2. 画像の貼り付け(次にやる)
+### 2. 画像の貼り付け — **済(2026-09-03)。実施記録は末尾へ**
 
 クリップボードの画像を貼り付け → アップロード → 記法挿入。仕様の正本は
 [アウトライン編集と画像貼り付けの仕様案](https://scrapbox.io/my-sandbox/アウトライン編集と画像貼り付けの仕様案)。
@@ -363,6 +363,44 @@ relatedPages は下部の関連セクションだけでなく**リンク色の�
 ポーリング縮退、`get_project_theme` の cosmetic 例外)。残っていたのは文言で、
 HANDOFF / CLAUDE.md の「非公開プロジェクトの認証は COSENSE_SID」を直し、
 KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だけ」を明記した。
+
+### 実施記録: 2. 画像の貼り付け(2026-09-03)
+
+v1 の範囲は計画どおり「パス貼り付けだけ」。ヘルパは作っていない。
+
+- **入口**は `session_paste` の1行分岐。`cosense::upload::image_path_from_paste`
+  が「実在する画像ファイルのパス」と判定したら `App::start_upload` へ。
+  端末が付ける飾り(末尾空白・`file://`・`\ `・引用符・`~`)は剥がす
+- **送信**は lib の `Client::upload_gcs`(3往復。同一ファイルは upload-request
+  で即 embedUrl)と `upload::upload_gyazo`(multipart。Teams は permalink を
+  `<org>.gyazo.com/<id>` に組み直す)。reqwest に `multipart`、`md5`、`toml` を足した
+- **行き先**は `Destination::resolve` で TOML > プロジェクト設定 > gcs。
+  プロジェクト設定は `get_project_theme` を `get_project_settings` に育てて
+  同じ1回の取得で theme と `uploadImageTo` / `gyazoTeamsName` を得る
+  (`Ctx::project_settings` キャッシュ)。設定ファイルは `src/config.rs`
+  (`~/.config/cosense-tui/config.toml`、`[upload]` と `[upload.project.<name>]`)。
+  読めない TOML は既定にせず、起動時のステータスで言う
+- **合流**は `start_related_load` / `drain_related` と同じ形(背景スレッド +
+  チャネル + ページ照合)。行IDとキャレット位置を覚え、届いたときキャレットが
+  その行なら編集バッファに差し込み(他の入力と一緒にコミット)、別の行なら
+  その行の**いまの**本文へ Replace、行が無ければ末尾に Insert して理由を言う。
+  前後に文字があれば空白を挟む(`splice_image`)
+- **EDIT 中の status** はこれまでヒントに隠れていたので、MOVE と同じく
+  ヒントの後ろに付ける形にした
+- **見つけた落とし穴**: my-sandbox のプロジェクト設定は `gyazo` +
+  team なし(個人)だが、環境にあるのは Teams トークンだけ。トークンで
+  「どの Gyazo に入るか」が決まるのに permalink は行き先から組むので、代用
+  すると 404 を指す。だから 2. で決めた「TEAMS 無ければ personal」の順は
+  **読む側だけ**に残し、**上げる側は行き先に一致するトークンだけ**を使う
+  (無ければ変数名を言って何もしない)。計画からの唯一の変更
+- **実測**: `upload_smoke`(新規 bin)で my-sandbox へ gcs 送信し
+  `https://scrapbox.io/files/<id>.png` が返ることを確認。Gyazo 側は
+  トークンの所在(会社の Teams)から実送信は控え、テストで形だけ検証
+- テストはネットワークに触れない: `App::uploads_on`(`related_fetch` と
+  同じゲート)が実行時だけ true になる
+
+残り(やらない/後で): クリップボードの画像そのもの(OS ヘルパ)、
+`uploadFileTo`(画像以外のファイル)、キーバインド設定の同居。
 
 ### 実施記録: 1. サイトトップ刷新(2026-09-02)
 

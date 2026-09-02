@@ -30,7 +30,11 @@ use crate::*;
             preview: cosense::index::PreviewMode::Auto,
             download_dir: std::env::temp_dir(),
             editability: std::sync::Mutex::new(HashMap::new()),
-            project_themes: std::sync::Mutex::new(HashMap::new()),
+            project_settings: std::sync::Mutex::new(HashMap::new()),
+            gyazo_teams_token: None,
+            gyazo_personal_token: None,
+            config: cosense::config::Config::default(),
+            config_error: None,
         }
     }
 

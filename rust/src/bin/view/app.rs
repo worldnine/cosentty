@@ -113,6 +113,9 @@ pub(crate) struct App {
     /// File downloads in flight (Enter/f on a 📎 link).
     pub(crate) file_tx: mpsc::Sender<FileMsg>,
     pub(crate) file_rx: mpsc::Receiver<FileMsg>,
+    /// Finished image uploads (`App::start_upload` / `drain_uploads`).
+    pub(crate) upload_tx: mpsc::Sender<UploadMsg>,
+    pub(crate) upload_rx: mpsc::Receiver<UploadMsg>,
 
     // --- web renderer (Mermaid today; see cosense::webrender) -------------
     /// Bumped on every page install. Shared with the render worker, which
@@ -442,6 +445,9 @@ pub(crate) struct App {
     /// put a request on the wire. Same reason `link_probe_tx` is an
     /// `Option`.
     pub(crate) related_fetch: bool,
+    /// Whether `start_upload` may put a file on the wire. Same gate, same
+    /// reason: a test that pastes an image path must go nowhere.
+    pub(crate) uploads_on: bool,
     pub(crate) related_tx: mpsc::Sender<RelatedMsg>,
     pub(crate) related_rx: mpsc::Receiver<RelatedMsg>,
     /// Flattened related entries in render order. Entry `i` renders with
@@ -514,6 +520,7 @@ impl App {
     pub(crate) fn new(project: String) -> Self {
         let (image_tx, image_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
+        let (upload_tx, upload_rx) = mpsc::channel();
         let (web_job_tx, web_jobs_rx) = mpsc::channel();
         let (web_tx, web_rx) = mpsc::channel();
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
@@ -540,6 +547,8 @@ impl App {
             image_tx,
             image_rx,
             file_tx,
+            upload_tx,
+            upload_rx,
             file_rx,
             rows: Vec::new(),
             laid_width: 0,
@@ -644,6 +653,7 @@ impl App {
             facts: PageFacts::default(),
             related_pending: false,
             related_fetch: false,
+            uploads_on: false,
             related_tx,
             related_rx,
             virtual_items: Vec::new(),

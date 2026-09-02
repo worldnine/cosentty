@@ -28,6 +28,7 @@ Cosense(旧 Scrapbox)の TUI ビューワ/エディタ。本体は `rust/`(lib �
   ff マージする(1関心事 = 1コミット、コミットメッセージは日本語)
 - 実験・検証には `my-sandbox/テスト` ページを使ってよい(実編集OK。
   終わったら元に戻す)。非公開プロジェクトの認証は `cosense login` の PAT で足りる。
-  `COSENSE_SID` が要るのは ws push 同期と web レンダラ(mmd)だけ
+  `COSENSE_SID` が要るのは ws push 同期・web レンダラ(mmd)・プロジェクト設定の
+  読み取り(テーマ・アップロード先)だけ
 - 設計判断は PLAN-*.md / NOTE-*.md / SPEC-*.md に書き残す文化。実施した
   計画には「実施記録」を追記する

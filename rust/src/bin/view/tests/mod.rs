@@ -10,5 +10,6 @@ mod nav;
 mod outline;
 mod session;
 mod sync;
+mod upload;
 mod ui;
 mod web;
