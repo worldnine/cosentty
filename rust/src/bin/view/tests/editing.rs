@@ -668,13 +668,13 @@ use super::support::*;
         assert!(app.history_dropped);
 
         redo(&mut app, &ctx);
-        assert!(app.note_text().contains("失効"), "note: {}", app.note_text());
+        assert!(app.toast_text().contains("失効"), "toast: {}", app.toast_text());
 
         // A new edit starts a clean lineage, and the excuse expires with it.
         do_edit(&mut app, &ctx, "line 3", vec![EditOp::Replace { id: "id2".into(), text: "x".into() }]);
         assert!(!app.history_dropped);
         redo(&mut app, &ctx);
-        assert_eq!(app.note_text(), "やり直せる編集がありません");
+        assert_eq!(app.toast_text(), "やり直せる編集がありません");
     }
 
     /// The undo reflex must not depend on which mode you are in: `^z`
@@ -748,5 +748,5 @@ use super::support::*;
         // Nothing left to undo: the session survives that too.
         handle_session_key(&mut app, &ctx, ctrl('z'));
         assert!(app.session.is_some());
-        assert_eq!(app.note_text(), "取り消せる編集がありません");
+        assert_eq!(app.toast_text(), "取り消せる編集がありません");
     }

@@ -337,7 +337,7 @@ use super::support::*;
         bare.cursor = 1;
         handle_key(&mut bare, &ctx, key(KeyCode::Tab));
         assert_eq!(bare.cursor, 1, "nowhere to go");
-        assert!(bare.note_text().contains("ソース表示は s"), "note: {}", bare.note_text());
+        assert!(bare.toast_text().contains("ソース表示は s"), "note: {}", bare.toast_text());
     }
 
     /// ソース表示はモードから表示オプションへ降格: `s` でトグルし、

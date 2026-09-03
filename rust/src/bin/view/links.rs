@@ -563,7 +563,7 @@ pub(crate) fn copy_payload(app: &App, whole_page: bool) -> Option<(String, Strin
 /// that will not take OSC 52, a copy too large to send that way).
 pub(crate) fn copy_and_report(app: &mut App, payload: Option<(String, String)>) {
     let Some((text, label)) = payload else {
-        app.note(t!("コピーするものがありません", "nothing to copy"));
+        app.toast(t!("コピーするものがありません", "nothing to copy"));
         return;
     };
     if copy_to_clipboard(&text) {
@@ -700,7 +700,7 @@ pub(crate) fn cycle_link_line(app: &mut App, forward: bool) {
             }
         }
     }
-    app.note(t!(
+    app.toast(t!(
         "リンクのある行がありません（ソース表示は s）",
         "no link lines (source view is on s)"
     ));

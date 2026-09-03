@@ -440,7 +440,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.undo_stack.last() else {
-        app.note(empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo")));
+        app.toast(empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo")));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -510,7 +510,7 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.redo_stack.last() else {
-        app.note(empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo")));
+        app.toast(empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo")));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();

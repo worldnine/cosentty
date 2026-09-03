@@ -488,6 +488,6 @@ pub(crate) fn jump_comment(app: &mut App, forward: bool) {
             app.goto_src(src);
             app.note(t!("{} 行目のコメント", "comment at line {}", src + 1));
         }
-        None => app.note(t!("これ以上コメントはありません", "no more comments")),
+        None => app.toast(t!("これ以上コメントはありません", "no more comments")),
     }
 }

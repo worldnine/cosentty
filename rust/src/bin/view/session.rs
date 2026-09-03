@@ -880,7 +880,7 @@ pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let last = app.lines.len().saturating_sub(1) as i32;
     let target = (cur_line + delta).clamp(0, last);
     if target == cur_line {
-        app.note(if delta < 0 { t!("ページの先頭です", "top of page") } else { t!("ページの末尾です — Enter で行を足せます", "end of page — Enter adds a line") });
+        app.toast(if delta < 0 { t!("ページの先頭です", "top of page") } else { t!("ページの末尾です — Enter で行を足せます", "end of page — Enter adds a line") });
         return;
     }
     let line = target as usize;
@@ -1080,7 +1080,7 @@ pub(crate) fn session_join_up(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line == 0 {
-        app.note(t!("ページの先頭です", "top of page"));
+        app.toast(t!("ページの先頭です", "top of page"));
         return;
     }
     let prev_text = app.lines[line - 1].text.clone();
@@ -1105,7 +1105,7 @@ pub(crate) fn session_join_down(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line + 1 >= app.lines.len() {
-        app.note(t!("ページの末尾です", "end of page"));
+        app.toast(t!("ページの末尾です", "end of page"));
         return;
     }
     let next_text = app.lines[line + 1].text.clone();

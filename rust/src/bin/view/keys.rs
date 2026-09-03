@@ -387,7 +387,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::Enter, false) | (KeyCode::Char('f'), false) => {
             let mut links = app.cursor_line_links();
             match links.len() {
-                0 => app.note(t!("この行にリンクはありません", "no link on this line")),
+                0 => app.toast(t!("この行にリンクはありません", "no link on this line")),
                 1 => activate_link(app, ctx, links.remove(0)),
                 _ => app.overlay = Some(Overlay::Links { items: links, cursor: 0 }),
             }
@@ -540,7 +540,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 app.laid_width = 0;
                 app.note(t!("コメントを削除しました", "comment deleted"));
             } else {
-                app.note(t!("この行にコメントはありません", "no comment on this line"));
+                app.toast(t!("この行にコメントはありません", "no comment on this line"));
             }
         }
         // jump between comments on this page
@@ -612,7 +612,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                     return Action::Continue;
                 }
             }
-            app.note(t!("割り当てのないキー: {:?} {:?}", "unbound key: {:?} {:?}", k.code, k.modifiers));
+            app.toast(t!("割り当てのないキー: {:?} {:?}", "unbound key: {:?} {:?}", k.code, k.modifiers));
         }
     }
     Action::Continue
@@ -646,7 +646,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         KeyCode::Char('y') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
             let text = format_all(&app.comments);
             if app.comments.is_empty() {
-                app.note(t!("コピーするコメントがありません", "no comments to copy"));
+                app.toast(t!("コピーするコメントがありません", "no comments to copy"));
             } else if copy_to_clipboard(&text) {
                 app.note(t!("✓ コメント {} 件をコピーしました", "✓ copied {} comment(s)", app.comments.len()));
             } else {

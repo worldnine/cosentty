@@ -561,7 +561,7 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
 pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     if app.time.is_none() {
         if dir > 0 {
-            app.note(t!("すでに最新です", "already at NOW"));
+            app.toast(t!("すでに最新です", "already at NOW"));
             return;
         }
         match ctx.client.list_snapshots(&app.project, &app.page_id) {
@@ -570,7 +570,7 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
                 app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
                 show_snapshot(app, ctx, last);
             }
-            Ok(_) => app.note(t!("このページに履歴はありません", "no snapshots for this page")),
+            Ok(_) => app.toast(t!("このページに履歴はありません", "no snapshots for this page")),
             Err(e) => app.toast_err(t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}")),
         }
         return;
@@ -581,7 +581,7 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     };
     if dir < 0 {
         if pos == 0 {
-            app.note(t!("最も古い履歴です", "oldest snapshot"));
+            app.toast(t!("最も古い履歴です", "oldest snapshot"));
         } else {
             show_snapshot(app, ctx, pos - 1);
         }
