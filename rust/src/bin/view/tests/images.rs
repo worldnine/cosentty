@@ -171,3 +171,107 @@ use super::support::*;
         drop(b);
         assert_eq!(gate.in_use(), 0);
     }
+
+    /// The band a waiting picture wears has to MOVE. A `[URL]` is twenty to
+    /// sixty cells wide, and the vertical band's unit — six rows a second —
+    /// gives a ten-second sweep along a row: longer than the download, so the
+    /// reader watched a still grey line and called the animation dead. The
+    /// sweep is therefore timed, not counted.
+    #[test]
+    fn a_waiting_picture_sweeps_a_band_along_its_url() {
+        use ratatui::{backend::TestBackend, style::Modifier, Terminal};
+
+        let url = "https://example.com/a.png";
+        let mut app = page(&["image"]);
+        app.blocks =
+            vec![Block::Image { url: url.into(), indent: 0, item: false }];
+        app.srcs = vec![0];
+        let ctx = test_ctx();
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+
+        // Paint at `seconds` into the sweep and take the notation's own cells.
+        let mut draw_at = |app: &mut App, seconds: f32| -> Vec<(String, ratatui::style::Style)> {
+            app.image_anim = Instant::now() - Duration::from_secs_f32(seconds);
+            terminal.draw(|f| ui(f, app, &ctx)).unwrap();
+            let buf = terminal.backend().buffer();
+            let row = |y: u16| -> String {
+                (0..60)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            };
+            let y = (0..8).find(|y| row(*y).contains('[')).expect("the notation on screen");
+            let x0 = (0..60).find(|x| buf.cell((*x, y)).unwrap().symbol() == "[").unwrap();
+            let x1 = (0..60).rev().find(|x| buf.cell((*x, y)).unwrap().symbol() == "]").unwrap();
+            (x0..=x1)
+                .map(|x| {
+                    let c = buf.cell((x, y)).unwrap();
+                    (c.symbol().to_string(), c.style())
+                })
+                .collect()
+        };
+
+        let early = draw_at(&mut app, 0.3);
+        let late = draw_at(&mut app, 0.9);
+        assert_eq!(early.len(), late.len(), "the same notation; only its brightness moved");
+
+        // Every cell carries an RGB foreground. A palette colour could only
+        // be DIM-ed, and `DarkGray` dimmed is the same grey it already was —
+        // that is what made the band invisible rather than slow.
+        for (sym, st) in &early {
+            assert!(matches!(st.fg, Some(Color::Rgb(..))), "{sym} kept a palette colour: {st:?}");
+            assert!(!st.add_modifier.contains(Modifier::DIM), "the band is colour, not DIM");
+        }
+
+        let peak = |frame: &[(String, ratatui::style::Style)]| -> usize {
+            frame
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (_, s))| match s.fg {
+                    Some(Color::Rgb(r, g, b)) => u32::from(r) + u32::from(g) + u32::from(b),
+                    _ => 0,
+                })
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+        let (a, b) = (peak(&early), peak(&late));
+        assert!(b >= a + 6, "the band covered ground between two frames, not a cell or two: {a} → {b}");
+        assert!(a > 0, "and it entered from the head of the row, not the middle");
+        assert!(b + 3 < early.len(), "…and had not fallen off the end yet: {b}/{}", early.len());
+    }
+
+    /// The other half of the same complaint: a picture written INSIDE a line
+    /// of text reserved its box and painted nothing in it, so the reader
+    /// stared at an eight-row hole with no hint of what would fill it.
+    #[test]
+    fn a_waiting_picture_names_itself_in_the_box_it_reserved() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let url = "https://example.com/a.png";
+        let mut app = page(&["t", &format!("本文 [{url}] が続く")]);
+        let ctx = test_ctx();
+        app.rebuild(40);
+        assert!(
+            app.content_view(40).iter().any(|r| matches!(r, Row::Inline { .. })),
+            "the line really is a mixed one"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        app.image_anim = Instant::now() - Duration::from_secs_f32(0.6);
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..40)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .filter(|s| s != " ")
+                .collect::<String>()
+        };
+        let hits: Vec<u16> = (0..14).filter(|y| row(*y).contains("[https://")).collect();
+        assert_eq!(hits.len(), 1, "the waiting picture speaks once, on its own row: {hits:?}");
+        let y = hits[0];
+        assert!(row(y).contains("本文"), "on the line's own baseline, where the words ride: {}", row(y));
+        let x0 = (0..40).find(|x| buf.cell((*x, y)).unwrap().symbol() == "[").unwrap();
+        let fg = buf.cell((x0 + 1, y)).unwrap().style().fg;
+        assert!(matches!(fg, Some(Color::Rgb(..))), "and it wears the band: {fg:?}");
+    }
+

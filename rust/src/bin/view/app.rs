@@ -27,7 +27,11 @@ pub(crate) enum Row {
         /// like every other item).
         indent: usize,
         item: bool,
-        images: Vec<(u16, u16, String)>,
+        /// `(row, col, width, height, url)`: where the layout put the picture
+        /// and the box it reserved for it — the real size once the picture
+        /// has decoded, the placeholder's while it is still coming. The draw
+        /// needs the reservation to say so (see `Row::ImageLoading`).
+        images: Vec<(u16, u16, u16, u16, String)>,
         /// `(row, col, piece)`: the piece knows which part of the block
         /// and which column of that part it shows, for the click path.
         texts: Vec<(u16, u16, TextPiece)>,
@@ -115,6 +119,12 @@ pub(crate) struct App {
     pub(crate) image_errors: HashMap<String, String>,
     /// Images currently downloading in the background.
     pub(crate) pending: HashSet<String>,
+    /// Clock the downloading pictures animate against — reset when new work
+    /// is dispatched, so the band runs from the head of the row instead of
+    /// from whatever phase the page's first paint left behind. The diagrams
+    /// have their own (`web_anim`): the two are asked a different question,
+    /// and one page can wait on both.
+    pub(crate) image_anim: std::time::Instant,
     pub(crate) image_tx: mpsc::Sender<ImageMsg>,
     pub(crate) image_rx: mpsc::Receiver<ImageMsg>,
     /// File downloads in flight (Enter/f on a 📎 link).
@@ -569,6 +579,7 @@ impl App {
             images: HashMap::new(),
             image_errors: HashMap::new(),
             pending: HashSet::new(),
+            image_anim: std::time::Instant::now(),
             image_tx,
             image_rx,
             file_tx,

@@ -1341,8 +1341,28 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         }
                     }
                 }
-                for (row_off, col, url) in images {
-                    let Some(info) = app.images.get(url) else { continue };
+                for (row_off, col, w, h, url) in images {
+                    let Some(info) = app.images.get(url) else {
+                        // Not arrived. The box stands reserved so the words
+                        // beside it do not jump; a hole that says nothing is
+                        // the other half of the dead animation, so the
+                        // notation goes on the line's own baseline — the row
+                        // the picture hangs off — wearing the band a waiting
+                        // `[URL]` has always worn.
+                        let baseline = *row_off as i32 + *h as i32 - 1;
+                        let Some(r) = one_row(screen_y + baseline) else { continue };
+                        let room = (*w).min(r.width.saturating_sub(*col));
+                        if room == 0 {
+                            continue;
+                        }
+                        let text = truncate_width(&format!("[{url}]"), room as usize);
+                        let line = Line::from(Span::styled(text, base.fg(CHROME_DIM)));
+                        f.render_widget(
+                            Paragraph::new(shimmer_across(&line, app, ctx)),
+                            Rect::new(r.x + *col, r.y, room, 1),
+                        );
+                        continue;
+                    };
                     let top = screen_y + *row_off as i32;
                     let pos = SignedPosition {
                         x: 0,
@@ -1717,17 +1737,23 @@ pub(crate) fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: 
 }
 
 /// `shimmer` turned sideways: the band runs ALONG a single row, character
-/// by character, for the rows that are one line tall (a loading image's
-/// `[URL]`). Same clock, same brightness range, so the two read as one
-/// signal.
+/// by character, for the rows that are one line tall (a picture's `[URL]`
+/// while it downloads, and the box a mixed line reserves for one).
+///
+/// Two things differ from the vertical band beyond the direction, and both
+/// are the reason this row used to look dead: it animates against the
+/// pictures' own clock, and `shimmer_level_across` times the sweep instead
+/// of counting cells per second, so a sixty-cell URL crosses in the same
+/// moment a twenty-cell one does. Same brightness floor and ceiling, so the
+/// two still read as one signal.
 pub(crate) fn shimmer_across(line: &Line<'static>, app: &App, ctx: &Ctx) -> Line<'static> {
-    let elapsed = app.web_anim.elapsed().as_secs_f32();
+    let elapsed = app.image_anim.elapsed().as_secs_f32();
     let len = str_width(&line.to_string()) as u16;
     let mut col: u16 = 0;
     let mut spans: Vec<Span<'static>> = Vec::new();
     for s in &line.spans {
         for ch in s.content.chars() {
-            let level = cosense::theme::shimmer_level(col, len, elapsed);
+            let level = cosense::theme::shimmer_level_across(col, len, elapsed);
             spans.push(Span::styled(
                 ch.to_string(),
                 cosense::theme::shimmer_style(s.style, ctx.terminal_bg, level),
@@ -2276,15 +2302,24 @@ impl App {
         src: usize,
     ) -> Row {
         use cosense::render::InlinePart;
+        let body = (text_w.saturating_sub(indent)).max(1) as u16;
+        // The box a picture gets: its real size once decoded, the
+        // placeholder's while it is still coming. Clamped to the line here so
+        // the size the layout used is the size the draw sees reserved — the
+        // notation of a waiting picture may not paint into its neighbour's
+        // columns.
+        let reserved = |url: &str| -> (u16, u16) {
+            match self.images.get(url) {
+                Some(info) => (info.cells_w.min(body), info.cells_h.max(1)),
+                None => (IMAGE_PLACEHOLDER_W.min(body), IMAGE_PLACEHOLDER_H),
+            }
+        };
         let items: Vec<Inline> = parts
             .iter()
             .map(|p| match p {
                 InlinePart::Text(line) => Inline::Text(line.clone()),
                 InlinePart::Image(url) => {
-                    let (w, h) = match self.images.get(url) {
-                        Some(info) => (info.cells_w, info.cells_h.max(1)),
-                        None => (IMAGE_PLACEHOLDER_W, IMAGE_PLACEHOLDER_H),
-                    };
+                    let (w, h) = reserved(url);
                     Inline::Image { url: url.clone(), w, h }
                 }
             })
@@ -2295,7 +2330,13 @@ impl App {
             height,
             indent,
             item,
-            images: images.into_iter().map(|p| (p.row, p.col, p.what)).collect(),
+            images: images
+                .into_iter()
+                .map(|p| {
+                    let (w, h) = reserved(&p.what);
+                    (p.row, p.col, w, h, p.what)
+                })
+                .collect(),
             texts: texts.into_iter().map(|p| (p.row, p.col, p.what)).collect(),
         }
     }

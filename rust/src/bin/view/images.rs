@@ -70,9 +70,11 @@ impl Drop for Slot<'_> {
 pub(crate) static IMAGE_SLOTS: Slots = Slots::new(IMAGE_PARALLEL);
 
 /// Rows a not-yet-decoded picture takes in a MIXED line (`inline_row`),
-/// so the text beside it does not jump when it lands. A picture on a line
-/// of its own reserves nothing: it shows as its `[URL]` row until it
-/// arrives (`Row::ImageLoading`).
+/// so the text beside it does not jump when it lands. The box is not left
+/// blank: the notation `[URL]` sits on the line's own baseline and wears the
+/// band, which is what says the space belongs to a picture on its way.
+/// A picture on a line of its own reserves nothing: it shows as its `[URL]`
+/// row until it arrives (`Row::ImageLoading`).
 pub(crate) const IMAGE_PLACEHOLDER_H: u16 = 8;
 
 /// The tallest a picture may be drawn, in rows. Beyond this the reader is
@@ -222,6 +224,7 @@ impl App {
                 _ => Vec::new(),
             })
             .collect();
+        let mut started = false;
         for url in urls {
             if self.images.contains_key(&url)
                 || self.image_errors.contains_key(&url)
@@ -229,6 +232,7 @@ impl App {
             {
                 continue;
             }
+            started = true;
             self.pending.insert(url.clone());
             let tx = self.image_tx.clone();
             let fetcher = Arc::clone(&ctx.fetcher);
@@ -246,6 +250,11 @@ impl App {
                     .and_then(|img| build_image(&picker, img, IMAGE_MAX_COLS));
                 let _ = tx.send((url, res));
             });
+        }
+        // Fresh work: the band on every waiting `[URL]` starts at the head of
+        // its row again, so the reader sees a sweep rather than a grey line.
+        if started {
+            self.image_anim = std::time::Instant::now();
         }
     }
 
