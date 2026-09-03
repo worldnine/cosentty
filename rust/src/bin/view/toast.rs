@@ -136,11 +136,13 @@ impl App {
         }
         self.quit_armed = Some(Instant::now());
         // Say what would be lost, when something would.
-        let stake = if self.inflight > 0 {
-            t!("未送信の編集 {} 件 · ", "{} unsent edit(s) · ", self.inflight)
-        } else {
-            String::new()
-        };
+        let mut stake = String::new();
+        if self.inflight > 0 {
+            stake.push_str(&t!("未送信の編集 {} 件 · ", "{} unsent edit(s) · ", self.inflight));
+        }
+        if !self.comments.is_empty() {
+            stake.push_str(&t!("未送信のコメント {} 件 · ", "{} unsent comment(s) · ", self.comments.len()));
+        }
         self.toast(t!("{stake}もう一度 q で終了 · Esc で戻る", "{stake}q again to quit · Esc to stay"));
         false
     }

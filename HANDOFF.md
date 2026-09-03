@@ -29,7 +29,7 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 - viewer(`rust/src/bin/view/`): `main`(起動+イベントループ)/ `app`(状態)/
   `keys` / `mouse` / `session`(EDIT)/ `editing`(コミット・undo)/ `outline` /
   `sync`(ws・resync)/ `nav` / `links` / `images` / `web` / `ui`(描画)/
-  `toast`(一過性の通知バナー)/
+  `toast`(一過性の通知バナー)/ `handoff`(コメントをエージェントへ送る: `S`、herdr / `--send-cmd`)/
   `tests/`(モジュール対応)
 
 ## ビルドとテスト

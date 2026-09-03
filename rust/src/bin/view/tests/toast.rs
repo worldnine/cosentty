@@ -225,3 +225,14 @@ use super::support::*;
         assert!(app.toast_text().contains("未送信の編集 2 件"), "{}", app.toast_text());
         assert!(matches!(handle_key(&mut app, &ctx, ctrl('c')), Action::Quit));
     }
+
+    /// q の問いには失われるものを添える: 未送信のコメントもその1つ。
+    #[test]
+    fn the_quit_question_counts_unsent_comments() {
+        let mut app = page(&["title", "one"]);
+        app.cursor = 1;
+        let c = app.make_comment("fix".into()).unwrap();
+        app.comments.push(c);
+        assert!(!app.confirm_quit());
+        assert!(app.toast_text().contains("未送信のコメント 1 件"), "{}", app.toast_text());
+    }

@@ -212,7 +212,7 @@ cosense-cli の `uploadFile` を読んで確かめた送信手順(3往復):
 
 **これで 2. の未決は無くなった。** 着手してよい。
 
-### 3. コメントモードの置き場所(P3 の残り)
+### 3. コメントモードの置き場所(P3 の残り) — **済(2026-09-03)。実施記録は末尾へ**
 
 - キーバインドが混んできたので、どのモードに属させるかを決め直す
 - 前提が変わっている点に注意: **Tab は再編済み**(READ=リンク巡回 /
@@ -390,6 +390,37 @@ relatedPages は下部の関連セクションだけでなく**リンク色の�
 ポーリング縮退、`get_project_theme` の cosmetic 例外)。残っていたのは文言で、
 HANDOFF / CLAUDE.md の「非公開プロジェクトの認証は COSENSE_SID」を直し、
 KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だけ」を明記した。
+
+### 実施記録: 3. コメントの整理(2026-09-03)
+
+ユーザー判断: 「縮める」(モードに隔離しない・落とさない)。やりたいことは
+**herdr 経由でエージェントに直送**と、**引用とコメントを混ぜたテキストの
+クリップボード送り**。akapen(`https://github.com/worldnine/akapen`)を参照。
+
+- 現在の動作: READ に `v` `c` `d` `^n` `^p` `l` の6キー。書き出しは終了時の
+  stdout と `l`→`y` のみ。書式は `Page:` `URL:` `Lines … (exact text — …)`
+  `Instruction:` のラベル付きで冗長。送る手段が無い
+- 期待する動作: READ は `c`(書く。同じ範囲で再度 `c` = 編集)・`S`(送る)・
+  `l`(一覧: Enter / d / y / s)。選択は Shift+↑↓ / J/K に統一。廃止キーは
+  黄バナーで行き先を言う。`S` は全件をクリップボードへ + 宛先へ届け、
+  **届いたときだけ消す**(akapen の `s`)。宛先は `--send-cmd` → herdr の
+  タブの唯一のエージェント(`herdr agent list` / `herdr agent prompt <pane> <text>`、
+  argv 直渡し)→ 無し。書式は akapen の返信形に Cosense の場所1行を足したもの
+- 完了条件: `retired_comment_keys_say_where_their_job_went`、
+  `the_comments_list_deletes_with_d`、`s_with_nowhere_to_send_…`、
+  `s_pipes_the_export_to_the_send_command_and_clears_on_success`、
+  `c_on_the_same_range_edits_the_existing_comment`、`handoff::tests`、
+  `comment::tests`(書式)、`the_quit_question_counts_unsent_comments`
+- 決めたこと:
+  - 送信キーは **`S`**。`s` はソース表示に取られている(akapen は `s`)。一覧の中では `s`
+  - herdr の中では**フラグ無しで直送**(akapen は `--send-agent` で opt-in)。
+    `HERDR_PANE_ID` があれば herdr の中。テストは `Ctx::send_target` を
+    `SendTarget::None` に固定するので、herdr の中で走らせても外へ出ない
+  - 終了時の stdout 印字は残す(送り忘れの保険)。q の問いに「未送信のコメント N 件」を添える
+  - 永続化(comments.json)はしていない。送ってしまえば消えるものなので、
+    要るなら別の小粒として
+- 場所: `src/bin/view/handoff.rs`(宛先の決定・送信・エージェント解決)、
+  `src/comment.rs`(書式)、keys.rs のコメント節と一覧オーバーレイ
 
 ### 実施記録: 5. ヘッダの整理(2026-09-03)
 

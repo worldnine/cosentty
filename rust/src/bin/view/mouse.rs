@@ -467,27 +467,3 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     }
 }
 
-/// Move the cursor to the next/previous commented line on this page.
-pub(crate) fn jump_comment(app: &mut App, forward: bool) {
-    let cur_src = app.cursor_src().unwrap_or(0);
-    let mut targets: Vec<usize> = app
-        .comments
-        .iter()
-        .filter(|c| c.project == app.project && c.title == app.title)
-        .map(|c| c.start)
-        .collect();
-    targets.sort_unstable();
-    targets.dedup();
-    let target = if forward {
-        targets.into_iter().find(|&s| s > cur_src)
-    } else {
-        targets.into_iter().filter(|&s| s < cur_src).next_back()
-    };
-    match target {
-        Some(src) => {
-            app.goto_src(src);
-            app.note(t!("{} 行目のコメント", "comment at line {}", src + 1));
-        }
-        None => app.toast(t!("これ以上コメントはありません", "no more comments")),
-    }
-}

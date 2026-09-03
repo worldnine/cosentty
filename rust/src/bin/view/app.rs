@@ -697,17 +697,18 @@ impl App {
         }
     }
 
-    /// Index into `comments` of the comment covering the cursor line.
-    pub(crate) fn comment_at_cursor(&self) -> Option<usize> {
-        let src = self.cursor_src()?;
+    /// The comment whose range is exactly the current selection (or the
+    /// cursor line when nothing is selected): `c` on it edits instead of
+    /// stacking a second one.
+    pub(crate) fn comment_for_range(&self) -> Option<usize> {
+        let (a, b) = match self.selection {
+            Some(sel) => sel.range(),
+            None => (self.cursor, self.cursor),
+        };
         self.comments.iter().position(|c| {
-            c.project == self.project && c.title == self.title && c.covers(src)
+            c.project == self.project && c.title == self.title && c.start == a && c.end == b
         })
     }
-
-}
-
-impl App {
 
     /// True if a source line is covered by any saved comment.
     pub(crate) fn src_has_comment(&self, src: usize) -> bool {

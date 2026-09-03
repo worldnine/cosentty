@@ -72,37 +72,60 @@ impl Comment {
     }
 }
 
-/// Format one comment as an agent-actionable instruction block:
+/// Format one comment the way a reply reads in chat (akapen's reply
+/// mode): where it is, the quoted lines, a blank line, then the comment.
 ///
 /// ```text
-/// Page: acme / Team Tips
-/// URL: https://scrapbox.io/acme/TAO%20Tips#6a79...
-/// Lines 12-13 (exact text — edit_lines matches verbatim):
-///   > 元の行テキスト1
-///   > 元の行テキスト2
-/// Instruction:
+/// acme/Team Tips L12-13 https://scrapbox.io/acme/TAO%20Tips#6a79...
+/// > 元の行テキスト1
+/// > 元の行テキスト2
+///
 /// この行の誤字を直して
 /// ```
 ///
-/// The `> ` snippet is the *exact* line text so an agent can pass it as the
-/// `edit_lines` target without re-fetching. The URL deep-links the line.
+/// The quote is the EXACT line text, so an agent driving the cosense CLI
+/// / MCP can hand it to `edit_lines` verbatim; the URL deep-links the
+/// first line. No `Lines:` / `Instruction:` labels: a quote followed by a
+/// remark is how people already write this, and the agent reads it the
+/// same way. The blank line is load-bearing — CommonMark's lazy
+/// continuation would otherwise pull the comment into the blockquote.
 pub fn format_comment(c: &Comment) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("Page: {} / {}\n", c.project, c.title));
-    out.push_str(&format!("URL: {}\n", c.edit_url()));
-    out.push_str(&format!(
-        "Lines {} (exact text — edit_lines matches verbatim):\n",
-        c.range_label()
-    ));
-    for t in &c.line_texts {
-        out.push_str(&format!("  > {t}\n"));
-    }
-    out.push_str("Instruction:\n");
-    out.push_str(&normalize_text(&c.text));
-    out
+    format_comment_numbered(c, None)
 }
 
-/// Many comments, grouped by page then start line, one blank line between.
+/// `number`: the item number when the comment is one of several. It goes
+/// in FRONT of the location line (`2. acme/… L5`) and the rest of the
+/// block is indented under it, so the batch reads as a numbered list of
+/// distinct points. The number sits before the `> ` marker, so quoted
+/// content that itself starts with `1. ` cannot collide with it.
+fn format_comment_numbered(c: &Comment, number: Option<usize>) -> String {
+    let location = format!("{}/{} L{} {}", c.project, c.title, c.range_label(), c.edit_url());
+    let mut quote: Vec<String> = c.line_texts.iter().map(|t| format!("> {t}")).collect();
+    if quote.is_empty() {
+        quote.push("> ".into());
+    }
+    let text = normalize_text(&c.text);
+    match number {
+        None => format!("{location}\n{}\n\n{text}", quote.join("\n")),
+        Some(n) => {
+            let mut out = format!("{n}. {location}");
+            for q in &quote {
+                out.push_str("\n   ");
+                out.push_str(q);
+            }
+            out.push('\n');
+            for l in text.lines() {
+                out.push_str("\n    ");
+                out.push_str(l);
+            }
+            out
+        }
+    }
+}
+
+/// Many comments, sorted by page then start line, one blank line between
+/// blocks. Two or more are numbered so the receiving agent reads a list of
+/// separate points to address in order; one stays a plain remark.
 pub fn format_all(comments: &[Comment]) -> String {
     let mut sorted: Vec<&Comment> = comments.iter().collect();
     sorted.sort_by(|a, b| {
@@ -115,21 +138,7 @@ pub fn format_all(comments: &[Comment]) -> String {
     sorted
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            if numbered {
-                let block = format_comment(c);
-                // prefix each block with "N." on its first line
-                let mut lines = block.lines();
-                let first = lines.next().unwrap_or("");
-                let mut b = format!("{}. {first}", i + 1);
-                for l in lines {
-                    b.push_str(&format!("\n   {l}"));
-                }
-                b
-            } else {
-                format_comment(c)
-            }
-        })
+        .map(|(i, c)| format_comment_numbered(c, numbered.then_some(i + 1)))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -202,8 +211,11 @@ mod tests {
         assert_eq!(c2.edit_url(), "https://scrapbox.io/acme/TAO%20Tips");
     }
 
+    /// 引用とコメントを混ぜた、チャットの返信の形。場所は1行、引用は
+    /// `> ` の正確な行テキスト、空行を挟んでコメント(空行が無いと
+    /// CommonMark はコメントを引用に飲み込む)。
     #[test]
-    fn format_carries_exact_text_and_url_and_instruction() {
+    fn format_is_location_then_quote_then_blank_then_comment() {
         let c = comment(
             11,
             12,
@@ -211,32 +223,43 @@ mod tests {
             &["6a7973f30000000000966115", "6a7973f30000000000966116"],
             "この行の誤字を直して\n\n  ",
         );
-        let out = format_comment(&c);
-        assert!(out.contains("Page: acme / Team Tips"));
-        assert!(out.contains("#6a7973f30000000000966115"));
-        assert!(out.contains("Lines 12-13 (exact text"));
-        assert!(out.contains("  > 元の行テキスト1"));
-        assert!(out.contains("  > 元の行テキスト2"));
-        assert!(out.trim_end().ends_with("この行の誤字を直して"));
+        assert_eq!(
+            format_comment(&c),
+            "acme/Team Tips L12-13 https://scrapbox.io/acme/TAO%20Tips#6a7973f30000000000966115\n\
+             > 元の行テキスト1\n\
+             > 元の行テキスト2\n\
+             \n\
+             この行の誤字を直して"
+        );
     }
 
+    /// 複数は番号付きの箇条書きになる(順に対応すべき別々の指摘だと
+    /// 読める)。番号は場所の行の前、引用とコメントはその項目の中に
+    /// インデントされる。並びはページ → 開始行。
     #[test]
     fn format_all_numbers_multiple_and_sorts() {
         let a = comment(5, 5, &["b"], &["i2"], "two");
-        let b = comment(1, 1, &["a"], &["i1"], "one");
+        let b = comment(1, 1, &["a"], &["i1"], "one\nmore");
         let out = format_all(&[a, b]);
-        // sorted by start → "one" (line 1) first, numbered
-        assert!(out.starts_with("1. Page: acme / Team Tips"));
-        assert!(out.contains("2. Page: acme / Team Tips"));
-        let one_pos = out.find("one").unwrap();
-        let two_pos = out.find("two").unwrap();
-        assert!(one_pos < two_pos);
+        assert_eq!(
+            out,
+            "1. acme/Team Tips L2 https://scrapbox.io/acme/TAO%20Tips#i1\n\
+             \x20  > a\n\
+             \n\
+             \x20   one\n\
+             \x20   more\n\
+             \n\
+             2. acme/Team Tips L6 https://scrapbox.io/acme/TAO%20Tips#i2\n\
+             \x20  > b\n\
+             \n\
+             \x20   two"
+        );
     }
 
     #[test]
     fn single_comment_is_not_numbered() {
         let c = comment(0, 0, &["x"], &["i"], "note");
         let out = format_all(&[c]);
-        assert!(out.starts_with("Page:"));
+        assert!(out.starts_with("acme/Team Tips L1 "));
     }
 }

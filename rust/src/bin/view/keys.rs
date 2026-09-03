@@ -496,27 +496,33 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             redo(app, ctx);
         }
 
-        // ---- comments (akapen parity) ----
+        // ---- comments ----
+        // READ keeps two keys for them: `c` writes one, `l` lists them
+        // (and is where delete / copy / send live). `S` is the shortcut
+        // for sending. The keys that used to sit here (`v` select, `d`
+        // delete, `^n`/`^p` jump) say where their job went — a key that
+        // silently stops working is worse than one that explains itself.
         (KeyCode::Char('v'), false) => {
-            if app.selection.is_some() {
-                app.selection = None;
-                app.status.clear();
-            } else if app.cursor >= app.lines.len() {
-                app.toast_err(t!("関連ページの行は選択できません", "related rows cannot be selected"));
-            } else {
-                app.selection = Some(Selection::new(app.cursor));
-                app.status = t!("選択中 — j/k で広げる · c でコメント", "selecting — j/k extend · c comment");
-            }
+            app.toast(t!("選択は Shift+↑↓ か J/K で（v は廃止）", "select with Shift+↑↓ or J/K (v is gone)"));
         }
         (KeyCode::Char('c'), false) => {
             if app.time.is_some() {
                 app.toast_err(t!("履歴を表示中 — コメントは最新でのみ書けます（Esc で戻る）", "viewing history — comments need NOW (Esc)"));
                 return Action::Continue;
             }
-            app.composing = Some(Input::new(String::new()));
+            // The same range again means "edit that comment": the
+            // composer opens on its text and Enter replaces it.
+            let existing = app.comment_for_range().map(|i| app.comments[i].text.clone());
+            let editing = existing.is_some();
+            app.composing = Some(Input::new(existing.unwrap_or_default()));
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
-            app.status = t!("コメントを入力 · Enter 保存 · Esc 取消", "type comment · Enter save · Esc cancel");
+            app.status = if editing {
+                t!("コメントを編集 · Enter 置き換え · Esc 取消", "edit comment · Enter replace · Esc cancel")
+            } else {
+                t!("コメントを入力 · Enter 保存 · Esc 取消", "type comment · Enter save · Esc cancel")
+            };
         }
+        (KeyCode::Char('S'), false) => send_comments(app, ctx),
 
         // ---- new lines (vim's o/O; the session opens on the new line) ----
         (KeyCode::Char('o'), false) => open_line(app, ctx, false),
@@ -542,17 +548,11 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             app.toast(t!("削除は編集中に — e で入って ^k（行）/ Shift+↑↓ と ⌫（範囲）", "delete while editing — e, then ^k (line) or Shift+↑↓ and ⌫ (range)"));
         }
         (KeyCode::Char('d'), false) => {
-            if let Some(i) = app.comment_at_cursor() {
-                app.comments.remove(i);
-                app.laid_width = 0;
-                app.note(t!("コメントを削除しました", "comment deleted"));
-            } else {
-                app.toast(t!("この行にコメントはありません", "no comment on this line"));
-            }
+            app.toast(t!("コメントの削除は l の一覧で d", "delete a comment in the l list with d"));
         }
-        // jump between comments on this page
-        (KeyCode::Char('n'), true) => jump_comment(app, true),
-        (KeyCode::Char('p'), true) => jump_comment(app, false),
+        (KeyCode::Char('n'), true) | (KeyCode::Char('p'), true) => {
+            app.toast(t!("コメントへは l の一覧から Enter で", "reach a comment from the l list with Enter"));
+        }
 
         // ---- output ----
         // `y` copies what is under the cursor (or the selection); `Y` the
@@ -649,7 +649,30 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         KeyCode::Up => Act::Up,
         KeyCode::Char('n') if ctrl => Act::Down,
         KeyCode::Char('p') if ctrl => Act::Up,
-        // The comments list is where copying every comment belongs.
+        // The comments list is where the comments are worked on: `y`
+        // copies them all, `s` sends them (as `S` does outside), `d`
+        // deletes the one under the cursor.
+        KeyCode::Char('s') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
+            send_comments(app, ctx);
+            if app.comments.is_empty() {
+                app.overlay = None;
+            }
+            Act::None
+        }
+        KeyCode::Char('d') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
+            if let Some(Overlay::Comments { cursor }) = app.overlay.as_mut() {
+                if *cursor < app.comments.len() {
+                    app.comments.remove(*cursor);
+                    app.laid_width = 0;
+                    *cursor = (*cursor).min(app.comments.len().saturating_sub(1));
+                    app.note(t!("コメントを削除しました", "comment deleted"));
+                }
+                if app.comments.is_empty() {
+                    app.overlay = None;
+                }
+            }
+            Act::None
+        }
         KeyCode::Char('y') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
             let text = format_all(&app.comments);
             if app.comments.is_empty() {

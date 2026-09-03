@@ -358,3 +358,121 @@ use super::support::*;
         handle_key(&mut app, &ctx, key(KeyCode::Tab));
         assert_eq!(app.mode, Mode::View, "Tab no longer toggles source");
     }
+
+    /// コメントの READ キーは `c`(書く)と `S`(送る)と `l`(一覧)だけ。
+    /// 消えた `v` / `d` / `^n` / `^p` は黙って死なず、行き先を言う。
+    #[test]
+    fn retired_comment_keys_say_where_their_job_went() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        app.cursor = 1;
+        let c = app.make_comment("fix".into()).unwrap();
+        app.comments.push(c);
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('v')));
+        assert!(app.selection.is_none(), "v no longer selects");
+        assert!(app.toast_text().contains("Shift+↑↓"), "{}", app.toast_text());
+
+        handle_key(&mut app, &ctx, key(KeyCode::Char('d')));
+        assert_eq!(app.comments.len(), 1, "d in READ deletes nothing");
+        assert!(app.toast_text().contains("l の一覧"), "{}", app.toast_text());
+
+        handle_key(&mut app, &ctx, ctrl('n'));
+        assert!(app.toast_text().contains("l の一覧"), "{}", app.toast_text());
+    }
+
+    /// 一覧(`l`)がコメントの作業場: `d` でカーソルのものを消し、空になれば閉じる。
+    #[test]
+    fn the_comments_list_deletes_with_d() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        for (line, text) in [(1, "a"), (2, "b")] {
+            app.cursor = line;
+            let c = app.make_comment(text.into()).unwrap();
+            app.comments.push(c);
+        }
+        handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
+        assert!(matches!(app.overlay, Some(Overlay::Comments { cursor: 0 })));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('d')));
+        assert_eq!(app.comments.len(), 1);
+        assert_eq!(app.comments[0].text, "a", "the one under the cursor went");
+        assert!(matches!(app.overlay, Some(Overlay::Comments { cursor: 0 })), "cursor clamped, list still open");
+        handle_key(&mut app, &ctx, key(KeyCode::Char('d')));
+        assert!(app.comments.is_empty());
+        assert!(app.overlay.is_none(), "an empty list closes");
+    }
+
+    /// 送り先が無いとき(herdr の外、--send-cmd なし)の `S`: 赤バナーで
+    /// 言い、コメントは残す。空なら黄バナー。
+    #[test]
+    fn s_with_nowhere_to_send_keeps_the_comments_and_says_so() {
+        let ctx = test_ctx(); // SendTarget::None
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        assert!(app.toast_text().contains("送るコメントがありません"), "{}", app.toast_text());
+        app.cursor = 1;
+        let c = app.make_comment("fix".into()).unwrap();
+        app.comments.push(c);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        assert_eq!(app.comments.len(), 1, "nothing was delivered, so nothing is cleared");
+        assert!(app.toast.as_ref().unwrap().error);
+        assert!(app.toast_text().contains("送り先がありません"), "{}", app.toast_text());
+        assert!(app.toast_text().contains("コメントは残しています"), "{}", app.toast_text());
+    }
+
+    /// `--send-cmd` へはパイプで届き、成功したらコメントは消える。
+    #[test]
+    fn s_pipes_the_export_to_the_send_command_and_clears_on_success() {
+        let dir = std::env::temp_dir().join(format!("cosense-send-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("review.txt");
+        let mut ctx = test_ctx();
+        ctx.send_target = SendTarget::Command(format!("cat >> '{}'", out.display()));
+        let mut app = page(&["title", "one", "two"]);
+        app.rebuild(40);
+        for (line, text) in [(1, "a"), (2, "b")] {
+            app.cursor = line;
+            let c = app.make_comment(text.into()).unwrap();
+            app.comments.push(c);
+        }
+        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        assert!(app.comments.is_empty(), "delivered, so cleared: {}", app.toast_text());
+        let got = std::fs::read_to_string(&out).unwrap();
+        assert!(got.starts_with("1. proj/t L2 "), "{got}");
+        assert!(got.contains("   > one\n\n    a\n\n2. proj/t L3 "), "{got}");
+        // A failing command keeps them.
+        ctx.send_target = SendTarget::Command("exit 3".into());
+        app.cursor = 1;
+        let c = app.make_comment("c".into()).unwrap();
+        app.comments.push(c);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        assert_eq!(app.comments.len(), 1);
+        assert!(app.toast.as_ref().unwrap().error);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同じ範囲でもう一度 `c`: 既存のコメントを編集する(積み増さない)。
+    #[test]
+    fn c_on_the_same_range_edits_the_existing_comment() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('c')));
+        for ch in "typo".chars() {
+            handle_key(&mut app, &ctx, key(KeyCode::Char(ch)));
+        }
+        handle_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.comments.len(), 1);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('c')));
+        assert_eq!(app.composing.as_ref().unwrap().buf, "typo", "prefilled with the existing text");
+        assert!(app.status.contains("編集"));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('!')));
+        handle_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.comments.len(), 1, "replaced, not stacked");
+        assert_eq!(app.comments[0].text, "typo!");
+    }

@@ -1653,8 +1653,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 t!("ブラウザ    w カーソル行でページを開く", "browser     w open page at cursor line"),
                 t!("ページ履歴  ← 古い履歴 · → 新しい · Esc 最新へ戻る（履歴中は読み取り専用）",
                    "time        ← older snapshot · → newer · Esc back to NOW (read-only while back)"),
-                t!("コメント    v 選択 · c 追加 · d 削除 · ^n/^p 移動",
-                   "comment     v select · c add · d delete · ^n/^p jump"),
+                t!("コメント    c 書く（同じ範囲で再度 c = 編集）· S 送る · l 一覧（Enter 移動 · d 削除 · y コピー · s 送る）",
+                   "comment     c write (c again on the range: edit) · S send · l list (Enter jump · d delete · y copy · s send)"),
                 t!("行の詳細    t この行をいつ誰が更新したか", "detail      t who/when edited this line"),
                 t!("図          code:mmd / code:mermaid / code:<名前>.mmd を図として描く。",
                    "diagram     code:mmd / code:mermaid / code:<name>.mmd draw as pictures,"),
@@ -1672,20 +1672,27 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "            when you ask. COSENSE_WEB_RENDER=auto|off changes that;"),
                 t!("            COSENSE_WEB_IDLE_SECS でブラウザを残す長さを決められる。",
                    "            COSENSE_WEB_IDLE_SECS is how long the browser stays warm."),
-                t!("出力        y コメントを全件コピー", "output      y copy all comments"),
-                t!("画面        l コメント一覧 · ? ヘルプ", "list        l comments · ? help"),
-                t!("終了        q（Esc で取消。コメントは標準出力へ）",
-                   "quit        q  (Esc cancels; comments print to stdout)"),
+                t!("出力        y カーソル行/選択をコピー · Y ページ全体", "output      y copy line/selection · Y whole page"),
+                t!("画面        ? ヘルプ", "screen      ? help"),
+                t!("終了        q 二度押し（未送信のコメントは標準出力へ）",
+                   "quit        q twice (unsent comments print to stdout)"),
             ]);
             (t!("キー割り当て", "keys"), keys, usize::MAX)
         }
         None => return,
     };
 
-    let footer = ts!(
-        " ↑/↓ 移動 · Enter 開く · Esc 閉じる ",
-        " ↑/↓ move · Enter open · Esc close "
-    );
+    let footer = if matches!(app.overlay, Some(Overlay::Comments { .. })) {
+        ts!(
+            " ↑/↓ 移動 · Enter 開く · d 削除 · y 全件コピー · s 送る · Esc 閉じる ",
+            " ↑/↓ move · Enter open · d delete · y copy all · s send · Esc close "
+        )
+    } else {
+        ts!(
+            " ↑/↓ 移動 · Enter 開く · Esc 閉じる ",
+            " ↑/↓ move · Enter open · Esc close "
+        )
+    };
     draw_menu_panel(f, area, &title, &items, cursor, footer);
 }
 

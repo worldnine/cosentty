@@ -161,9 +161,17 @@ pub(crate) fn finish_composer(app: &mut App, input: Input) {
     if buf.trim().is_empty() {
         app.note(t!("空のコメントは破棄しました", "empty comment discarded"));
     } else if let Some(c) = app.make_comment(buf) {
-        app.comments.push(c);
+        match app.comment_for_range() {
+            Some(i) => {
+                app.comments[i] = c;
+                app.note(t!("コメントを置き換えました", "comment replaced"));
+            }
+            None => {
+                app.comments.push(c);
+                app.note(t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len()));
+            }
+        }
         app.selection = None;
-        app.note(t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len()));
         app.laid_width = 0; // force rebuild to weave the card
     } else {
         app.toast_err(t!("コメントを行に結び付けられません", "could not anchor comment"));

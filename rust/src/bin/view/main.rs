@@ -14,9 +14,11 @@
 // Keys:
 //   j/k ↑/↓  move line cursor        Space/b  page down/up
 //   g/G       top/bottom             v        start/stop range selection
-//   c         write comment on cursor/selection
-//   y         copy all comments (clipboard)   D  delete all comments
-//   q         quit (comments also printed to stdout)
+//   c         comment on the cursor line / selection (again on the same
+//             selection: edit it)
+//   S         send the comments to the agent (herdr, or --send-cmd) and
+//             clear them; l lists them (Enter jump · d delete · y copy · s send)
+//   q         quit (unsent comments also print to stdout)
 //   Enter/f   follow the line's link: a page navigates, an uploaded file
 //             is saved to the download dir and opened, an http(s) URL (↗)
 //             opens in the browser (a gyazo image → its gyazo page)
@@ -97,6 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut ime_mode = cosense::ime::ImeMode::Jp; // Japanese-first default
     let mut preview = cosense::index::PreviewMode::Auto;
     let mut download_dir: Option<String> = None;
+    let mut send_cmd: Option<String> = None;
     let mut lang: Option<String> = None;
     let mut it = raw.into_iter();
     while let Some(a) = it.next() {
@@ -130,6 +133,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             s if s.starts_with("--download-dir=") => {
                 download_dir = Some(s["--download-dir=".len()..].to_string())
             }
+            "--send-cmd" => send_cmd = it.next(),
+            s if s.starts_with("--send-cmd=") => send_cmd = Some(s["--send-cmd=".len()..].to_string()),
             _ => positional.push(a),
         }
     }
@@ -261,6 +266,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         gyazo_personal_token,
         config,
         config_error,
+        send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
     let loaded = load_page(&ctx, &project, &title)?;
 
@@ -465,6 +471,9 @@ struct Ctx {
     /// `config_error` says so once on the status line.
     config: cosense::config::Config,
     config_error: Option<String>,
+    /// Where `S` delivers the comments (`--send-cmd`, else the herdr agent
+    /// of this tab when running inside herdr, else nowhere). See handoff.rs.
+    send_target: SendTarget,
 }
 
 impl Ctx {
@@ -762,5 +771,7 @@ mod app;
 use app::*;
 mod toast;
 use toast::*;
+mod handoff;
+use handoff::*;
 
 

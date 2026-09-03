@@ -20,6 +20,7 @@ view https://scrapbox.io/<project>/<title>#<lineId>   # ブラウザの URL を�
 | `--lang ja\|en` | 画面の言語。省略時は `COSENSE_LANG` → `LC_ALL` → `LC_MESSAGES` → `LANG` を見て、どれも無ければ英語 |
 | `--preview on\|off\|auto` | 一覧の抜粋欄（既定 `auto`＝80桁以上で表示） |
 | `--download-dir DIR` | 保存先。省略時は `COSENSE_DOWNLOAD_DIR` → `XDG_DOWNLOAD_DIR` → `~/Downloads` → カレント |
+| `--send-cmd CMD` | `S` で送るコメントの宛先（stdin にパイプ。`cat >> review.txt`、`xargs -0 -I{} herdr agent prompt w:p1 {}` など）。省略時は herdr の中なら**このタブの唯一のエージェント**（いなければワークスペースの唯一の）へ `herdr agent prompt` で直送、外なら送り先なし（`y` でコピー） |
 | `--ime jp\|off` | IME の扱い（既定 `jp`） |
 | `--theme NAME` / `--light` / `--dark` | 配色 |
 
@@ -81,9 +82,10 @@ PAT / Service Account のみの環境では従来どおり `同期: poll` の3�
 | edit | `e` ファイル編集 | **モードレス編集セッション**（akapen 本来の意味に復帰。SPEC-edit-session.md） | `e`（行末） `i`（行頭） |
 | link 巡回 | —（akapen に相当なし） | **次/前のリンクのある行**へカーソルを巡回（ブラウザの Tab と同じ意味論。端で折り返す。開くのは Enter/f） | `Tab` 次 · `S-Tab` 前 |
 | source 表示 | `Tab` view⇄source | **モードから表示オプションへ降格**（生 Scrapbox 記法を行番号付きで表示する読み取り専用ビュー。コピー・記法デバッグ・行番号参照用） | `s` |
-| comment | `v` select · `c` add · `d` delete · `^n`/`^p` jump | 同じ。範囲選択は `v` のほか **Shift+`↑`/`↓` / `J`/`K`** でも始められる・伸ばせる（EDIT と同じ指。選択には `y` コピーと `c` コメントが効く） | `v` `c` `d` `^n` `^p` `S-↑` `S-↓` `J` `K` |
-| output | `y` copy · `s` send | `y`=カーソル行（選択があれば範囲）· `Y`=ページ全体。EDIT 中は `^y`（`s` はソース表示に使用） | `y` `Y` `^y` |
-| list | `l` comments · `?` help | 同じ | `l` `?` |
+| comment | `v` select · `c` add · `d` delete · `^n`/`^p` jump | **READ に残すのは `c` と `S` と `l` だけ**（2026-09-03 整理）。選択は **Shift+`↑`/`↓` / `J`/`K`**（EDIT と同じ指）で、`v` は廃止。`c` はカーソル行/選択にコメントを書き、**同じ範囲でもう一度 `c` を押すと既存コメントの編集**（本文がプリフィルされ Enter で置換）。削除と移動は `l` の一覧の中（`d` / Enter）。廃止したキー（`v` `d` `^n` `^p`）は黙って死なず、行き先を黄バナーで言う | `c` `S` `l` `S-↑` `S-↓` `J` `K` |
+| send | `s` send | **`S`**（`s` はソース表示に使っているので大文字）。全コメントをクリップボードにコピーし、宛先（`--send-cmd`、無ければ herdr のタブの唯一のエージェント）へ届け、**届いたときだけコメントを消す**。失敗時は赤バナーで理由を言い、コメントは残す（再送できる。クリップボードにはコピー済み）。宛先が無いときも同じ。書式は akapen の返信形：`project/title L12-13 URL` の場所1行、`> ` の正確な行テキスト、空行、コメント。複数は `1.` `2.` の番号付き箇条書きで、引用とコメントはその項目にインデントされる（受け取るエージェントが「順に対応する別々の指摘」と読める。番号は `> ` の前なので引用内の `1. ` と衝突しない） | `S` |
+| output | `y` copy | `y`=カーソル行（選択があれば範囲）· `Y`=ページ全体。EDIT 中は `^y` | `y` `Y` `^y` |
+| list | `l` comments · `?` help | `l` はコメントの作業場：`Enter` でその行へ（別ページなら開いてから）、`d` で削除（空になれば閉じる）、`y` で全件コピー（残す）、`s` で送る（`S` と同じ） | `l` `?` |
 | undo | — | **全コミットの逆演算 undo/redo**（確認ゲートの代わりの安全網）。undo は READ でも EDIT でも `^z` が使える（READ では akapen 互換の `u` も従来どおり。EDIT では `u` が印字キーなので `^z` のみ）。redo はどちらも `^r` | `u` · `^z` · `^r` |
 | browser | — | ブラウザで開く（**w**eb。旧 `e`）カーソル行に deep-link | `w` |
 | time / detail | `t` 詳細 | **行の更新者と更新/作成時刻**をオーバレイ表示（トグル）。更新者名はプロジェクトごとのメンバー表から解決（`t` を押したときに遅延取得、10分で再取得、未知の ID なら60秒のクールダウン付きで即再取得） | `t` |

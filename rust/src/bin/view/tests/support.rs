@@ -35,6 +35,7 @@ use crate::*;
             gyazo_personal_token: None,
             config: cosense::config::Config::default(),
             config_error: None,
+            send_target: SendTarget::None,
         }
     }
 
