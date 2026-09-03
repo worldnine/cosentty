@@ -597,7 +597,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         app.drain_visibility();
         app.start_web_renders(capability::Trigger::Auto);
         app.rescale_diagrams();
-        app.expire_web_notice();
+        app.expire_note();
         app.expire_toast();
         app.drain_downloads();
         app.drain_uploads(ctx);

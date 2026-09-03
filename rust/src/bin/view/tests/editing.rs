@@ -246,7 +246,9 @@ use super::support::*;
         assert!(app.outline_pending.is_none());
         assert_eq!(app.inflight, 0);
         assert!(drain_jobs(&mut app).is_empty());
-        assert!(app.toast_text().contains("変更なし"), "status: {}", app.toast_text());
+        // Leaving the mode with nothing changed is visible (the MOVE hint
+        // goes); it is not worth a word.
+        assert!(app.toast_text().is_empty() && app.note_text().is_empty(), "toast: {} / note: {}", app.toast_text(), app.note_text());
     }
 
     /// The screen must never keep what the server refused. A rejected drag
@@ -666,13 +668,13 @@ use super::support::*;
         assert!(app.history_dropped);
 
         redo(&mut app, &ctx);
-        assert!(app.toast_text().contains("失効"), "status: {}", app.toast_text());
+        assert!(app.note_text().contains("失効"), "note: {}", app.note_text());
 
         // A new edit starts a clean lineage, and the excuse expires with it.
         do_edit(&mut app, &ctx, "line 3", vec![EditOp::Replace { id: "id2".into(), text: "x".into() }]);
         assert!(!app.history_dropped);
         redo(&mut app, &ctx);
-        assert_eq!(app.toast_text(), "やり直せる編集がありません");
+        assert_eq!(app.note_text(), "やり直せる編集がありません");
     }
 
     /// The undo reflex must not depend on which mode you are in: `^z`
@@ -746,5 +748,5 @@ use super::support::*;
         // Nothing left to undo: the session survives that too.
         handle_session_key(&mut app, &ctx, ctrl('z'));
         assert!(app.session.is_some());
-        assert_eq!(app.toast_text(), "取り消せる編集がありません");
+        assert_eq!(app.note_text(), "取り消せる編集がありません");
     }

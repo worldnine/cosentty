@@ -12,6 +12,18 @@
 //!   an upload in flight, a stopped commit worker). It stays until the
 //!   state changes, and the footer shows it in the hint slot as before.
 //!
+//! Not everything that happened deserves a banner. Four levels, by kind
+//! (NOTE-notifications.md has the table):
+//!
+//! - **silent** — the screen already answers: a page opened (the header
+//!   changed), a mode switched (the footer badge), a selection dropped.
+//! - **note** (`App::note`) — a quiet line in the footer's hint slot for a
+//!   few seconds: "copied", "✓ line 3", "top of page", "nothing to undo".
+//!   The reader who wonders finds it; nobody else is interrupted.
+//! - **toast** (yellow) — must be read: "not here, do this instead", and
+//!   changes the reader did not make (someone else edited the page).
+//! - **toast_err** (red) — something failed. Lives twice as long.
+//!
 //! The banner reserves no space: its rectangle alone is cleared and
 //! painted, so the layout never moves. The frame's bottom rule or the last
 //! text row shows around it. tachyonfx fades it in and out; the filter
@@ -25,6 +37,10 @@ use unicode_width::UnicodeWidthStr;
 
 /// How long a toast stays, fades included.
 pub(crate) const TOAST_SECS: Duration = Duration::from_secs(4);
+/// An error stays longer: it is the one kind a reader must not miss.
+pub(crate) const TOAST_ERR_SECS: Duration = Duration::from_secs(8);
+/// How long a footer note stays.
+pub(crate) const NOTE_SECS: Duration = Duration::from_secs(4);
 /// The fade at each end.
 const FADE_MS: u32 = 120;
 
@@ -43,7 +59,46 @@ pub(crate) struct Toast {
     fx: Option<Effect>,
 }
 
+impl Toast {
+    fn life(&self) -> Duration {
+        if self.error { TOAST_ERR_SECS } else { TOAST_SECS }
+    }
+}
+
 impl App {
+    /// The quiet level: a line in the footer's hint slot that gives the
+    /// slot back after a few seconds. Never touches `status` or the toast.
+    pub(crate) fn note(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.note = if msg.is_empty() { None } else { Some((msg, Instant::now() + NOTE_SECS)) };
+    }
+
+    /// The note's text, or "".
+    pub(crate) fn note_text(&self) -> &str {
+        self.note.as_ref().map(|(m, _)| m.as_str()).unwrap_or("")
+    }
+
+    /// Drop the note once it has had its seconds, so the key hints come
+    /// back. Returns whether anything changed.
+    pub(crate) fn expire_note(&mut self) -> bool {
+        let Some((_, until)) = self.note.as_ref() else { return false };
+        if Instant::now() < *until {
+            return false;
+        }
+        self.note = None;
+        true
+    }
+
+    /// Append the note to a footer text that is showing something else
+    /// (keys, a standing status), so a boundary ("top of page") is still
+    /// said while a selection hint holds the slot.
+    pub(crate) fn with_note(&self, base: String) -> String {
+        match self.note.as_ref() {
+            Some((n, _)) if !n.is_empty() => format!("{base} · {n}"),
+            _ => base,
+        }
+    }
+
     /// Say that something happened. Replaces whatever toast is showing.
     pub(crate) fn toast(&mut self, msg: impl Into<String>) {
         self.raise_toast(msg.into(), false);
@@ -79,8 +134,8 @@ impl App {
         let gone = self
             .toast
             .as_ref()
-            .and_then(|t| t.shown)
-            .is_some_and(|at| at.elapsed() > TOAST_SECS);
+            .and_then(|t| t.shown.map(|at| (at, t.life())))
+            .is_some_and(|(at, life)| at.elapsed() > life);
         if gone {
             self.toast = None;
         }
@@ -89,11 +144,11 @@ impl App {
 }
 
 /// Fade in from the banner's own background, hold, fade out to it. The
-/// total equals [`TOAST_SECS`], so the banner leaves exactly when the
+/// total equals the toast's life, so the banner leaves exactly when the
 /// toast expires. Filtered to cells of that background: only the banner
 /// animates.
-fn toast_effect(bg: Color) -> Effect {
-    let total = TOAST_SECS.as_millis() as u32;
+fn toast_effect(bg: Color, life: Duration) -> Effect {
+    let total = life.as_millis() as u32;
     let hold = total.saturating_sub(FADE_MS * 2);
     let mut effect = fx::sequence(&[
         fx::fade_from(bg, bg, (FADE_MS, Interpolation::Linear)),
@@ -142,7 +197,7 @@ pub(crate) fn draw_toast(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let Some(t) = app.toast.as_mut() else { return };
     let now = Instant::now();
     let shown = *t.shown.get_or_insert(now);
-    if now.duration_since(shown) > TOAST_SECS {
+    if now.duration_since(shown) > t.life() {
         return; // expire_toast drops it on the next pass
     }
     let Some(rect) = toast_rect(area, &t.text) else { return };
@@ -159,6 +214,7 @@ pub(crate) fn draw_toast(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     );
     let dt = t.last_frame.map(|p| now.duration_since(p)).unwrap_or(Duration::ZERO);
     t.last_frame = Some(now);
-    let fx = t.fx.get_or_insert_with(|| toast_effect(bg));
+    let life = t.life();
+    let fx = t.fx.get_or_insert_with(|| toast_effect(bg, life));
     f.render_effect(fx, Rect::new(area.x, rect.y, area.width, 1), dt);
 }

@@ -12,13 +12,13 @@ use super::support::*;
         app.note_web_failure("diagram: Chrome が見つかりません（ソースを表示します）".into());
         assert_eq!(
             app.hint_text(&[]),
-            "コミットに失敗しました: line 4 — 500",
-            "status outranks a diagram note",
+            "コミットに失敗しました: line 4 — 500 · diagram: Chrome が見つかりません（ソースを表示します）",
+            "the status leads; the note rides behind it",
         );
         // When the note times out it takes only itself with it.
-        let (msg, _) = app.web_notice.clone().unwrap();
-        app.web_notice = Some((msg, std::time::Instant::now()));
-        assert!(app.expire_web_notice());
+        let (msg, _) = app.note.clone().unwrap();
+        app.note = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_note());
         assert_eq!(app.status, "コミットに失敗しました: line 4 — 500", "the real message survives");
         assert_eq!(app.hint_text(&[]), "コミットに失敗しました: line 4 — 500");
 

@@ -725,23 +725,11 @@ impl App {
         }
     }
 
-    /// Note that a diagram did not draw. This never touches `app.status`,
-    /// so it cannot overwrite — or, on expiry, erase — a commit, auth or
-    /// resync message.
+    /// Note that a diagram did not draw: the quiet level. It never touches
+    /// `app.status`, so it cannot overwrite — or, on expiry, erase — a
+    /// standing message; a picture that did not draw is not worth a banner.
     pub(crate) fn note_web_failure(&mut self, msg: String) {
-        const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(6);
-        self.web_notice = Some((msg, std::time::Instant::now() + SHOWN_FOR));
-    }
-
-    /// Drop the diagram note once it has had its seconds, so the key hints
-    /// come back. Returns whether anything changed.
-    pub(crate) fn expire_web_notice(&mut self) -> bool {
-        let Some((_, until)) = self.web_notice.as_ref() else { return false };
-        if std::time::Instant::now() < *until {
-            return false;
-        }
-        self.web_notice = None;
-        true
+        self.note(msg);
     }
 
     /// Install finished web renders. A result from an older page generation

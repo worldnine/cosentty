@@ -1012,13 +1012,13 @@ use super::support::*;
         assert!(app.hint_body(&[]).contains("h/j/k/l"));
         handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
         assert!(!app.outline_prefix);
-        assert!(app.toast_text().contains("取り消しました"));
+        assert!(app.note_text().contains("取り消しました"));
         assert_eq!(app.cursor, 1, "the unknown second key was consumed");
 
         handle_key(&mut app, &ctx, ctrl('g'));
         handle_key(&mut app, &ctx, key(KeyCode::Esc));
         assert!(!app.outline_prefix);
-        assert!(app.toast_text().contains("取り消しました"));
+        assert!(app.note_text().contains("取り消しました"));
 
         handle_key(&mut app, &ctx, ctrl('g'));
         handle_key(&mut app, &ctx, key(KeyCode::Char('l')));

@@ -468,7 +468,6 @@ pub(crate) fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
             if app.index.is_some() {
                 app.history.push(from);
                 app.forward.clear();
-                app.toast(format!("→ /{project}"));
             }
         }
         LinkItem::File { label, url } => app.start_download(ctx, label, url),
@@ -478,7 +477,7 @@ pub(crate) fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
             match std::fs::write(&dest, body) {
                 Ok(()) => {
                     let shown = dest.display().to_string();
-                    app.toast(if open_in_browser(&shown) {
+                    app.note(if open_in_browser(&shown) {
                         t!("保存しました {shown} · 開きました", "saved {shown} · opened")
                     } else {
                         t!("保存しました {shown}", "saved {shown}")
@@ -489,7 +488,7 @@ pub(crate) fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
         }
         LinkItem::Url { url, .. } => {
             if open_in_browser(&url) {
-                app.toast(t!("開きました {url}", "opened {url}"));
+                app.note(t!("開きました {url}", "opened {url}"));
             } else {
                 app.toast_err(t!("ブラウザを開けません", "failed to open browser"));
             }
@@ -564,11 +563,11 @@ pub(crate) fn copy_payload(app: &App, whole_page: bool) -> Option<(String, Strin
 /// that will not take OSC 52, a copy too large to send that way).
 pub(crate) fn copy_and_report(app: &mut App, payload: Option<(String, String)>) {
     let Some((text, label)) = payload else {
-        app.toast(t!("コピーするものがありません", "nothing to copy"));
+        app.note(t!("コピーするものがありません", "nothing to copy"));
         return;
     };
     if copy_to_clipboard(&text) {
-        app.toast(format!("✓ copied {label}"));
+        app.note(format!("✓ copied {label}"));
     } else {
         app.toast_err(t!("コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました", "copy failed — no clipboard tool and the terminal refused OSC 52"));
     }
@@ -660,21 +659,17 @@ pub(crate) fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) 
 /// still can.
 #[must_use = "a failed navigation leaves the reader where they were"]
 pub(crate) fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str, from: Place) -> bool {
-    let same_project = app.project == project;
     match load_page(ctx, project, title) {
         Ok(loaded) => {
             app.history.push(from);
             app.forward.clear();
             app.set_page(loaded, ctx);
-            app.toast(if page_is_uncreated(app) {
-                // Following a link to a page nobody has written yet is how
-                // a wiki grows. Say what it is, and what makes it real.
-                t!("未作成のページ — e / o で書き始めると作成されます（{title}）", "an uncreated page — e / o starts writing it ({title})")
-            } else if same_project {
-                format!("→ {title}")
-            } else {
-                format!("→ /{project}/{title}")
-            });
+            // The header now says where we are; only a page nobody has
+            // written yet needs a word — following a link to it is how a
+            // wiki grows, so say what it is and what makes it real.
+            if page_is_uncreated(app) {
+                app.toast(t!("未作成のページ — e / o で書き始めると作成されます（{title}）", "an uncreated page — e / o starts writing it ({title})"));
+            }
             true
         }
         Err(e) => {
@@ -705,7 +700,7 @@ pub(crate) fn cycle_link_line(app: &mut App, forward: bool) {
             }
         }
     }
-    app.toast(t!(
+    app.note(t!(
         "リンクのある行がありません（ソース表示は s）",
         "no link lines (source view is on s)"
     ));
@@ -846,7 +841,7 @@ impl App {
                     let shown = path.display().to_string();
                     let opened = open_in_browser(&shown);
                     self.status.clear(); // "downloading…" is over
-                    self.toast(if opened {
+                    self.note(if opened {
                         t!("保存しました {shown} · 開きました", "saved {shown} · opened")
                     } else {
                         t!("保存しました {shown}", "saved {shown}")

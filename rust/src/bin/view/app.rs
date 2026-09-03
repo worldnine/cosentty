@@ -79,15 +79,6 @@ pub(crate) enum Place {
     Index { project: String, state: Box<cosense::index::Index> },
 }
 
-impl Place {
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Place::Page { title, .. } => title.clone(),
-            Place::Index { project, .. } => format!("/{project}"),
-        }
-    }
-}
-
 pub(crate) struct App {
     pub(crate) mode: Mode,
     pub(crate) project: String,
@@ -152,15 +143,6 @@ pub(crate) struct App {
     /// the reader is looking at. Cleared only when an authoritative page
     /// install proves the two agree again (see `mark_desynced`).
     pub(crate) web_unsynced: bool,
-    /// A diagram-failure note, and when it stops being worth showing.
-    ///
-    /// It lives in its OWN slot rather than in `app.status`, and ranks
-    /// BELOW it: a commit failure, an auth error or a resync notice must
-    /// never be overwritten — or worse, wiped when the diagram note times
-    /// out — by something as minor as a picture that did not draw. It ranks
-    /// above the key hints, and gives the line back after a few seconds so
-    /// the hints return.
-    pub(crate) web_notice: Option<(String, std::time::Instant)>,
     /// Jobs into the render worker, results back. Artifacts land in
     /// `images` (they are images), so drawing needs no special case.
     pub(crate) web_job_tx: mpsc::Sender<WebJob>,
@@ -227,6 +209,10 @@ pub(crate) struct App {
     pub(crate) status: String,
     /// The one-shot notice floating above the footer, if any.
     pub(crate) toast: Option<Toast>,
+    /// The quiet level (toast.rs): a footer line and when it stops being
+    /// worth showing. Ranks below `status` — it rides behind it — and
+    /// above the key hints, which it gives back after a few seconds.
+    pub(crate) note: Option<(String, Instant)>,
     /// One-shot portable fallback for terminals that do not deliver
     /// modified arrow keys. The next key is always consumed.
     pub(crate) outline_prefix: bool,
@@ -574,6 +560,7 @@ impl App {
             comments: Vec::new(),
             status: String::new(),
             toast: None,
+            note: None,
             outline_prefix: false,
             move_mode: None,
             outline_pending: None,
@@ -597,7 +584,6 @@ impl App {
             web_cols: IMAGE_MAX_COLS,
             web_rescaling: HashSet::new(),
             web_unsynced: false,
-            web_notice: None,
             web_job_tx,
             web_jobs_rx: Some(web_jobs_rx),
             web_tx,

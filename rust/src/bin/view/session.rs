@@ -342,7 +342,7 @@ pub(crate) fn close_session(app: &mut App) {
 pub(crate) fn leave_session(app: &mut App, ctx: &Ctx) {
     session_commit_dirty(app, ctx);
     close_session(app);
-    app.toast(t!("✓ 完了", "✓ done"));
+    app.note(t!("✓ 完了", "✓ done"));
 }
 
 /// `^z` (undo) / `^r` (redo) inside the session — SPEC §6 says the safety
@@ -639,7 +639,7 @@ pub(crate) fn session_cycle_heading(app: &mut App, ctx: &Ctx) {
     app.laid_width = 0;
     app.follow = true;
     let _ = ctx;
-    app.toast(match next {
+    app.note(match next {
         Some(n) => t!("見出し レベル{n}（^t でさらに）", "heading level {n} (^t for more)"),
         None => t!("見出しを解除（^t で再び）", "heading cleared (^t to start again)"),
     });
@@ -841,7 +841,7 @@ pub(crate) fn session_kill(app: &mut App, ctx: &Ctx) {
     app.cursor = seat;
     app.follow = true;
     app.laid_width = 0;
-    app.toast(t!("✓ 1行削除 · ^z で戻せます", "✓ deleted line · ^z to undo"));
+    app.note(t!("✓ 1行削除 · ^z で戻せます", "✓ deleted line · ^z to undo"));
 }
 
 /// ↑/↓ inside the session: commit the dirty line, carry the caret to the
@@ -880,7 +880,7 @@ pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let last = app.lines.len().saturating_sub(1) as i32;
     let target = (cur_line + delta).clamp(0, last);
     if target == cur_line {
-        app.toast(if delta < 0 { t!("ページの先頭です", "top of page") } else { t!("ページの末尾です — Enter で行を足せます", "end of page — Enter adds a line") });
+        app.note(if delta < 0 { t!("ページの先頭です", "top of page") } else { t!("ページの末尾です — Enter で行を足せます", "end of page — Enter adds a line") });
         return;
     }
     let line = target as usize;
@@ -1080,7 +1080,7 @@ pub(crate) fn session_join_up(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line == 0 {
-        app.toast(t!("ページの先頭です", "top of page"));
+        app.note(t!("ページの先頭です", "top of page"));
         return;
     }
     let prev_text = app.lines[line - 1].text.clone();
@@ -1105,7 +1105,7 @@ pub(crate) fn session_join_down(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line + 1 >= app.lines.len() {
-        app.toast(t!("ページの末尾です", "end of page"));
+        app.note(t!("ページの末尾です", "end of page"));
         return;
     }
     let next_text = app.lines[line + 1].text.clone();
@@ -1279,12 +1279,10 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             // both un-selects and leaves.
             if app.selection.is_some() {
                 app.selection = None;
-                app.toast(t!("選択を解除しました", "selection cleared"));
             } else if app.session.as_ref().and_then(|s| s.sel_ends()).is_some() {
                 if let Some(s) = app.session.as_mut() {
                     s.sel_from = None;
                 }
-                app.toast(t!("選択を解除しました", "selection cleared"));
             } else {
                 leave_session(app, ctx);
             }
@@ -1467,7 +1465,7 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
     }
     let edited = edited.strip_suffix('\n').unwrap_or(&edited).to_string();
     if edited == original {
-        app.toast(t!("変更はありません", "no changes"));
+        app.note(t!("変更はありません", "no changes"));
         return;
     }
     let new_lines: Vec<String> = edited.split('\n').map(str::to_string).collect();
@@ -1479,11 +1477,11 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     let ops = diff_to_ops(&old, &new_lines);
     if ops.is_empty() {
-        app.toast(t!("変更はありません", "no changes"));
+        app.note(t!("変更はありません", "no changes"));
     } else {
         let n = ops.len();
         do_edit(app, ctx, &t!("エディタ", "editor"), ops);
-        app.toast(t!("✓ エディタの変更を {n} 件コミットしました · u で戻せます", "✓ editor: {n} op(s) committed · u to undo"));
+        app.note(t!("✓ エディタの変更を {n} 件コミットしました · u で戻せます", "✓ editor: {n} op(s) committed · u to undo"));
     }
 }
 

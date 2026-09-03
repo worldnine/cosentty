@@ -352,7 +352,7 @@ use super::support::*;
         assert_eq!(app.web_missing.len(), n);
         assert!(app.web_errors.is_empty());
         assert!(app.web_pending.is_empty());
-        assert!(app.web_notice.is_none(), "an empty cache is not worth a notice");
+        assert!(app.note.is_none(), "an empty cache is not worth a notice");
     }
 
     #[test]
@@ -434,10 +434,10 @@ use super::support::*;
         app.rebuild(80);
         app.start_web_renders(capability::Trigger::Auto);
         assert!(app.web_notice_shown);
-        app.web_notice = None;
+        app.note = None;
         // A second pass over the same page says nothing more.
         app.start_web_renders(capability::Trigger::Auto);
-        assert!(app.web_notice.is_none());
+        assert!(app.note.is_none());
     }
 
     #[test]
@@ -1109,7 +1109,7 @@ use super::support::*;
             "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
         );
         handle_key(&mut app, &ctx, key(KeyCode::Char('y')));
-        assert!(app.toast_text().contains("copied"), "status: {}", app.toast_text());
+        assert!(app.note_text().contains("copied"), "note: {}", app.note_text());
 
         app.overlay = Some(Overlay::Help);
         // Tall enough for every help line, diagram notes included: the

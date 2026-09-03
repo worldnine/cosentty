@@ -339,12 +339,10 @@ pub(crate) fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, 
 pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
     let place = if back { app.history.pop() } else { app.forward.pop() };
     let Some(place) = place else {
-        app.toast(if back { t!("戻る先の履歴はありません", "no history") } else { t!("進む先の履歴はありません", "no forward history") });
+        app.note(if back { t!("戻る先の履歴はありません", "no history") } else { t!("進む先の履歴はありません", "no forward history") });
         return;
     };
     let here = app.here();
-    let label = place.label();
-    let arrow = if back { "←" } else { "→" };
     let mut arrived = false;
     match place {
         Place::Page { project, title } => {
@@ -353,14 +351,12 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
             // instant: cursor, scroll and images do not have to be rebuilt.
             if app.index.is_some() && app.project == project && app.title == title {
                 app.index = None;
-                app.toast(format!("{arrow} {title}"));
                 arrived = true;
             } else {
                 match load_page(ctx, &project, &title) {
                     Ok(loaded) => {
                         app.index = None;
                         app.set_page(loaded, ctx);
-                        app.toast(format!("{arrow} {title}"));
                         arrived = true;
                     }
                     Err(e) => {
@@ -381,7 +377,6 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
             app.index = Some(*state);
             app.index_project = project;
             app.overlay = None;
-            app.toast(format!("{arrow} {label}"));
             arrived = true;
         }
     }

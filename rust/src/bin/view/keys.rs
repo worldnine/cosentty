@@ -207,7 +207,6 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             (KeyCode::Esc, _) => {
                 app.composing = None;
                 app.ime_guard = None; // back to ASCII for command mode
-                app.toast(t!("キャンセルしました", "cancelled"));
             }
             (KeyCode::Enter, _) => {
                 let input = app.composing.take().unwrap();
@@ -299,7 +298,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         if let Some((block, direction)) = outline_prefix_command(k) {
             edit_outline(app, ctx, block, direction);
         } else {
-            app.toast(t!("アウトライン操作を取り消しました", "outline action cancelled"));
+            app.note(t!("アウトライン操作を取り消しました", "outline action cancelled"));
         }
         return Action::Continue;
     }
@@ -332,12 +331,10 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 // screenshot today's page under a historical source's hash.
                 if reload_page(app, ctx) {
                     app.status.clear();
-                    app.toast(t!("最新", "NOW"));
                 }
             } else if app.selection.is_some() {
                 app.selection = None;
                 app.status.clear();
-                app.toast(t!("選択を解除しました", "selection cleared"));
             } else {
                 app.status.clear();
                 app.dismiss_toast();
@@ -390,7 +387,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::Enter, false) | (KeyCode::Char('f'), false) => {
             let mut links = app.cursor_line_links();
             match links.len() {
-                0 => app.toast(t!("この行にリンクはありません", "no link on this line")),
+                0 => app.note(t!("この行にリンクはありません", "no link on this line")),
                 1 => activate_link(app, ctx, links.remove(0)),
                 _ => app.overlay = Some(Overlay::Links { items: links, cursor: 0 }),
             }
@@ -416,10 +413,6 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             let (w, h) = (app.laid_width.max(1), app.view_h);
             app.relayout_preserving_screen_row(w, h);
             app.selection = None;
-            app.toast(match app.mode {
-                Mode::View => "view",
-                Mode::Source => "source",
-            });
         }
 
         // ---- edit (akapen's `e edit` slot, back to its true meaning:
@@ -465,7 +458,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 // moment the probe reports its misses — pressing `R` twice
                 // should not be part of the interface.
                 app.web_manual_wanted = true;
-            } else if app.web_notice.is_none() {
+            } else if app.note.is_none() {
                 app.note_web_failure(match app.render_policy {
                     capability::RenderPolicy::Off => {
                         t!("diagram: レンダラは off です (COSENSE_WEB_RENDER)", "diagram: renderer is off (COSENSE_WEB_RENDER)")
@@ -479,7 +472,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::Char('w'), false) => {
             let url = app.cursor_url();
             if open_in_browser(&url) {
-                app.toast(t!("開きました {url}", "opened {url}"));
+                app.note(t!("開きました {url}", "opened {url}"));
             } else {
                 app.toast_err(t!("ブラウザを開けません", "failed to open browser"));
             }
@@ -501,7 +494,6 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             if app.selection.is_some() {
                 app.selection = None;
                 app.status.clear();
-                app.toast(t!("選択を解除しました", "selection cleared"));
             } else if app.cursor >= app.lines.len() {
                 app.toast_err(t!("関連ページの行は選択できません", "related rows cannot be selected"));
             } else {
@@ -546,9 +538,9 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             if let Some(i) = app.comment_at_cursor() {
                 app.comments.remove(i);
                 app.laid_width = 0;
-                app.toast(t!("コメントを削除しました", "comment deleted"));
+                app.note(t!("コメントを削除しました", "comment deleted"));
             } else {
-                app.toast(t!("この行にコメントはありません", "no comment on this line"));
+                app.note(t!("この行にコメントはありません", "no comment on this line"));
             }
         }
         // jump between comments on this page
@@ -615,12 +607,12 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                     if fixed {
                         app.toast(t!("英数に戻しました（日本語は e / i で編集に入ってから）", "switched back to ASCII (Japanese needs an edit session: e / i)"));
                     } else {
-                        app.toast_err(t!("IMEがONのようです — 英数に切り替えてください（編集中は自動で日本語になります）", "the IME looks ON — switch to ASCII (an edit session turns it on for you)"));
+                        app.toast(t!("IMEがONのようです — 英数に切り替えてください（編集中は自動で日本語になります）", "the IME looks ON — switch to ASCII (an edit session turns it on for you)"));
                     }
                     return Action::Continue;
                 }
             }
-            app.toast(t!("割り当てのないキー: {:?} {:?}", "unbound key: {:?} {:?}", k.code, k.modifiers));
+            app.note(t!("割り当てのないキー: {:?} {:?}", "unbound key: {:?} {:?}", k.code, k.modifiers));
         }
     }
     Action::Continue
@@ -654,9 +646,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         KeyCode::Char('y') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
             let text = format_all(&app.comments);
             if app.comments.is_empty() {
-                app.toast(t!("コピーするコメントがありません", "no comments to copy"));
+                app.note(t!("コピーするコメントがありません", "no comments to copy"));
             } else if copy_to_clipboard(&text) {
-                app.toast(t!("✓ コメント {} 件をコピーしました", "✓ copied {} comment(s)", app.comments.len()));
+                app.note(t!("✓ コメント {} 件をコピーしました", "✓ copied {} comment(s)", app.comments.len()));
             } else {
                 app.toast_err(t!("コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました", "copy failed — no clipboard tool and the terminal refused OSC 52"));
             }

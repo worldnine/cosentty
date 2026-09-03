@@ -113,3 +113,45 @@ use super::support::*;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         assert!(!row_text(&term, 10).contains("本文にありません"));
     }
+
+    /// 薄い段(note)は status を押しのけず、その後ろに乗る。キーヒントしか
+    /// 無いときはヒントの場所を借り、数秒で返す。索引のフッターでも同じ。
+    #[test]
+    fn a_note_rides_behind_the_status_and_gives_the_hint_slot_back() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.note("ページの先頭です");
+        assert_eq!(app.hint_body(&[]), "ページの先頭です", "alone, it takes the hint slot");
+        app.status = "選択中 — j/k で広げる".into();
+        assert_eq!(app.hint_body(&[]), "選択中 — j/k で広げる · ページの先頭です");
+        assert!(app.toast_text().is_empty(), "never a banner");
+
+        assert!(!app.expire_note(), "still fresh");
+        app.note = Some(("late".into(), Instant::now() - Duration::from_millis(1)));
+        assert!(app.expire_note());
+        assert_eq!(app.hint_body(&[]), "選択中 — j/k で広げる", "the slot is back to the state");
+
+        // 索引画面: 一覧にはステータス行が無いので、ヒント欄を借りる。
+        app.index = Some(cosense::index::Index::new(vec![], 0, cosense::index::SortKey::Updated));
+        app.note("「x」は本文にありません");
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer();
+        let footer: String = (0..buf.area.width)
+            .map(|x| buf.cell((x, 7)).unwrap().symbol().to_string())
+            .collect::<String>()
+            .replace(' ', "");
+        assert!(footer.contains("本文にありません"), "{footer:?}");
+    }
+
+    /// 失敗は見逃されてはいけないので、赤は黄の2倍残る。
+    #[test]
+    fn an_error_toast_lives_longer_than_an_info_toast() {
+        let mut app = page(&["title"]);
+        app.toast_err("コミットに失敗しました");
+        app.toast.as_mut().unwrap().shown = Some(Instant::now() - TOAST_SECS - Duration::from_secs(1));
+        assert!(!app.expire_toast(), "past the info lifetime, an error is still up");
+        app.toast.as_mut().unwrap().shown = Some(Instant::now() - TOAST_ERR_SECS - Duration::from_secs(1));
+        assert!(app.expire_toast());
+    }

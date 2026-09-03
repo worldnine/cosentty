@@ -159,11 +159,11 @@ pub(crate) fn in_input(app: &mut App, f: fn(&mut Input)) {
 pub(crate) fn finish_composer(app: &mut App, input: Input) {
     let buf = input.buf;
     if buf.trim().is_empty() {
-        app.toast(t!("空のコメントは破棄しました", "empty comment discarded"));
+        app.note(t!("空のコメントは破棄しました", "empty comment discarded"));
     } else if let Some(c) = app.make_comment(buf) {
         app.comments.push(c);
         app.selection = None;
-        app.toast(t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len()));
+        app.note(t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len()));
         app.laid_width = 0; // force rebuild to weave the card
     } else {
         app.toast_err(t!("コメントを行に結び付けられません", "could not anchor comment"));
@@ -440,7 +440,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.undo_stack.last() else {
-        app.toast(empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo")));
+        app.note(empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo")));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -487,7 +487,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
             .map(|rebase| apply_move_rebase(app, &ops, rebase))
             .unwrap_or_else(|| app.focus_edit(focus))
     };
-    app.toast(t!("{label} を取り消しました（あと {} 件）", "undid {label} ({} more)", app.undo_stack.len()));
+    app.note(t!("{label} を取り消しました（あと {} 件）", "undid {label} ({} more)", app.undo_stack.len()));
     seated
 }
 
@@ -510,7 +510,7 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.redo_stack.last() else {
-        app.toast(empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo")));
+        app.note(empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo")));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -550,7 +550,7 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
             .map(|rebase| apply_move_rebase(app, &ops, rebase))
             .unwrap_or_else(|| app.focus_edit(focus))
     };
-    app.toast(t!("{label} をやり直しました", "redid {label}"));
+    app.note(t!("{label} をやり直しました", "redid {label}"));
     seated
 }
 

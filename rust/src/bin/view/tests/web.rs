@@ -123,7 +123,7 @@ use super::support::*;
         // must NOT report "nothing to draw".
         handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
         assert!(app.web_manual_wanted);
-        assert!(app.web_notice.is_none(), "a request in flight is not 'nothing to draw'");
+        assert!(app.note.is_none(), "a request in flight is not 'nothing to draw'");
         assert!(
             app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
             "no duplicate batch while the probe owns the keys"
@@ -562,7 +562,7 @@ use super::support::*;
         assert!(!app.web_rescaling.contains(&key), "it stops being in flight");
         assert!(app.images.contains_key(&key), "the picture on screen survives");
         assert!(app.web_errors.is_empty(), "a resize failure is not a diagram failure");
-        assert!(app.web_notice.is_none(), "and the reader is not told about it");
+        assert!(app.note.is_none(), "and the reader is not told about it");
     }
 
     #[test]
@@ -752,12 +752,12 @@ use super::support::*;
         assert!(app.status.is_empty());
         assert!(app.hint_text(&[]).contains("ソースを表示します"), "the reader is told once");
         // It holds the line for its few seconds…
-        assert!(!app.expire_web_notice());
+        assert!(!app.expire_note());
         // …and then hands the row back to the key hints.
-        let (msg, _) = app.web_notice.clone().unwrap();
-        app.web_notice = Some((msg, std::time::Instant::now()));
-        assert!(app.expire_web_notice());
-        assert!(app.web_notice.is_none());
+        let (msg, _) = app.note.clone().unwrap();
+        app.note = Some((msg, std::time::Instant::now()));
+        assert!(app.expire_note());
+        assert!(app.note.is_none());
         assert!(app.hint_text(&[]).contains("? ヘルプ"), "hints are visible again");
-        assert!(!app.expire_web_notice(), "and it stays gone");
+        assert!(!app.expire_note(), "and it stays gone");
     }

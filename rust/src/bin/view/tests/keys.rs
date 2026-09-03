@@ -337,7 +337,7 @@ use super::support::*;
         bare.cursor = 1;
         handle_key(&mut bare, &ctx, key(KeyCode::Tab));
         assert_eq!(bare.cursor, 1, "nowhere to go");
-        assert!(bare.toast_text().contains("ソース表示は s"), "status: {}", bare.toast_text());
+        assert!(bare.note_text().contains("ソース表示は s"), "note: {}", bare.note_text());
     }
 
     /// ソース表示はモードから表示オプションへ降格: `s` でトグルし、
@@ -350,7 +350,7 @@ use super::support::*;
 
         handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert_eq!(app.mode, Mode::Source);
-        assert_eq!(app.toast_text(), "source");
+        assert!(app.toast_text().is_empty(), "the footer badge says SRC; no toast");
         handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert_eq!(app.mode, Mode::View);
 

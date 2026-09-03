@@ -223,7 +223,7 @@ impl App {
                         let (text, _) = splice_image(&self.lines[idx].text, msg.offset, &url);
                         do_edit(self, ctx, &t!("画像", "image"), vec![EditOp::Replace { id: msg.line_id, text }]);
                     }
-                    self.toast(t!("{} を貼りました ({where_})", "pasted {} ({where_})", msg.name));
+                    self.note(t!("{} を貼りました ({where_})", "pasted {} ({where_})", msg.name));
                 }
                 None => {
                     let ops = vec![EditOp::insert("_end", &format!("[{url}]"))];

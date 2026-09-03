@@ -404,7 +404,11 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
-    let hint: String = if ix.filter_editing {
+    // The index has no status line; a note takes the hint slot for its
+    // seconds, as on the page.
+    let hint: String = if let Some((n, _)) = app.note.as_ref() {
+        n.clone()
+    } else if ix.filter_editing {
         match ix.filter_mode {
             cosense::index::FilterMode::Title => ts!(
                 "タイトル絞り込み — Enter 確定 · Tab 本文検索へ · Esc 解除",
@@ -1746,10 +1750,10 @@ impl App {
                 "MOVE — j/k 1行 · J/K 兄弟 · h/l 字下げ · Esc 確定",
                 "MOVE — j/k line · J/K sibling · h/l indent · Esc commit"
             );
-            return match self.status.is_empty() {
+            return self.with_note(match self.status.is_empty() {
                 true => keys,
                 false => format!("{keys} · {}", self.status),
-            };
+            });
         }
         if self.outline_prefix {
             return t!(
@@ -1764,10 +1768,10 @@ impl App {
             );
             // An upload's progress arrives while the keys are being typed;
             // it rides along behind the hint as MOVE's does.
-            return match self.status.is_empty() {
+            return self.with_note(match self.status.is_empty() {
                 true => keys,
                 false => format!("{keys} · {}", self.status),
-            };
+            });
         }
         if !cursor_links.is_empty() {
             let listed: Vec<String> = cursor_links
@@ -1784,12 +1788,13 @@ impl App {
                     format!("{}:{}{mark}", i + 1, l.label())
                 })
                 .collect();
-            return t!("Enter/f で開く → {}", "Enter/f open → {}", listed.join("  "));
+            return self.with_note(t!("Enter/f で開く → {}", "Enter/f open → {}", listed.join("  ")));
         }
         if !self.status.is_empty() {
-            return self.status.clone();
+            return self.with_note(self.status.clone());
         }
-        if let Some((msg, _)) = self.web_notice.as_ref() {
+        // The quiet level takes the key list's place for its few seconds.
+        if let Some((msg, _)) = self.note.as_ref() {
             return msg.clone();
         }
         if self.editable {

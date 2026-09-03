@@ -43,7 +43,7 @@ use super::support::*;
         assert_eq!(s.input.buf, "a [https://scrapbox.io/files/abc] Xb");
         assert_eq!(s.input.cur, s.input.buf.len() - 1, "caret still before the b");
         assert!(drain_jobs(&mut app).is_empty(), "nothing committed yet: the line is just dirty");
-        assert!(app.toast_text().contains("貼りました"), "{}", app.toast_text());
+        assert!(app.note_text().contains("貼りました"), "{}", app.note_text());
         assert!(!app.hint_body(&[]).contains("アップロード中"), "the in-flight note left the footer: {}", app.hint_body(&[]));
     }
 

@@ -193,7 +193,7 @@ pub(crate) fn queue_outline_action(app: &mut App, ctx: &Ctx, label: &str, done: 
     if let Some(job) = do_edit(app, ctx, label, ops) {
         app.outline_pending = Some(OutlinePending { job, snapshot });
         app.follow = true;
-        app.toast(done);
+        app.note(done);
     } else {
         // The worker never took the structural job. Put the clean
         // pre-action model back immediately; an optimistic move must never
@@ -476,10 +476,6 @@ pub(crate) fn leave_move_mode(app: &mut App, ctx: &Ctx) {
         // there is nothing to tell the server.
         rerender(app, ctx);
         app.follow = true;
-        app.toast(t!(
-            "移動モードを抜けました（変更なし）",
-            "left move mode (nothing changed)"
-        ));
         return;
     };
     queue_outline_action(app, ctx, &label, done, ops);

@@ -260,7 +260,7 @@ use super::support::*;
         let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, vec!["t", "new!", "ONE", "two"]);
         assert_eq!(app.cursor, 3, "cursor followed its line id, not its number");
-        assert!(app.toast_text().contains("web"));
+        assert!(app.note_text().contains("web"));
     }
 
     #[test]
@@ -337,7 +337,7 @@ use super::support::*;
         let now = app.server_epoch_now();
         ws_on_resync(&mut app, &ctx, resync_at(differs, Some("h2"), now));
         assert_eq!(app.lines[1].text, "CHANGED");
-        assert!(app.toast_text().contains("全同期"), "status: {}", app.toast_text());
+        assert!(app.note_text().contains("全同期"), "note: {}", app.note_text());
     }
 
     #[test]
@@ -360,7 +360,7 @@ use super::support::*;
         );
         assert_eq!(app.lines[1].text, "ONE!", "diff applied in place");
         assert_eq!(app.ws_head.as_deref(), Some("c1"));
-        assert!(app.toast_text().contains("websocket"));
+        assert!(app.note_text().contains("websocket"));
     }
 
     #[test]
