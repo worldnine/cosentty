@@ -1131,7 +1131,8 @@ use super::support::*;
         app.overlay = Some(Overlay::Help);
         // Tall enough for every help line, diagram notes included: the
         // panel clips from the bottom, and this test reads the whole list.
-        let mut t = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        // (35: the text-first diagram row joined the list.)
+        let mut t = Terminal::new(TestBackend::new(100, 35)).unwrap();
         t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let screen: String = {
             let buf = t.backend().buffer().clone();

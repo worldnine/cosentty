@@ -503,6 +503,12 @@ gyazo に加え、任意の http(s) 画像 URL（拡張子つき）とリンク�
 
 `code:mmd` / `code:mermaid` / `code:<名前>.mmd` のコードブロックは、**図として表示**される。
 
+描ける型(flowchart・sequence・pie・gantt・gitGraph・class・er・journey・mindmap・
+timeline・xychart 他)はまず**罫線・表のテキスト描画**(`mermaid-text` による)で出し、
+描けないものだけブラウザ画像 → 素のコード行に落ちる。テキスト描画は即時・オフラインで、
+選択・検索・コピーが効く。編集中のブロックは素のソースに戻る。`COSENSE_MERMAID=off` で
+テキスト段を止めて以前の振る舞い(画像 → コード行)に戻せる。
+
 Mermaid には「ソース → SVG」の公開 REST API がない。Cosense はブラウザ側でハッシュ付きの Mermaid
 チャンクを動的 import して `.mermaid-preview` に SVG を差し込んでいる。そこで TUI 側で Mermaid を
 再実装するのではなく、**ヘッドレス Chrome で実際の Cosense ページを開き、Cosense 自身が描いた

@@ -29,6 +29,16 @@ fn supported(code: &str) -> bool {
             | "timeline"
             | "xychart-beta"
             | "xychart"
+            | "sankey-beta"
+            | "sankey"
+            | "block-beta"
+            | "block"
+            | "packet-beta"
+            | "packet"
+            | "quadrantChart"
+            | "requirementDiagram"
+            | "architecture-beta"
+            | "architecture"
     )
 }
 
@@ -59,10 +69,36 @@ mod tests {
 
     #[test]
     fn known_types_go_to_the_lib() {
-        assert!(render_text("flowchart TB\n A-->B", 60).is_some());
-        assert!(render_text("sequenceDiagram\n A->>B: hi", 60).is_some());
-        assert!(render_text("pie title P\n \"A\" : 1", 60).is_some());
-        assert!(render_text("gantt\n title T", 60).is_some());
+        for code in [
+            "flowchart TB\n A-->B",
+            "sequenceDiagram\n A->>B: hi",
+            "pie title P\n \"A\" : 1",
+            "gantt\n title T\n section S\n A :a1, 2026-01-01, 1d",
+            "gitGraph\n commit",
+            "classDiagram\n Animal <|-- Dog",
+            "erDiagram\n A ||--o{ B : x",
+            "journey\n title T\n section S\n A: 5: B",
+            "mindmap\n root((R))\n C",
+            "timeline\n title T\n S : E",
+            "xychart-beta\n title T\n x-axis [a]\n bar [1]",
+        ] {
+            assert!(render_text(code, 80).is_some(), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn japanese_never_panics_and_fits() {
+        // 旧版で panic した入力の回帰網。
+        for code in [
+            "sequenceDiagram\n Alice->>Bob: こんにちは\n loop 毎分\n Alice->>Bob: Ping\n end",
+            "flowchart TB\n A[開始]-->B{判断?}",
+            "pie title 予算\n \"開発\" : 1",
+        ] {
+            let lines = render_text(code, 60).expect(code);
+            for l in &lines {
+                assert!(str_width(l) <= 60, "too wide: {l}");
+            }
+        }
     }
 
     #[test]
