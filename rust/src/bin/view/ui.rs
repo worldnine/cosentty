@@ -1857,8 +1857,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "            COSENSE_WEB_IDLE_SECS is how long the browser stays warm."),
                 t!("出力        y カーソル行/選択をコピー · Y ページ全体", "output      y copy line/selection · Y whole page"),
                 t!("画面        ? ヘルプ", "screen      ? help"),
-                t!("終了        q 二度押し（未送信のコメントは標準出力へ）",
-                   "quit        q twice (unsent comments print to stdout)"),
+                t!("終了        q 二度押し（未送信のコメントがあれば件数を添えて問う）",
+                   "quit        q twice (asks, naming unsent comments)"),
             ]);
             (t!("キー割り当て", "keys"), keys, usize::MAX)
         }

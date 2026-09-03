@@ -18,7 +18,7 @@
 //             selection: edit it)
 //   s         send the comments to the agent (herdr, or --send-cmd) and
 //             clear them; l lists them (Enter jump · d delete · y copy · s send)
-//   q         quit (unsent comments also print to stdout)
+//   q         quit (asks once; says how many comments are unsent)
 //   Enter/f   follow the line's link: a page navigates, an uploaded file
 //             is saved to the download dir and opened, an http(s) URL (↗)
 //             opens in the browser (a gyazo image → its gyazo page)
@@ -469,9 +469,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     drop(app.ime_guard.take());
 
-    if !app.comments.is_empty() {
-        println!("{}", format_all(&app.comments));
-    }
+    // Unsent comments are NOT printed here: text appearing after the
+    // viewer has closed reads as spillage, not as a hand-off (akapen
+    // dropped the same print for the same reason). The `q` question says
+    // how many are unsent while there is still time to `s` or `y`.
     res
 }
 
