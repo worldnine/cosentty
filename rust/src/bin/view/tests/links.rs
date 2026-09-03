@@ -382,3 +382,23 @@ use super::support::*;
         assert_eq!(percent_decode(&urlencode_component("階層整理型WiKi はスケールしない")), "階層整理型WiKi はスケールしない");
         assert_eq!(percent_decode("100%"), "100%");
     }
+
+    /// 装飾の中のリンクは遷移できる。`[** 見出し「[page]」の原則]` の最初の `]` は
+    /// 内側のリンクのもので、装飾の終わりではない。描画側の parser はこれを
+    /// 正しく読んでいたが、遷移側の抽出は最初の `]` で装飾を閉じて内側を捨てていた。
+    #[test]
+    fn a_link_inside_a_decoration_is_a_link_to_follow() {
+        let page = |t: &str| LinkItem::Page(t.to_string());
+        assert_eq!(
+            links_on_line("[** デモを貫く「[ヒューマンインザループ]」の原則]"),
+            vec![page("ヒューマンインザループ")]
+        );
+        assert_eq!(links_on_line("[* [改善案]] と [/ [斜体の中]]"), vec![page("改善案"), page("斜体の中")]);
+        assert_eq!(links_on_line("[* ただの太字]"), vec![]);
+        // `[[x]]` は太字、`[[[x]]]` は太字のリンク。
+        assert_eq!(links_on_line("[[太字]] のあと [[[改善案]]]"), vec![page("改善案")]);
+        assert_eq!(links_on_line("[[太字]] [普通のリンク]"), vec![page("普通のリンク")]);
+        // 位置は内側の `[` のもの(クリックの当たり判定に使う)。
+        let pos: Vec<usize> = positioned_links_on_line("[* [a]] [b]").into_iter().map(|(p, _)| p).collect();
+        assert_eq!(pos, vec![3, 8]);
+    }

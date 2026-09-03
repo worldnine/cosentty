@@ -153,6 +153,18 @@ pub(crate) fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
     let mut from = 0usize;
     while let Some(rel_start) = text[from..].find('[') {
         let start = from + rel_start;
+        // `[[x]]` is Cosense's other bold. Its closing is `]]`, and a link
+        // may sit inside (`[[[改善案]]]`): scan the inside when there is
+        // something bracketed there, else step past the whole thing.
+        if text[start + 1..].starts_with('[') {
+            let inner_start = start + 2;
+            from = match text[inner_start..].find("]]") {
+                Some(rel) if text[inner_start..inner_start + rel].contains('[') => inner_start,
+                Some(rel) => inner_start + rel + 2,
+                None => start + 1,
+            };
+            continue;
+        }
         if let Some(rel_end) = text[start + 1..].find(']') {
             let end = start + 1 + rel_end;
             let inner = &text[start + 1..end];
@@ -161,6 +173,14 @@ pub(crate) fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
                 .map(|sp| inner[..sp].chars().all(|c| matches!(c, '*' | '/' | '_' | '-')))
                 .unwrap_or(false)
                 && inner.starts_with(|c| matches!(c, '*' | '/' | '_' | '-'));
+            if is_deco {
+                // A decoration wraps ordinary notation: `[* [page]]` and
+                // `[** 見出し「[page]」の原則]` both carry a link. Taking the
+                // first `]` as the decoration's end swallowed it — so keep
+                // scanning INSIDE; the decoration's own `]` is then just text.
+                from = start + 1;
+                continue;
+            }
             let is_url = inner.contains("http://") || inner.contains("https://");
             let is_icon = inner.contains(".icon");
             if !is_deco && !is_url && !is_icon && !inner.is_empty() {
