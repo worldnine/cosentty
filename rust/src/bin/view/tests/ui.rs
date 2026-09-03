@@ -731,3 +731,39 @@ use super::support::*;
         assert_eq!(header_line("a", "b ", 6), "a   b ", "right flush when it fits");
         assert_eq!(header_line("abcd", "xy ", 6), "abcd  xy ", "otherwise they follow; the widget clips");
     }
+
+    /// ヘッダ右端の日時は「いま見ているページが書かれた時」。NOW では最新行の
+    /// 更新時刻、履歴では快照の時刻と位置に入れ替わるだけで、場所は同じ。
+    /// 履歴に入るとヘッダと枠が紫になる(言葉ではなく縁の色で分かる)。
+    #[test]
+    fn the_header_date_slides_from_now_into_history_and_the_chrome_turns_purple() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.lines[1].updated = 1_700_000_000;
+        app.lines[2].updated = 1_700_000_060; // the newest line is the page's `updated`
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        let header = |term: &Terminal<TestBackend>| -> String {
+            let buf = term.backend().buffer();
+            (0..buf.area.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect::<String>().replace(' ', "")
+        };
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let now_stamp = cosense::theme::format_local(1_700_000_060).replace(' ', "");
+        assert!(header(&term).ends_with(&now_stamp), "{:?}", header(&term));
+        let live_bg = term.backend().buffer().cell((0, 0)).unwrap().style().bg;
+        assert_eq!(live_bg, Some(app.header_colors.bg));
+
+        in_history(&mut app);
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let h = header(&term);
+        let old_stamp = cosense::theme::format_local(1).replace(' ', "");
+        assert!(h.ends_with(&format!("{old_stamp}·1/1")), "the same slot, now the snapshot's: {h:?}");
+        assert!(!h.contains('⏪'), "no emoji arrows");
+        let (_, purple) = cosense::theme::history_header_colors(ctx.terminal_bg);
+        let buf = term.backend().buffer();
+        assert_eq!(buf.cell((0, 0)).unwrap().style().bg, Some(purple), "header goes purple");
+        assert_ne!(Some(purple), live_bg);
+        // 枠の縦線(本文左端の列)も同じ紫。
+        let frame_fg = buf.cell((0, 3)).unwrap().style().fg;
+        assert_eq!(frame_fg, Some(purple), "so does the page frame");
+    }

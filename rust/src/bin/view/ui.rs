@@ -45,6 +45,32 @@ impl HeaderColors {
     }
 }
 
+impl App {
+    /// The colours the header, the page frame and the footer badge wear:
+    /// the project's own while reading NOW, Cosense's purple while a past
+    /// snapshot is shown — the one sign of history that is on every edge
+    /// of the page rather than in a word.
+    pub(crate) fn chrome_colors(&self, ctx: &Ctx) -> HeaderColors {
+        if self.time.is_some() {
+            let (fg, bg) = cosense::theme::history_header_colors(ctx.terminal_bg);
+            HeaderColors { fg, bg }
+        } else {
+            self.header_colors
+        }
+    }
+
+    /// When the page as shown was last written: the newest line's stamp
+    /// for NOW (Cosense's `updated` is exactly that), the snapshot's for
+    /// history. 0 when nothing carries a stamp (a page typed offline, a
+    /// test fixture).
+    pub(crate) fn shown_updated(&self) -> i64 {
+        match self.time.as_ref() {
+            Some(tm) => tm.points[tm.pos].created,
+            None => self.lines.iter().map(|l| l.updated).max().unwrap_or(0),
+        }
+    }
+}
+
 /// Truncate `s` to at most `w` columns, appending `…` when cut.
 pub(crate) fn truncate_width(s: &str, w: usize) -> String {
     use unicode_width::UnicodeWidthChar;
@@ -629,17 +655,29 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
 
     // header: `name / title` on the left — the project's proper name, or
     // its slug until the settings are read — and, at the right end, only
-    // what is STATE and has no other sign: the snapshot being viewed, a
+    // what is STATE and has no other sign: when the page was written, a
     // page that has drifted from the server, read-only. EDIT/SRC have the
     // footer badge, the backdrop and the caret; the comment count has `l`;
     // a selection has its footer hint; unread lines have the telomere's
     // colour. None of those earn a second badge here.
+    //
+    // The date is the same slot for NOW and for history: stepping back
+    // with ← changes the date in place (and adds the position), while the
+    // chrome turns purple — that is the whole transition.
+    let chrome = app.chrome_colors(ctx);
     let name = if app.project_display.is_empty() { app.project.as_str() } else { app.project_display.as_str() };
     let left = format!(" {name} / {}", app.title);
     let mut badges: Vec<String> = Vec::new();
-    if let Some(tm) = app.time.as_ref() {
-        let p = &tm.points[tm.pos];
-        badges.push(format!("⏪ {}/{} · {}", tm.pos + 1, tm.points.len(), cosense::theme::format_local(p.created)));
+    let stamp = app.shown_updated();
+    match app.time.as_ref() {
+        Some(tm) => badges.push(format!(
+            "{} · {}/{}",
+            cosense::theme::format_local(stamp),
+            tm.pos + 1,
+            tm.points.len()
+        )),
+        None if stamp > 0 => badges.push(cosense::theme::format_local(stamp)),
+        None => {}
     }
     if app.web_unsynced {
         badges.push(ts!("未同期", "unsynced").to_string());
@@ -652,8 +690,8 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     f.render_widget(
         Paragraph::new(head).style(
             Style::default()
-                .fg(app.header_colors.fg)
-                .bg(app.header_colors.bg)
+                .fg(chrome.fg)
+                .bg(chrome.bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Rect::new(area.x, area.y, area.width, 1),
@@ -686,8 +724,8 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // 並ぶ三つ目のモードサイン。READ は従来どおり控えめに。
     let mode_style = if app.session.is_some() {
         Style::default()
-            .fg(app.header_colors.fg)
-            .bg(app.header_colors.bg)
+            .fg(chrome.fg)
+            .bg(chrome.bg)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(CHROME_DIM)
@@ -757,7 +795,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         // READ のページ枠はヘッダのアクセント色(サイトでページが
         // プロジェクト色の中に置かれているのと同じ)。EDIT は枠なし —
         // 下敷きがモードを語る。
-        let frame_style = page_frame_style(app.header_colors);
+        let frame_style = page_frame_style(chrome);
         let right_x = body.x + body.width.saturating_sub(1);
         let set = |buf: &mut ratatui::buffer::Buffer, x: u16, y: i32, s: &str| {
             if y < band_top || y > band_bot {

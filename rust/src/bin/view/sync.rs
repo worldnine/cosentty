@@ -640,7 +640,7 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.follow = true;
     app.start_image_loads(ctx);
     app.time.as_mut().unwrap().pos = idx;
-    app.status = t!("⏪ {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新", "⏪ {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
+    app.status = t!("履歴 {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新", "history {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
         idx + 1,
         len,
         cosense::theme::format_local(created),

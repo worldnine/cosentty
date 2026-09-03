@@ -399,6 +399,14 @@ pub fn project_header_colors(
     (fg, Color::Rgb(bg.0, bg.1, bg.2))
 }
 
+/// The chrome (header and page frame) while a past snapshot is shown:
+/// Cosense's `purple` theme colour, blended onto the terminal background
+/// the same way a project's own header colour is. One colour for one
+/// meaning — "this is not NOW" — whatever the project's theme.
+pub fn history_header_colors(terminal_bg: (u8, u8, u8)) -> (Color, Color) {
+    project_header_colors(Some("purple"), terminal_bg)
+}
+
 /// `(red, green, blue, alpha)` for Cosense's standard `--navbar-bg`.
 fn cosense_navbar_rgba(theme: &str) -> Option<(u8, u8, u8, u8)> {
     Some(match theme {
