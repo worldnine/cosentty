@@ -39,6 +39,9 @@ pub(crate) enum Row {
     ImageLoading { src: usize, indent: usize, item: bool, url: String },
     ImageError { msg: String, src: usize, indent: usize, item: bool },
     Card { line: Line<'static> },
+    /// A heading or spacer of the related-pages sections below the frame:
+    /// plain chrome, drawn as is (no band — that is the comment card's).
+    Aside { line: Line<'static> },
     /// One row of the comment composer, woven in under the commented
     /// range like a card (akapen: the bar opens where the comment will
     /// sit). `caret`: the display column of the insertion point when this
@@ -63,7 +66,7 @@ impl Row {
             | Row::Inline { src, .. }
             | Row::ImageLoading { src, .. }
             | Row::ImageError { src, .. } => Some(*src),
-            Row::Card { .. } | Row::Composer { .. } | Row::FrameEnd => None,
+            Row::Card { .. } | Row::Aside { .. } | Row::Composer { .. } | Row::FrameEnd => None,
         }
     }
 }

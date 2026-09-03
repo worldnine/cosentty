@@ -488,6 +488,8 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
     バーは上に乗る」): カード/入力欄の行は `band_across` で枠列を含む全幅を黒に塗って
     から本文を描く。`▌`・キャレット・サムは行の後に描かれるので上に乗る。
     `the_comment_band_cuts_across_the_whole_frame`
+  - 関連ページ節の見出し・空行が `Row::Card` を共用していて、全幅の帯でページの
+    下側まで黒くなった(指摘)。`Row::Aside` に分けた。`related_section_rows_are_not_comment_bands`
   - **Shift+Enter で改行**(同日): 古い端末には Enter と同じバイトなので、起動時に
     `supports_keyboard_enhancement` を確かめ、話せる端末には kitty keyboard protocol
     の DISAMBIGUATE を要求(終了時に Pop)。Shift+Enter / Alt+Enter(ESC CR)/ `^j` の

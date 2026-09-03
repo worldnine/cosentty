@@ -1274,6 +1274,11 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
             }
+            Row::Aside { line } => {
+                if let Some(r) = one_row(screen_y) {
+                    f.render_widget(Paragraph::new(line.clone()).style(base), r);
+                }
+            }
             Row::Composer { line, caret } => {
                 if let Some(r) = bar_row(screen_y) {
                     band_across(f, r.y);
@@ -2307,12 +2312,12 @@ impl App {
         let unread_style = Style::default().fg(CHROME_CARET);
         let read_style = Style::default();
         let mut vsrc = self.lines.len();
-        let mut rows = vec![Row::Card { line: Line::from("") }];
+        let mut rows = vec![Row::Aside { line: Line::from("") }];
         for sec in &self.related {
             let head = format!("── {} ", sec.heading);
             let used = str_width(&head);
             let fill = "─".repeat(text_w.saturating_sub(used));
-            rows.push(Row::Card {
+            rows.push(Row::Aside {
                 line: Line::from(Span::styled(format!("{head}{fill}"), dim)),
             });
             for e in &sec.entries {
@@ -2325,7 +2330,7 @@ impl App {
                 });
                 vsrc += 1;
             }
-            rows.push(Row::Card { line: Line::from("") });
+            rows.push(Row::Aside { line: Line::from("") });
         }
         rows
     }

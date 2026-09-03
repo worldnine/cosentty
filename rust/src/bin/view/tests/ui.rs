@@ -977,3 +977,14 @@ use super::support::*;
         let ly = app.text_rect.y + first as u16 - app.scroll;
         assert_eq!(buf.cell((0, ly)).unwrap().symbol(), COMMENT_BAR);
     }
+
+    /// 関連ページ節の見出しと空行はコメントの帯ではない。同じ Row::Card を
+    /// 使っていたせいで、帯を全幅に塗ったときページの下側まで黒くなった。
+    #[test]
+    fn related_section_rows_are_not_comment_bands() {
+        let mut app = page(&["title", "one"]);
+        app.related = vec![RelSection { heading: "Links (0)".into(), entries: Vec::new() }];
+        app.rebuild(40);
+        assert!(app.rows.iter().any(|r| matches!(r, Row::Aside { .. })), "the section heading is an aside");
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Card { .. })), "and no comment card is woven");
+    }
