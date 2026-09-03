@@ -666,7 +666,6 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // chrome turns purple — that is the whole transition.
     let chrome = app.chrome_colors(ctx);
     let name = if app.project_display.is_empty() { app.project.as_str() } else { app.project_display.as_str() };
-    let left = format!(" {name} / {}", app.title);
     let mut badges: Vec<String> = Vec::new();
     // The position counts NOW as the newest entry: `4/4` while reading the
     // live page with three snapshots, and ← walks the number down.
@@ -685,7 +684,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         badges.push(ts!("読み取り専用", "read-only").to_string());
     }
     let right = if badges.is_empty() { String::new() } else { format!("{} ", badges.join(" · ")) };
-    let head = header_line(&left, &right, area.width);
+    let head = header_line(name, &app.title, &right, area.width);
     f.render_widget(
         Paragraph::new(head).style(
             Style::default()
@@ -2304,17 +2303,25 @@ impl App {
     }
 }
 
-/// One header row: `left` at the left edge, `right` flush with the right
-/// edge. When both do not fit, the RIGHT side wins: the states (history
-/// position, date, unsynced, read-only) are what the header is for, while
-/// the name and title are also on the page itself — so the left is cut to
-/// `…` for whatever room remains.
-pub(crate) fn header_line(left: &str, right: &str, width: u16) -> String {
+/// One header row: ` name / title` at the left edge, `right` flush with
+/// the right edge. When it all does not fit, things give way in this order:
+/// the RIGHT side never (the states — history position, date, unsynced,
+/// read-only — are what the header is for); the site NAME goes first and
+/// goes whole, leaving ` / title` (the name is one word the reader already
+/// knows, and cutting it to `研…` says nothing); the TITLE is cut to `…`
+/// only after that.
+pub(crate) fn header_line(name: &str, title: &str, right: &str, width: u16) -> String {
     use unicode_width::UnicodeWidthStr;
     let width = width as usize;
     let rw = UnicodeWidthStr::width(right);
     let room = width.saturating_sub(rw + 1); // one blank before the badges
-    let left = if UnicodeWidthStr::width(left) > room { truncate_width(left, room) } else { left.to_string() };
+    let full = format!(" {name} / {title}");
+    let left = if UnicodeWidthStr::width(full.as_str()) <= room {
+        full
+    } else {
+        let bare = format!(" / {title}");
+        if UnicodeWidthStr::width(bare.as_str()) <= room { bare } else { truncate_width(&bare, room) }
+    };
     let pad = width.saturating_sub(UnicodeWidthStr::width(left.as_str()) + rw);
     format!("{left}{}{right}", " ".repeat(pad))
 }

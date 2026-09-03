@@ -728,9 +728,11 @@ use super::support::*;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let h = header(&term).replace(' ', "");
         assert!(h.ends_with("未同期·読み取り専用"), "{h:?}");
-        assert_eq!(header_line("a", "b ", 6), "a   b ", "right flush when it fits");
-        assert_eq!(header_line("abcd", "xy ", 6), "a… xy ", "otherwise the left is cut: the badges win");
-        assert_eq!(header_line("日本語のタイトル", "3/12 ", 12), "日本…  3/12 ", "cut on a character boundary; the badges keep their place");
+        assert_eq!(header_line("s", "t", "b ", 10), " s / t  b ", "right flush when it fits");
+        // 足りないときはまずサイト名が丸ごと消え、`/ タイトル` が残る。
+        assert_eq!(header_line("研究ノート", "設計", "4/4 ", 12), " / 設計 4/4 ", "the name goes first, whole");
+        // それでも足りなければタイトルを … で削る。バッジは動かない。
+        assert_eq!(header_line("研究ノート", "日本語のタイトル", "3/12 ", 12), " / 日… 3/12 ", "then the title is cut");
     }
 
     /// ヘッダ右端の日時は「いま見ているページが書かれた時」。NOW では最新行の
