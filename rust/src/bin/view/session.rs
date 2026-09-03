@@ -1465,7 +1465,7 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
     }
     let edited = edited.strip_suffix('\n').unwrap_or(&edited).to_string();
     if edited == original {
-        app.note(t!("変更はありません", "no changes"));
+        app.toast(t!("変更はありません", "no changes"));
         return;
     }
     let new_lines: Vec<String> = edited.split('\n').map(str::to_string).collect();
@@ -1477,7 +1477,7 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
         app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
     let ops = diff_to_ops(&old, &new_lines);
     if ops.is_empty() {
-        app.note(t!("変更はありません", "no changes"));
+        app.toast(t!("変更はありません", "no changes"));
     } else {
         let n = ops.len();
         do_edit(app, ctx, &t!("エディタ", "editor"), ops);
