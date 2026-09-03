@@ -339,7 +339,7 @@ pub(crate) fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, 
 pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
     let place = if back { app.history.pop() } else { app.forward.pop() };
     let Some(place) = place else {
-        app.status = if back { t!("戻る先の履歴はありません", "no history") } else { t!("進む先の履歴はありません", "no forward history") };
+        app.toast(if back { t!("戻る先の履歴はありません", "no history") } else { t!("進む先の履歴はありません", "no forward history") });
         return;
     };
     let here = app.here();
@@ -353,14 +353,14 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
             // instant: cursor, scroll and images do not have to be rebuilt.
             if app.index.is_some() && app.project == project && app.title == title {
                 app.index = None;
-                app.status = format!("{arrow} {title}");
+                app.toast(format!("{arrow} {title}"));
                 arrived = true;
             } else {
                 match load_page(ctx, &project, &title) {
                     Ok(loaded) => {
                         app.index = None;
                         app.set_page(loaded, ctx);
-                        app.status = format!("{arrow} {title}");
+                        app.toast(format!("{arrow} {title}"));
                         arrived = true;
                     }
                     Err(e) => {
@@ -372,7 +372,7 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
                         } else {
                             app.forward.push(place);
                         }
-                        app.status = t!("履歴の移動に失敗しました: {e}", "history failed: {e}");
+                        app.toast_err(t!("履歴の移動に失敗しました: {e}", "history failed: {e}"));
                     }
                 }
             }
@@ -381,7 +381,7 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
             app.index = Some(*state);
             app.index_project = project;
             app.overlay = None;
-            app.status = format!("{arrow} {label}");
+            app.toast(format!("{arrow} {label}"));
             arrived = true;
         }
     }
@@ -414,8 +414,7 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
                 // Both, because this is reached from two places: from a
                 // page (no index open — the page's own status line shows
                 // it) and from `s`/`^u` with the list already on screen.
-                app.status = t!("ページ一覧を取得できません: {e}", "page list failed: {e}");
-                app.index_notice = app.status.clone();
+                app.toast_err(t!("ページ一覧を取得できません: {e}", "page list failed: {e}"));
                 return;
             }
         };
@@ -465,7 +464,7 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
     let (count, capped, hits) = match ctx.client.search_pages_in(&project, &query) {
         Ok(v) => v,
         Err(e) => {
-            app.index_notice = t!("本文検索に失敗しました: {e}", "full-text search failed: {e}");
+            app.toast_err(t!("本文検索に失敗しました: {e}", "full-text search failed: {e}"));
             return;
         }
     };
@@ -486,11 +485,9 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
     // asking the same question it just answered.
     ix.filter_mode = carried_filter_mode(app);
     app.index = Some(ix);
-    app.index_notice = if found == 0 {
-        t!("「{}」は本文にありません", "no page's body has \"{}\"", query)
-    } else {
-        String::new()
-    };
+    if found == 0 {
+        app.toast(t!("「{}」は本文にありません", "no page's body has \"{}\"", query));
+    }
 }
 
 /// `^u`: back to the project's own list, whatever was narrowing or
@@ -897,7 +894,7 @@ impl App {
             Err(e) => {
                 // Say so: a silent empty table would look like "unknown
                 // member" and hide a permission or network problem.
-                self.status = t!("メンバー一覧を取得できません: {} — {e}", "member list failed for {}: {e}", self.project);
+                self.toast_err(t!("メンバー一覧を取得できません: {} — {e}", "member list failed for {}: {e}", self.project));
                 HashMap::new()
             }
         };

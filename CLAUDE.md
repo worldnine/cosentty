@@ -16,7 +16,7 @@ Cosense(旧 Scrapbox)の TUI ビューワ/エディタ。本体は `rust/`(lib �
 
 - viewer は `rust/src/bin/view/` 配下に関心事別で分割済み
   (`app` 状態 / `keys` / `mouse` / `session` EDIT / `editing` / `outline` /
-  `sync` / `nav` / `links` / `images` / `web` / `ui` / `tests/`)。
+  `sync` / `nav` / `links` / `images` / `web` / `ui` / `toast` / `tests/`)。
   巨大ファイルはもう無いので、まず該当モジュールを開けばよい
 - 挙動を変えたら `rust/KEYMAP.md` とヘルプ文言(`ui.rs` の Overlay::Help)も追随させる
 - UI の文言は `t!("日本語", "english")` で両言語を並べる。キー名・フラグ・

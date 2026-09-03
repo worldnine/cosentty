@@ -10,6 +10,7 @@ mod nav;
 mod outline;
 mod session;
 mod sync;
+mod toast;
 mod upload;
 mod ui;
 mod web;

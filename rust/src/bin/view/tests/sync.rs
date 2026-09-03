@@ -11,7 +11,7 @@ use super::support::*;
         // Right from the newest snapshot is the other way out of history.
         travel(&mut app, &ctx, 1);
         assert!(app.time.is_some());
-        assert_ne!(app.status, "最新");
+        assert_ne!(app.toast_text(), "最新");
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
     }
 
@@ -260,7 +260,7 @@ use super::support::*;
         let texts: Vec<&str> = app.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, vec!["t", "new!", "ONE", "two"]);
         assert_eq!(app.cursor, 3, "cursor followed its line id, not its number");
-        assert!(app.status.contains("web"));
+        assert!(app.toast_text().contains("web"));
     }
 
     #[test]
@@ -293,6 +293,7 @@ use super::support::*;
         assert_eq!(app.ws_head.as_deref(), Some("c1"));
         assert!(!app.ws_resync_pending, "no resync for a meta commit");
         assert_eq!(app.status, "quiet", "and nothing to announce");
+        assert!(app.toast_text().is_empty(), "not even a toast: {}", app.toast_text());
 
         // その直後の本文コミットは contiguous のまま差分適用される。
         ws_on_commit(
@@ -328,6 +329,7 @@ use super::support::*;
         ws_on_resync(&mut app, &ctx, resync(same, Some("h1")));
         assert_eq!(app.ws_head.as_deref(), Some("h1"), "the head still resumes");
         assert_eq!(app.status, "quiet", "an unchanged install is silent");
+        assert!(app.toast_text().is_empty(), "not even a toast: {}", app.toast_text());
 
         // 内容が変わっていれば従来どおり告げる(epoch は現在値を運ぶ)。
         let mut differs = polled(&[("id0", "t"), ("id1", "CHANGED")]).page;
@@ -335,7 +337,7 @@ use super::support::*;
         let now = app.server_epoch_now();
         ws_on_resync(&mut app, &ctx, resync_at(differs, Some("h2"), now));
         assert_eq!(app.lines[1].text, "CHANGED");
-        assert!(app.status.contains("全同期"), "status: {}", app.status);
+        assert!(app.toast_text().contains("全同期"), "status: {}", app.toast_text());
     }
 
     #[test]
@@ -358,7 +360,7 @@ use super::support::*;
         );
         assert_eq!(app.lines[1].text, "ONE!", "diff applied in place");
         assert_eq!(app.ws_head.as_deref(), Some("c1"));
-        assert!(app.status.contains("websocket"));
+        assert!(app.toast_text().contains("websocket"));
     }
 
     #[test]

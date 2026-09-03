@@ -404,12 +404,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
 
     // ---- footer ------------------------------------------------------
     let ix = app.index.as_ref().expect("open");
-    let hint: String = if !app.index_notice.is_empty() {
-        // The index has no status line of its own, so a notice takes the
-        // footer's hint slot. It lasts until the next key (cleared at the
-        // top of `index_key`), which is what a transient notice should do.
-        app.index_notice.clone()
-    } else if ix.filter_editing {
+    let hint: String = if ix.filter_editing {
         match ix.filter_mode {
             cosense::index::FilterMode::Title => ts!(
                 "タイトル絞り込み — Enter 確定 · Tab 本文検索へ · Esc 解除",
@@ -619,6 +614,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // Esc goes back to it).
     if app.index.is_some() {
         draw_index(f, app, ctx, area);
+        draw_toast(f, app, ctx, area);
         return;
     }
 
@@ -678,7 +674,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
 
     // help / status: a leading position readout (akapen's `VIEW L23/118`),
     // then the contextual hint — numbered links when the cursor line has
-    // them, else the static key list, else a transient status message.
+    // them, else the static key list, else the standing status (what IS:
+    // a selection, the history position). One-shot notices are toasts and
+    // float above this line instead (toast.rs).
     let mode_tag = if app.session.is_some() {
         "EDIT"
     } else if app.mode == Mode::Source {
@@ -1301,6 +1299,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if app.overlay.is_some() {
         draw_overlay(f, app, area);
     }
+    // A toast rides above the footer, over everything else, and leaves by
+    // itself (toast.rs).
+    draw_toast(f, app, ctx, area);
 }
 
 /// One thing on a line: a run of text, or a picture with its cell size.
@@ -1740,7 +1741,6 @@ impl App {
         // The move mode says its own name and its own keys, in words: the
         // grabbed block is highlighted, but a highlight is a colour and a
         // colour alone must not be what tells the reader where they are.
-        // A refusal ("no sibling that way") rides along behind them.
         if self.move_mode.is_some() {
             let keys = t!(
                 "MOVE — j/k 1行 · J/K 兄弟 · h/l 字下げ · Esc 確定",
@@ -1762,8 +1762,8 @@ impl App {
             let keys = t!("{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了", "{}↑↓ move · Enter new line · ⌫@BOL join · Tab indent · Esc done",
                 if dirty { "● " } else { "" }
             );
-            // An upload's progress and outcome arrive while the keys are
-            // being typed; they ride along behind the hint as MOVE's do.
+            // An upload's progress arrives while the keys are being typed;
+            // it rides along behind the hint as MOVE's does.
             return match self.status.is_empty() {
                 true => keys,
                 false => format!("{keys} · {}", self.status),

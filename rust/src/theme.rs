@@ -666,6 +666,21 @@ pub fn edit_backdrop(terminal_bg: (u8, u8, u8)) -> Color {
     }
 }
 
+/// トーストの地色。文字(黄/赤)が浮くよう、端末の背景とは十分に離す。
+/// akapen は黒地固定だが、真っ黒な端末では矩形が消えるので、その場合と
+/// 明るい端末では持ち上げた黒(濃いグレー)にする。他の帯(選択・EDIT の
+/// 下敷き)と一致しない色であることも大事: フェードはこの色のセルだけに
+/// かかる。
+pub fn toast_bg(terminal_bg: (u8, u8, u8)) -> Color {
+    let (r, g, b) = terminal_bg;
+    let near_black = r.max(g).max(b) < 24;
+    if near_black || relative_luminance(terminal_bg) > 0.179 {
+        Color::Rgb(44, 44, 48)
+    } else {
+        Color::Rgb(0, 0, 0)
+    }
+}
+
 /// Apply `shimmer_level` to one span's style: an RGB foreground is mixed
 /// toward the terminal background, which is the only way to modulate
 /// brightness without inventing a color the theme never chose.
@@ -697,6 +712,15 @@ pub fn shimmer_style(base: Style, terminal_bg: (u8, u8, u8), level: f32) -> Styl
 mod tests {
     use super::*;
     use crate::highlight::Highlighter;
+
+    /// トーストの地色は端末の背景から十分離れ、真っ黒な端末では黒に
+    /// 溶けない。
+    #[test]
+    fn toast_bg_stands_off_the_terminal_background() {
+        assert_eq!(toast_bg((0, 0, 0)), Color::Rgb(44, 44, 48), "pure black: lifted");
+        assert_eq!(toast_bg((30, 30, 46)), Color::Rgb(0, 0, 0), "a dark theme: black");
+        assert_eq!(toast_bg((250, 250, 250)), Color::Rgb(44, 44, 48), "light: dark grey, not ink");
+    }
 
     /// 選択バンドは「端末背景」「コードの wash」「カーソル行の DarkGray」の
     /// どれとも見分けがつくこと。明・暗どちらの背景でも。

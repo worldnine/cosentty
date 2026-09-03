@@ -19,6 +19,7 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 libc = "0.2"
 tempfile = "3"
 tungstenite = { version = "0.29", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+tachyonfx = { version = "0.25", features = ["std-duration"] }
 
 [lib]
 name = "cosense"

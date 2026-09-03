@@ -80,8 +80,8 @@ use super::support::*;
         // Esc asks for NOW. The fetch fails, so there is no NOW to show.
         handle_key(&mut app, &ctx, key(KeyCode::Esc));
         assert!(app.time.is_some(), "the snapshot stays on screen");
-        assert_ne!(app.status, "最新", "and it is not labelled as the live page");
-        assert!(app.status.contains("読み直しに失敗"), "the reason is shown: {}", app.status);
+        assert_ne!(app.toast_text(), "最新", "and it is not labelled as the live page");
+        assert!(app.toast_text().contains("読み直しに失敗"), "the reason is shown: {}", app.toast_text());
         assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no diagram work");
     }
 
@@ -919,9 +919,9 @@ use super::support::*;
         // for — so the list is still there (a failed open keeps the
         // reader's place). What is checked is which row it resolved to.
         assert!(
-            app.status.contains("三番目"),
+            app.toast_text().contains("三番目"),
             "the third row was opened, not another: {}",
-            app.status
+            app.toast_text()
         );
     }
 
@@ -1109,7 +1109,7 @@ use super::support::*;
             "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
         );
         handle_key(&mut app, &ctx, key(KeyCode::Char('y')));
-        assert!(app.status.contains("copied"), "status: {}", app.status);
+        assert!(app.toast_text().contains("copied"), "status: {}", app.toast_text());
 
         app.overlay = Some(Overlay::Help);
         // Tall enough for every help line, diagram notes included: the
@@ -1540,8 +1540,8 @@ use super::support::*;
         handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
         assert_eq!(app.lines.len(), 3, "nothing was deleted");
         assert!(drain_jobs(&mut app).is_empty(), "and nothing was committed");
-        assert!(app.status.contains("^k"), "status: {}", app.status);
-        assert!(app.status.contains("⌫"), "status: {}", app.status);
+        assert!(app.toast_text().contains("^k"), "status: {}", app.toast_text());
+        assert!(app.toast_text().contains("⌫"), "status: {}", app.toast_text());
 
         // Not even with a selection: that range belongs to `c` (comment)
         // in READ, and to ⌫ in EDIT.

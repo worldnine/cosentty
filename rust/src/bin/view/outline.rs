@@ -84,24 +84,24 @@ pub(crate) fn outline_prefix_command(k: event::KeyEvent) -> Option<(bool, Outlin
 
 pub(crate) fn outline_mutation_blocked(app: &mut App) -> bool {
     if app.move_mode.is_some() {
-        app.status = t!(
+        app.toast_err(t!(
             "移動モード中 — Esc/Enter で確定してから",
             "in move mode — commit it first with Esc/Enter"
-        );
+        ));
         return true;
     }
     if app.outline_refresh_needed {
-        app.status = t!(
+        app.toast_err(t!(
             "アウトライン移動後の再読み込み待ち — ページを開き直してください",
             "outline refresh required — reopen the page before editing"
-        );
+        ));
         return true;
     }
     if app.outline_pending.is_some() {
-        app.status = t!(
+        app.toast_err(t!(
             "アウトライン操作の完了待ち — 編集・取り消し・やり直しは待ってください",
             "waiting for outline action — edit, undo, and redo are temporarily blocked"
-        );
+        ));
         return true;
     }
     false
@@ -131,7 +131,7 @@ pub(crate) fn restore_outline_snapshot(app: &mut App, snapshot: &OutlineSnapshot
 }
 
 pub(crate) fn outline_error(app: &mut App, error: PlanError) {
-    app.status = match error {
+    app.toast_err(match error {
         PlanError::InvalidTarget => t!("カーソルの下にソース行がありません", "no source line under the cursor"),
         PlanError::TitleProtected => t!("タイトル行はアウトライン操作できません", "the title line is protected"),
         PlanError::CannotOutdent => t!(
@@ -143,7 +143,7 @@ pub(crate) fn outline_error(app: &mut App, error: PlanError) {
             "同じ親を持つ兄弟ブロックがありません",
             "no sibling block with the same parent"
         ),
-    };
+    });
 }
 
 /// The refusals every outline action shares, in the order the reader
@@ -157,14 +157,14 @@ pub(crate) fn outline_action_allowed(app: &mut App) -> bool {
         return false;
     }
     if app.web_unsynced {
-        app.status = t!(
+        app.toast_err(t!(
             "サーバーの内容を読み直すまでアウトライン操作できません",
             "outline actions require a fresh server copy"
-        );
+        ));
         return false;
     }
     if app.time.is_some() {
-        app.status = t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)");
+        app.toast_err(t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)"));
         return false;
     }
     if !ensure_editable(app) {
@@ -175,10 +175,10 @@ pub(crate) fn outline_action_allowed(app: &mut App) -> bool {
         return false;
     }
     if page_is_uncreated(app) {
-        app.status = t!(
+        app.toast_err(t!(
             "未作成ページではアウトライン操作できません",
             "outline actions are unavailable until the page is created"
-        );
+        ));
         return false;
     }
     true
@@ -193,7 +193,7 @@ pub(crate) fn queue_outline_action(app: &mut App, ctx: &Ctx, label: &str, done: 
     if let Some(job) = do_edit(app, ctx, label, ops) {
         app.outline_pending = Some(OutlinePending { job, snapshot });
         app.follow = true;
-        app.status = done;
+        app.toast(done);
     } else {
         // The worker never took the structural job. Put the clean
         // pre-action model back immediately; an optimistic move must never
@@ -210,10 +210,10 @@ pub(crate) fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: Out
         return;
     }
     if block && app.selection.is_some() {
-        app.status = t!(
+        app.toast_err(t!(
             "選択中はブロック操作できません — Esc で選択を解除",
             "block actions are unavailable with a selection — Esc clears it"
-        );
+        ));
         return;
     }
 
@@ -294,10 +294,10 @@ pub(crate) fn enter_move_mode(app: &mut App, ctx: &Ctx) {
     // same refusal the Alt and ^g block bindings give. Refusing is better
     // than carrying a selection that the drag would silently drop.
     if app.selection.is_some() {
-        app.status = t!(
+        app.toast_err(t!(
             "選択中はブロック操作できません — Esc で選択を解除",
             "block actions are unavailable with a selection — Esc clears it"
-        );
+        ));
         return;
     }
     let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
@@ -340,10 +340,10 @@ pub(crate) fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirecti
         app.mark_desynced();
         app.follow = true;
         rerender(app, ctx);
-        app.status = t!(
+        app.toast_err(t!(
             "つかんでいたブロックが見つからないので、つかむ前の並びに戻しました",
             "the grabbed block is gone — restored the arrangement from before the grab"
-        );
+        ));
         return;
     };
     let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
@@ -476,10 +476,10 @@ pub(crate) fn leave_move_mode(app: &mut App, ctx: &Ctx) {
         // there is nothing to tell the server.
         rerender(app, ctx);
         app.follow = true;
-        app.status = t!(
+        app.toast(t!(
             "移動モードを抜けました（変更なし）",
             "left move mode (nothing changed)"
-        );
+        ));
         return;
     };
     queue_outline_action(app, ctx, &label, done, ops);
@@ -569,10 +569,10 @@ pub(crate) fn recover_outline_action_with(
     app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let same_page = app.project == pending.project && app.page_id == pending.page_id;
     if !same_page {
-        app.status = t!(
+        app.toast_err(t!(
             "前のページのアウトライン操作に失敗しました（{reason}）",
             "outline action on the previous page failed ({reason})"
-        );
+        ));
         return;
     }
 
@@ -615,15 +615,15 @@ pub(crate) fn recover_outline_action_with(
             });
             app.follow = true;
         }
-        app.status = t!(
+        app.toast_err(t!(
             "アウトライン操作に失敗しました（{reason}）— サーバーの内容を読み直しました",
             "outline action failed ({reason}) — reloaded server state"
-        );
+        ));
     } else {
-        let reload_reason = app.status.clone();
-        app.status = t!(
+        let reload_reason = app.toast_text().to_string();
+        app.toast_err(t!(
             "アウトライン操作に失敗しました（{reason}）— 変更を戻しました。{reload_reason}",
             "outline action failed ({reason}) — reverted the change. {reload_reason}"
-        );
+        ));
     }
 }

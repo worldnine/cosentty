@@ -181,7 +181,7 @@ use super::support::*;
         // the block stays in hand.
         handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
         handle_key(&mut app, &ctx, modified(KeyCode::Char('J'), KeyModifiers::SHIFT));
-        assert!(app.status.contains("兄弟ブロック"), "status: {}", app.status);
+        assert!(app.toast_text().contains("兄弟ブロック"), "status: {}", app.toast_text());
         assert!(app.move_mode.is_some());
         // While `j` from the same spot simply goes.
         handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
@@ -219,7 +219,7 @@ use super::support::*;
         );
         assert!(app.web_unsynced, "and the disagreement is recorded");
         assert!(drain_jobs(&mut app).is_empty(), "nothing was sent");
-        assert!(app.status.contains("つかむ前の並び"), "status: {}", app.status);
+        assert!(app.toast_text().contains("つかむ前の並び"), "status: {}", app.toast_text());
     }
 
     /// Caps lock, or the habit of the `^g H/J/K/L` block bindings, must not
@@ -245,7 +245,7 @@ use super::support::*;
         assert_eq!(drain_jobs(&mut app).len(), 1, "and the drag went out as one commit");
         // And the paste itself was handled, not swallowed: in READ it
         // points at the edit keys, which is what it does without a drag.
-        assert!(app.status.contains("貼り付けは編集中に"), "status: {}", app.status);
+        assert!(app.toast_text().contains("貼り付けは編集中に"), "status: {}", app.toast_text());
         finish_outline(&mut app, &ctx);
     }
 
@@ -262,7 +262,7 @@ use super::support::*;
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
         assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)), "kept as it was");
-        assert!(app.status.contains("選択中"), "status: {}", app.status);
+        assert!(app.toast_text().contains("選択中"), "toast: {}", app.toast_text());
         assert!(drain_jobs(&mut app).is_empty());
     }
 
@@ -337,7 +337,7 @@ use super::support::*;
         bare.cursor = 1;
         handle_key(&mut bare, &ctx, key(KeyCode::Tab));
         assert_eq!(bare.cursor, 1, "nowhere to go");
-        assert!(bare.status.contains("ソース表示は s"), "status: {}", bare.status);
+        assert!(bare.toast_text().contains("ソース表示は s"), "status: {}", bare.toast_text());
     }
 
     /// ソース表示はモードから表示オプションへ降格: `s` でトグルし、
@@ -350,7 +350,7 @@ use super::support::*;
 
         handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert_eq!(app.mode, Mode::Source);
-        assert_eq!(app.status, "source");
+        assert_eq!(app.toast_text(), "source");
         handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert_eq!(app.mode, Mode::View);
 

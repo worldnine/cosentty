@@ -43,8 +43,8 @@ use super::support::*;
         assert_eq!(s.input.buf, "a [https://scrapbox.io/files/abc] Xb");
         assert_eq!(s.input.cur, s.input.buf.len() - 1, "caret still before the b");
         assert!(drain_jobs(&mut app).is_empty(), "nothing committed yet: the line is just dirty");
-        assert!(app.status.contains("貼りました"), "{}", app.status);
-        assert!(app.hint_body(&[]).contains("貼りました"), "EDIT shows the outcome behind its keys");
+        assert!(app.toast_text().contains("貼りました"), "{}", app.toast_text());
+        assert!(!app.hint_body(&[]).contains("アップロード中"), "the in-flight note left the footer: {}", app.hint_body(&[]));
     }
 
     /// Caret elsewhere: the line's CURRENT text gets the URL, as a commit.
@@ -75,7 +75,7 @@ use super::support::*;
         app.drain_uploads(&ctx);
         assert_eq!(app.lines.len(), 3);
         assert_eq!(app.lines[2].text, "[https://gyazo.com/x]");
-        assert!(app.status.contains("末尾"), "{}", app.status);
+        assert!(app.toast_text().contains("末尾"), "{}", app.toast_text());
     }
 
     #[test]
@@ -87,7 +87,7 @@ use super::support::*;
         let id = app.lines[1].id.clone();
         done(&app, &id, 0, Err("HTTP 402 for upload-request"));
         app.drain_uploads(&ctx);
-        assert!(app.status.contains("容量"), "402 is said in words: {}", app.status);
+        assert!(app.toast_text().contains("容量"), "402 is said in words: {}", app.toast_text());
         assert_eq!(app.lines[1].text, "one");
 
         app.title = "elsewhere".into();
@@ -126,11 +126,11 @@ use super::support::*;
         let png = dir.path().join("shot.png");
         std::fs::write(&png, b"x").unwrap();
         app.start_upload(&ctx, &png);
-        assert!(app.status.contains("編集中"), "{}", app.status);
+        assert!(app.toast_text().contains("編集中"), "{}", app.toast_text());
         enter_session(&mut app, &ctx, 1, 0);
         app.editable = false;
         app.start_upload(&ctx, &png);
-        assert!(app.status.contains("読み取り専用"), "{}", app.status);
+        assert!(app.toast_text().contains("読み取り専用"), "{}", app.toast_text());
     }
 
     /// A Gyazo destination takes the token that matches it and no other:
@@ -148,7 +148,7 @@ use super::support::*;
         let png = dir.path().join("shot.png");
         std::fs::write(&png, b"x").unwrap();
         app.start_upload(&ctx, &png);
-        assert!(app.status.contains("GYAZO_ACCESS_TOKEN") && !app.status.contains("TEAMS"), "{}", app.status);
+        assert!(app.toast_text().contains("GYAZO_ACCESS_TOKEN") && !app.toast_text().contains("TEAMS"), "{}", app.toast_text());
 
         ctx.config = cosense::config::Config::parse("[upload]\nimages = \"gyazo\"\ngyazo_team = \"org\"\n").unwrap();
         app.start_upload(&ctx, &png);
@@ -163,9 +163,9 @@ use super::support::*;
         let mut app = page(&["title", "one"]);
         app.rebuild(40);
         handle_key(&mut app, &ctx, ctrl('v'));
-        assert!(app.status.contains("編集中に"), "{}", app.status);
+        assert!(app.toast_text().contains("編集中に"), "{}", app.toast_text());
         enter_session(&mut app, &ctx, 1, 0);
         app.editable = false;
         handle_key(&mut app, &ctx, ctrl('v'));
-        assert!(app.status.contains("読み取り専用"), "{}", app.status);
+        assert!(app.toast_text().contains("読み取り専用"), "{}", app.toast_text());
     }

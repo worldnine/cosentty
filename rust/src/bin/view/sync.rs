@@ -42,13 +42,12 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                                     app.own_commits.pop_front();
                                 }
                             }
-                            app.status = format!("✓ {label}");
+                            app.toast(format!("✓ {label}"));
                         }
                     }
                     return;
                 }
             }
-            let outline_done = outline.is_some();
             if !commit_id.is_empty() {
                 app.own_commits.push_back(commit_id);
                 while app.own_commits.len() > OWN_COMMIT_MEMORY {
@@ -65,13 +64,9 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     *t = (app.project.clone(), app.title.clone());
                 }
             }
-            if outline_done
-                || app.status.is_empty()
-                || app.status.starts_with('✓')
-                || app.status.starts_with("EDIT")
-            {
-                app.status = format!("✓ {label}");
-            }
+            // A toast never displaces the standing status (a selection
+            // hint, an upload in flight), so the tick can always be said.
+            app.toast(format!("✓ {label}"));
             // A page that just came into being has an id we do not know
             // yet, and every edit until we do has to wait. Waiting for the
             // next poll means up to 3 s (60 s on websocket sync) of held
@@ -94,7 +89,7 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     t!("送信失敗: {label} — {msg}", "commit failed: {label} — {msg}"),
                 );
             } else {
-                app.status = t!("コミットに失敗しました: {label} — {msg}", "commit failed: {label} — {msg}");
+                app.toast_err(t!("コミットに失敗しました: {label} — {msg}", "commit failed: {label} — {msg}"));
                 app.mark_desynced();
                 if app.create_state == CreateState::Sent && page_is_uncreated(app) {
                     // The page was never made. Let the next edit try again
@@ -150,12 +145,12 @@ pub(crate) fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::
     let ops = cosense::editops::diff_to_ops(&server, &local);
     if ops.is_empty() {
         rerender(app, ctx);
-        app.status = t!("✓ ページを作成しました", "✓ page created");
+        app.toast(t!("✓ ページを作成しました", "✓ page created"));
     } else {
         // `do_edit` applies locally, stacks the undo and queues the commit
         // — the same path any other edit takes, now that there is a page.
         do_edit(app, ctx, &t!("新規ページの同期", "sync new page"), ops);
-        app.status = t!("✓ ページを作成しました", "✓ page created");
+        app.toast(t!("✓ ページを作成しました", "✓ page created"));
     }
     reanchor_cursor_session(app, cursor_id, session_id);
 }
@@ -223,7 +218,7 @@ pub(crate) fn install_remote_lines(
     reanchor_cursor_session(app, cursor_id, session_id);
     app.follow = true;
     if let Some(s) = status {
-        app.status = s.into();
+        app.toast(s);
     }
 }
 
@@ -327,11 +322,9 @@ pub(crate) fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
             }
         }
         WsEvent::Status(s) => {
-            // Never clobber the session hint (EDIT — …): connection notes
-            // are transient and can wait.
-            if !app.status.starts_with("EDIT") {
-                app.status = s;
-            }
+            // Connection notes are transient: a toast, which leaves the
+            // footer's standing status alone.
+            app.toast(s);
         }
         WsEvent::Resynced(res) => ws_on_resync(app, ctx, res),
         WsEvent::Commit(c) => ws_on_commit(app, ctx, c),
@@ -469,14 +462,14 @@ pub(crate) fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
         rerender(app, ctx);
         reanchor_cursor_session(app, cursor_id, session_id);
         app.follow = true;
-        app.status = t!("⟳ websocket で更新を反映", "⟳ applying a websocket update");
+        app.toast(t!("⟳ websocket で更新を反映", "⟳ applying a websocket update"));
         return true;
     }
     // Chain broke (reconnect gap, join replay): the event is NOT applied
     // and NOT silently dropped — a background full-page resync is
     // requested, and the fetched page will carry this commit's effect.
     app.ws_resync_pending = true;
-    app.status = t!("⟳ websocket 差分に欠落 — 再同期します", "⟳ a websocket diff was missing — resyncing");
+    app.toast(t!("⟳ websocket 差分に欠落 — 再同期します", "⟳ a websocket diff was missing — resyncing"));
     true
 }
 
@@ -533,7 +526,7 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
     // set_page cleared session + undo lineage and marked us synced again.
     match stash {
         None => {
-            app.status = t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded");
+            app.toast(t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded"));
         }
         Some((id, buf, caret)) => {
             if let Some(idx) = app.lines.iter().position(|l| l.id == id) {
@@ -541,7 +534,7 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
                 if let Some(s) = app.session.as_mut() {
                     s.input = Input { buf: buf.clone(), cur: caret.min(buf.len()) };
                 }
-                app.status = t!("他の人がページを更新しました — 読み直し、編集中の行はそのままです", "page changed by someone else — reloaded, your line kept");
+                app.toast(t!("他の人がページを更新しました — 読み直し、編集中の行はそのままです", "page changed by someone else — reloaded, your line kept"));
             } else if !buf.trim().is_empty() {
                 // The line is gone: rescue the text as a fresh last line.
                 let new_id = new_line_id();
@@ -553,9 +546,9 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
                 if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
                     enter_session(app, ctx, idx, buf.len());
                 }
-                app.status = t!("編集中の行が他の人に削除されました — 内容はページ末尾に退避しました", "your line was deleted by someone else — text rescued at the end");
+                app.toast(t!("編集中の行が他の人に削除されました — 内容はページ末尾に退避しました", "your line was deleted by someone else — text rescued at the end"));
             } else {
-                app.status = t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded");
+                app.toast(t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded"));
             }
         }
     }
@@ -568,7 +561,7 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
 pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     if app.time.is_none() {
         if dir > 0 {
-            app.status = t!("すでに最新です", "already at NOW");
+            app.toast(t!("すでに最新です", "already at NOW"));
             return;
         }
         match ctx.client.list_snapshots(&app.project, &app.page_id) {
@@ -577,8 +570,8 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
                 app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
                 show_snapshot(app, ctx, last);
             }
-            Ok(_) => app.status = t!("このページに履歴はありません", "no snapshots for this page"),
-            Err(e) => app.status = t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}"),
+            Ok(_) => app.toast(t!("このページに履歴はありません", "no snapshots for this page")),
+            Err(e) => app.toast_err(t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}")),
         }
         return;
     }
@@ -588,7 +581,7 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     };
     if dir < 0 {
         if pos == 0 {
-            app.status = t!("最も古い履歴です", "oldest snapshot");
+            app.toast(t!("最も古い履歴です", "oldest snapshot"));
         } else {
             show_snapshot(app, ctx, pos - 1);
         }
@@ -596,7 +589,8 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
         // Past the newest snapshot is NOW — but only if NOW can be fetched.
         // See the Esc path: a failed reload keeps the snapshot, read-only.
         if reload_page(app, ctx) {
-            app.status = t!("最新", "NOW");
+            app.status.clear(); // the ⏪ position hint
+            app.toast(t!("最新", "NOW"));
         }
     } else {
         show_snapshot(app, ctx, pos + 1);
@@ -621,7 +615,7 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
                 s
             }
             Err(e) => {
-                app.status = t!("履歴を取得できません: {e}", "snapshot fetch failed: {e}");
+                app.toast_err(t!("履歴を取得できません: {e}", "snapshot fetch failed: {e}"));
                 return;
             }
         },
@@ -668,7 +662,7 @@ pub(crate) fn reload_page(app: &mut App, ctx: &Ctx) -> bool {
             true
         }
         Err(e) => {
-            app.status = t!("読み直しに失敗しました: {e}", "reload failed: {e}");
+            app.toast_err(t!("読み直しに失敗しました: {e}", "reload failed: {e}"));
             false
         }
     }

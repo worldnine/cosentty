@@ -159,14 +159,14 @@ pub(crate) fn in_input(app: &mut App, f: fn(&mut Input)) {
 pub(crate) fn finish_composer(app: &mut App, input: Input) {
     let buf = input.buf;
     if buf.trim().is_empty() {
-        app.status = t!("空のコメントは破棄しました", "empty comment discarded");
+        app.toast(t!("空のコメントは破棄しました", "empty comment discarded"));
     } else if let Some(c) = app.make_comment(buf) {
         app.comments.push(c);
         app.selection = None;
-        app.status = t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len());
+        app.toast(t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len()));
         app.laid_width = 0; // force rebuild to weave the card
     } else {
-        app.status = t!("コメントを行に結び付けられません", "could not anchor comment");
+        app.toast_err(t!("コメントを行に結び付けられません", "could not anchor comment"));
     }
 }
 
@@ -233,7 +233,7 @@ pub(crate) fn ensure_editable(app: &mut App) -> bool {
     if app.editable {
         true
     } else {
-        app.status = t!("このプロジェクトでは編集権限がありません", "no edit permission in this project");
+        app.toast_err(t!("このプロジェクトでは編集権限がありません", "no edit permission in this project"));
         false
     }
 }
@@ -440,7 +440,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.undo_stack.last() else {
-        app.status = empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo"));
+        app.toast(empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo")));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -487,7 +487,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
             .map(|rebase| apply_move_rebase(app, &ops, rebase))
             .unwrap_or_else(|| app.focus_edit(focus))
     };
-    app.status = t!("{label} を取り消しました（あと {} 件）", "undid {label} ({} more)", app.undo_stack.len());
+    app.toast(t!("{label} を取り消しました（あと {} 件）", "undid {label} ({} more)", app.undo_stack.len()));
     seated
 }
 
@@ -510,7 +510,7 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.redo_stack.last() else {
-        app.status = empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo"));
+        app.toast(empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo")));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -550,7 +550,7 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
             .map(|rebase| apply_move_rebase(app, &ops, rebase))
             .unwrap_or_else(|| app.focus_edit(focus))
     };
-    app.status = t!("{label} をやり直しました", "redid {label}");
+    app.toast(t!("{label} をやり直しました", "redid {label}"));
     seated
 }
 

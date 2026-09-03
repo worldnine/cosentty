@@ -53,7 +53,7 @@ use super::support::*;
             &ctx,
             modified(KeyCode::Right, KeyModifiers::CONTROL),
         );
-        assert!(app.status.contains("タイトル行"));
+        assert!(app.toast_text().contains("タイトル行"));
         assert!(drain_jobs(&mut app).is_empty());
     }
 
@@ -180,7 +180,7 @@ use super::support::*;
         app.cursor = 2;
         app.selection = Some(Selection::new(2));
         handle_key(&mut app, &ctx, modified(KeyCode::Down, KeyModifiers::ALT));
-        assert!(app.status.contains("選択中"));
+        assert!(app.toast_text().contains("選択中"));
         assert!(drain_jobs(&mut app).is_empty());
 
         app.selection = None;
@@ -215,9 +215,9 @@ use super::support::*;
         app.cursor = 2;
         handle_key(&mut app, &ctx, modified(KeyCode::Up, KeyModifiers::ALT));
         assert!(
-            app.status.contains("兄弟ブロック"),
+            app.toast_text().contains("兄弟ブロック"),
             "status: {}",
-            app.status
+            app.toast_text()
         );
         assert!(drain_jobs(&mut app).is_empty(), "an ancestor is not moved");
     }
@@ -234,35 +234,35 @@ use super::support::*;
         app.cursor = 0;
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("タイトル行"), "status: {}", app.status);
+        assert!(app.toast_text().contains("タイトル行"), "status: {}", app.toast_text());
 
         // A related row below the body is not a source line.
         let mut app = page(&["title", " one"]);
         app.cursor = app.lines.len();
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("ソース行"), "status: {}", app.status);
+        assert!(app.toast_text().contains("ソース行"), "status: {}", app.toast_text());
 
         // A page that does not exist yet has nothing to commit against.
         let mut app = page_uncreated(&["title", " one"]);
         app.cursor = 1;
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("未作成"), "status: {}", app.status);
+        assert!(app.toast_text().contains("未作成"), "status: {}", app.toast_text());
 
         let mut app = page(&["title", " one"]);
         app.cursor = 1;
         in_history(&mut app);
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("履歴を表示中"), "status: {}", app.status);
+        assert!(app.toast_text().contains("履歴を表示中"), "status: {}", app.toast_text());
 
         let mut app = page(&["title", " one"]);
         app.cursor = 1;
         app.editable = false;
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("編集権限"), "status: {}", app.status);
+        assert!(app.toast_text().contains("編集権限"), "status: {}", app.toast_text());
 
         // One structural action at a time: the outstanding one has the only
         // snapshot to roll back to.
@@ -273,7 +273,7 @@ use super::support::*;
         drain_jobs(&mut app);
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("完了待ち"), "status: {}", app.status);
+        assert!(app.toast_text().contains("完了待ち"), "status: {}", app.toast_text());
         assert!(drain_jobs(&mut app).is_empty());
 
         // A landed action whose ids we no longer trust: reopen the page.
@@ -282,7 +282,7 @@ use super::support::*;
         app.outline_refresh_needed = true;
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         assert!(app.move_mode.is_none());
-        assert!(app.status.contains("開き直して"), "status: {}", app.status);
+        assert!(app.toast_text().contains("開き直して"), "status: {}", app.toast_text());
         assert!(drain_jobs(&mut app).is_empty());
     }
 
@@ -349,7 +349,7 @@ use super::support::*;
             vec![EditOp::Replace { id, text: "changed".into() }],
         );
         assert_eq!(app.lines[1].text, " parent");
-        assert!(app.status.contains("移動モード中"), "status: {}", app.status);
+        assert!(app.toast_text().contains("移動モード中"), "status: {}", app.toast_text());
         assert!(drain_jobs(&mut app).is_empty());
     }
 
@@ -452,7 +452,7 @@ use super::support::*;
                 assert_eq!(app.session.as_ref().map(|s| s.line), Some(2), "the caret line");
                 assert_eq!(app.session.as_ref().map(|s| s.input.cur), Some(1), "and the caret");
                 assert!(app.session.as_ref().unwrap().sel_from.is_none(), "and no selection");
-                assert!(app.status.contains("移動モード"), "status: {}", app.status);
+                assert!(app.toast_text().contains("移動モード"), "status: {}", app.toast_text());
             }
         }
         assert!(drain_jobs(&mut app).is_empty());
@@ -660,9 +660,9 @@ use super::support::*;
         assert!(app.web_unsynced, "a failed refresh leaves the stale visit read-only");
         assert!(app.outline_refresh_needed);
         assert!(
-            app.status.contains("失敗") || app.status.contains("failed"),
+            app.toast_text().contains("失敗") || app.toast_text().contains("failed"),
             "the same-page stale visit attempted an authoritative refresh: {}",
-            app.status
+            app.toast_text()
         );
 
         // The successful commit may have replaced the IDs we still display.
@@ -682,7 +682,7 @@ use super::support::*;
             before
         );
         assert!(drain_jobs(&mut app).is_empty());
-        assert!(app.status.contains("開き直して"));
+        assert!(app.toast_text().contains("開き直して"));
     }
 
     /// The gate waits for one job id, so an ordinary commit still on its way
@@ -795,14 +795,14 @@ use super::support::*;
             assert_eq!(app.inflight, 0);
             assert!(app.gen.load(std::sync::atomic::Ordering::SeqCst) > generation);
             assert!(
-                app.status.contains("アウトライン操作に失敗"),
+                app.toast_text().contains("アウトライン操作に失敗"),
                 "status: {}",
-                app.status
+                app.toast_text()
             );
             assert!(
-                app.status.contains(if conflict { "競合" } else { "500" }),
+                app.toast_text().contains(if conflict { "競合" } else { "500" }),
                 "status: {}",
-                app.status
+                app.toast_text()
             );
         }
     }
@@ -926,7 +926,7 @@ use super::support::*;
         assert_eq!(app.redo_stack.len(), 1);
         assert_eq!(app.redo_stack[0].0, "older redo");
         assert!(app.history_dropped);
-        assert!(app.status.contains("サーバーの内容を読み直しました"));
+        assert!(app.toast_text().contains("サーバーの内容を読み直しました"));
     }
 
     #[test]
@@ -1012,13 +1012,13 @@ use super::support::*;
         assert!(app.hint_body(&[]).contains("h/j/k/l"));
         handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
         assert!(!app.outline_prefix);
-        assert!(app.status.contains("取り消しました"));
+        assert!(app.toast_text().contains("取り消しました"));
         assert_eq!(app.cursor, 1, "the unknown second key was consumed");
 
         handle_key(&mut app, &ctx, ctrl('g'));
         handle_key(&mut app, &ctx, key(KeyCode::Esc));
         assert!(!app.outline_prefix);
-        assert!(app.status.contains("取り消しました"));
+        assert!(app.toast_text().contains("取り消しました"));
 
         handle_key(&mut app, &ctx, ctrl('g'));
         handle_key(&mut app, &ctx, key(KeyCode::Char('l')));
@@ -1057,7 +1057,7 @@ use super::support::*;
         app.rebuild(72);
         handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
         handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
-        println!("status: {}", app.status);
+        println!("status: {}", app.toast_text());
         let mut t = Terminal::new(TestBackend::new(72, 14)).unwrap();
         t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = t.backend().buffer().clone();

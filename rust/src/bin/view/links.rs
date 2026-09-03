@@ -468,31 +468,31 @@ pub(crate) fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
             if app.index.is_some() {
                 app.history.push(from);
                 app.forward.clear();
-                app.status = format!("→ /{project}");
+                app.toast(format!("→ /{project}"));
             }
         }
         LinkItem::File { label, url } => app.start_download(ctx, label, url),
         LinkItem::Export { label, src, csv } => {
             let body = block_export_body(&app.lines, src, csv);
             let dest = download_path_in(&ctx.download_dir, &label, "");
-            app.status = match std::fs::write(&dest, body) {
+            match std::fs::write(&dest, body) {
                 Ok(()) => {
                     let shown = dest.display().to_string();
-                    if open_in_browser(&shown) {
+                    app.toast(if open_in_browser(&shown) {
                         t!("保存しました {shown} · 開きました", "saved {shown} · opened")
                     } else {
                         t!("保存しました {shown}", "saved {shown}")
-                    }
+                    });
                 }
-                Err(e) => t!("保存に失敗しました: {label} — {e}", "save failed: {label} — {e}"),
-            };
+                Err(e) => app.toast_err(t!("保存に失敗しました: {label} — {e}", "save failed: {label} — {e}")),
+            }
         }
         LinkItem::Url { url, .. } => {
-            app.status = if open_in_browser(&url) {
-                t!("開きました {url}", "opened {url}")
+            if open_in_browser(&url) {
+                app.toast(t!("開きました {url}", "opened {url}"));
             } else {
-                t!("ブラウザを開けません", "failed to open browser")
-            };
+                app.toast_err(t!("ブラウザを開けません", "failed to open browser"));
+            }
         }
     }
 }
@@ -564,14 +564,14 @@ pub(crate) fn copy_payload(app: &App, whole_page: bool) -> Option<(String, Strin
 /// that will not take OSC 52, a copy too large to send that way).
 pub(crate) fn copy_and_report(app: &mut App, payload: Option<(String, String)>) {
     let Some((text, label)) = payload else {
-        app.status = t!("コピーするものがありません", "nothing to copy");
+        app.toast(t!("コピーするものがありません", "nothing to copy"));
         return;
     };
-    app.status = if copy_to_clipboard(&text) {
-        format!("✓ copied {label}")
+    if copy_to_clipboard(&text) {
+        app.toast(format!("✓ copied {label}"));
     } else {
-        t!("コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました", "copy failed — no clipboard tool and the terminal refused OSC 52")
-    };
+        app.toast_err(t!("コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました", "copy failed — no clipboard tool and the terminal refused OSC 52"));
+    }
 }
 
 pub(crate) fn copy_to_clipboard(text: &str) -> bool {
@@ -666,7 +666,7 @@ pub(crate) fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str
             app.history.push(from);
             app.forward.clear();
             app.set_page(loaded, ctx);
-            app.status = if page_is_uncreated(app) {
+            app.toast(if page_is_uncreated(app) {
                 // Following a link to a page nobody has written yet is how
                 // a wiki grows. Say what it is, and what makes it real.
                 t!("未作成のページ — e / o で書き始めると作成されます（{title}）", "an uncreated page — e / o starts writing it ({title})")
@@ -674,11 +674,11 @@ pub(crate) fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str
                 format!("→ {title}")
             } else {
                 format!("→ /{project}/{title}")
-            };
+            });
             true
         }
         Err(e) => {
-            app.status = t!("開けません: /{project}/{title} — {e}", "open failed: /{project}/{title} — {e}");
+            app.toast_err(t!("開けません: /{project}/{title} — {e}", "open failed: /{project}/{title} — {e}"));
             false
         }
     }
@@ -705,10 +705,10 @@ pub(crate) fn cycle_link_line(app: &mut App, forward: bool) {
             }
         }
     }
-    app.status = t!(
+    app.toast(t!(
         "リンクのある行がありません（ソース表示は s）",
         "no link lines (source view is on s)"
-    );
+    ));
 }
 
 impl App {
@@ -845,13 +845,17 @@ impl App {
                 Ok(path) => {
                     let shown = path.display().to_string();
                     let opened = open_in_browser(&shown);
-                    self.status = if opened {
+                    self.status.clear(); // "downloading…" is over
+                    self.toast(if opened {
                         t!("保存しました {shown} · 開きました", "saved {shown} · opened")
                     } else {
                         t!("保存しました {shown}", "saved {shown}")
-                    };
+                    });
                 }
-                Err(e) => self.status = t!("ダウンロードに失敗しました: {label} — {e}", "download failed: {label} — {e}"),
+                Err(e) => {
+                    self.status.clear();
+                    self.toast_err(t!("ダウンロードに失敗しました: {label} — {e}", "download failed: {label} — {e}"));
+                }
             }
         }
     }

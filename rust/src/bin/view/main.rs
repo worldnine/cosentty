@@ -267,7 +267,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(project.clone());
     app.light = ctx.light;
     if let Some(e) = ctx.config_error.as_ref() {
-        app.status = t!("設定ファイルを読めませんでした: {e}", "could not read the config file: {e}");
+        app.toast_err(t!("設定ファイルを読めませんでした: {e}", "could not read the config file: {e}"));
     }
     app.session_ime = cosense::ime::SessionIme::new(ime_mode);
     // The serial commit worker: owns its own Client clone and answers on
@@ -393,7 +393,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 app.cursor = i;
                 app.follow = true;
             }
-            None => app.status = t!("このページに行 {id} はありません", "line {id} not found on this page"),
+            None => app.toast_err(t!("このページに行 {id} はありません", "line {id} not found on this page")),
         }
     }
 
@@ -598,6 +598,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         app.start_web_renders(capability::Trigger::Auto);
         app.rescale_diagrams();
         app.expire_web_notice();
+        app.expire_toast();
         app.drain_downloads();
         app.drain_uploads(ctx);
         terminal.draw(|f| ui(f, app, ctx))?;
@@ -610,7 +611,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // While a diagram renders, the shimmer wants smoother frames — but
         // only then, so an idle viewer still costs ~8 wake-ups a second.
         // The same goes for a picture on its way: its `[URL]` row pulses.
-        let tick = if app.web_shimmer.is_empty() && app.pending.is_empty() { 120 } else { 60 };
+        // A toast fades at both ends, so it wants the smoother rate too.
+        let tick = if app.web_shimmer.is_empty() && app.pending.is_empty() && app.toast.is_none() { 120 } else { 60 };
         if !event::poll(Duration::from_millis(tick))? {
             continue;
         }
@@ -715,7 +717,7 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
     // READ has nowhere to put it. Silence here reads as "paste is broken",
     // so say where it does go.
     if !clean.trim().is_empty() {
-        app.status = t!("貼り付けは編集中に — e / i / o で入ってから", "paste while editing — enter with e / i / o first");
+        app.toast(t!("貼り付けは編集中に — e / i / o で入ってから", "paste while editing — enter with e / i / o first"));
     }
 }
 
@@ -747,5 +749,7 @@ mod ui;
 use ui::*;
 mod app;
 use app::*;
+mod toast;
+use toast::*;
 
 

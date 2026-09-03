@@ -14,9 +14,9 @@ use super::support::*;
         handle_commit_outcome(&mut app, &ctx, CommitOutcome::Conflict { job: UNRELATED_JOB });
         assert!(app.web_unsynced, "a failed recovery leaves us divergent");
         assert!(
-            app.status.contains("読み直しに失敗"),
+            app.toast_text().contains("読み直しに失敗"),
             "the real reason is not overwritten: {}",
-            app.status
+            app.toast_text()
         );
         while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
         assert!(!app.start_web_renders(capability::Trigger::Manual));
@@ -246,7 +246,7 @@ use super::support::*;
         assert!(app.outline_pending.is_none());
         assert_eq!(app.inflight, 0);
         assert!(drain_jobs(&mut app).is_empty());
-        assert!(app.status.contains("変更なし"), "status: {}", app.status);
+        assert!(app.toast_text().contains("変更なし"), "status: {}", app.toast_text());
     }
 
     /// The screen must never keep what the server refused. A rejected drag
@@ -285,9 +285,9 @@ use super::support::*;
             assert!(app.outline_pending.is_none());
             assert_eq!(app.inflight, 0);
             assert!(
-                app.status.contains("アウトライン操作に失敗"),
+                app.toast_text().contains("アウトライン操作に失敗"),
                 "status: {}",
-                app.status
+                app.toast_text()
             );
         }
     }
@@ -347,9 +347,9 @@ use super::support::*;
         );
         assert!(app.web_unsynced, "the unrelated failure still marks the page divergent");
         assert!(
-            app.status.contains("コミットに失敗"),
+            app.toast_text().contains("コミットに失敗"),
             "the unrelated failure keeps its own status: {}",
-            app.status
+            app.toast_text()
         );
         assert!(app.outline_pending.is_some(), "and it does not touch the gate");
         assert_eq!(
@@ -365,9 +365,9 @@ use super::support::*;
             "the rejected action is rolled back to the pre-action page"
         );
         assert!(
-            app.status.contains("アウトライン操作に失敗"),
+            app.toast_text().contains("アウトライン操作に失敗"),
             "status: {}",
-            app.status
+            app.toast_text()
         );
     }
 
@@ -666,13 +666,13 @@ use super::support::*;
         assert!(app.history_dropped);
 
         redo(&mut app, &ctx);
-        assert!(app.status.contains("失効"), "status: {}", app.status);
+        assert!(app.toast_text().contains("失効"), "status: {}", app.toast_text());
 
         // A new edit starts a clean lineage, and the excuse expires with it.
         do_edit(&mut app, &ctx, "line 3", vec![EditOp::Replace { id: "id2".into(), text: "x".into() }]);
         assert!(!app.history_dropped);
         redo(&mut app, &ctx);
-        assert_eq!(app.status, "やり直せる編集がありません");
+        assert_eq!(app.toast_text(), "やり直せる編集がありません");
     }
 
     /// The undo reflex must not depend on which mode you are in: `^z`
@@ -746,5 +746,5 @@ use super::support::*;
         // Nothing left to undo: the session survives that too.
         handle_session_key(&mut app, &ctx, ctrl('z'));
         assert!(app.session.is_some());
-        assert_eq!(app.status, "取り消せる編集がありません");
+        assert_eq!(app.toast_text(), "取り消せる編集がありません");
     }

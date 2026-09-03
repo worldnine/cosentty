@@ -46,11 +46,11 @@ impl App {
     /// can say no is a sentence on the status line, never silence.
     pub(crate) fn paste_clipboard_image(&mut self, ctx: &Ctx) {
         if self.session.is_none() {
-            self.status = t!("画像は編集中に貼ってください — e / i / o で入ってから", "paste images while editing — enter with e / i / o first");
+            self.toast_err(t!("画像は編集中に貼ってください — e / i / o で入ってから", "paste images while editing — enter with e / i / o first"));
             return;
         }
         if !self.editable {
-            self.status = t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image");
+            self.toast_err(t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image"));
             return;
         }
         if !self.uploads_on {
@@ -61,7 +61,7 @@ impl App {
             Ok(path) => self.start_upload(ctx, &path),
             Err(reason) => {
                 use cosense::clipboard::Reason;
-                self.status = match reason {
+                self.toast_err(match reason {
                     Reason::NoImage => t!("クリップボードに画像がありません", "no image on the clipboard"),
                     Reason::HelperBuilding => t!(
                         "クリップボードを読むヘルパを準備中です（初回だけ）— 少ししてもう一度",
@@ -76,7 +76,7 @@ impl App {
                         "reading clipboard images needs wl-paste or xclip"
                     ),
                     Reason::Other(e) => t!("クリップボードを読めませんでした — {e}", "could not read the clipboard — {e}"),
-                };
+                });
             }
         }
     }
@@ -92,11 +92,11 @@ impl App {
     /// for a Gyazo destination.
     pub(crate) fn start_upload(&mut self, ctx: &Ctx, path: &std::path::Path) {
         let Some(s) = self.session.as_ref() else {
-            self.status = t!("画像は編集中に貼ってください", "paste images while editing");
+            self.toast_err(t!("画像は編集中に貼ってください", "paste images while editing"));
             return;
         };
         if !self.editable {
-            self.status = t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image");
+            self.toast_err(t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image"));
             return;
         }
         let (line_id, offset) = (self.lines[s.line].id.clone(), s.input.cur);
@@ -106,7 +106,7 @@ impl App {
             .unwrap_or_else(|| "image".into());
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if size > cosense::upload::MAX_BYTES {
-            self.status = t!("{name} は 100MB を超えています", "{name} is over 100MB");
+            self.toast_err(t!("{name} は 100MB を超えています", "{name} is over 100MB"));
             return;
         }
         let (dest, decided) =
@@ -124,7 +124,7 @@ impl App {
                 match token.clone() {
                     Some(t) => Some(t),
                     None => {
-                        self.status = t!("{} へ上げるには {var} が要ります", "uploading to {} needs {var}", dest.label());
+                        self.toast_err(t!("{} へ上げるには {var} が要ります", "uploading to {} needs {var}", dest.label()));
                         return;
                     }
                 }
@@ -191,14 +191,17 @@ impl App {
             if msg.project != self.project || msg.title != self.title {
                 continue;
             }
+            // The "uploading…" note in the footer is over either way; the
+            // outcome is a toast.
+            self.status.clear();
             let url = match msg.result {
                 Ok(url) => url,
                 Err(e) => {
-                    self.status = if e.contains("402") {
+                    self.toast_err(if e.contains("402") {
                         t!("{}: プロジェクトの容量上限を超えています", "{}: project storage limit reached", msg.name)
                     } else {
                         t!("{} を上げられませんでした — {e}", "could not upload {} — {e}", msg.name)
-                    };
+                    });
                     changed = true;
                     continue;
                 }
@@ -220,16 +223,16 @@ impl App {
                         let (text, _) = splice_image(&self.lines[idx].text, msg.offset, &url);
                         do_edit(self, ctx, &t!("画像", "image"), vec![EditOp::Replace { id: msg.line_id, text }]);
                     }
-                    self.status = t!("{} を貼りました ({where_})", "pasted {} ({where_})", msg.name);
+                    self.toast(t!("{} を貼りました ({where_})", "pasted {} ({where_})", msg.name));
                 }
                 None => {
                     let ops = vec![EditOp::insert("_end", &format!("[{url}]"))];
                     do_edit(self, ctx, &t!("画像", "image"), ops);
-                    self.status = t!(
+                    self.toast(t!(
                         "{} を貼りました ({where_}) — 元の行が無くなっていたので末尾に置きました",
                         "pasted {} ({where_}) — its line was gone, so it went to the end",
                         msg.name
-                    );
+                    ));
                 }
             }
             self.laid_width = 0;

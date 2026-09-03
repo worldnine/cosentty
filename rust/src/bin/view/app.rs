@@ -221,7 +221,12 @@ pub(crate) struct App {
     /// Comment composer (the bottom input; `c`).
     pub(crate) composing: Option<Input>,
     pub(crate) comments: Vec<Comment>,
+    /// What IS: the selection hint, the history position, an upload in
+    /// flight, a stopped commit worker. Stays until the state changes.
+    /// What HAPPENED goes to [`App::toast`] instead (see toast.rs).
     pub(crate) status: String,
+    /// The one-shot notice floating above the footer, if any.
+    pub(crate) toast: Option<Toast>,
     /// One-shot portable fallback for terminals that do not deliver
     /// modified arrow keys. The next key is always consumed.
     pub(crate) outline_prefix: bool,
@@ -260,12 +265,6 @@ pub(crate) struct App {
     /// standing choice, which a fresh index has to be built from before
     /// there is an `Index` to ask.
     pub(crate) index_sort: cosense::index::SortKey,
-    /// A one-off notice for the index's footer, which has no status line of
-    /// its own. Deliberately NOT `status`: that one is also written by the
-    /// background sync, and a "同期: ws" arriving while the reader is
-    /// learning the list's keys would take the key hints away for no reason
-    /// they asked for. Cleared on the next key.
-    pub(crate) index_notice: String,
     /// The sort menu over the index, and where its cursor is. Deliberately
     /// NOT part of the saved `Index`: a menu is something you are doing,
     /// not somewhere you have been.
@@ -574,6 +573,7 @@ impl App {
             composing: None,
             comments: Vec::new(),
             status: String::new(),
+            toast: None,
             outline_prefix: false,
             move_mode: None,
             outline_pending: None,
@@ -586,7 +586,6 @@ impl App {
             index_preview_rect: Rect::default(),
             index_project: String::new(),
             index_scrolled_at: None,
-            index_notice: String::new(),
             index_sort: cosense::index::SortKey::default(),
             index_sort_menu: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),

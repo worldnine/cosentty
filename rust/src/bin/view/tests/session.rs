@@ -53,7 +53,7 @@ use super::support::*;
 
         enter_session(&mut app, &ctx, 1, 4);
         assert!(app.session.is_none());
-        assert!(app.status.contains("編集権限"));
+        assert!(app.toast_text().contains("編集権限"));
 
         let before: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
         open_line(&mut app, &ctx, false);
@@ -514,9 +514,9 @@ use super::support::*;
         let before: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
         handle_key(&mut app, &ctx, key(KeyCode::Char('あ')));
         assert!(
-            app.status.contains("英数") || app.status.contains("IME"),
+            app.toast_text().contains("英数") || app.toast_text().contains("IME"),
             "status: {}",
-            app.status,
+            app.toast_text(),
         );
         assert_eq!(
             app.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>(),
@@ -612,7 +612,7 @@ use super::support::*;
 
         // READ: nowhere to put it, so say where it goes.
         handle_paste(&mut app, &ctx, "hello");
-        assert!(app.status.contains("編集中"), "status: {}", app.status);
+        assert!(app.toast_text().contains("編集中"), "status: {}", app.toast_text());
         assert_eq!(app.lines.len(), 2, "and nothing is written");
 
         // The index filters by what you paste (first line only).
@@ -1092,7 +1092,7 @@ use super::support::*;
 
         handle_session_key(&mut app, &ctx, ctrl('k'));
         assert_eq!(app.lines.len(), 2, "nothing deleted");
-        assert!(app.status.contains("タイトル行"), "status: {}", app.status);
+        assert!(app.toast_text().contains("タイトル行"), "status: {}", app.toast_text());
         assert!(app.session.is_some(), "and the session stays open");
     }
 
