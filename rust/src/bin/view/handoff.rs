@@ -1,6 +1,6 @@
-// Handing the comments to an agent: `S` (and `s` in the comments list).
+// Handing the comments to an agent: `s` (in READ and in the comments list).
 //
-// akapen's model, kept as is: `y` copies and keeps, `S` delivers and — on
+// akapen's model, kept as is: `y` copies and keeps, `s` delivers and — on
 // success only — clears the slate. Where the text goes:
 //
 // - `--send-cmd <cmd>`: piped to the command's stdin (`sh -c`), for any
@@ -10,14 +10,14 @@
 //   `herdr agent prompt <pane> <text>`. The text is one argv element, so
 //   quotes and `$` in a comment can never break the delivery. The rule and
 //   the `herdr agent list` reading are akapen's (`export.rs`).
-// - Neither: `S` says so and points at `y`.
+// - Neither: `s` says so and points at `y`.
 //
 // A failed delivery keeps every comment for a retry; the clipboard copy
-// that `S` also makes has already happened either way.
+// that `s` also makes has already happened either way.
 
 use super::*;
 
-/// Where `S` delivers, decided once at startup.
+/// Where `s` delivers, decided once at startup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SendTarget {
     /// `--send-cmd`: the shell command the export is piped to.
@@ -40,7 +40,7 @@ impl SendTarget {
     }
 }
 
-/// `S`: copy every comment to the clipboard, deliver it to the send
+/// `s`: copy every comment to the clipboard, deliver it to the send
 /// target, and clear the comments when the delivery succeeded.
 pub(crate) fn send_comments(app: &mut App, ctx: &Ctx) {
     if app.comments.is_empty() {

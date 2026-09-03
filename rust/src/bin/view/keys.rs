@@ -407,9 +407,10 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::BackTab, _) => cycle_link_line(app, false),
 
         // ---- raw source view (akapen's `Tab view⇄source`, demoted from a
-        //      mode on Tab to a display option on `s`: what only it can do
-        //      is show raw text with line numbers) ----
-        (KeyCode::Char('s'), false) => {
+        //      mode on Tab to a display option: what only it can do is show
+        //      raw text with line numbers). On `z` — a "how it looks" key
+        //      in vim's family — so `s` can be akapen's send. ----
+        (KeyCode::Char('z'), false) => {
             // The cursor is a source line, so it carries over as is; the
             // re-layout additionally keeps that line on the same physical
             // screen row (akapen's `replace_view_preserving_cursor`).
@@ -498,7 +499,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
 
         // ---- comments ----
         // READ keeps two keys for them: `c` writes one, `l` lists them
-        // (and is where delete / copy / send live). `S` is the shortcut
+        // (and is where delete / copy / send live). `s` is the shortcut
         // for sending. The keys that used to sit here (`v` select, `d`
         // delete, `^n`/`^p` jump) say where their job went — a key that
         // silently stops working is worse than one that explains itself.
@@ -522,7 +523,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 t!("コメントを入力 · Enter 保存 · Esc 取消", "type comment · Enter save · Esc cancel")
             };
         }
-        (KeyCode::Char('S'), false) => send_comments(app, ctx),
+        (KeyCode::Char('s'), false) => send_comments(app, ctx),
 
         // ---- new lines (vim's o/O; the session opens on the new line) ----
         (KeyCode::Char('o'), false) => open_line(app, ctx, false),

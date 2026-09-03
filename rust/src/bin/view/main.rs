@@ -16,7 +16,7 @@
 //   g/G       top/bottom             v        start/stop range selection
 //   c         comment on the cursor line / selection (again on the same
 //             selection: edit it)
-//   S         send the comments to the agent (herdr, or --send-cmd) and
+//   s         send the comments to the agent (herdr, or --send-cmd) and
 //             clear them; l lists them (Enter jump · d delete · y copy · s send)
 //   q         quit (unsent comments also print to stdout)
 //   Enter/f   follow the line's link: a page navigates, an uploaded file
@@ -471,7 +471,7 @@ struct Ctx {
     /// `config_error` says so once on the status line.
     config: cosense::config::Config,
     config_error: Option<String>,
-    /// Where `S` delivers the comments (`--send-cmd`, else the herdr agent
+    /// Where `s` delivers the comments (`--send-cmd`, else the herdr agent
     /// of this tab when running inside herdr, else nowhere). See handoff.rs.
     send_target: SendTarget,
 }

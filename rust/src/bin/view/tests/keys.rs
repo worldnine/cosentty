@@ -315,9 +315,9 @@ use super::support::*;
 
     /// READ の Tab はブラウザの Tab: リンクのある行へ巡回する。端では
     /// 折り返し、Shift+Tab は逆回り。リンクが1つも無いページでは動かず、
-    /// ソース表示の引っ越し先(`s`)を教える。
+    /// ソース表示の引っ越し先(`z`)を教える。
     #[test]
-    fn tab_cycles_through_link_lines_and_teaches_s_when_there_are_none() {
+    fn tab_cycles_through_link_lines_and_teaches_z_when_there_are_none() {
         let ctx = test_ctx();
         let mut app = page(&["title", "plain", "see [alpha]", "plain2", "[beta] too"]);
         app.rebuild(40);
@@ -337,21 +337,21 @@ use super::support::*;
         bare.cursor = 1;
         handle_key(&mut bare, &ctx, key(KeyCode::Tab));
         assert_eq!(bare.cursor, 1, "nowhere to go");
-        assert!(bare.toast_text().contains("ソース表示は s"), "note: {}", bare.toast_text());
+        assert!(bare.toast_text().contains("ソース表示は z"), "note: {}", bare.toast_text());
     }
 
-    /// ソース表示はモードから表示オプションへ降格: `s` でトグルし、
-    /// Tab はもうモードを切り替えない。
+    /// ソース表示はモードから表示オプションへ降格: `z` でトグルし、
+    /// Tab はもうモードを切り替えない(`s` は akapen 通り送信)。
     #[test]
-    fn s_toggles_the_raw_source_view_instead_of_tab() {
+    fn z_toggles_the_raw_source_view_instead_of_tab() {
         let ctx = test_ctx();
         let mut app = page(&["title", "body"]);
         app.rebuild(40);
 
-        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('z')));
         assert_eq!(app.mode, Mode::Source);
         assert!(app.toast_text().is_empty(), "the footer badge says SRC; no toast");
-        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('z')));
         assert_eq!(app.mode, Mode::View);
 
         // Tab はリンク巡回であってモード切替ではない。
@@ -359,7 +359,7 @@ use super::support::*;
         assert_eq!(app.mode, Mode::View, "Tab no longer toggles source");
     }
 
-    /// コメントの READ キーは `c`(書く)と `S`(送る)と `l`(一覧)だけ。
+    /// コメントの READ キーは `c`(書く)と `s`(送る)と `l`(一覧)だけ。
     /// 消えた `v` / `d` / `^n` / `^p` は黙って死なず、行き先を言う。
     #[test]
     fn retired_comment_keys_say_where_their_job_went() {
@@ -405,19 +405,19 @@ use super::support::*;
         assert!(app.overlay.is_none(), "an empty list closes");
     }
 
-    /// 送り先が無いとき(herdr の外、--send-cmd なし)の `S`: 赤バナーで
+    /// 送り先が無いとき(herdr の外、--send-cmd なし)の `s`: 赤バナーで
     /// 言い、コメントは残す。空なら黄バナー。
     #[test]
     fn s_with_nowhere_to_send_keeps_the_comments_and_says_so() {
         let ctx = test_ctx(); // SendTarget::None
         let mut app = page(&["title", "one"]);
         app.rebuild(40);
-        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert!(app.toast_text().contains("送るコメントがありません"), "{}", app.toast_text());
         app.cursor = 1;
         let c = app.make_comment("fix".into()).unwrap();
         app.comments.push(c);
-        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert_eq!(app.comments.len(), 1, "nothing was delivered, so nothing is cleared");
         assert!(app.toast.as_ref().unwrap().error);
         assert!(app.toast_text().contains("送り先がありません"), "{}", app.toast_text());
@@ -439,7 +439,7 @@ use super::support::*;
             let c = app.make_comment(text.into()).unwrap();
             app.comments.push(c);
         }
-        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert!(app.comments.is_empty(), "delivered, so cleared: {}", app.toast_text());
         let got = std::fs::read_to_string(&out).unwrap();
         assert!(got.starts_with("1. proj/t L2 "), "{got}");
@@ -449,7 +449,7 @@ use super::support::*;
         app.cursor = 1;
         let c = app.make_comment("c".into()).unwrap();
         app.comments.push(c);
-        handle_key(&mut app, &ctx, key(KeyCode::Char('S')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert_eq!(app.comments.len(), 1);
         assert!(app.toast.as_ref().unwrap().error);
         let _ = std::fs::remove_dir_all(&dir);

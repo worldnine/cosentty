@@ -721,8 +721,8 @@ pub(crate) fn cycle_link_line(app: &mut App, forward: bool) {
         }
     }
     app.toast(t!(
-        "リンクのある行がありません（ソース表示は s）",
-        "no link lines (source view is on s)"
+        "リンクのある行がありません（ソース表示は z）",
+        "no link lines (source view is on z)"
     ));
 }
 

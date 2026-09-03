@@ -400,9 +400,9 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
 - 現在の動作: READ に `v` `c` `d` `^n` `^p` `l` の6キー。書き出しは終了時の
   stdout と `l`→`y` のみ。書式は `Page:` `URL:` `Lines … (exact text — …)`
   `Instruction:` のラベル付きで冗長。送る手段が無い
-- 期待する動作: READ は `c`(書く。同じ範囲で再度 `c` = 編集)・`S`(送る)・
+- 期待する動作: READ は `c`(書く。同じ範囲で再度 `c` = 編集)・`s`(送る)・
   `l`(一覧: Enter / d / y / s)。選択は Shift+↑↓ / J/K に統一。廃止キーは
-  黄バナーで行き先を言う。`S` は全件をクリップボードへ + 宛先へ届け、
+  黄バナーで行き先を言う。`s` は全件をクリップボードへ + 宛先へ届け、
   **届いたときだけ消す**(akapen の `s`)。宛先は `--send-cmd` → herdr の
   タブの唯一のエージェント(`herdr agent list` / `herdr agent prompt <pane> <text>`、
   argv 直渡し)→ 無し。書式は akapen の返信形に Cosense の場所1行を足したもの
@@ -412,7 +412,8 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
   `c_on_the_same_range_edits_the_existing_comment`、`handoff::tests`、
   `comment::tests`(書式)、`the_quit_question_counts_unsent_comments`
 - 決めたこと:
-  - 送信キーは **`S`**。`s` はソース表示に取られている(akapen は `s`)。一覧の中では `s`
+  - 送信キーは akapen 通り **`s`**。ソース表示は `s` から奥の **`z`** へ移した
+    (ユーザー指示「ソース表示はもっと奥へ」。使う頻度が低く、無シフトで空いていた)
   - herdr の中では**フラグ無しで直送**(akapen は `--send-agent` で opt-in)。
     `HERDR_PANE_ID` があれば herdr の中。テストは `Ctx::send_target` を
     `SendTarget::None` に固定するので、herdr の中で走らせても外へ出ない
