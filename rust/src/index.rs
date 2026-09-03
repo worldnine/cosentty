@@ -9,7 +9,7 @@
 //! network: matching, cursor movement, the vertical budget, and row text.
 //! The viewer owns drawing, fetching and keys.
 
-use crate::api::{PageSummary, SearchResult};
+use crate::api::{PageSummary, ProjectSummary, SearchResult};
 
 /// `auto` hides the preview below this terminal width. Keep ashiato's
 /// established switch even though the excerpt is now below the list: at
@@ -77,6 +77,21 @@ impl FilterMode {
             FilterMode::FullText => FilterMode::Title,
         }
     }
+}
+
+/// What the rows ARE: one project's pages, or the projects themselves.
+///
+/// The projects list is the level above the site top — the same screen
+/// (list, filter line, excerpt dock, history) over different rows, rather
+/// than a second widget. What it does NOT have follows from the rows:
+/// nothing to create (a project is not made by naming it), no body to
+/// search, no order to choose (`updated` is the one that answers "which
+/// one was I working in").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Scope {
+    #[default]
+    Pages,
+    Projects,
 }
 
 /// Which pane the keys are talking to. The list is where a picker starts.
@@ -223,6 +238,10 @@ pub fn relative_age(stamp: i64) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Entry {
     pub title: String,
+    /// The URL slug when this row is a project (`Scope::Projects`), which
+    /// the row shows next to the proper name and the filter matches as
+    /// well. Empty for a page.
+    pub slug: String,
     /// Server-side mtime (epoch seconds).
     pub updated: i64,
     /// When the page was created, and when anyone last opened it. Both are
@@ -264,6 +283,7 @@ impl Entry {
             views: r.views,
             descriptions: r.lines,
             matched: r.words,
+            slug: String::new(),
         }
     }
 
@@ -278,6 +298,39 @@ impl Entry {
             views: p.views,
             descriptions: p.descriptions,
             matched: Vec::new(), // a listed page matched nothing: it just IS
+            slug: String::new(),
+        }
+    }
+
+    /// One project as a list row. The title is its proper name (the slug
+    /// when it has none), and the excerpt says what the list API knows:
+    /// where it lives, who may see it, how many are in it.
+    pub fn from_project(p: ProjectSummary) -> Self {
+        let title = if p.display_name.trim().is_empty() {
+            p.name.clone()
+        } else {
+            p.display_name.clone()
+        };
+        let visibility = if p.public_visible {
+            crate::t!("公開", "public")
+        } else {
+            crate::t!("非公開", "private")
+        };
+        let mut facts = vec![format!("{visibility} · {} members", p.users_count)];
+        if let Some(plan) = p.plan.as_deref().filter(|s| !s.is_empty()) {
+            facts.push(plan.to_string());
+        }
+        Self {
+            title,
+            slug: p.name.clone(),
+            updated: p.updated,
+            created: p.created,
+            accessed: 0,
+            linked: 0,
+            views: 0,
+            descriptions: vec![format!("scrapbox.io/{}", p.name), facts.join(" · ")],
+            unread: false,
+            matched: Vec::new(),
         }
     }
 }
@@ -289,6 +342,8 @@ pub struct Index {
     /// for). Filtering never reorders: the list under a filter is the same
     /// list with rows removed.
     pub entries: Vec<Entry>,
+    /// Pages of one project, or the projects themselves.
+    pub scope: Scope,
     /// What has been typed. Empty = the whole project.
     pub filter: String,
     /// What the open line searches. `Tab` swaps them.
@@ -394,7 +449,11 @@ impl Index {
         let mut rows: Vec<Row<'_>> = self
             .entries
             .iter()
-            .filter(|e| needle.is_empty() || e.title.to_lowercase().contains(&needle))
+            .filter(|e| {
+                needle.is_empty()
+                    || e.title.to_lowercase().contains(&needle)
+                    || e.slug.to_lowercase().contains(&needle)
+            })
             .map(Row::Page)
             .collect();
         if self.offers_create() {
@@ -407,6 +466,9 @@ impl Index {
     /// named that already — an exact match IS the page, and two pages
     /// cannot share a title — and only where a page could be written.
     pub fn offers_create(&self) -> bool {
+        if self.scope == Scope::Projects {
+            return false; // a project is not made by naming it here
+        }
         if !self.can_create {
             return false; // a read-only project has nothing to offer here
         }
@@ -475,6 +537,9 @@ impl Index {
     /// kept — "I meant the body, not the title" is the whole point, and
     /// retyping it would be the cost of saying so.
     pub fn toggle_filter_mode(&mut self) {
+        if self.scope == Scope::Projects {
+            return; // projects have no bodies to search
+        }
         self.filter_mode = self.filter_mode.toggled();
         self.cursor = 0;
         self.scroll = 0;

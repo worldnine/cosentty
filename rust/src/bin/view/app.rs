@@ -273,6 +273,10 @@ pub(crate) struct App {
     /// it. Six orders × one 500-page request each is how the site's rate
     /// limit was being hit (see `nav::ListCache`).
     pub(crate) index_cache: HashMap<(String, cosense::index::SortKey), ListCache>,
+    /// The projects list (`^o` over the page list), kept for the same
+    /// `INDEX_CACHE_SECS` so stepping up and back down is not a request
+    /// each time. `^o` over the projects list refetches.
+    pub(crate) projects_cache: Option<ProjectsCache>,
     /// The sort menu over the index, and where its cursor is. Deliberately
     /// NOT part of the saved `Index`: a menu is something you are doing,
     /// not somewhere you have been.
@@ -608,6 +612,7 @@ impl App {
             index_scrolled_at: None,
             index_sort: cosense::index::SortKey::default(),
             index_cache: HashMap::new(),
+            projects_cache: None,
             index_sort_menu: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,

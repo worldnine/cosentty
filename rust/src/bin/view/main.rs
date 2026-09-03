@@ -144,17 +144,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var(k).ok()
     }));
 
-    // `view <project> [title]`, or `view https://scrapbox.io/<project>/<title>#<lineId>`
-    // — a page URL pasted from the browser opens that project's page, with
-    // the cursor on the deep-linked line.
-    let (project, title, line_id) = match positional.first().and_then(|a| parse_page_url(a)) {
-        Some(target) => target,
-        None => (
-            positional.first().cloned().unwrap_or_else(|| "help-jp".into()),
-            positional.get(1).cloned(),
-            None,
-        ),
-    };
     let sid = std::env::var("COSENSE_SID").ok().filter(|s| !s.is_empty());
     let env_token = |name: &str| std::env::var(name).ok().filter(|s| !s.is_empty());
     let gyazo_teams_token = env_token("GYAZO_TEAMS_ACCESS_TOKEN");
@@ -167,6 +156,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     let auth = AuthStore::load(sid);
     let api_domain = "scrapbox.io".to_string();
     let user_cred = auth.resolve_user(&format!("https://{api_domain}"));
+
+    // `view <project> [title]`, or `view https://scrapbox.io/<project>/<title>#<lineId>`
+    // — a page URL pasted from the browser opens that project's page, with
+    // the cursor on the deep-linked line. `view` alone starts at the
+    // projects list: the most recently updated project of the credential's
+    // is loaded underneath, and the list of all of them opens on top. With
+    // no credential there is no membership to list, so the public help
+    // project stands in, as it always has.
+    let mut start_at_projects = false;
+    let (project, title, line_id) = match positional.first().and_then(|a| parse_page_url(a)) {
+        Some(target) => target,
+        None => match positional.first() {
+            Some(p) => (p.clone(), positional.get(1).cloned(), None),
+            None => {
+                let probe = Client::new(Config {
+                    project: String::new(),
+                    auth: auth.clone(),
+                    api_domain: api_domain.clone(),
+                })?;
+                let latest = probe
+                    .list_projects()
+                    .ok()
+                    .and_then(|mut ps| {
+                        ps.sort_by(|a, b| b.updated.cmp(&a.updated));
+                        ps.into_iter().next()
+                    })
+                    .map(|p| p.name);
+                start_at_projects = latest.is_some();
+                (latest.unwrap_or_else(|| "help-jp".into()), None, None)
+            }
+        },
+    };
     let cfg = Config { project: project.clone(), auth, api_domain };
     let client = Client::new(cfg)?;
 
@@ -380,6 +401,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if start_at_index {
         let project = app.project.clone();
         open_index(&mut app, &ctx, &project, String::new());
+    }
+    if start_at_projects {
+        // On top of that project's list, so `[` from the projects lands in
+        // it and a second `[` on the page underneath.
+        open_projects(&mut app, &ctx, true);
     }
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.

@@ -27,7 +27,7 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
 }
 
 fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
-    use cosense::index::{Pane, Row};
+    use cosense::index::Pane;
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let page_rows = app.index_list_rect.height.max(1) as i32;
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
@@ -104,9 +104,23 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         }
         (KeyCode::Char('c'), true) => return Action::Quit,
         (KeyCode::Char('/'), false) => ix.begin_filter(),
+        // `^o` again: one level up. Over a project's pages it lists the
+        // projects; over the projects it fetches them again (the page
+        // list's `^o` refetches too).
+        (KeyCode::Char('o'), true) => {
+            let refetch = ix.scope == cosense::index::Scope::Projects;
+            open_projects(app, ctx, !refetch);
+        }
         // `s` names the order, as it names the display on the page.
         (KeyCode::Char('s'), false) => {
-            if ix.is_search() {
+            if ix.scope == cosense::index::Scope::Projects {
+                // One order, and the one the question has: which project
+                // was I in most recently.
+                app.toast(t!(
+                    "プロジェクトは更新の新しい順です",
+                    "projects are in order of last update"
+                ));
+            } else if ix.is_search() {
                 // Re-ordering hits by date would answer a question nobody
                 // asked, and quietly re-listing the project would lose the
                 // ones found. So say what the state is.
@@ -141,14 +155,7 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                 Pane::Preview => Pane::List,
             };
         }
-        (KeyCode::Enter, _) => {
-            let target = match ix.rows().get(ix.cursor) {
-                Some(Row::Page(e)) => Some((e.title.clone(), false)),
-                Some(Row::Create(name)) => Some((name.to_string(), true)),
-                None => None,
-            };
-            open_from_index(app, ctx, target);
-        }
+        (KeyCode::Enter, _) => open_selected(app, ctx),
         // Scrolling the preview when it has the focus; moving the list
         // otherwise. Same fingers either way.
         (KeyCode::Down, _) | (KeyCode::Char('j'), false) if ix.focus == Pane::Preview => {

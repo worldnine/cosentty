@@ -300,6 +300,48 @@ akapen/src/effects.rs の toast_effect):
   - 依存: なし
 - ヘルプ画面のモード別再構成(READ / EDIT / 一覧 / オーバーレイ)
 
+### 実施記録: プロジェクト一覧(2026-09-03)
+
+きっかけはユーザーの「デバッグで不便」。別プロジェクトへ行く手段が
+`[/project/title]` リンクか再起動しかなく、`^o` の一覧は `app.project` に
+固定だった。「必ず組み込む」節の `/api/projects` をここで消化した。
+
+- 現在の動作: ページ一覧は今いるプロジェクトだけ。プロジェクト名を打つ入口が無い
+- 期待する動作: ページ一覧で `^o` をもう一度 → 参加プロジェクトの一覧(更新の
+  新しい順)。Enter で降り、`[` で戻る。引数なし起動はここから始まる
+- 完了条件: `the_projects_list_filters_on_slug_and_name_and_offers_nothing_to_create`、
+  `control_o_steps_up_to_the_projects_and_enter_steps_back_down`、
+  `the_projects_list_draws_its_level_and_the_slugs`
+- 決めたこと:
+  - **別ウィジェットにしない。** `Index` に `scope: Scope { Pages, Projects }` を
+    足し、`Entry` に `slug` を持たせて同じ画面(一覧・絞り込み行・抜粋・履歴・
+    マウス)を使い回す。無いものは行の性質から導かれる: 作成行(名前を打って
+    作るものではない)、本文検索(本文が無い)、並び順の選択(`updated` 一択)。
+    `[読み取り専用]` の札もこの scope では出さない(書く場所ではないので)
+  - `/api/projects` は **PAT で通る**(実測、sid 不要)。応答は `name` /
+    `displayName` / `publicVisible` / `plan` / `updated`(epoch 秒)/ `usersCount`
+    など。**サーバの順は日付順ではない**ので手元で `updated` 降順に並べる。
+    ユーザー単位のエンドポイントなので `resolve_user`(PAT / sid)で叩き、
+    Service Account は使わない(SA は1プロジェクトの鍵で、参加一覧を持たない)
+  - 履歴: 上がるのは移動(`history.push`)、プロジェクト一覧の上での `^o` は
+    取り直し(積まない・絞り込みは保つ)。Enter で降りるのも移動。降りられなければ
+    一覧に留まる(`open_from_index` と同じ約束)。`Place::Index` の復元では
+    scope が Projects のとき `project_display` を呼ばない(空の名前で API を
+    叩かないため)
+  - `index_project` / `index_display` は Projects の間は空。ヘッダは
+    `プロジェクト — N projects` と段の名前を出す
+  - Enter とクリックの分岐は `nav::open_selected` に一本化した(以前は keys と
+    mouse がそれぞれ `Row` を見て `open_from_index` を呼んでいた)
+  - 引数なし起動: `list_projects` が取れたら最近更新のプロジェクトを下敷きに
+    してページ一覧 → プロジェクト一覧を積む。取れなければ従来の `help-jp`
+  - 5 分キャッシュ(`App::projects_cache`、`INDEX_CACHE_SECS` を共用)
+- 見送り: 参加していない公開プロジェクトへの入口(名前を打つ欄)。リンクか
+  起動引数で行ける。要るなら絞り込み行に `[/name]` 相当を足す小粒として
+- 開発メモ: **worktree で本体の `target/` を共有すると lib(`libcosense`)の
+  メタデータハッシュが本体と衝突し、別ソースの rlib を掴む**ことがあった
+  (`Scope` が見つからないという嘘のエラー)。worktree 専用の target dir で
+  ビルドし直して解消。依存のビルドは 1 分弱
+
 ## 将来メモ(今はやらない)
 
 - **設定ファイル(`~/.config/cosense-tui/config.toml`)**: 画像アップロード先の
@@ -313,8 +355,8 @@ akapen/src/effects.rs の toast_effect):
 - `^e`($EDITOR 往復)直後のカーソル形状が外部エディタ設定のまま残りうる
   (PLAN-mode-ux.md に記録済み)
 - P5 系: 表示プロファイル(auto / rich / text)、数式、テーマの意味的整理
-- ベクトル検索(`search/vector/titles`)・プロジェクト一覧(`/api/projects`)の
-  組み込み — 一覧刷新(1)と相性がよいので、その設計時に一緒に検討する
+- ベクトル検索(`search/vector/titles`)の組み込み — 一覧刷新(1)と相性が
+  よいので、その設計時に一緒に検討する(プロジェクト一覧は 2026-09-03 に済)
 
 ## 済(このセッションで消化)
 

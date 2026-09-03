@@ -52,7 +52,7 @@ pub(crate) fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
 /// would only be a way of asking "are you sure" about a page that can be
 /// left again with `[`.
 pub(crate) fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
-    use cosense::index::{Pane, Row};
+    use cosense::index::Pane;
     let list = app.index_list_rect;
     let preview = app.index_preview_rect;
     let inside = |r: Rect| {
@@ -103,12 +103,7 @@ pub(crate) fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
             ix.focus = Pane::List;
             let Some(i) = row_at(&m, ix) else { return };
             ix.cursor = i;
-            let target = match ix.rows().get(i) {
-                Some(Row::Page(e)) => Some((e.title.clone(), false)),
-                Some(Row::Create(name)) => Some((name.to_string(), true)),
-                None => None,
-            };
-            open_from_index(app, ctx, target);
+            open_selected(app, ctx);
         }
         _ => {}
     }

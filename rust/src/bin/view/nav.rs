@@ -377,8 +377,11 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
             }
         }
         Place::Index { project, state } => {
+            // The projects list names no project: nothing to look up.
+            let projects = state.scope == cosense::index::Scope::Projects;
             app.index = Some(*state);
-            app.index_display = ctx.project_display(&project);
+            app.index_display =
+                if projects { String::new() } else { ctx.project_display(&project) };
             app.index_project = project;
             app.overlay = None;
             arrived = true;
@@ -444,6 +447,115 @@ impl App {
             (project.to_string(), sort),
             ListCache { count, pages: pages.to_vec(), at: Instant::now() },
         );
+    }
+}
+
+/// The projects list as `/api/projects` returned it, and when.
+pub(crate) struct ProjectsCache {
+    pub(crate) projects: Vec<cosense::api::ProjectSummary>,
+    pub(crate) at: Instant,
+}
+
+impl App {
+    fn cached_projects(&self) -> Option<Vec<cosense::api::ProjectSummary>> {
+        self.projects_cache
+            .as_ref()
+            .filter(|c| c.at.elapsed() <= INDEX_CACHE_SECS)
+            .map(|c| c.projects.clone())
+    }
+}
+
+/// `^o` over the page list (or a launch with no project named): the
+/// projects this credential is a member of, most recently updated first.
+///
+/// The level above the site top, on the same screen: the page list is one
+/// project's pages, this is the projects, and Enter steps down into one
+/// (`enter_project`). It goes on the history stack like any other place,
+/// so `[` walks back down — except when it was already open, where `^o`
+/// means "fetch it again" and is not a move. `reuse` answers from the
+/// session cache while it is young (the step up and back down that
+/// debugging across projects is made of should not be a request each
+/// time); `^o` on the list itself always refetches.
+pub(crate) fn open_projects(app: &mut App, ctx: &Ctx, reuse: bool) {
+    use cosense::index::{Entry, Index, Scope, SortKey};
+    let projects = match if reuse { app.cached_projects() } else { None } {
+        Some(p) => p,
+        None => match ctx.client.list_projects() {
+            Ok(p) => {
+                app.projects_cache = Some(ProjectsCache { projects: p.clone(), at: Instant::now() });
+                p
+            }
+            Err(e) => {
+                app.toast_err(t!(
+                    "プロジェクト一覧を取得できません: {e}",
+                    "project list failed: {e}"
+                ));
+                return;
+            }
+        },
+    };
+    let from = app.here();
+    let already = matches!(&from, Place::Index { state, .. } if state.scope == Scope::Projects);
+    // Kept across a refetch: the list is the same list, only fresher.
+    let filter = if already {
+        app.index.as_ref().map(|ix| ix.filter.clone()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut entries: Vec<Entry> = projects.into_iter().map(Entry::from_project).collect();
+    Index::sort_entries(&mut entries, SortKey::Updated);
+    let n = entries.len();
+    let mut ix = Index::new(entries, n, SortKey::Updated);
+    ix.scope = Scope::Projects;
+    if !filter.is_empty() {
+        ix.set_filter(filter);
+    }
+    app.index = Some(ix);
+    // No project is being listed. The header names the level instead.
+    app.index_project = String::new();
+    app.index_display = String::new();
+    app.index_sort_menu = None;
+    app.overlay = None;
+    if !already {
+        app.history.push(from);
+        app.forward.clear();
+    }
+}
+
+/// Enter on the projects list: that project's page list, with the
+/// projects list left on the stack for `[`. A list that cannot be fetched
+/// leaves the projects on screen (as a page that cannot be opened leaves
+/// the page list).
+pub(crate) fn enter_project(app: &mut App, ctx: &Ctx, project: &str) {
+    let from = app.here();
+    let saved = app.index.take();
+    open_index(app, ctx, project, String::new());
+    if app.index.is_none() {
+        app.index = saved;
+        return;
+    }
+    app.history.push(from);
+    app.forward.clear();
+}
+
+/// Enter (or a click) on the row under the cursor, whatever the list is
+/// of: a page opens, a create offer starts writing, a project lists.
+pub(crate) fn open_selected(app: &mut App, ctx: &Ctx) {
+    use cosense::index::{Row, Scope};
+    let Some(ix) = app.index.as_ref() else { return };
+    match ix.scope {
+        Scope::Pages => {
+            let target = match ix.rows().get(ix.cursor) {
+                Some(Row::Page(e)) => Some((e.title.clone(), false)),
+                Some(Row::Create(name)) => Some((name.to_string(), true)),
+                None => None,
+            };
+            open_from_index(app, ctx, target);
+        }
+        Scope::Projects => {
+            let Some(slug) = ix.selected().map(|e| e.slug.clone()) else { return };
+            enter_project(app, ctx, &slug);
+        }
     }
 }
 

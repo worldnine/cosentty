@@ -331,6 +331,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // column could be showing instead.
     let sort = if ix.is_search() { cosense::index::SortKey::Updated } else { ix.sort };
     let searching = ix.is_search();
+    let projects = ix.scope == cosense::index::Scope::Projects;
 
     // ---- header ------------------------------------------------------
     let shown = rows.len();
@@ -348,15 +349,23 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // The same badge the page wears. It rides EVERY form of this header,
     // because the moment it explains the most is while a new name is being
     // typed and nothing is offered to create.
-    let ro = if ix.can_create { "" } else { ts!("  [読み取り専用]", "  [read-only]") };
+    // Not over the projects: nothing is written there, so nothing is
+    // read-only either.
+    let ro = if ix.can_create || projects { "" } else { ts!("  [読み取り専用]", "  [read-only]") };
     // Where the typed text ends, in display columns — the caret's column.
     // Only meaningful while the line is open.
     let mut caret_col: Option<u16> = None;
     // The project by its proper name, as on the page header.
-    let pname = [app.index_display.as_str(), app.index_project.as_str(), app.project.as_str()]
-        .into_iter()
-        .find(|s| !s.is_empty())
-        .unwrap_or("");
+    let pname = if projects {
+        // The level, where a project's list names the project.
+        ts!("プロジェクト", "Projects")
+    } else {
+        [app.index_display.as_str(), app.index_project.as_str(), app.project.as_str()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("")
+    };
+    let unit = if projects { "projects" } else { "pages" };
     let head = if ix.filter_editing {
         // A full-text query has no count yet — the list on screen is still
         // the unsearched one, and calling its length a match count would be
@@ -390,7 +399,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         } else {
             String::new()
         };
-        format!(" {pname} — {} pages{}{ro}", ix.entries.len(), more)
+        format!(" {pname} — {} {unit}{}{ro}", ix.entries.len(), more)
     } else {
         format!(" {pname} — /{} ({} match){ro}", ix.filter, shown)
     };
@@ -462,7 +471,18 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 };
                 // Truncate FIRST, then mark: the ranges have to index the
                 // text that is actually drawn, not the title it came from.
-                let shown_title = truncate_width(&e.title, text_w.saturating_sub(6) as usize);
+                // A project row wears its slug after the proper name: it
+                // is what the URL and the command line call it, and what
+                // the filter may have matched.
+                let slug = if e.slug.is_empty() || e.slug == e.title {
+                    String::new()
+                } else {
+                    format!("  {}", e.slug)
+                };
+                let title_room = (text_w as usize)
+                    .saturating_sub(6)
+                    .saturating_sub(UnicodeWidthStr::width(slug.as_str()));
+                let shown_title = truncate_width(&e.title, title_room);
                 let mut spans = vec![
                     Span::styled(glyph.to_string(), style.fg(tel)),
                     // Whatever the list is sorted ON — an age for the three
@@ -471,6 +491,9 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                     Span::styled(format!("{:>4} ", sort.column(e)), style.fg(CHROME_DIM)),
                 ];
                 spans.extend(marked_spans(&shown_title, &terms_of(e), title_style, wash));
+                if !slug.is_empty() {
+                    spans.extend(marked_spans(&slug, &terms_of(e), style.fg(CHROME_DIM), wash));
+                }
                 Line::from(spans)
             }
             Row::Create(name) => Line::from(Span::styled(
@@ -550,6 +573,14 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // seconds, as on the page.
     let hint: String = if let Some((n, _)) = app.note.as_ref() {
         n.clone()
+    } else if ix.filter_editing && projects {
+        ts!("絞り込み — Enter 確定 · Esc 解除", "filter — Enter apply · Esc clear").to_string()
+    } else if projects {
+        ts!(
+            "j/k · / 絞り込み · Enter 開く · ^o 取り直す · Esc/[ 戻る · q 終了",
+            "j/k · / filter · Enter open · ^o refetch · Esc/[ back · q quit"
+        )
+        .to_string()
     } else if ix.filter_editing {
         match ix.filter_mode {
             cosense::index::FilterMode::Title => ts!(
@@ -594,7 +625,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     };
     f.render_widget(
         Paragraph::new(format!(" {} {pos} · {hint}", ts!("一覧", "index"))).style(Style::default().fg(CHROME_DIM)),
-        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+        Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
     );
 
     // The filter line's caret: put the HARDWARE cursor on it. Terminal
@@ -1766,8 +1797,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                    "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
                 t!("移動履歴    [ 戻る · ] 進む", "history     [ back · ] forward"),
                 t!("表示切替    z 表示⇄ソース（行番号つき raw）", "source      z view⇄source (raw with line numbers)"),
-                t!("ページ一覧  ^o 一覧＋抜粋 · / 絞り込み（Tab で本文検索）· s 並び順 · q 終了",
-                   "index       ^o list + excerpt · / filter (Tab: full-text) · s order · q quit"),
+                t!("ページ一覧  ^o 一覧＋抜粋 · / 絞り込み（Tab で本文検索）· s 並び順 · ^o もう一度でプロジェクト一覧 · q 終了",
+                   "index       ^o list + excerpt · / filter (Tab: full-text) · s order · ^o again: projects · q quit"),
             ];
             if app.editable {
                 keys.extend([

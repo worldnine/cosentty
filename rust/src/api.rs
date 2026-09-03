@@ -309,6 +309,27 @@ pub struct ProjectSettings {
     pub gyazo_teams_name: Option<String>,
 }
 
+/// One row of `/api/projects`: a project the credential is a member of.
+/// Timestamps are epoch seconds, as everywhere else in the API.
+#[derive(Debug, Default, Clone, Deserialize, PartialEq, Eq)]
+pub struct ProjectSummary {
+    /// The URL slug.
+    pub name: String,
+    /// The proper name (the site header's). Empty when the API has none.
+    #[serde(default, rename = "displayName")]
+    pub display_name: String,
+    #[serde(default, rename = "publicVisible")]
+    pub public_visible: bool,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub updated: i64,
+    #[serde(default)]
+    pub created: i64,
+    #[serde(default, rename = "usersCount")]
+    pub users_count: i64,
+}
+
 /// `relatedPages` of a page response. 1-hop = direct links + backlinks
 /// (existing pages only), 2-hop = pages sharing a link target with this
 /// page. Cross-project ("External links") entries are NOT here: the API's
@@ -753,6 +774,32 @@ impl Client {
         self.get_project_settings(project)?
             .theme
             .ok_or_else(|| "projects/<name>: no theme in response".into())
+    }
+
+    /// `/api/projects`: the projects this credential belongs to, in the
+    /// order the server hands them over (NOT by date — the caller sorts).
+    ///
+    /// A user-level endpoint, so it takes the user credential (PAT / sid),
+    /// never a service account: an SA is one project's key and has no
+    /// membership list to answer with. Projects the user merely CAN read
+    /// (public ones they are not in) are not listed.
+    pub fn list_projects(&self) -> Result<Vec<ProjectSummary>, Box<dyn Error>> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(default)]
+            projects: Vec<ProjectSummary>,
+        }
+        let url = format!("{}/projects", self.cfg.base());
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(cred) = self.cfg.auth.resolve_user(&self.cfg.origin()) {
+            let (name, value) = cred.header();
+            req = req.header(name, value);
+        }
+        let res = req.send_polite()?;
+        if !res.status().is_success() {
+            return Err(format!("HTTP {} for {}", res.status(), url).into());
+        }
+        Ok(res.json::<Wrapper>()?.projects)
     }
 
     /// The project's settings page as `/api/projects/<name>` reports it:
