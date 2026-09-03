@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const IME_SWIFT: &str = include_str!("../scripts/ime.swift");
 
 /// FNV-1a 64-bit (see akapen: picks a cache file name, nothing more).
-fn fnv1a(data: &[u8]) -> u64 {
+pub(crate) fn fnv1a(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in data {
         hash ^= u64::from(b);

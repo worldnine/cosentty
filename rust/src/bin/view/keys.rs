@@ -491,6 +491,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::Char('u'), false) | (KeyCode::Char('z'), true) => {
             undo(app, ctx);
         }
+        (KeyCode::Char('v'), true) => app.paste_clipboard_image(ctx),
         (KeyCode::Char('r'), true) => {
             redo(app, ctx);
         }

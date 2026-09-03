@@ -193,6 +193,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Compile the macOS IME helper in the background so the first composer
     // open never blocks on swiftc.
     cosense::ime::start_background_build();
+    cosense::clipboard::start_background_build();
     // Detect the terminal's actual background after entering the alt screen.
     // A forced mode uses a representative base so translucent Cosense navbar
     // colors still compose predictably without a second OSC query.

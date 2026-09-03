@@ -153,3 +153,18 @@ use super::support::*;
         app.start_upload(&ctx, &png);
         assert!(app.status.contains("org.gyazo.com") && app.status.contains("アップロード中"), "{}", app.status);
     }
+
+    /// `^v` outside a session, or on a read-only page, says why nothing
+    /// happens instead of touching the clipboard.
+    #[test]
+    fn ctrl_v_refuses_with_a_reason_when_it_cannot_paste() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        handle_key(&mut app, &ctx, ctrl('v'));
+        assert!(app.status.contains("編集中に"), "{}", app.status);
+        enter_session(&mut app, &ctx, 1, 0);
+        app.editable = false;
+        handle_key(&mut app, &ctx, ctrl('v'));
+        assert!(app.status.contains("読み取り専用"), "{}", app.status);
+    }

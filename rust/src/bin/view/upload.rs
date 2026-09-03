@@ -33,7 +33,54 @@ pub(crate) fn splice_image(text: &str, offset: usize, url: &str) -> (String, usi
     (format!("{before}{piece}{after}"), len)
 }
 
+/// Where clipboard pictures are written before they go up. Files here
+/// are the viewer's own and are removed once read.
+pub(crate) fn clipboard_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("cosense-tui").join("clipboard")
+}
+
 impl App {
+    /// `^v`: the picture on the clipboard, into the caret line — the same
+    /// road as a dragged path from the moment there is a file. The OS is
+    /// asked in the foreground (a few tens of milliseconds); every way it
+    /// can say no is a sentence on the status line, never silence.
+    pub(crate) fn paste_clipboard_image(&mut self, ctx: &Ctx) {
+        if self.session.is_none() {
+            self.status = t!("画像は編集中に貼ってください — e / i / o で入ってから", "paste images while editing — enter with e / i / o first");
+            return;
+        }
+        if !self.editable {
+            self.status = t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image");
+            return;
+        }
+        if !self.uploads_on {
+            return; // tests: the OS clipboard is not consulted
+        }
+        let stem = format!("clipboard-{}", now_secs());
+        match cosense::clipboard::image_to(&clipboard_dir(), &stem) {
+            Ok(path) => self.start_upload(ctx, &path),
+            Err(reason) => {
+                use cosense::clipboard::Reason;
+                self.status = match reason {
+                    Reason::NoImage => t!("クリップボードに画像がありません", "no image on the clipboard"),
+                    Reason::HelperBuilding => t!(
+                        "クリップボードを読むヘルパを準備中です（初回だけ）— 少ししてもう一度",
+                        "building the clipboard helper (first time only) — try again shortly"
+                    ),
+                    Reason::NoSwiftc => t!(
+                        "クリップボードの画像を読むには swiftc（Xcode Command Line Tools）が要ります",
+                        "reading clipboard images needs swiftc (Xcode Command Line Tools)"
+                    ),
+                    Reason::NoTool => t!(
+                        "クリップボードの画像を読むには wl-paste か xclip が要ります",
+                        "reading clipboard images needs wl-paste or xclip"
+                    ),
+                    Reason::Other(e) => t!("クリップボードを読めませんでした — {e}", "could not read the clipboard — {e}"),
+                };
+            }
+        }
+    }
+
     /// A pasted image path: read the file, decide where it goes, and send
     /// it on a background thread. The line and caret position are noted
     /// NOW, by line id: by the time the URL comes back the caret may be
@@ -92,8 +139,15 @@ impl App {
         let (project, title) = (self.project.clone(), self.title.clone());
         let path = path.to_path_buf();
         let content_type = cosense::upload::content_type_for(&path);
+        // A clipboard picture was written only to be read here; the
+        // user's own file is theirs.
+        let scratch = cosense::clipboard::is_scratch(&path, &clipboard_dir());
         std::thread::spawn(move || {
-            let result = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
+            let read = std::fs::read(&path).map_err(|e| e.to_string());
+            if scratch {
+                let _ = std::fs::remove_file(&path);
+            }
+            let result = read.and_then(|bytes| {
                 match &dest {
                     Destination::Gcs => client.upload_gcs(&project, &bytes, &name, content_type),
                     Destination::Gyazo { team } => cosense::upload::upload_gyazo(

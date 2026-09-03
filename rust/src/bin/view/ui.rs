@@ -1561,6 +1561,8 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                        "            in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done"),
                     t!("            x 行/選択を削除 · ^e ページ全体を $EDITOR で編集 · コミットは自動",
                        "            x delete line/selection · ^e whole page in $EDITOR · commits are automatic"),
+                    t!("            画像: 編集中に ^v でクリップボードの画像 / 画像ファイルのパスを貼る → アップロードして [URL]",
+                       "            images: while editing, ^v pastes the clipboard image / paste an image file's path → uploaded as [URL]"),
                     t!("構造編集    m 移動モード（ブロックをつかむ）: j/k/↑↓ 1行 · J/K 兄弟ごと",
                        "outline     m move mode (grab a block): j/k/↑↓ one line · J/K whole sibling"),
                     t!("            h/l/←→ 字下げ · Esc/Enter/m 確定（掴んだまま他のキーを押すと確定）",

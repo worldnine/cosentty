@@ -1304,6 +1304,9 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         (KeyCode::Char('u'), true) => edit_input(app, Input::kill_to_start),
         (KeyCode::Char('k'), true) => session_kill(app, ctx),
         (KeyCode::Char('t'), true) => session_cycle_heading(app, ctx),
+        // The terminal cannot paste a PICTURE (bracketed paste is text), so
+        // the clipboard image has a key of its own.
+        (KeyCode::Char('v'), true) => app.paste_clipboard_image(ctx),
         // `y` types a letter in a modeless session, and `^c` belongs to the
         // terminal, so copying takes `^y`.
         (KeyCode::Char('y'), true) => {

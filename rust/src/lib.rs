@@ -1,6 +1,7 @@
 pub mod api;
 pub mod capability;
 pub mod chrome;
+pub mod clipboard;
 pub mod comment;
 pub mod config;
 pub mod editops;
