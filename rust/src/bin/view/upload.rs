@@ -1,6 +1,6 @@
 use super::*;
 
-use cosense::upload::Destination;
+use cosense::upload::{Decided, Destination};
 
 /// A finished background upload: which page and line it was pasted into,
 /// where in the line, what the file was called, and the URL (or why not).
@@ -109,7 +109,8 @@ impl App {
             self.status = t!("{name} は 100MB を超えています", "{name} is over 100MB");
             return;
         }
-        let dest = Destination::resolve(&ctx.config, &self.project, ctx.project_settings(&self.project).as_ref());
+        let (dest, decided) =
+            Destination::resolve_with(&ctx.config, &self.project, ctx.project_settings(&self.project).as_ref());
         // The token must match the destination (see `Ctx::gyazo_teams_token`);
         // the wrong one would put the picture where the page will not
         // point. So no falling back to the other token: refuse, and name
@@ -130,7 +131,17 @@ impl App {
             }
             Destination::Gcs => None,
         };
-        self.status = t!("{name} を {} へアップロード中…", "uploading {name} to {}…", dest.label());
+        // The default is a decision made for want of information, and the
+        // reader deserves to know that is what happened — the project may
+        // well say Gyazo, unreadably.
+        self.status = match decided {
+            Decided::Default => t!(
+                "{name} を {} へアップロード中…（プロジェクト設定を読めないので既定。COSENSE_SID か config.toml で決まる）",
+                "uploading {name} to {}… (project setting unreadable, so the default; COSENSE_SID or config.toml decides)",
+                dest.label()
+            ),
+            _ => t!("{name} を {} へアップロード中…", "uploading {name} to {}…", dest.label()),
+        };
         if !self.uploads_on {
             return; // tests: nothing goes on the wire
         }

@@ -116,20 +116,35 @@ pub enum Destination {
     Gyazo { team: Option<String> },
 }
 
+/// Who decided the destination — the status line says so when it was
+/// nobody, because "gcs" alone does not tell the reader that the project's
+/// own setting (Gyazo, say) was simply out of reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decided {
+    /// `config.toml` named it.
+    File,
+    /// The project's Upload tab named it.
+    Project,
+    /// Neither could be read: the safe default.
+    Default,
+}
+
 impl Destination {
-    /// TOML > project setting > `gcs`. The project's own Upload tab is what
-    /// the browser follows, so following it keeps the two from diverging;
-    /// the file overrides it for whoever wants otherwise; and with neither
-    /// (`/api/projects/<name>` refuses a PAT, so the setting is often out of
-    /// reach) the picture stays inside the project.
-    pub fn resolve(config: &Config, project: &str, settings: Option<&ProjectSettings>) -> Destination {
+    /// `resolve`, with who decided.
+    ///
+    /// A project response WITHOUT `uploadImageTo` counts as unread: the
+    /// public view of a project (no sid, or a PAT) carries the theme and
+    /// even `gyazoTeamsName` but not this field (measured on acme-edu),
+    /// and a team name alone does not mean Gyazo — `別のプロジェクト` has one
+    /// and uploads to gcs.
+    pub fn resolve_with(config: &Config, project: &str, settings: Option<&ProjectSettings>) -> (Destination, Decided) {
         let choice = config.upload_choice(project);
-        let kind = choice
-            .images
-            .clone()
-            .or_else(|| settings.and_then(|s| s.upload_image_to.clone()))
-            .unwrap_or_else(|| "gcs".into());
-        match kind.as_str() {
+        let (kind, decided) = match (choice.images.clone(), settings.and_then(|s| s.upload_image_to.clone())) {
+            (Some(k), _) => (k, Decided::File),
+            (None, Some(k)) => (k, Decided::Project),
+            (None, None) => ("gcs".to_string(), Decided::Default),
+        };
+        let dest = match kind.as_str() {
             "gyazo" => {
                 let team = choice
                     .gyazo_team
@@ -139,7 +154,17 @@ impl Destination {
                 Destination::Gyazo { team }
             }
             _ => Destination::Gcs,
-        }
+        };
+        (dest, decided)
+    }
+
+    /// TOML > project setting > `gcs`. The project's own Upload tab is what
+    /// the browser follows, so following it keeps the two from diverging;
+    /// the file overrides it for whoever wants otherwise; and with neither
+    /// (`/api/projects/<name>` refuses a PAT, so the setting is often out of
+    /// reach) the picture stays inside the project.
+    pub fn resolve(config: &Config, project: &str, settings: Option<&ProjectSettings>) -> Destination {
+        Self::resolve_with(config, project, settings).0
     }
 
     /// What the status line calls it.
@@ -241,6 +266,13 @@ mod tests {
             "gyazo with no team is personal gyazo.com"
         );
         assert_eq!(Destination::Gyazo { team: Some("x".into()) }.label(), "x.gyazo.com");
+
+        // Who decided is reported; a public view with the field missing
+        // is "nobody", even with a team name on it.
+        assert_eq!(Destination::resolve_with(&none, "p", Some(&settings)).1, Decided::Project);
+        assert_eq!(Destination::resolve_with(&file, "q", None).1, Decided::File);
+        let public_view = ProjectSettings { theme: Some("x".into()), upload_image_to: None, gyazo_teams_name: Some("org".into()) };
+        assert_eq!(Destination::resolve_with(&none, "p", Some(&public_view)), (Destination::Gcs, Decided::Default));
     }
 
     #[test]

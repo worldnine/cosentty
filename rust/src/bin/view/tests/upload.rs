@@ -111,6 +111,7 @@ use super::support::*;
         session_paste(&mut app, &ctx, &format!("{} ", png.display()));
         assert_eq!(app.session.as_ref().unwrap().input.buf, "one", "the path is not typed");
         assert!(app.status.contains("アップロード中") && app.status.contains("gcs"), "{}", app.status);
+        assert!(app.status.contains("読めない"), "no setting was read, and the status says so: {}", app.status);
 
         session_paste(&mut app, &ctx, "/nowhere/shot.png");
         assert_eq!(app.session.as_ref().unwrap().input.buf, "one/nowhere/shot.png", "a path to nothing is text");
