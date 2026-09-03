@@ -207,6 +207,9 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
     // editing, so a Japanese sentence can be corrected mid-line.
     if app.composing.is_some() {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // The bar is part of the layout (it sits under the commented
+        // range and grows as the text wraps), so every key re-lays out.
+        app.laid_width = 0;
         match (k.code, ctrl) {
             (KeyCode::Esc, _) => {
                 app.composing = None;
@@ -516,6 +519,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             let existing = app.comment_for_range().map(|i| app.comments[i].text.clone());
             let editing = existing.is_some();
             app.composing = Some(Input::new(existing.unwrap_or_default()));
+            app.laid_width = 0; // the bar opens under the range
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
             app.status = if editing {
                 t!("コメントを編集 · Enter 置き換え · Esc 取消", "edit comment · Enter replace · Esc cancel")

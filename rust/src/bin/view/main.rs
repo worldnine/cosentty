@@ -717,6 +717,7 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
     }
     if let Some(input) = app.composing.as_mut() {
         input.insert_str(&clean);
+        app.laid_width = 0; // the bar grows with the text
         return;
     }
     // The index's filter is a text field too: pasting a title into it is

@@ -39,6 +39,12 @@ pub(crate) enum Row {
     ImageLoading { src: usize, indent: usize, item: bool, url: String },
     ImageError { msg: String, src: usize, indent: usize, item: bool },
     Card { line: Line<'static> },
+    /// One row of the comment composer, woven in under the commented
+    /// range like a card (akapen: the bar opens where the comment will
+    /// sit). `caret`: the display column of the insertion point when this
+    /// row holds it — the hardware cursor goes there, so the IME's
+    /// composition window opens in the bar.
+    Composer { line: Line<'static>, caret: Option<u16> },
     FrameEnd,
 }
 
@@ -57,7 +63,7 @@ impl Row {
             | Row::Inline { src, .. }
             | Row::ImageLoading { src, .. }
             | Row::ImageError { src, .. } => Some(*src),
-            Row::Card { .. } | Row::FrameEnd => None,
+            Row::Card { .. } | Row::Composer { .. } | Row::FrameEnd => None,
         }
     }
 }
@@ -942,6 +948,26 @@ impl App {
         }
         let need = (last_y - avoid_y as i32 + 1) as u16;
         self.scroll = self.scroll.saturating_add(need).min(self.max_scroll(band_h));
+    }
+
+    /// While composing, keep the whole composer bar on screen: it sits
+    /// under the commented range, which `follow_cursor` alone may leave
+    /// below the fold when the range ends near the bottom (akapen's
+    /// `keep_composer_visible_view`).
+    pub(crate) fn keep_composer_visible(&mut self, body_h: u16) {
+        let Some(last) = self.rows.iter().rposition(|r| matches!(r, Row::Composer { .. })) else {
+            return;
+        };
+        let first = self.rows.iter().position(|r| matches!(r, Row::Composer { .. })).unwrap_or(last);
+        let top = self.row_top(first);
+        let bottom = self.row_top(last) + 1;
+        if bottom > self.scroll + body_h {
+            self.scroll = bottom - body_h;
+        }
+        if top < self.scroll {
+            self.scroll = top;
+        }
+        self.scroll = self.scroll.min(self.max_scroll(body_h).max(bottom.saturating_sub(body_h)));
     }
 
     /// Wheel scroll: move the viewport by `delta` height units and leave

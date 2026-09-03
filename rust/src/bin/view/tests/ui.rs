@@ -79,15 +79,82 @@ use super::support::*;
         app.index = None;
 
         // --- コメント入力欄 ---
+        // 入力欄はカーソル行(title の次、行 1)の直下に割って入る:
+        // 罫線1行、本文1行。本文の行にキャレットがある。
+        app.cursor = 1;
         let mut input = Input::new(String::new());
         input.insert_char('あ');
         input.insert_char('い');
         app.composing = Some(input);
+        app.laid_width = 0;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let pos = term.get_cursor_position().unwrap();
-        // "> " の2桁 + 全角2文字の4桁。行は入力欄の2行目。
-        assert_eq!(pos.x, 6, "全角は2桁で数える");
-        assert_eq!(pos.y, 12 - 1 - 3 + 1);
+        let text_x = app.text_rect.x;
+        assert_eq!(pos.x, text_x + 4, "全角は2桁で数える");
+        // ヘッダ1・上罫線1・title・one・入力欄の上罫線 → 本文は行 5。
+        assert_eq!(pos.y, app.text_rect.y + 3);
+    }
+
+    /// コメント入力欄は akapen と同じく、コメントする範囲の最終行の直下に
+    /// 割って入る(フッターの下に出るのではない)。シアンの罫線に挟まれ、
+    /// ラベルは ` comment · 2-3 `。同じ範囲の既存コメントを編集するときは
+    /// ` edit · ` になり、そのカードは入力欄に置き換わる(2段にならない)。
+    #[test]
+    fn the_composer_opens_under_the_commented_range_and_replaces_the_card_it_edits() {
+        let mut app = page(&["title", "one", "two", "three"]);
+        app.rebuild(40);
+        let plain = |r: &Row| -> String {
+            match r {
+                Row::Composer { line, .. } | Row::Card { line } => {
+                    line.spans.iter().map(|s| s.content.as_ref()).collect()
+                }
+                _ => String::new(),
+            }
+        };
+        app.selection = Some(Selection { anchor: 1, cursor: 2 });
+        app.composing = Some(Input::new("メモ".into()));
+        app.rebuild(40);
+        let comp: Vec<usize> = app.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Composer { .. })).map(|(i, _)| i).collect();
+        assert_eq!(comp.len(), 3, "rule, one body row, rule: {comp:?}");
+        // 直前の行は範囲の最終行(two = src 2)、直後は three。
+        assert_eq!(app.rows[comp[0] - 1].src(), Some(2));
+        assert_eq!(app.rows[comp[2] + 1].src(), Some(3));
+        assert!(plain(&app.rows[comp[0]]).starts_with(" comment · 2-3 ─"), "{}", plain(&app.rows[comp[0]]));
+        assert_eq!(plain(&app.rows[comp[1]]), "メモ");
+        assert!(matches!(app.rows[comp[1]], Row::Composer { caret: Some(4), .. }), "caret after 2 wide chars");
+        assert!(matches!(app.rows[comp[0]], Row::Composer { caret: None, .. }));
+
+        // 保存するとカードになる(同じ形、色だけ変わる)。
+        let c = app.make_comment("メモ".into()).unwrap();
+        app.comments.push(c);
+        app.composing = None;
+        app.rebuild(40);
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Composer { .. })));
+        let cards: Vec<&Row> = app.rows.iter().filter(|r| matches!(r, Row::Card { .. }) && !plain(r).is_empty()).collect();
+        assert!(plain(cards[0]).starts_with(" comment · 2-3 ─"), "{}", plain(cards[0]));
+        assert_eq!(plain(cards[1]), "メモ");
+
+        // 同じ範囲でもう一度: edit ラベルの入力欄がカードの場所に立ち、カードは隠れる。
+        app.composing = Some(Input::new("メモ".into()));
+        app.rebuild(40);
+        let comp: Vec<&Row> = app.rows.iter().filter(|r| matches!(r, Row::Composer { .. })).collect();
+        assert!(plain(comp[0]).starts_with(" edit · 2-3 ─"), "{}", plain(comp[0]));
+        assert!(!app.rows.iter().any(|r| matches!(r, Row::Card { .. }) && plain(r).starts_with(" comment")), "the edited card gives way to the bar");
+    }
+
+    /// 入力欄の本文は列幅で折り返し、キャレットの位置は折り返し後の
+    /// (行, 桁)で報告する。行がいっぱいのときのキャレットは次の行の頭
+    /// (次に打つ字がそこへ行くから)。末尾だけは最終行の右端になりうる。
+    #[test]
+    fn the_composer_body_wraps_and_reports_where_the_caret_landed() {
+        let (rows, caret) = wrap_with_caret("abcdefgh", 3, 4);
+        assert_eq!(rows, vec!["abcd", "efgh"]);
+        assert_eq!(caret, (0, 3));
+        assert_eq!(wrap_with_caret("abcdefgh", 4, 4).1, (1, 0), "at a full row's end the caret is where the next char will go");
+        assert_eq!(wrap_with_caret("abcdefgh", 5, 4).1, (1, 1));
+        assert_eq!(wrap_with_caret("abcdefgh", 8, 4).1, (1, 4));
+        assert_eq!(wrap_with_caret("", 0, 4), (vec![String::new()], (0, 0)));
+        assert_eq!(wrap_with_caret("あいう", 2, 4).1, (1, 0), "a wide char that does not fit starts the next row");
     }
 
     #[test]

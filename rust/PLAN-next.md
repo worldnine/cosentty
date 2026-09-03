@@ -420,6 +420,15 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
   - 終了時の stdout 印字は残す(送り忘れの保険)。q の問いに「未送信のコメント N 件」を添える
   - 永続化(comments.json)はしていない。送ってしまえば消えるものなので、
     要るなら別の小粒として
+  - **入力欄の見た目**(同日、「該当行の下に割って入る、akapen に沿って」):
+    フッターの3行入力欄を撤去し、`Row::Composer` としてコメントする範囲の最終行
+    (そのカードの後)に織り込む。akapen の `composer_lines` と同じシアンの罫線、
+    ` comment · 12-14 ` / ` edit · 12-14 ` のラベル、`wrap_with_caret` で折り返し
+    とキャレット位置を出し、ハードウェアカーソルをその桁に置く。カードも akapen の
+    `comment_bar_lines` に揃えて罫線＋黄タイトルだけにした(箱と背景を廃止)ので、
+    Enter で入力欄がカードに「なる」。`keep_composer_visible` が画面外に出るのを防ぐ。
+    テスト: `the_composer_opens_under_the_commented_range_and_replaces_the_card_it_edits`、
+    `the_composer_body_wraps_and_reports_where_the_caret_landed`
   - **cosense skill との相性**(ユーザー指示。skill は
     `~/.claude/plugins/cache/cosense-cli/cosense-cli/<ver>/skills/cosense/`):
     skill は「URL は `https://` から次の空白まで」「URL の `#<lineId>` が編集

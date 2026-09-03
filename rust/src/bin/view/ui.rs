@@ -19,7 +19,6 @@ pub(crate) const SOURCE_NUM_W: usize = 5;
 /// Cursor-row highlight inside the page body.
 pub(crate) const CURSOR_BG: Color = Color::DarkGray;
 
-pub(crate) const CARD_BG: Color = Color::Black;
 
 // Non-content chrome uses ANSI palette entries, never fixed RGB. Terminal
 // themes own the actual values behind these role colors.
@@ -121,44 +120,88 @@ pub(crate) fn related_row(
     Line::from(spans)
 }
 
-/// Render a comment as inline card lines (indented, distinct background).
+/// A saved comment as a bar under its lines (akapen's comment bar): a top
+/// rule carrying the title (` comment · 12-14 `, yellow), the wrapped
+/// text, a bottom rule. Rules only — no side borders, no background — so
+/// it reads as a speech bubble whose rules run across the text column,
+/// and so the composer (the same bar in cyan) turns into it on Enter
+/// without the shape changing.
 pub(crate) fn card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(4).max(10);
-    let bar = "─".repeat(inner);
-    let cs = Style::default().bg(CARD_BG).fg(Color::Gray);
-    let accent = Style::default().bg(CARD_BG).fg(Color::LightBlue);
-    let mut out = Vec::new();
-    out.push(Line::from(Span::styled(format!("  ╭{bar}╮"), accent)));
-    let head = t!("  💬 {} 行目", "  💬 lines {}", c.range_label());
-    out.push(Line::from(vec![
-        Span::styled("  │ ", accent),
-        Span::styled(
-            pad(&head, inner.saturating_sub(2)),
-            cs.add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │", accent),
-    ]));
-    for bl in c.text.lines() {
-        for chunk in wrap_plain(bl, inner.saturating_sub(2)) {
-            out.push(Line::from(vec![
-                Span::styled("  │ ", accent),
-                Span::styled(pad(&chunk, inner.saturating_sub(2)), cs),
-                Span::styled(" │", accent),
-            ]));
-        }
-    }
-    out.push(Line::from(Span::styled(format!("  ╰{bar}╯"), accent)));
+    let rule = Style::default().fg(CHROME_DIM);
+    let title = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let label = t!(" comment · {} ", " comment · {} ", c.range_label());
+    bar_lines(&label, title, rule, c.text.lines().flat_map(|l| wrap_plain(l, width)).collect(), width)
+}
+
+/// The bar shape both the card and the composer use: `label` on the top
+/// rule, `body` rows, a bottom rule.
+fn bar_lines(
+    label: &str,
+    title: Style,
+    rule: Style,
+    body: Vec<String>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let fill = "─".repeat(width.saturating_sub(str_width(label)));
+    let mut out = vec![Line::from(vec![Span::styled(label.to_string(), title), Span::styled(fill, rule)])];
+    out.extend(body.into_iter().map(Line::from));
+    out.push(Line::from(Span::styled("─".repeat(width), rule)));
     out
 }
 
-pub(crate) fn pad(s: &str, width: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        s.to_string()
+/// The comment composer as rows under the commented range: the card's
+/// bar in cyan, ` comment · 12-14 ` (or ` edit · 12-14 ` when replacing
+/// an existing comment), the input wrapped to the column, and the
+/// insertion point's cell recorded so the hardware cursor — and with it
+/// the IME's composition window — sits in the bar.
+pub(crate) fn composer_rows(input: &Input, range: (usize, usize), editing: bool, width: usize) -> Vec<Row> {
+    let width = width.max(1);
+    let accent = Style::default().fg(CHROME_ACCENT);
+    let title = accent.add_modifier(Modifier::BOLD);
+    let label = if range.0 == range.1 {
+        format!("{} {}", if editing { " edit ·" } else { " comment ·" }, range.0 + 1)
     } else {
-        format!("{s}{}", " ".repeat(width - w))
+        format!("{} {}-{}", if editing { " edit ·" } else { " comment ·" }, range.0 + 1, range.1 + 1)
+    };
+    let label = format!("{label} ");
+    let (before, _) = input.parts();
+    let (body, (crow, ccol)) = wrap_with_caret(&input.buf, before.chars().count(), width);
+    let mut rows: Vec<Row> = bar_lines(&label, title, accent, body, width)
+        .into_iter()
+        .map(|line| Row::Composer { line, caret: None })
+        .collect();
+    if let Some(Row::Composer { caret, .. }) = rows.get_mut(1 + crow) {
+        *caret = Some(ccol.min(width - 1) as u16);
     }
+    rows
+}
+
+/// `wrap_plain`, also reporting the cell the caret (after `caret_chars`
+/// characters) lands in: `(row, display column)`. A caret between a full
+/// row and the next character sits where that character goes — the start
+/// of the next row. Only at the very end of the text can it sit on a full
+/// row's right edge; the drawer clamps that one cell.
+pub(crate) fn wrap_with_caret(s: &str, caret_chars: usize, width: usize) -> (Vec<String>, (usize, usize)) {
+    use unicode_width::UnicodeWidthChar;
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut w = 0usize;
+    let mut caret: Option<(usize, usize)> = None;
+    for (i, ch) in s.chars().enumerate() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            w = 0;
+        }
+        if i == caret_chars {
+            caret = Some((out.len(), w));
+        }
+        cur.push(ch);
+        w += cw;
+    }
+    let caret = caret.unwrap_or((out.len(), w));
+    out.push(cur);
+    (out, caret)
 }
 
 pub(crate) fn wrap_plain(s: &str, width: usize) -> Vec<String> {
@@ -857,6 +900,11 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if app.toast.is_some() {
         app.keep_cursor_above(text.y, band_bot as u16, band_h);
     }
+    // The composer bar is what is being typed into: it stays on screen
+    // whatever the range it hangs under is doing.
+    if app.composing.is_some() {
+        app.keep_composer_visible(band_h);
+    }
 
     // EDIT の行またぎ文字選択の両端。キャレット行は自分の行の反転を
     // session 描画(caret_sel_bytes)が行うので、ここではそれ以外の行 —
@@ -1079,6 +1127,18 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
             }
+            Row::Composer { line, caret } => {
+                if let Some(r) = one_row(screen_y) {
+                    f.render_widget(Paragraph::new(line.clone()).style(base), r);
+                    if let Some(col) = caret {
+                        // The hardware cursor marks the insertion point:
+                        // this is a Japanese input surface, and the IME's
+                        // composition window follows the hardware cursor.
+                        let x = r.x + (*col).min(r.width.saturating_sub(1));
+                        f.set_cursor_position(ratatui::layout::Position::new(x, r.y));
+                    }
+                }
+            }
             // Already painted as the frame's └───┘ rule above.
             Row::FrameEnd => {}
             Row::Blank { .. } => {
@@ -1283,45 +1343,6 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 }
             }
         }
-    }
-
-    // Comment composer at the bottom. The caret is drawn at the input's
-    // cursor (←/→/^a/^e move it), not glued to the end.
-    if let Some(input) = &app.composing {
-        let h = 3u16;
-        let r = Rect::new(area.x, area.y + area.height.saturating_sub(1 + h), area.width, h);
-        f.render_widget(Clear, r);
-        let (a, b) = app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor));
-        let label = if a == b {
-            t!(" {} 行目へのコメント ", " comment on line {} ", a + 1)
-        } else {
-            t!(" {}-{} 行目へのコメント ", " comment on lines {}-{} ", a + 1, b + 1)
-        };
-        let (before, after) = input.parts();
-        // …and the same hardware cursor, for the same reason: this is the
-        // viewer's main Japanese surface, and its composition window was
-        // landing wherever the cursor happened to be. `"> "` is two columns
-        // and the caret sits after `before`, measured in display columns.
-        let caret_x = 2 + unicode_width::UnicodeWidthStr::width(before);
-        let cx = r.x + (caret_x.min(r.width.saturating_sub(1) as usize)) as u16;
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(CHROME_ACTIVE)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(format!("> {before}▏{after}")),
-                Line::from(Span::styled(
-                    "Enter save · Esc cancel · ←/→ ^a/^e ^w ^u",
-                    Style::default().fg(CHROME_DIM),
-                )),
-            ]),
-            r,
-        );
-        f.set_cursor_position(ratatui::layout::Position::new(cx, r.y + 1));
     }
 
     // Modal overlay (comments list / link picker / help) on top.
@@ -2230,14 +2251,37 @@ impl App {
             // spans label + text
             Mode::Source => Self::text_width(Mode::Source, width) + SOURCE_NUM_W,
         };
+        // The composer opens where its comment will sit: under the last
+        // content row of the range being commented. An existing comment
+        // on exactly that range is being edited, so its card gives way to
+        // the bar (one bar, not two stacked).
+        let mut composer: Option<(usize, Vec<Row>)> = self.composing.as_ref().map(|input| {
+            let range = self.selection.map(|s| s.range()).unwrap_or((self.cursor, self.cursor));
+            let anchor = content
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.src().is_some_and(|s| range.0 <= s && s <= range.1))
+                .map(|(idx, _)| idx)
+                .last()
+                .unwrap_or(content.len().saturating_sub(1));
+            (anchor, composer_rows(input, range, self.comment_for_range().is_some(), width_cols))
+        });
+        let hidden_card = if self.composing.is_some() { self.comment_for_range() } else { None };
         for (idx, row) in content.into_iter().enumerate() {
             rows.push(row);
             if let Some(cidxs) = cards_after.get(&idx) {
                 for &ci in cidxs {
+                    if Some(ci) == hidden_card {
+                        continue;
+                    }
                     for line in card_lines(&self.comments[ci], width_cols) {
                         rows.push(Row::Card { line });
                     }
                 }
+            }
+            if composer.as_ref().is_some_and(|(anchor, _)| *anchor == idx) {
+                let (_, bar) = composer.take().unwrap();
+                rows.extend(bar);
             }
         }
         // Painted as └───┘ by `ui`; related rows begin after it.

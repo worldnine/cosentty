@@ -158,6 +158,7 @@ pub(crate) fn in_input(app: &mut App, f: fn(&mut Input)) {
 /// Enter in the comment composer.
 pub(crate) fn finish_composer(app: &mut App, input: Input) {
     let buf = input.buf;
+    app.laid_width = 0; // the bar closes either way
     if buf.trim().is_empty() {
         app.note(t!("空のコメントは破棄しました", "empty comment discarded"));
     } else if let Some(c) = app.make_comment(buf) {
