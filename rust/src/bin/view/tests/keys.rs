@@ -442,8 +442,9 @@ use super::support::*;
         handle_key(&mut app, &ctx, key(KeyCode::Char('s')));
         assert!(app.comments.is_empty(), "delivered, so cleared: {}", app.toast_text());
         let got = std::fs::read_to_string(&out).unwrap();
-        assert!(got.starts_with("1. proj/t L2 "), "{got}");
-        assert!(got.contains("   > one\n\n    a\n\n2. proj/t L3 "), "{got}");
+        assert!(got.starts_with("1. https://scrapbox.io/proj/t"), "{got}");
+        assert!(got.contains("   > one"), "{got}");
+        assert!(got.contains("\n\n    a\n\n2. https://scrapbox.io/proj/t"), "{got}");
         // A failing command keeps them.
         ctx.send_target = SendTarget::Command("exit 3".into());
         app.cursor = 1;

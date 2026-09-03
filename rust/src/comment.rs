@@ -56,9 +56,11 @@ impl Comment {
         }
     }
 
-    /// Deep link to the first anchored line (Cosense jumps to `#lineId`).
+    /// Deep link to the first anchored line (Cosense jumps to `#lineId`,
+    /// and the cosense skill takes that fragment as the anchor for the
+    /// edit — its top priority, ahead of anything the body suggests).
     pub fn edit_url(&self) -> String {
-        let title = urlencode(&self.title);
+        let title = encode_title_for_url(&self.title);
         match self.line_ids.first() {
             Some(id) if !id.is_empty() => {
                 format!("https://scrapbox.io/{}/{}#{}", self.project, title, id)
@@ -76,19 +78,28 @@ impl Comment {
 /// mode): where it is, the quoted lines, a blank line, then the comment.
 ///
 /// ```text
-/// acme/Team Tips L12-13 https://scrapbox.io/acme/TAO%20Tips#6a79...
-/// > 元の行テキスト1
-/// > 元の行テキスト2
+/// https://scrapbox.io/acme/Team_Tips#6a79...115 L12-13
+/// > 元の行テキスト1  # 6a79...115
+/// > 元の行テキスト2  # 6a79...116
 ///
 /// この行の誤字を直して
 /// ```
 ///
-/// The quote is the EXACT line text, so an agent driving the cosense CLI
-/// / MCP can hand it to `edit_lines` verbatim; the URL deep-links the
-/// first line. No `Lines:` / `Instruction:` labels: a quote followed by a
-/// remark is how people already write this, and the agent reads it the
-/// same way. The blank line is load-bearing — CommonMark's lazy
-/// continuation would otherwise pull the comment into the blockquote.
+/// Written in the cosense skill's own vocabulary, so the agent receiving
+/// it can act without translation:
+/// - the URL comes first and is whitespace-free (the skill reads a URL
+///   from `https://` to the next space), in Cosense's readable form (`_`
+///   for spaces, raw Japanese), with the first line's `#lineId` — the
+///   fragment the skill treats as the edit's anchor;
+/// - every quoted line ends in `# <lineId>`, the marker `previewEdit`
+///   prints on changed lines, which is what an `insertBefore` / `replace`
+///   / `delete` op takes as its anchor;
+/// - the quote is the EXACT text, so a human reads what was meant and the
+///   agent can check it against `readPage`.
+/// No `Lines:` / `Instruction:` labels: a quote followed by a remark is
+/// how people already write this. The blank line is load-bearing —
+/// CommonMark's lazy continuation would otherwise pull the comment into
+/// the blockquote.
 pub fn format_comment(c: &Comment) -> String {
     format_comment_numbered(c, None)
 }
@@ -99,8 +110,16 @@ pub fn format_comment(c: &Comment) -> String {
 /// distinct points. The number sits before the `> ` marker, so quoted
 /// content that itself starts with `1. ` cannot collide with it.
 fn format_comment_numbered(c: &Comment, number: Option<usize>) -> String {
-    let location = format!("{}/{} L{} {}", c.project, c.title, c.range_label(), c.edit_url());
-    let mut quote: Vec<String> = c.line_texts.iter().map(|t| format!("> {t}")).collect();
+    let location = format!("{} L{}", c.edit_url(), c.range_label());
+    let mut quote: Vec<String> = c
+        .line_texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| match c.line_ids.get(i).filter(|id| !id.is_empty()) {
+            Some(id) => format!("> {t}  # {id}"),
+            None => format!("> {t}"),
+        })
+        .collect();
     if quote.is_empty() {
         quote.push("> ".into());
     }
@@ -154,19 +173,19 @@ fn normalize_text(text: &str) -> String {
         .join("\n")
 }
 
-/// Minimal percent-encoding for the title path component.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.as_bytes() {
-        let c = *b;
-        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') {
-            out.push(c as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{c:02X}"));
-        }
-    }
-    out
+/// A page title as Cosense's "Copy readable link" writes it, and as the
+/// cosense CLI's `encodeTitleForUrl` does: Unicode stays raw (browsers
+/// pass it through as an IRI), spaces become `_` (Cosense's convention),
+/// and only what would break the URL or the server's `/:project/:title`
+/// route is percent-encoded (`%` `/` `?` `#`). An agent reads the page
+/// name off the URL; a human does too.
+pub fn encode_title_for_url(title: &str) -> String {
+    title
+        .replace('%', "%25")
+        .replace('/', "%2F")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+        .replace(' ', "_")
 }
 
 #[cfg(test)]
@@ -204,11 +223,19 @@ mod tests {
         let c = comment(0, 0, &["x"], &["6a7973f30000000000966115"], "note");
         assert_eq!(
             c.edit_url(),
-            "https://scrapbox.io/acme/TAO%20Tips#6a7973f30000000000966115"
+            "https://scrapbox.io/acme/Team_Tips#6a7973f30000000000966115"
         );
         // no id → page url
         let c2 = comment(0, 0, &["x"], &[], "note");
-        assert_eq!(c2.edit_url(), "https://scrapbox.io/acme/TAO%20Tips");
+        assert_eq!(c2.edit_url(), "https://scrapbox.io/acme/Team_Tips");
+    }
+
+    /// タイトルは cosense CLI の encodeTitleForUrl と同じ形: 日本語は生、
+    /// 空白は `_`、URL やルートを壊す `% / ? #` だけをエスケープ。
+    #[test]
+    fn titles_are_written_as_cosense_readable_links() {
+        assert_eq!(encode_title_for_url("Team Tips"), "Team_Tips");
+        assert_eq!(encode_title_for_url("改善案 #4 / 50%?"), "改善案_%234_%2F_50%25%3F");
     }
 
     /// 引用とコメントを混ぜた、チャットの返信の形。場所は1行、引用は
@@ -225,12 +252,15 @@ mod tests {
         );
         assert_eq!(
             format_comment(&c),
-            "acme/Team Tips L12-13 https://scrapbox.io/acme/TAO%20Tips#6a7973f30000000000966115\n\
-             > 元の行テキスト1\n\
-             > 元の行テキスト2\n\
+            "https://scrapbox.io/acme/Team_Tips#6a7973f30000000000966115 L12-13\n\
+             > 元の行テキスト1  # 6a7973f30000000000966115\n\
+             > 元の行テキスト2  # 6a7973f30000000000966116\n\
              \n\
              この行の誤字を直して"
         );
+        // A line the API gave no id (an uncreated page) is quoted bare.
+        let bare = comment(0, 0, &["x"], &[], "n");
+        assert!(format_comment(&bare).starts_with("https://scrapbox.io/acme/Team_Tips L1\n> x\n\nn"));
     }
 
     /// 複数は番号付きの箇条書きになる(順に対応すべき別々の指摘だと
@@ -243,14 +273,14 @@ mod tests {
         let out = format_all(&[a, b]);
         assert_eq!(
             out,
-            "1. acme/Team Tips L2 https://scrapbox.io/acme/TAO%20Tips#i1\n\
-             \x20  > a\n\
+            "1. https://scrapbox.io/acme/Team_Tips#i1 L2\n\
+             \x20  > a  # i1\n\
              \n\
              \x20   one\n\
              \x20   more\n\
              \n\
-             2. acme/Team Tips L6 https://scrapbox.io/acme/TAO%20Tips#i2\n\
-             \x20  > b\n\
+             2. https://scrapbox.io/acme/Team_Tips#i2 L6\n\
+             \x20  > b  # i2\n\
              \n\
              \x20   two"
         );
@@ -260,6 +290,6 @@ mod tests {
     fn single_comment_is_not_numbered() {
         let c = comment(0, 0, &["x"], &["i"], "note");
         let out = format_all(&[c]);
-        assert!(out.starts_with("acme/Team Tips L1 "));
+        assert!(out.starts_with("https://scrapbox.io/acme/Team_Tips"));
     }
 }

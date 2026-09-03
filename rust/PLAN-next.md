@@ -420,6 +420,15 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
   - 終了時の stdout 印字は残す(送り忘れの保険)。q の問いに「未送信のコメント N 件」を添える
   - 永続化(comments.json)はしていない。送ってしまえば消えるものなので、
     要るなら別の小粒として
+  - **cosense skill との相性**(ユーザー指示。skill は
+    `~/.claude/plugins/cache/cosense-cli/cosense-cli/<ver>/skills/cosense/`):
+    skill は「URL は `https://` から次の空白まで」「URL の `#<lineId>` が編集
+    アンカーの最優先」「ops は lineId を anchor にする」「previewEdit は変更行の
+    行末に `# <lineId>` を付ける」という語彙で動く。書式をそれに合わせた:
+    URL を行頭に(空白なし・CLI の `encodeTitleForUrl` と同じ `_` 区切り)、
+    引用行の末尾に `# <lineId>`。以前の `edit_lines matches verbatim` は
+    別ツールの語彙で、skill には無い。受け取ったエージェントは skill の手順
+    (browsePage → readPage → previewEdit → submitEdit)にそのまま乗れる
 - 場所: `src/bin/view/handoff.rs`(宛先の決定・送信・エージェント解決)、
   `src/comment.rs`(書式)、keys.rs のコメント節と一覧オーバーレイ
 
