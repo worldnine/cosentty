@@ -692,7 +692,7 @@ use super::support::*;
     }
 
     /// ヘッダは左に `正式名称 / タイトル`、右端に「状態で、ほかに印が無いもの」
-    /// だけ(未同期・読み取り専用・未読)。コメント数・編集中・ソース・選択情報は
+    /// だけ(未同期・読み取り専用)。コメント数・編集中・ソース・選択情報・未読は
     /// 別の場所が言うので載せない。
     #[test]
     fn the_header_keeps_the_name_and_only_the_unsigned_states() {
@@ -701,7 +701,7 @@ use super::support::*;
         let mut app = page(&["title", "one"]);
         app.project = "slug-1234".into();
         app.project_display = "研究ノート".into();
-        app.read_at = None; // first visit: the one unread badge that needs no clock
+        app.read_at = None; // a first visit: the telomere says so, not the header
         app.comments.push(Comment {
             project: "slug-1234".into(),
             title: "title".into(),
@@ -721,13 +721,13 @@ use super::support::*;
         assert!(h.starts_with(&format!("研究ノート/{}", app.title)), "{h:?}");
         assert!(!h.contains("slug"), "the slug gives way to the proper name");
         assert!(!h.contains("コメント"), "the count lives behind `l`");
-        assert!(h.ends_with("初回"), "right end: the unread badge only: {h:?}");
+        assert!(h.ends_with(&app.title), "nothing at the right end: no unread badge either: {h:?}");
 
         app.web_unsynced = true;
         app.editable = false;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let h = header(&term).replace(' ', "");
-        assert!(h.ends_with("未同期·読み取り専用·初回"), "{h:?}");
+        assert!(h.ends_with("未同期·読み取り専用"), "{h:?}");
         assert_eq!(header_line("a", "b ", 6), "a   b ", "right flush when it fits");
         assert_eq!(header_line("abcd", "xy ", 6), "abcd  xy ", "otherwise they follow; the widget clips");
     }

@@ -630,10 +630,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // header: `name / title` on the left — the project's proper name, or
     // its slug until the settings are read — and, at the right end, only
     // what is STATE and has no other sign: the snapshot being viewed, a
-    // page that has drifted from the server, read-only, unread lines.
-    // EDIT/SRC have the footer badge, the backdrop and the caret; the
-    // comment count has `l`; a selection has its footer hint. None of
-    // those earn a second badge here.
+    // page that has drifted from the server, read-only. EDIT/SRC have the
+    // footer badge, the backdrop and the caret; the comment count has `l`;
+    // a selection has its footer hint; unread lines have the telomere's
+    // colour. None of those earn a second badge here.
     let name = if app.project_display.is_empty() { app.project.as_str() } else { app.project_display.as_str() };
     let left = format!(" {name} / {}", app.title);
     let mut badges: Vec<String> = Vec::new();
@@ -646,12 +646,6 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
     if !app.editable {
         badges.push(ts!("読み取り専用", "read-only").to_string());
-    }
-    // Unread: first visit anywhere, or how many lines changed since.
-    match (app.read_at, app.unread_count()) {
-        (None, _) => badges.push(ts!("初回", "first visit").to_string()),
-        (Some(_), 0) => {}
-        (Some(_), n) => badges.push(t!("未読 {n}", "{n} new")),
     }
     let right = if badges.is_empty() { String::new() } else { format!("{} ", badges.join(" · ")) };
     let head = header_line(&left, &right, area.width);
