@@ -30,8 +30,11 @@ pub(crate) enum Row {
         images: Vec<(u16, u16, String)>,
         texts: Vec<(u16, u16, Line<'static>)>,
     },
-    /// Space reserved for an image still downloading in the background.
-    ImageLoading { src: usize, indent: usize, item: bool },
+    /// An image still downloading in the background: one row showing the
+    /// notation as written, `[URL]`, with the same brightness band a
+    /// rendering diagram wears (see `ui::shimmer_across`). The picture
+    /// replaces it when it lands, as a diagram replaces its code.
+    ImageLoading { src: usize, indent: usize, item: bool, url: String },
     ImageError { msg: String, src: usize, indent: usize, item: bool },
     Card { line: Line<'static> },
     FrameEnd,
@@ -41,7 +44,6 @@ impl Row {
     pub(crate) fn height(&self) -> u16 {
         match self {
             Row::Image { height, .. } | Row::Inline { height, .. } => *height,
-            Row::ImageLoading { .. } => IMAGE_PLACEHOLDER_H,
             _ => 1,
         }
     }

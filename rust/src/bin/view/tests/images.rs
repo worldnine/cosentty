@@ -121,13 +121,14 @@ use super::support::*;
         let mut terminal = Terminal::new(TestBackend::new(42, 8)).unwrap();
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
-        app.scroll = 1;
-        app.follow = false;
-        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         {
+            // Not yet here: the notation itself, one row, dimmed and pulsing.
             let buf = terminal.backend().buffer();
-            assert_eq!(buf.cell((4, 1)).unwrap().symbol(), "□");
-            assert_ne!(buf.cell((1, 1)).unwrap().symbol(), " ", "image telomere at top row");
+            let rows: Vec<String> = (0..8)
+                .map(|y| (0..42).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect())
+                .collect();
+            assert!(rows.iter().any(|r| r.contains("[https://example.com/a.png]")), "rows: {rows:?}");
+            assert_eq!(app.rows.iter().find(|r| matches!(r, Row::ImageLoading { .. })).map(|r| r.height()), Some(1));
         }
 
         // The real sliced image uses a different widget path from its text

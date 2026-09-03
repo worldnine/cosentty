@@ -1068,14 +1068,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     );
                 }
             }
-            Row::ImageLoading { indent, item, .. } => {
+            Row::ImageLoading { indent, item, url, .. } => {
                 if let Some(r) = one_row(screen_y) {
+                    // The line as the author wrote it, provisional and
+                    // working: the band running along it says a picture is
+                    // on its way, the way a diagram's code says so.
                     let pad = bullet_pad(*indent, *item);
-                    f.render_widget(
-                        Paragraph::new(format!("{pad} □ loading image…"))
-                            .style(base.fg(Color::DarkGray)),
-                        r,
-                    );
+                    let text = truncate_width(&format!("{pad}[{url}]"), r.width as usize);
+                    let line = Line::from(Span::styled(text, base.fg(CHROME_DIM)));
+                    f.render_widget(Paragraph::new(shimmer_across(&line, app, ctx)), r);
                 }
             }
             Row::Inline { images, texts, indent, item, .. } => {
@@ -1480,6 +1481,28 @@ pub(crate) fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: 
             )
         })
         .collect();
+    Line::from(spans)
+}
+
+/// `shimmer` turned sideways: the band runs ALONG a single row, character
+/// by character, for the rows that are one line tall (a loading image's
+/// `[URL]`). Same clock, same brightness range, so the two read as one
+/// signal.
+pub(crate) fn shimmer_across(line: &Line<'static>, app: &App, ctx: &Ctx) -> Line<'static> {
+    let elapsed = app.web_anim.elapsed().as_secs_f32();
+    let len = str_width(&line.to_string()) as u16;
+    let mut col: u16 = 0;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for s in &line.spans {
+        for ch in s.content.chars() {
+            let level = cosense::theme::shimmer_level(col, len, elapsed);
+            spans.push(Span::styled(
+                ch.to_string(),
+                cosense::theme::shimmer_style(s.style, ctx.terminal_bg, level),
+            ));
+            col += str_width(&ch.to_string()) as u16;
+        }
+    }
     Line::from(spans)
 }
 
@@ -1986,7 +2009,7 @@ impl App {
                     } else {
                         // still downloading — reserve space so the page is
                         // readable now and the image slots in when it lands
-                        content.push(Row::ImageLoading { src, indent, item: *item });
+                        content.push(Row::ImageLoading { src, indent, item: *item, url: url.clone() });
                     }
                 }
             }

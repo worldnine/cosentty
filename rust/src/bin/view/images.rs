@@ -26,8 +26,10 @@ pub(crate) fn diagram_max_cols(text_w: u16) -> u16 {
     text_w.min(IMAGE_MAX_COLS).max(1)
 }
 
-/// Rows reserved for an image that is still downloading. The real height
-/// replaces it (and the layout is rebuilt) once the image arrives.
+/// Rows a not-yet-decoded picture takes in a MIXED line (`inline_row`),
+/// so the text beside it does not jump when it lands. A picture on a line
+/// of its own reserves nothing: it shows as its `[URL]` row until it
+/// arrives (`Row::ImageLoading`).
 pub(crate) const IMAGE_PLACEHOLDER_H: u16 = 8;
 
 /// The tallest a picture may be drawn, in rows. Beyond this the reader is

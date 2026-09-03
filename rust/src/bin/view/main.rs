@@ -609,7 +609,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // Idle: one wake-up per 120ms is enough to slot in arriving images.
         // While a diagram renders, the shimmer wants smoother frames — but
         // only then, so an idle viewer still costs ~8 wake-ups a second.
-        let tick = if app.web_shimmer.is_empty() { 120 } else { 60 };
+        // The same goes for a picture on its way: its `[URL]` row pulses.
+        let tick = if app.web_shimmer.is_empty() && app.pending.is_empty() { 120 } else { 60 };
         if !event::poll(Duration::from_millis(tick))? {
             continue;
         }
