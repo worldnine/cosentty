@@ -429,6 +429,11 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
     Enter で入力欄がカードに「なる」。`keep_composer_visible` が画面外に出るのを防ぐ。
     テスト: `the_composer_opens_under_the_commented_range_and_replaces_the_card_it_edits`、
     `the_composer_body_wraps_and_reports_where_the_caret_landed`
+  - **左端の帯**(同日): コメントの付いた行は左フレーム列に黄の `▌`、入力中の範囲は
+    シアンの `▌`。キャレット `>` より後に描くので重なれば帯が勝つ(ユーザー指示
+    「キャレットとかぶっていい」)。`commented_lines_wear_a_yellow_bar_in_the_frame_column`
+  - IME は既存の `ImeGuard`(`c` で日本語 → Enter/Esc で英数)のまま。ヘルパは
+    `~/.cache/akapen/ime-<hash>` を共用(同じ ime.swift なのでハッシュが一致)
   - **cosense skill との相性**(ユーザー指示。skill は
     `~/.claude/plugins/cache/cosense-cli/cosense-cli/<ver>/skills/cosense/`):
     skill は「URL は `https://` から次の空白まで」「URL の `#<lineId>` が編集

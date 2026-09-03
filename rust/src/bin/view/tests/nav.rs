@@ -18,7 +18,7 @@ use super::support::*;
         // colour only, which made the one gutter column mean two different
         // things depending on where you were looking.
         let mark = |updated: i64, unread: bool| {
-            gutter_cell(false, Some((related_age(updated), unread)), false)
+            gutter_cell(Some((related_age(updated), unread)), false)
         };
         let now = now_secs();
         assert_eq!(mark(now - 60, true).0, "█", "edited a minute ago: thick");

@@ -841,3 +841,55 @@ use super::support::*;
         let frame_fg = buf.cell((0, 3)).unwrap().style().fg;
         assert_eq!(frame_fg, Some(purple), "so does the page frame");
     }
+
+    /// コメントの付いた行は左フレーム列に黄色い太い帯(`▌`、akapen の印)。
+    /// カーソルの `>` と重なるときは帯が勝つ(キャレットは1行、帯は
+    /// コメントが覆う行ぜんぶを言う)。入力中はその範囲がシアンの帯になる。
+    #[test]
+    fn commented_lines_wear_a_yellow_bar_in_the_frame_column() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two", "three"]);
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let row_y = |app: &App, src: usize| -> u16 {
+            let (first, _) = app.src_rows(src).unwrap();
+            app.text_rect.y + first as u16 - app.scroll
+        };
+
+        // 入力中: 範囲 1-2 がシアンの帯、3 は素のまま(帯なし)。
+        app.cursor = 2;
+        app.selection = Some(Selection { anchor: 1, cursor: 2 });
+        app.composing = Some(Input::new(String::new()));
+        app.laid_width = 0;
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = term.backend().buffer();
+            for src in [1, 2] {
+                let c = buf.cell((0, row_y(&app, src))).unwrap();
+                assert_eq!(c.symbol(), COMMENT_BAR, "src {src}");
+                assert_eq!(c.fg, CHROME_ACCENT, "src {src}: composing is cyan");
+            }
+            assert_ne!(buf.cell((0, row_y(&app, 3))).unwrap().symbol(), COMMENT_BAR);
+        }
+
+        // 保存後: 同じ2行が黄色い帯。カーソル行(2)でも `>` ではなく帯。
+        let c = app.make_comment("fix".into()).unwrap();
+        app.comments.push(c);
+        app.composing = None;
+        app.selection = None;
+        app.laid_width = 0;
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        {
+            let buf = term.backend().buffer();
+            for src in [1, 2] {
+                let c = buf.cell((0, row_y(&app, src))).unwrap();
+                assert_eq!(c.symbol(), COMMENT_BAR, "src {src}");
+                assert_eq!(c.fg, Color::Yellow, "src {src}: a saved comment is yellow");
+            }
+            assert_eq!(buf.cell((0, row_y(&app, 2))).unwrap().bg, CURSOR_BG, "the cursor band still shows under the bar");
+            // コメントの無いカーソル行なら `>` のまま。
+            app.cursor = 3;
+        }
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        assert_eq!(term.backend().buffer().cell((0, row_y(&app, 3))).unwrap().symbol(), ">");
+    }

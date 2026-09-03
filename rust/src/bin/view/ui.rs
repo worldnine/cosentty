@@ -935,6 +935,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
     let mut carets: Vec<(u16, Style)> = Vec::new();
+    // Rows that carry a comment (yellow) or are being commented on right
+    // now (the composer's cyan): a thick bar in the frame's left column,
+    // akapen's `▌` marker. Painted last, so it wins over the `>` caret —
+    // the caret is one row, the bar says which lines the comment covers.
+    let mut comment_bars: Vec<(u16, Style)> = Vec::new();
+    let composing_range = app
+        .composing
+        .as_ref()
+        .map(|_| app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor)));
     // Rows inside a `code:` block. Painted LAST, as a background-only pass:
     // the band has to run to the frame, and the telomere, the thumb and the
     // padding columns are all drawn after the rows.
@@ -978,6 +987,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .and_then(|s| sess_sel.map(|((a, _), (b, _))| a <= s && s <= b))
             .unwrap_or(false);
         let has_comment = row.src().map(|s| app.src_has_comment(s)).unwrap_or(false);
+        let in_composing = row
+            .src()
+            .and_then(|s| composing_range.map(|(a, b)| a <= s && s <= b))
+            .unwrap_or(false);
         // Telomere: age + read state of this row's source line (None for
         // synthesized rows). A row BELOW the body is a related page, and it
         // answers the same two questions about itself — how recently it
@@ -1043,7 +1056,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 let sy = screen_y + k;
                 let y = text.y as i32 + sy;
                 if y >= band_top && y <= band_bot {
-                    let (glyph, mut style) = gutter_cell(has_comment, age, ctx.light);
+                    let (glyph, mut style) = gutter_cell(age, ctx.light);
                     // EDIT の帯は本文領域だけ(上のコメント参照)なので、
                     // テロメアには帯の色を継がせない。
                     if let Some(bg) = base.bg {
@@ -1062,6 +1075,14 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                             caret_style = caret_style.bg(bg);
                         }
                         carets.push((y as u16, caret_style));
+                    }
+                    if in_composing || has_comment {
+                        let color = if in_composing { CHROME_ACCENT } else { Color::Yellow };
+                        let mut bar = Style::default().fg(color).add_modifier(Modifier::BOLD);
+                        if let Some(bg) = base.bg {
+                            bar = bar.bg(bg);
+                        }
+                        comment_bars.push((y as u16, bar));
                     }
                 }
             }
@@ -1270,6 +1291,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     for (sy, style) in carets {
         if let Some(c) = buf.cell_mut((caret_x, sy)) {
             c.set_symbol(">");
+            c.set_style(style);
+        }
+    }
+    for (sy, style) in comment_bars {
+        if let Some(c) = buf.cell_mut((caret_x, sy)) {
+            c.set_symbol(COMMENT_BAR);
             c.set_style(style);
         }
     }
@@ -1788,11 +1815,12 @@ pub(crate) fn draw_menu_panel(
 /// before the telomere/comment balance is settled would bake in a wrong
 /// convention. `has_comment` is kept so the caller can still tint the row
 /// without touching the marker column.
-pub(crate) fn gutter_cell(
-    _has_comment: bool,
-    age: Option<(i64, bool)>,
-    light: bool,
-) -> (&'static str, Style) {
+/// The thick bar in the frame's left column on commented lines (yellow)
+/// and on the lines being commented on (cyan, while the composer is open).
+/// akapen's marker, same glyph.
+pub(crate) const COMMENT_BAR: &str = "▌";
+
+pub(crate) fn gutter_cell(age: Option<(i64, bool)>, light: bool) -> (&'static str, Style) {
     match age {
         Some((a, unread)) => {
             let (glyph, color) = cosense::theme::telomere(a, unread, light);
