@@ -790,6 +790,7 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
 mod tests;
 mod images;
 use images::*;
+mod mmd_text;
 mod links;
 use links::*;
 mod upload;

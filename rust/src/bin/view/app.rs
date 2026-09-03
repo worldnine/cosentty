@@ -375,6 +375,8 @@ pub(crate) struct App {
     pub(crate) caps: capability::Capabilities,
     /// When diagrams may be drawn (`COSENSE_WEB_RENDER`).
     pub(crate) render_policy: capability::RenderPolicy,
+    /// lib 検証 spike 用のテキスト段旗。手書き分支と同名・同意味。
+    pub(crate) mermaid_text: bool,
     /// Visibility answers from the background probe (project, verdict).
     pub(crate) vis_rx: mpsc::Receiver<(String, capability::Visibility)>,
     pub(crate) vis_tx: mpsc::Sender<(String, capability::Visibility)>,
@@ -668,6 +670,7 @@ impl App {
             poll_ctrl_rx: Some(poll_ctrl_rx),
             caps: capability::Capabilities::default(),
             render_policy: capability::RenderPolicy::from_env(),
+            mermaid_text: !mmd_text::text_tier_off(),
             vis_rx,
             vis_tx,
             vis_asked: None,

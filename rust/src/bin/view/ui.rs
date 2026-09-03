@@ -2224,6 +2224,25 @@ impl App {
                     let editing_here = edit
                         .map(|(eline, _)| rows.iter().any(|(rsrc, _)| *rsrc == eline))
                         .unwrap_or(false);
+                    // lib 検証 spike のテキスト段。編集中は素のソース契約が勝つ。
+                    if !editing_here && self.mermaid_text {
+                        if let Some(lines) = mmd_text::render_text(code, text_w) {
+                            for line in lines {
+                                let line = Line::from(line);
+                                for w in
+                                    wrap_line_parts(&line, text_w, &hanging_prefix(&line))
+                                {
+                                    content.push(Row::Line {
+                                        line: w.line,
+                                        src: *last_src,
+                                        start: w.start,
+                                        hang: w.hang,
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     let art = if editing_here {
                         None
                     } else {

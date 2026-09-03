@@ -48,6 +48,8 @@ use super::support::*;
         // Without a picture the block is ordinary code rows; every line of
         // it owns rows and nothing should be remapped.
         let mut app = mermaid_page();
+        // lib spike: web経路の検証なのでテキスト段を止める。
+        app.mermaid_text = false;
         for start in [1usize, 2, 3] {
             app.cursor = start;
             app.rebuild(80);
@@ -254,6 +256,8 @@ use super::support::*;
     #[test]
     fn a_renderer_failure_leaves_the_code_block_on_screen() {
         let mut app = mermaid_page();
+        // lib spike: web経路の検証なのでテキスト段を止める。
+        app.mermaid_text = false;
         app.rebuild(80);
         let key = app
             .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
@@ -289,6 +293,8 @@ use super::support::*;
     #[test]
     fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
         let mut app = mermaid_page();
+        // lib spike: web経路の検証なのでテキスト段を止める。
+        app.mermaid_text = false;
         app.rebuild(80);
         app.start_web_renders(capability::Trigger::Auto);
         let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());

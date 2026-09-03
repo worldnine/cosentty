@@ -417,6 +417,8 @@ use super::support::*;
     #[test]
     fn a_refused_private_render_falls_back_to_source_without_disabling_edits() {
         let mut app = mermaid_page();
+        // lib spike: web経路の検証なのでテキスト段を止める。
+        app.mermaid_text = false;
         app.editable = true;
         app.caps = capability::Capabilities {
             sid: true,
