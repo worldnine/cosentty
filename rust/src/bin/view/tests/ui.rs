@@ -772,6 +772,8 @@ use super::support::*;
         app.comments.push(Comment {
             project: "slug-1234".into(),
             title: "title".into(),
+            page_id: "pid".into(),
+            revision: None,
             start: 1,
             end: 1,
             line_texts: vec!["one".into()],

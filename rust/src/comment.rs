@@ -30,11 +30,29 @@ impl Selection {
     }
 }
 
+/// The page revision a comment was written on, when it was not NOW: a
+/// Page History snapshot. A comment is shown only on the revision it was
+/// written on (akapen's model — the lines it quotes are THAT version's),
+/// and the export names the snapshot so an agent can read exactly what
+/// the reviewer saw (`cosense readPageSnapshot`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Revision {
+    /// The snapshot's id (`listPageSnapshots` → `timestamps[].id`).
+    pub snapshot_id: String,
+    /// The snapshot's time, epoch seconds.
+    pub created: i64,
+}
+
 /// A comment anchored to a run of a page's lines.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Comment {
     pub project: String,
     pub title: String,
+    /// The page's immutable id (`readPage` → `id`), which the snapshot
+    /// command needs. Empty for a page that does not exist yet.
+    pub page_id: String,
+    /// `None` = written on NOW (the live page).
+    pub revision: Option<Revision>,
     /// 0-based first/last line index into the page's line list.
     pub start: usize,
     pub end: usize,
@@ -72,6 +90,18 @@ impl Comment {
     pub fn covers(&self, line: usize) -> bool {
         self.start <= line && line <= self.end
     }
+
+    /// The snapshot this comment belongs to, `None` for NOW. What the
+    /// viewer compares against the revision it is showing.
+    pub fn snapshot_id(&self) -> Option<&str> {
+        self.revision.as_ref().map(|r| r.snapshot_id.as_str())
+    }
+
+    /// The revision's time as shown on cards and in the list, `None` for
+    /// NOW.
+    pub fn revision_label(&self) -> Option<String> {
+        self.revision.as_ref().map(|r| crate::theme::format_local(r.created))
+    }
 }
 
 /// Format one comment the way a reply reads in chat (akapen's reply
@@ -95,7 +125,13 @@ impl Comment {
 ///   prints on changed lines, which is what an `insertBefore` / `replace`
 ///   / `delete` op takes as its anchor;
 /// - the quote is the EXACT text, so a human reads what was meant and the
-///   agent can check it against `readPage`.
+///   agent can check it against `readPage`;
+/// - a comment written on a past revision adds a `Snapshot:` line naming
+///   the snapshot and the command that reads it
+///   (`cosense readPageSnapshot <projectUrl> <pageId> <snapshotId>`), so
+///   "put this back the way it was in this version" is one command away
+///   from the text the reviewer saw. Snapshot lines carry the same ids as
+///   NOW, so the `# <lineId>` anchors still address the live page.
 /// No `Lines:` / `Instruction:` labels: a quote followed by a remark is
 /// how people already write this. The blank line is load-bearing —
 /// CommonMark's lazy continuation would otherwise pull the comment into
@@ -110,7 +146,17 @@ pub fn format_comment(c: &Comment) -> String {
 /// distinct points. The number sits before the `> ` marker, so quoted
 /// content that itself starts with `1. ` cannot collide with it.
 fn format_comment_numbered(c: &Comment, number: Option<usize>) -> String {
-    let location = format!("{} L{}", c.edit_url(), c.range_label());
+    let mut location = format!("{} L{}", c.edit_url(), c.range_label());
+    if let Some(r) = &c.revision {
+        location.push_str(&format!(
+            "\nSnapshot: {} ({}) — cosense readPageSnapshot https://scrapbox.io/{} {} {}",
+            r.snapshot_id,
+            crate::theme::format_local(r.created),
+            c.project,
+            c.page_id,
+            r.snapshot_id
+        ));
+    }
     let mut quote: Vec<String> = c
         .line_texts
         .iter()
@@ -127,7 +173,7 @@ fn format_comment_numbered(c: &Comment, number: Option<usize>) -> String {
     match number {
         None => format!("{location}\n{}\n\n{text}", quote.join("\n")),
         Some(n) => {
-            let mut out = format!("{n}. {location}");
+            let mut out = format!("{n}. {}", location.replace('\n', "\n   "));
             for q in &quote {
                 out.push_str("\n   ");
                 out.push_str(q);
@@ -196,6 +242,8 @@ mod tests {
         Comment {
             project: "acme".into(),
             title: "Team Tips".into(),
+            page_id: "5803c53900000000000000a1".into(),
+            revision: None,
             start,
             end,
             line_texts: texts.iter().map(|s| s.to_string()).collect(),
@@ -284,6 +332,23 @@ mod tests {
              \n\
              \x20   two"
         );
+    }
+
+    /// 過去版に書いたコメントは、場所の次に Snapshot 行を持つ: skill が
+    /// その版を読むコマンドを丸ごと(projectUrl · pageId · snapshotId)。
+    #[test]
+    fn a_comment_on_a_past_revision_names_the_snapshot_and_how_to_read_it() {
+        let mut c = comment(0, 0, &["古い行"], &["i1"], "この版に戻して");
+        c.revision = Some(Revision { snapshot_id: "6a98c8230000000000fed958".into(), created: 0 });
+        let out = format_comment(&c);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("https://scrapbox.io/acme/Team_Tips#i1 L1"), "{out}");
+        assert!(lines[1].starts_with("Snapshot: 6a98c8230000000000fed958 ("), "{out}");
+        assert!(lines[1].ends_with(") — cosense readPageSnapshot https://scrapbox.io/acme 5803c53900000000000000a1 6a98c8230000000000fed958"), "{out}");
+        assert_eq!(lines[2], "> 古い行  # i1");
+        // 番号付きでは Snapshot 行も項目の中にインデントされる。
+        let all = format_all(&[c.clone(), comment(3, 3, &["x"], &["i9"], "n")]);
+        assert!(all.contains("\n   Snapshot: 6a98c823"), "{all}");
     }
 
     #[test]

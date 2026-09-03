@@ -602,6 +602,33 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
     }
 }
 
+/// Open the time machine at snapshot `id` (a comment's revision). The
+/// timeline comes from the page's own list when known, else the server;
+/// a snapshot no longer listed leaves the page as it is and says so.
+pub(crate) fn show_revision(app: &mut App, ctx: &Ctx, id: &str) {
+    if app.time.as_ref().is_some_and(|tm| tm.points.get(tm.pos).is_some_and(|p| p.id == id)) {
+        return; // already showing it
+    }
+    let points = match app.time.as_ref().map(|tm| tm.points.clone()).or_else(|| app.snapshots.clone()) {
+        Some(p) => p,
+        None => match ctx.client.list_snapshots(&app.project, &app.page_id) {
+            Ok(p) => p,
+            Err(e) => {
+                app.toast_err(t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}"));
+                return;
+            }
+        },
+    };
+    let Some(idx) = points.iter().position(|p| p.id == id) else {
+        app.toast_err(t!("その版は履歴に見つかりません", "that revision is not in the page's history"));
+        return;
+    };
+    if app.time.is_none() {
+        app.time = Some(TimeMachine { points, pos: idx, cache: HashMap::new() });
+    }
+    show_snapshot(app, ctx, idx);
+}
+
 /// Install snapshot `idx` of the time machine: swap the page body for the
 /// historical lines (rendered normally — the UI always consumes complete
 /// documents, akapen's history model), drop the related list (it describes

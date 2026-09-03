@@ -434,6 +434,18 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
     「キャレットとかぶっていい」)。`commented_lines_wear_a_yellow_bar_in_the_frame_column`
   - IME は既存の `ImeGuard`(`c` で日本語 → Enter/Esc で英数)のまま。ヘルパは
     `~/.cache/akapen/ime-<hash>` を共用(同じ ime.swift なのでハッシュが一致)
+  - **履歴へのコメント**(同日。「現在のコメントが過去にも出るのは論理的か」→
+    行番号だけの結び付けで過去版の無関係な行に出ていた。ユーザー案「履歴にも別に
+    コメントを付ける」を採用): `Comment` に `page_id` と `revision: Option<Revision
+    { snapshot_id, created }>` を足し、`App::comment_is_shown` で「このページ・この版」
+    のものだけ織る/帯を出す/再編集の対象にする。履歴中の `c` を解禁(書いた版に固定)。
+    一覧の Enter は `show_revision` でその版へ入ってから行へ(NOW のコメントなら
+    `reload_page` で NOW へ)。書き出しには `Snapshot: <id> (<時刻>) — cosense
+    readPageSnapshot <projectUrl> <pageId> <snapshotId>` を足す(skill が1コマンドで
+    その版を読める。snapshot の行 ID は NOW と同じなので anchor もそのまま)。
+    テスト: `a_comment_lives_on_the_revision_it_was_written_on`、
+    `the_list_travels_to_the_comments_revision_before_landing`、
+    `a_comment_on_a_past_revision_names_the_snapshot_and_how_to_read_it`
   - **cosense skill との相性**(ユーザー指示。skill は
     `~/.claude/plugins/cache/cosense-cli/cosense-cli/<ver>/skills/cosense/`):
     skill は「URL は `https://` から次の空白まで」「URL の `#<lineId>` が編集

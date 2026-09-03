@@ -510,10 +510,9 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             app.toast(t!("選択は Shift+↑↓ か J/K で（v は廃止）", "select with Shift+↑↓ or J/K (v is gone)"));
         }
         (KeyCode::Char('c'), false) => {
-            if app.time.is_some() {
-                app.toast_err(t!("履歴を表示中 — コメントは最新でのみ書けます（Esc で戻る）", "viewing history — comments need NOW (Esc)"));
-                return Action::Continue;
-            }
+            // In history too: the comment is pinned to the snapshot on
+            // screen ("this version had it right — put it back"), shown
+            // only there, and exported with the command that reads it.
             // The same range again means "edit that comment": the
             // composer opens on its text and Enter replaces it.
             let existing = app.comment_for_range().map(|i| app.comments[i].text.clone());
@@ -739,10 +738,29 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
                     .map(|c| (c.project.clone(), c.title.clone(), Some(c.start))),
                 _ => None,
             };
+            let revision = match &app.overlay {
+                Some(Overlay::Comments { cursor }) => {
+                    app.comments.get(*cursor).and_then(|c| c.snapshot_id().map(str::to_string))
+                }
+                _ => None,
+            };
             app.overlay = None;
             if let Some((project, title, line)) = target {
                 if project != app.project || title != app.title {
                     navigate_to(app, ctx, &project, &title);
+                }
+                // A comment lives on one revision: go there before landing
+                // on its line (akapen: the timeline rewinds to the draft
+                // the comment was written on; a NOW comment brings you
+                // back to NOW).
+                match revision {
+                    Some(id) => show_revision(app, ctx, &id),
+                    None if app.time.is_some() => {
+                        if reload_page(app, ctx) {
+                            app.status.clear();
+                        }
+                    }
+                    None => {}
                 }
                 if create {
                     // Land in EDIT on a fresh body line. Nothing is sent

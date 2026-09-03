@@ -703,6 +703,24 @@ impl App {
         }
     }
 
+    /// The snapshot on screen, `None` at NOW. A comment written now is
+    /// pinned to this.
+    pub(crate) fn shown_revision(&self) -> Option<cosense::comment::Revision> {
+        let tm = self.time.as_ref()?;
+        let p = tm.points.get(tm.pos)?;
+        Some(cosense::comment::Revision { snapshot_id: p.id.clone(), created: p.created })
+    }
+
+    /// Whether a comment belongs on the screen: this page, and the
+    /// revision being shown (a NOW comment is not shown on a snapshot,
+    /// nor a snapshot's comment on NOW — its line numbers and quoted
+    /// text are that version's, and would point at the wrong lines).
+    pub(crate) fn comment_is_shown(&self, c: &Comment) -> bool {
+        c.project == self.project
+            && c.title == self.title
+            && c.snapshot_id() == self.time.as_ref().and_then(|tm| tm.points.get(tm.pos)).map(|p| p.id.as_str())
+    }
+
     /// The comment whose range is exactly the current selection (or the
     /// cursor line when nothing is selected): `c` on it edits instead of
     /// stacking a second one.
@@ -711,16 +729,14 @@ impl App {
             Some(sel) => sel.range(),
             None => (self.cursor, self.cursor),
         };
-        self.comments.iter().position(|c| {
-            c.project == self.project && c.title == self.title && c.start == a && c.end == b
-        })
+        self.comments.iter().position(|c| self.comment_is_shown(c) && c.start == a && c.end == b)
     }
 
     /// True if a source line is covered by any saved comment.
     pub(crate) fn src_has_comment(&self, src: usize) -> bool {
         self.comments
             .iter()
-            .any(|c| c.project == self.project && c.title == self.title && c.covers(src))
+            .any(|c| self.comment_is_shown(c) && c.covers(src))
     }
 
     /// The page as the screen sees it: the committed lines, except the
@@ -1027,6 +1043,8 @@ impl App {
         Some(Comment {
             project: self.project.clone(),
             title: self.title.clone(),
+            page_id: self.page_id.clone(),
+            revision: self.shown_revision(),
             start: a,
             end: b,
             line_texts,

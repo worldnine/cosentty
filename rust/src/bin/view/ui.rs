@@ -129,7 +129,12 @@ pub(crate) fn related_row(
 pub(crate) fn card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
     let rule = Style::default().fg(CHROME_DIM);
     let title = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let label = t!(" comment · {} ", " comment · {} ", c.range_label());
+    // A comment on a past revision says which one on its title, so a
+    // reader stepping through history knows the card is about THIS version.
+    let label = match c.revision_label() {
+        Some(at) => format!(" comment · {} · {at} ", c.range_label()),
+        None => format!(" comment · {} ", c.range_label()),
+    };
     bar_lines(&label, title, rule, c.text.lines().flat_map(|l| wrap_plain(l, width)).collect(), width)
 }
 
@@ -154,7 +159,13 @@ fn bar_lines(
 /// an existing comment), the input wrapped to the column, and the
 /// insertion point's cell recorded so the hardware cursor — and with it
 /// the IME's composition window — sits in the bar.
-pub(crate) fn composer_rows(input: &Input, range: (usize, usize), editing: bool, width: usize) -> Vec<Row> {
+pub(crate) fn composer_rows(
+    input: &Input,
+    range: (usize, usize),
+    editing: bool,
+    revision: Option<String>,
+    width: usize,
+) -> Vec<Row> {
     let width = width.max(1);
     let accent = Style::default().fg(CHROME_ACCENT);
     let title = accent.add_modifier(Modifier::BOLD);
@@ -163,7 +174,10 @@ pub(crate) fn composer_rows(input: &Input, range: (usize, usize), editing: bool,
     } else {
         format!("{} {}-{}", if editing { " edit ·" } else { " comment ·" }, range.0 + 1, range.1 + 1)
     };
-    let label = format!("{label} ");
+    let label = match revision {
+        Some(at) => format!("{label} · {at} "),
+        None => format!("{label} "),
+    };
     let (before, _) = input.parts();
     let (body, (crow, ccol)) = wrap_with_caret(&input.buf, before.chars().count(), width);
     let mut rows: Vec<Row> = bar_lines(&label, title, accent, body, width)
@@ -1614,7 +1628,10 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .map(|c| {
                     let first = c.text.lines().next().unwrap_or("");
-                    format!("{} :{}  {}", c.title, c.range_label(), first)
+                    match c.revision_label() {
+                        Some(at) => format!("{} :{} @{at}  {}", c.title, c.range_label(), first),
+                        None => format!("{} :{}  {}", c.title, c.range_label(), first),
+                    }
                 })
                 .collect(),
             *cursor,
@@ -2255,8 +2272,9 @@ impl App {
         //    lies in the comment's range (so the card sits under its block).
         let mut cards_after: HashMap<usize, Vec<usize>> = HashMap::new(); // content idx -> comment idxs
         for (ci, c) in self.comments.iter().enumerate() {
-            // Only weave cards for comments that belong to THIS page.
-            if c.project != self.project || c.title != self.title {
+            // Only weave cards for comments that belong to THIS page, on
+            // the revision being shown.
+            if !self.comment_is_shown(c) {
                 continue;
             }
             let mut anchor: Option<usize> = None;
@@ -2292,7 +2310,8 @@ impl App {
                 .map(|(idx, _)| idx)
                 .last()
                 .unwrap_or(content.len().saturating_sub(1));
-            (anchor, composer_rows(input, range, self.comment_for_range().is_some(), width_cols))
+            let revision = self.shown_revision().map(|r| cosense::theme::format_local(r.created));
+            (anchor, composer_rows(input, range, self.comment_for_range().is_some(), revision, width_cols))
         });
         let hidden_card = if self.composing.is_some() { self.comment_for_range() } else { None };
         for (idx, row) in content.into_iter().enumerate() {
