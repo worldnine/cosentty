@@ -921,7 +921,10 @@ impl App {
         unread_since(l.updated, self.read_at)
     }
 
-    /// Number of unread lines on this page.
+    /// Number of unread lines on this page. Only tests count them now: the
+    /// header stopped showing the number (the telomere's colour says which
+    /// lines are new).
+    #[cfg(test)]
     pub(crate) fn unread_count(&self) -> usize {
         self.lines.iter().filter(|l| self.line_unread(l)).count()
     }

@@ -52,6 +52,8 @@ impl Slots {
         *used += 1;
         Slot(self)
     }
+    /// Tests watch the count; the viewer only ever waits on it.
+    #[cfg(test)]
     pub(crate) fn in_use(&self) -> usize {
         *self.used.lock().unwrap_or_else(|e| e.into_inner())
     }

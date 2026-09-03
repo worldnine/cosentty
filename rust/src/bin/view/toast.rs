@@ -74,7 +74,8 @@ impl App {
         self.note = if msg.is_empty() { None } else { Some((msg, Instant::now() + NOTE_SECS)) };
     }
 
-    /// The note's text, or "".
+    /// The note's text, or "" — for tests; the footer reads the slot itself.
+    #[cfg(test)]
     pub(crate) fn note_text(&self) -> &str {
         self.note.as_ref().map(|(m, _)| m.as_str()).unwrap_or("")
     }
