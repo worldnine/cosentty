@@ -1042,7 +1042,12 @@ use super::support::*;
         ix.can_create = true; // a project this session may write in
         app.index = Some(ix);
 
-        // Closed line: letters are commands, not text.
+        // Closed line: letters are commands, not text. `q` asks first.
+        assert!(matches!(
+            handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
+            Action::Continue
+        ));
+        assert!(app.toast_text().contains("もう一度 q"));
         assert!(matches!(
             handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
             Action::Quit
@@ -1077,6 +1082,11 @@ use super::support::*;
         let ix = app.index.as_ref().unwrap();
         assert!(!ix.filter_editing);
         assert_eq!(ix.filter, "qui");
+        app.quit_armed = None;
+        assert!(matches!(
+            handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
+            Action::Continue
+        ));
         assert!(matches!(
             handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
             Action::Quit

@@ -212,6 +212,9 @@ pub(crate) struct App {
     pub(crate) status: String,
     /// The one-shot notice floating above the footer, if any.
     pub(crate) toast: Option<Toast>,
+    /// When `q` was pressed once; a second press within the window quits
+    /// (toast.rs `confirm_quit`). Any other key disarms it.
+    pub(crate) quit_armed: Option<Instant>,
     /// The quiet level (toast.rs): a footer line and when it stops being
     /// worth showing. Ranks below `status` — it rides behind it — and
     /// above the key hints, which it gives back after a few seconds.
@@ -574,6 +577,7 @@ impl App {
             comments: Vec::new(),
             status: String::new(),
             toast: None,
+            quit_armed: None,
             note: None,
             outline_prefix: false,
             move_mode: None,

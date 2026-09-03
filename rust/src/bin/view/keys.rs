@@ -7,6 +7,7 @@ use super::*;
 /// (see `Index::filter_editing`), so the letters stay available as
 /// commands — which is how `q` quits from here at all.
 pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
+    app.disarm_quit_unless_q(&k);
     let action = index_key(app, ctx, k);
     // The filter line is where Japanese gets typed, so it holds the IME
     // guard: the input source switches on open and returns to ASCII on
@@ -97,8 +98,10 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         return Action::Continue;
     }
     match (k.code, ctrl) {
-        // ---- quit ---- (as on the page: `q` quits, and `^c` with it)
-        (KeyCode::Char('q'), false) => return Action::Quit,
+        // ---- quit ---- (as on the page: `q` asks once, and `^c` just goes)
+        (KeyCode::Char('q'), false) => {
+            return if app.confirm_quit() { Action::Quit } else { Action::Continue };
+        }
         (KeyCode::Char('c'), true) => return Action::Quit,
         (KeyCode::Char('/'), false) => ix.begin_filter(),
         // `s` names the order, as it names the display on the page.
@@ -196,6 +199,7 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
 
 /// One key press.
 pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
+    app.disarm_quit_unless_q(&k);
     if app.index.is_some() {
         return handle_index_key(app, ctx, k);
     }
@@ -314,8 +318,11 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
 
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     match (k.code, ctrl) {
-        // ---- quit ---- (akapen default: q quits, Esc only cancels)
-        (KeyCode::Char('q'), false) => return Action::Quit,
+        // ---- quit ---- (akapen default: q quits, Esc only cancels; here
+        //      the first q asks and the second answers — toast.rs)
+        (KeyCode::Char('q'), false) => {
+            return if app.confirm_quit() { Action::Quit } else { Action::Continue };
+        }
         // `^c` too. In raw mode the terminal hands it over as a key rather
         // than a signal, so without this arm the interrupt habit is a dead
         // key. NOT wired into the edit session or the composer, where the

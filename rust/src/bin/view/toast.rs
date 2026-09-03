@@ -42,6 +42,9 @@ pub(crate) const TOAST_SECS: Duration = Duration::from_secs(4);
 pub(crate) const TOAST_ERR_SECS: Duration = Duration::from_secs(8);
 /// How long a footer note stays.
 pub(crate) const NOTE_SECS: Duration = Duration::from_secs(4);
+/// How long a first `q` waits for the second. Equal to the toast that asks
+/// for it, so the question and its window leave together.
+pub(crate) const QUIT_ARM_SECS: Duration = TOAST_SECS;
 /// The fade at each end.
 const FADE_MS: u32 = 120;
 
@@ -118,6 +121,37 @@ impl App {
     /// Esc, and anything else that means "I have seen it".
     pub(crate) fn dismiss_toast(&mut self) {
         self.toast = None;
+        self.quit_armed = None;
+    }
+
+    /// `q`: the first press asks, the second within [`QUIT_ARM_SECS`]
+    /// answers. Returns true when the program should quit now. A single
+    /// key is easy to hit by accident (typing into READ, thinking it is
+    /// EDIT), and the press-again pattern costs one keystroke and no
+    /// dialog — TUIs (vim's `:q!`, lazygit's confirmOnQuit) settle on a
+    /// question in the message line, never a modal. `^c` skips this.
+    pub(crate) fn confirm_quit(&mut self) -> bool {
+        if self.quit_armed.is_some_and(|at| at.elapsed() <= QUIT_ARM_SECS) {
+            return true;
+        }
+        self.quit_armed = Some(Instant::now());
+        // Say what would be lost, when something would.
+        let stake = if self.inflight > 0 {
+            t!("未送信の編集 {} 件 · ", "{} unsent edit(s) · ", self.inflight)
+        } else {
+            String::new()
+        };
+        self.toast(t!("{stake}もう一度 q で終了 · Esc で戻る", "{stake}q again to quit · Esc to stay"));
+        false
+    }
+
+    /// Any key that is not `q` withdraws a pending quit: `q j q` within
+    /// the window must not leave.
+    pub(crate) fn disarm_quit_unless_q(&mut self, k: &event::KeyEvent) {
+        let is_q = k.code == KeyCode::Char('q') && !k.modifiers.contains(KeyModifiers::CONTROL);
+        if !is_q {
+            self.quit_armed = None;
+        }
     }
 
     /// Drop a toast whose time is up. Returns true when one left, so the

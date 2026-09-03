@@ -194,3 +194,34 @@ use super::support::*;
         app.toast.as_mut().unwrap().shown = Some(Instant::now() - TOAST_ERR_SECS - Duration::from_secs(1));
         assert!(app.expire_toast());
     }
+
+    /// `q` は一度目が問いで二度目が答え。他のキーや Esc、時間切れで取り下げる。
+    /// `^c` は問わずに出る。失うものがあれば問いに添える。
+    #[test]
+    fn q_asks_once_and_quits_on_the_second_press() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        assert!(matches!(handle_key(&mut app, &ctx, key(KeyCode::Char('q'))), Action::Continue));
+        assert!(app.toast_text().contains("もう一度 q で終了"), "{}", app.toast_text());
+        assert!(matches!(handle_key(&mut app, &ctx, key(KeyCode::Char('q'))), Action::Quit));
+
+        // 間に別のキーが入れば取り下げ。
+        let mut app = page(&["title", "one"]);
+        handle_key(&mut app, &ctx, key(KeyCode::Char('q')));
+        handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+        assert!(matches!(handle_key(&mut app, &ctx, key(KeyCode::Char('q'))), Action::Continue), "q j q must not leave");
+        // Esc も取り下げ(トーストも消える)。
+        handle_key(&mut app, &ctx, key(KeyCode::Esc));
+        assert!(app.quit_armed.is_none() && app.toast_text().is_empty());
+        // 時間切れ。
+        handle_key(&mut app, &ctx, key(KeyCode::Char('q')));
+        app.quit_armed = Some(Instant::now() - QUIT_ARM_SECS - Duration::from_secs(1));
+        assert!(matches!(handle_key(&mut app, &ctx, key(KeyCode::Char('q'))), Action::Continue), "asks again after the window");
+
+        // 失うものは問いに添える。^c は問わない。
+        let mut app = page(&["title", "one"]);
+        app.inflight = 2;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('q')));
+        assert!(app.toast_text().contains("未送信の編集 2 件"), "{}", app.toast_text());
+        assert!(matches!(handle_key(&mut app, &ctx, ctrl('c')), Action::Quit));
+    }
