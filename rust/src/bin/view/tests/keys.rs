@@ -477,3 +477,45 @@ use super::support::*;
         assert_eq!(app.comments.len(), 1, "replaced, not stacked");
         assert_eq!(app.comments[0].text, "typo!");
     }
+
+    /// コメントは複数行にできる: ^j が改行、↑/↓ が行の間を桁を保って動き、
+    /// ^a/^e はその行の頭と末尾。Enter で保存するとカードは行ごとに出る。
+    #[test]
+    fn the_composer_takes_line_breaks_with_ctrl_j() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.rebuild(40);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('c')));
+        for ch in "ab".chars() {
+            handle_key(&mut app, &ctx, key(KeyCode::Char(ch)));
+        }
+        handle_key(&mut app, &ctx, ctrl('j'));
+        for ch in "cde".chars() {
+            handle_key(&mut app, &ctx, key(KeyCode::Char(ch)));
+        }
+        assert_eq!(app.composing.as_ref().unwrap().buf, "ab\ncde");
+        // ↑ は前の行の同じ桁(3桁目は無いので行末)、↓ で戻る。
+        handle_key(&mut app, &ctx, key(KeyCode::Up));
+        assert_eq!(app.composing.as_ref().unwrap().cur, 2);
+        handle_key(&mut app, &ctx, key(KeyCode::Down));
+        assert_eq!(app.composing.as_ref().unwrap().cur, 5, "same column (2) on the next line");
+        handle_key(&mut app, &ctx, ctrl('a'));
+        assert_eq!(app.composing.as_ref().unwrap().cur, 3, "^a: this line's start, not the draft's");
+        handle_key(&mut app, &ctx, ctrl('e'));
+        assert_eq!(app.composing.as_ref().unwrap().cur, 6);
+        // 描くと本文は2行。
+        app.rebuild(40);
+        let body: Vec<String> = app
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Composer { line, .. } => Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(body[1..3], ["ab".to_string(), "cde".to_string()]);
+        handle_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.comments[0].text, "ab\ncde");
+        assert!(app.status.is_empty() || !app.status.contains("^j"), "the composer hint is gone");
+    }

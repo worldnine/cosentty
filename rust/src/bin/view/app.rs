@@ -983,6 +983,18 @@ impl App {
         if top < self.scroll {
             self.scroll = top;
         }
+        // Taller than the pane even so (a very small window): the caret's
+        // row is the one that must be seen.
+        if bottom - top > body_h {
+            if let Some(ci) = self.rows.iter().position(|r| matches!(r, Row::Composer { caret: Some(_), .. })) {
+                let cy = self.row_top(ci);
+                if cy < self.scroll {
+                    self.scroll = cy;
+                } else if cy + 1 > self.scroll + body_h {
+                    self.scroll = cy + 1 - body_h;
+                }
+            }
+        }
         self.scroll = self.scroll.min(self.max_scroll(body_h).max(bottom.saturating_sub(body_h)));
     }
 

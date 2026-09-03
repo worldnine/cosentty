@@ -214,12 +214,23 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             (KeyCode::Esc, _) => {
                 app.composing = None;
                 app.ime_guard = None; // back to ASCII for command mode
+                app.status.clear(); // the composer's key hint goes with it
             }
             (KeyCode::Enter, _) => {
                 let input = app.composing.take().unwrap();
                 app.ime_guard = None; // back to ASCII for command mode
                 finish_composer(app, input);
             }
+            // ^j puts a line break in the comment (Enter is taken by
+            // "save"; akapen uses the same key). ↑/↓ move between the
+            // lines of the draft, keeping the column.
+            (KeyCode::Char('j'), true) => {
+                if let Some(c) = app.composing.as_mut() {
+                    c.insert_char('\n');
+                }
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => in_input(app, Input::up),
+            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => in_input(app, Input::down),
             (KeyCode::Backspace, _) => in_input(app, Input::backspace),
             (KeyCode::Delete, _) | (KeyCode::Char('d'), true) => in_input(app, Input::delete),
             (KeyCode::Left, _) | (KeyCode::Char('b'), true) => in_input(app, Input::left),
@@ -521,9 +532,9 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             app.laid_width = 0; // the bar opens under the range
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
             app.status = if editing {
-                t!("コメントを編集 · Enter 置き換え · Esc 取消", "edit comment · Enter replace · Esc cancel")
+                t!("コメントを編集 · Enter 置き換え · ^j 改行 · Esc 取消", "edit comment · Enter replace · ^j newline · Esc cancel")
             } else {
-                t!("コメントを入力 · Enter 保存 · Esc 取消", "type comment · Enter save · Esc cancel")
+                t!("コメントを入力 · Enter 保存 · ^j 改行 · Esc 取消", "type comment · Enter save · ^j newline · Esc cancel")
             };
         }
         (KeyCode::Char('s'), false) => send_comments(app, ctx),

@@ -432,6 +432,16 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
   - **フラット化**(同日、「akapen 準拠だがこのアプリのテイストに合わない」):
     罫線をやめ、黒背景(`CARD_BG`)の帯に、メニューのタイトルと同じ黒文字・色背景の
     バッジ(入力欄はシアン、カードは黄)。形(バッジ行・本文・帯1行)は共通のまま
+  - **複数行と高さ**(同日、「改行ができない。高くなりすぎた際の処理も」): `^j` で
+    改行(akapen と同じ)、`↑`/`↓` で行間を桁を保って移動、`^a`/`^e` は行単位。
+    `wrap_with_caret` は `\n` で行を切る。下書きが `view_h - 3` 行を超えたら
+    キャレットの周りだけを窓で見せ、畳んだ行数をバッジ行の右端と帯行に書く
+    (`composer_rows(.., max_body)`)。窓でも収まらない極小の高さでは
+    `keep_composer_visible` がキャレット行を優先する。帯は本文より1桁左から
+    (ユーザー指示「タイトルと入力開始位置を1文字左へ」。`bar_row`)。
+    入力欄を閉じたら status のキー案内も消す(残っていた)。テスト:
+    `the_composer_takes_line_breaks_with_ctrl_j`、`a_tall_draft_shows_a_window_around_the_caret`、
+    `the_composer_wraps_around_line_breaks_too`
   - **左端の帯**(同日): コメントの付いた行は左フレーム列に黄の `▌`、入力中の範囲は
     シアンの `▌`。キャレット `>` より後に描くので重なれば帯が勝つ(ユーザー指示
     「キャレットとかぶっていい」)。`commented_lines_wear_a_yellow_bar_in_the_frame_column`

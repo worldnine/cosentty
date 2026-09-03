@@ -34,11 +34,47 @@ impl Input {
             self.cur += ch.len_utf8();
         }
     }
-    pub(crate) fn home(&mut self) {
-        self.cur = 0;
+    /// Start of the caret's logical line (just after the previous `\n`).
+    pub(crate) fn line_start(&self) -> usize {
+        self.buf[..self.cur].rfind('\n').map_or(0, |i| i + 1)
     }
+    /// End of the caret's logical line (just before the next `\n`).
+    pub(crate) fn line_end(&self) -> usize {
+        self.buf[self.cur..].find('\n').map_or(self.buf.len(), |i| self.cur + i)
+    }
+    /// ^a / Home: to the start of the caret's line (a comment may span
+    /// lines — see `up` / `down`).
+    pub(crate) fn home(&mut self) {
+        self.cur = self.line_start();
+    }
+    /// ^e / End: to the end of the caret's line.
     pub(crate) fn end(&mut self) {
-        self.cur = self.buf.len();
+        self.cur = self.line_end();
+    }
+    /// ↑: the same character column on the previous logical line
+    /// (clamped to its length); nothing on the first line.
+    pub(crate) fn up(&mut self) {
+        let start = self.line_start();
+        if start == 0 {
+            return;
+        }
+        let col = self.buf[start..self.cur].chars().count();
+        let prev_start = self.buf[..start - 1].rfind('\n').map_or(0, |i| i + 1);
+        self.cur = Self::col_to_byte(&self.buf, prev_start, start - 1, col);
+    }
+    /// ↓: the same character column on the next logical line.
+    pub(crate) fn down(&mut self) {
+        let end = self.line_end();
+        if end >= self.buf.len() {
+            return;
+        }
+        let col = self.buf[self.line_start()..self.cur].chars().count();
+        let next_start = end + 1;
+        let next_end = self.buf[next_start..].find('\n').map_or(self.buf.len(), |i| next_start + i);
+        self.cur = Self::col_to_byte(&self.buf, next_start, next_end, col);
+    }
+    fn col_to_byte(buf: &str, start: usize, end: usize, col: usize) -> usize {
+        buf[start..end].char_indices().nth(col).map_or(end, |(i, _)| start + i)
     }
     pub(crate) fn backspace(&mut self) {
         if let Some(ch) = self.buf[..self.cur].chars().next_back() {
@@ -159,6 +195,7 @@ pub(crate) fn in_input(app: &mut App, f: fn(&mut Input)) {
 pub(crate) fn finish_composer(app: &mut App, input: Input) {
     let buf = input.buf;
     app.laid_width = 0; // the bar closes either way
+    app.status.clear(); // the composer's key hint goes with it
     if buf.trim().is_empty() {
         app.note(t!("空のコメントは破棄しました", "empty comment discarded"));
     } else if let Some(c) = app.make_comment(buf) {

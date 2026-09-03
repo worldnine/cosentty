@@ -172,6 +172,7 @@ pub(crate) fn composer_rows(
     editing: bool,
     revision: Option<String>,
     width: usize,
+    max_body: usize,
 ) -> Vec<Row> {
     let width = width.max(1);
     let title = Style::default().fg(Color::Black).bg(CHROME_ACCENT).add_modifier(Modifier::BOLD);
@@ -185,13 +186,50 @@ pub(crate) fn composer_rows(
         None => format!("{label} "),
     };
     let (before, _) = input.parts();
-    let (body, (crow, ccol)) = wrap_with_caret(&input.buf, before.chars().count(), width);
+    let (mut body, (mut crow, ccol)) = wrap_with_caret(&input.buf, before.chars().count(), width);
+    // A draft taller than the pane would push its own caret off screen
+    // (the whole bar is kept visible, and there is no "whole" that fits).
+    // Show a window of `max_body` rows around the caret instead, and say
+    // how many rows are folded away above and below on the band rows.
+    let (mut above, mut below) = (0usize, 0usize);
+    if body.len() > max_body {
+        let first = crow.saturating_sub(max_body / 2).min(body.len() - max_body);
+        above = first;
+        below = body.len() - (first + max_body);
+        body = body[first..first + max_body].to_vec();
+        crow -= first;
+    }
     let mut rows: Vec<Row> = bar_lines(&label, title, body, width)
         .into_iter()
         .map(|line| Row::Composer { line, caret: None })
         .collect();
     if let Some(Row::Composer { caret, .. }) = rows.get_mut(1 + crow) {
         *caret = Some(ccol.min(width - 1) as u16);
+    }
+    let dim = Style::default().fg(CHROME_DIM).bg(CARD_BG);
+    let fold = |n: usize, arrow: &str| -> Line<'static> {
+        let text = t!("{arrow} あと {n} 行", "{arrow} {n} more line(s)");
+        let pad = " ".repeat(width.saturating_sub(str_width(&text)));
+        Line::from(vec![Span::styled(text, dim), Span::styled(pad, dim)])
+    };
+    if above > 0 {
+        // The badge row keeps the badge; the fold note takes its tail.
+        if let Some(Row::Composer { line, .. }) = rows.first_mut() {
+            let badge = line.spans[0].clone();
+            let note = t!("↑ あと {above} 行 ", "↑ {above} more line(s) ");
+            let used = str_width(badge.content.as_ref()) + str_width(&note);
+            let band = Style::default().bg(CARD_BG);
+            *line = Line::from(vec![
+                badge,
+                Span::styled(" ".repeat(width.saturating_sub(used)), band),
+                Span::styled(note, dim),
+            ]);
+        }
+    }
+    if below > 0 {
+        if let Some(Row::Composer { line, .. }) = rows.last_mut() {
+            *line = fold(below, "↓");
+        }
     }
     rows
 }
@@ -208,6 +246,16 @@ pub(crate) fn wrap_with_caret(s: &str, caret_chars: usize, width: usize) -> (Vec
     let mut w = 0usize;
     let mut caret: Option<(usize, usize)> = None;
     for (i, ch) in s.chars().enumerate() {
+        // A line break in the draft (^j) ends the row where it stands; a
+        // caret sitting on it belongs to the row it ends.
+        if ch == '\n' {
+            if i == caret_chars {
+                caret = Some((out.len(), w));
+            }
+            out.push(std::mem::take(&mut cur));
+            w = 0;
+            continue;
+        }
         let cw = ch.width().unwrap_or(0);
         if w + cw > width && !cur.is_empty() {
             out.push(std::mem::take(&mut cur));
@@ -1116,6 +1164,19 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 None
             }
         };
+        // A comment block (card or composer) starts one column left of the
+        // text, over the telomere column: its badge and its first letter
+        // sit where the page's own gutter is, so the block reads as an
+        // aside hung on the lines, not as more text.
+        let bar_row = |screen_y: i32| -> Option<Rect> {
+            one_row(screen_y).map(|r| {
+                if r.x > 0 {
+                    Rect::new(r.x - 1, r.y, r.width + 1, 1)
+                } else {
+                    r
+                }
+            })
+        };
 
         match row {
             Row::Line { line, src, start, hang } => {
@@ -1164,12 +1225,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 }
             }
             Row::Card { line } => {
-                if let Some(r) = one_row(screen_y) {
+                if let Some(r) = bar_row(screen_y) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
             }
             Row::Composer { line, caret } => {
-                if let Some(r) = one_row(screen_y) {
+                if let Some(r) = bar_row(screen_y) {
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                     if let Some(col) = caret {
                         // The hardware cursor marks the insertion point:
@@ -2297,7 +2358,9 @@ impl App {
 
         // 3. weave cards in (cards span the text column, not the gutters)
         let mut rows: Vec<Row> = Vec::new();
-        let width_cols = match self.mode {
+        // One wider than the text: the block starts a column to the left
+        // of it (see `bar_row` in the drawer).
+        let width_cols = 1 + match self.mode {
             Mode::View => Self::text_width(Mode::View, width),
             // source rows carry their number label inline, so the card
             // spans label + text
@@ -2317,7 +2380,14 @@ impl App {
                 .last()
                 .unwrap_or(content.len().saturating_sub(1));
             let revision = self.shown_revision().map(|r| cosense::theme::format_local(r.created));
-            (anchor, composer_rows(input, range, self.comment_for_range().is_some(), revision, width_cols))
+            // The body may take the pane minus the badge row, the band
+            // row, and one row of the page for context; at least one row.
+            // Before the first frame the height is not known (0): no cap.
+            let max_body = match self.view_h {
+                0 => usize::MAX,
+                h => (h as usize).saturating_sub(3).max(1),
+            };
+            (anchor, composer_rows(input, range, self.comment_for_range().is_some(), revision, width_cols, max_body))
         });
         let hidden_card = if self.composing.is_some() { self.comment_for_range() } else { None };
         for (idx, row) in content.into_iter().enumerate() {

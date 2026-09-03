@@ -90,7 +90,7 @@ use super::support::*;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let pos = term.get_cursor_position().unwrap();
         let text_x = app.text_rect.x;
-        assert_eq!(pos.x, text_x + 4, "全角は2桁で数える");
+        assert_eq!(pos.x, text_x - 1 + 4, "全角は2桁で数える。欄は本文より1桁左から");
         // ヘッダ1・上罫線1・title・one・入力欄の上罫線 → 本文は行 5。
         assert_eq!(pos.y, app.text_rect.y + 3);
     }
@@ -908,4 +908,44 @@ use super::support::*;
         }
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         assert_eq!(term.backend().buffer().cell((0, row_y(&app, 3))).unwrap().symbol(), ">");
+    }
+
+    /// 改行(^j)は行をそこで終える。キャレットが改行の上にあれば、その改行が
+    /// 終える行の末尾に居る。空の論理行も1行として出る。
+    #[test]
+    fn the_composer_wraps_around_line_breaks_too() {
+        let (rows, caret) = wrap_with_caret("ab\ncd", 3, 10);
+        assert_eq!(rows, vec!["ab", "cd"]);
+        assert_eq!(caret, (1, 0), "after the break: the next row's start");
+        assert_eq!(wrap_with_caret("ab\ncd", 2, 10).1, (0, 2), "on the break: the end of its row");
+        assert_eq!(wrap_with_caret("ab\n\ncd", 3, 10).0, vec!["ab", "", "cd"]);
+        assert_eq!(wrap_with_caret("ab\n", 3, 10), (vec!["ab".into(), String::new()], (1, 0)));
+    }
+
+    /// 画面より高くなった下書きは、キャレットの周りだけを窓で見せ、上下に
+    /// 畳んだ行数を帯に書く。バーの高さは画面を超えない。
+    #[test]
+    fn a_tall_draft_shows_a_window_around_the_caret() {
+        use_japanese();
+        let mut input = Input::new("1\n2\n3\n4\n5\n6\n7\n8\n9".into());
+        // キャレットを 5 の行末へ(先頭から "1\n2\n3\n4\n5" = 9 バイト)。
+        input.cur = 9;
+        let rows = composer_rows(&input, (0, 0), false, None, 20, 3);
+        assert_eq!(rows.len(), 5, "badge + 3 body rows + band");
+        let plain = |r: &Row| -> String {
+            match r {
+                Row::Composer { line, .. } => line.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string(),
+                _ => String::new(),
+            }
+        };
+        assert!(plain(&rows[0]).ends_with("↑ あと 3 行"), "{}", plain(&rows[0]));
+        assert_eq!(plain(&rows[1]), "4");
+        assert_eq!(plain(&rows[2]), "5");
+        assert!(matches!(rows[2], Row::Composer { caret: Some(1), .. }), "the caret row is inside the window");
+        assert_eq!(plain(&rows[3]), "6");
+        assert_eq!(plain(&rows[4]), "↓ あと 3 行");
+        // 収まる高さなら全部出て、畳みの注記は無い。
+        let rows = composer_rows(&input, (0, 0), false, None, 20, 20);
+        assert_eq!(rows.len(), 11);
+        assert!(!plain(&rows[0]).contains("あと"));
     }
