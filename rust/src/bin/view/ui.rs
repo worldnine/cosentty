@@ -120,42 +120,49 @@ pub(crate) fn related_row(
     Line::from(spans)
 }
 
-/// A saved comment as a bar under its lines (akapen's comment bar): a top
-/// rule carrying the title (` comment · 12-14 `, yellow), the wrapped
-/// text, a bottom rule. Rules only — no side borders, no background — so
-/// it reads as a speech bubble whose rules run across the text column,
-/// and so the composer (the same bar in cyan) turns into it on Enter
-/// without the shape changing.
+/// The block a comment (and the composer) is drawn as. Flat, like the
+/// rest of this viewer's chrome: no rules, no borders — a band of this
+/// background under the lines, with the title as a badge in the top-left
+/// corner (black text on the badge colour, the menu panels' title style).
+pub(crate) const CARD_BG: Color = Color::Black;
+
+/// A saved comment as a flat block under its lines: the title badge
+/// (` comment · 12-14 `, black on yellow) on the first row, the wrapped
+/// text, and one blank row of the band below, so the block has the same
+/// shape the composer had — Enter turns one into the other with only the
+/// badge colour changing. akapen's placement (under the range) with this
+/// viewer's flat look instead of akapen's rules.
 pub(crate) fn card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
-    let rule = Style::default().fg(CHROME_DIM);
-    let title = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let title = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
     // A comment on a past revision says which one on its title, so a
     // reader stepping through history knows the card is about THIS version.
     let label = match c.revision_label() {
         Some(at) => format!(" comment · {} · {at} ", c.range_label()),
         None => format!(" comment · {} ", c.range_label()),
     };
-    bar_lines(&label, title, rule, c.text.lines().flat_map(|l| wrap_plain(l, width)).collect(), width)
+    bar_lines(&label, title, c.text.lines().flat_map(|l| wrap_plain(l, width)).collect(), width)
 }
 
-/// The bar shape both the card and the composer use: `label` on the top
-/// rule, `body` rows, a bottom rule.
-fn bar_lines(
-    label: &str,
-    title: Style,
-    rule: Style,
-    body: Vec<String>,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let fill = "─".repeat(width.saturating_sub(str_width(label)));
-    let mut out = vec![Line::from(vec![Span::styled(label.to_string(), title), Span::styled(fill, rule)])];
-    out.extend(body.into_iter().map(Line::from));
-    out.push(Line::from(Span::styled("─".repeat(width), rule)));
+/// The block shape both the card and the composer use: the badge on the
+/// first row, `body` rows, one blank row — every row filled to `width`
+/// with the block's background.
+fn bar_lines(label: &str, title: Style, body: Vec<String>, width: usize) -> Vec<Line<'static>> {
+    let band = Style::default().bg(CARD_BG);
+    let pad = |used: usize| " ".repeat(width.saturating_sub(used));
+    let mut out = vec![Line::from(vec![
+        Span::styled(label.to_string(), title),
+        Span::styled(pad(str_width(label)), band),
+    ])];
+    out.extend(body.into_iter().map(|row| {
+        let used = str_width(&row);
+        Line::from(vec![Span::styled(row, band), Span::styled(pad(used), band)])
+    }));
+    out.push(Line::from(Span::styled(pad(0), band)));
     out
 }
 
 /// The comment composer as rows under the commented range: the card's
-/// bar in cyan, ` comment · 12-14 ` (or ` edit · 12-14 ` when replacing
+/// block with a cyan badge, ` comment · 12-14 ` (or ` edit · 12-14 ` when replacing
 /// an existing comment), the input wrapped to the column, and the
 /// insertion point's cell recorded so the hardware cursor — and with it
 /// the IME's composition window — sits in the bar.
@@ -167,8 +174,7 @@ pub(crate) fn composer_rows(
     width: usize,
 ) -> Vec<Row> {
     let width = width.max(1);
-    let accent = Style::default().fg(CHROME_ACCENT);
-    let title = accent.add_modifier(Modifier::BOLD);
+    let title = Style::default().fg(Color::Black).bg(CHROME_ACCENT).add_modifier(Modifier::BOLD);
     let label = if range.0 == range.1 {
         format!("{} {}", if editing { " edit ·" } else { " comment ·" }, range.0 + 1)
     } else {
@@ -180,7 +186,7 @@ pub(crate) fn composer_rows(
     };
     let (before, _) = input.parts();
     let (body, (crow, ccol)) = wrap_with_caret(&input.buf, before.chars().count(), width);
-    let mut rows: Vec<Row> = bar_lines(&label, title, accent, body, width)
+    let mut rows: Vec<Row> = bar_lines(&label, title, body, width)
         .into_iter()
         .map(|line| Row::Composer { line, caret: None })
         .collect();

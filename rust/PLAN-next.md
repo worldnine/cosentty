@@ -429,6 +429,9 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
     Enter で入力欄がカードに「なる」。`keep_composer_visible` が画面外に出るのを防ぐ。
     テスト: `the_composer_opens_under_the_commented_range_and_replaces_the_card_it_edits`、
     `the_composer_body_wraps_and_reports_where_the_caret_landed`
+  - **フラット化**(同日、「akapen 準拠だがこのアプリのテイストに合わない」):
+    罫線をやめ、黒背景(`CARD_BG`)の帯に、メニューのタイトルと同じ黒文字・色背景の
+    バッジ(入力欄はシアン、カードは黄)。形(バッジ行・本文・帯1行)は共通のまま
   - **左端の帯**(同日): コメントの付いた行は左フレーム列に黄の `▌`、入力中の範囲は
     シアンの `▌`。キャレット `>` より後に描くので重なれば帯が勝つ(ユーザー指示
     「キャレットとかぶっていい」)。`commented_lines_wear_a_yellow_bar_in_the_frame_column`

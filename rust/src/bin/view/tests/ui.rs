@@ -115,12 +115,22 @@ use super::support::*;
         app.composing = Some(Input::new("メモ".into()));
         app.rebuild(40);
         let comp: Vec<usize> = app.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Composer { .. })).map(|(i, _)| i).collect();
-        assert_eq!(comp.len(), 3, "rule, one body row, rule: {comp:?}");
+        assert_eq!(comp.len(), 3, "badge row, one body row, one blank band row: {comp:?}");
+        // フラット: 罫線は無く、バッジは黒文字・シアン背景、帯は黒背景。
+        if let Row::Composer { line, .. } = &app.rows[comp[0]] {
+            assert_eq!(line.spans[0].style.bg, Some(CHROME_ACCENT));
+            assert_eq!(line.spans[0].style.fg, Some(Color::Black));
+            assert_eq!(line.spans[1].style.bg, Some(CARD_BG), "the rest of the badge row is band");
+            assert!(!plain(&app.rows[comp[0]]).contains('─'), "no rules");
+        }
+        if let Row::Composer { line, .. } = &app.rows[comp[2]] {
+            assert_eq!(line.spans[0].style.bg, Some(CARD_BG), "the closing row is a blank band");
+        }
         // 直前の行は範囲の最終行(two = src 2)、直後は three。
         assert_eq!(app.rows[comp[0] - 1].src(), Some(2));
         assert_eq!(app.rows[comp[2] + 1].src(), Some(3));
-        assert!(plain(&app.rows[comp[0]]).starts_with(" comment · 2-3 ─"), "{}", plain(&app.rows[comp[0]]));
-        assert_eq!(plain(&app.rows[comp[1]]), "メモ");
+        assert!(plain(&app.rows[comp[0]]).starts_with(" comment · 2-3 "), "{}", plain(&app.rows[comp[0]]));
+        assert_eq!(plain(&app.rows[comp[1]]).trim_end(), "メモ");
         assert!(matches!(app.rows[comp[1]], Row::Composer { caret: Some(4), .. }), "caret after 2 wide chars");
         assert!(matches!(app.rows[comp[0]], Row::Composer { caret: None, .. }));
 
@@ -131,14 +141,18 @@ use super::support::*;
         app.rebuild(40);
         assert!(!app.rows.iter().any(|r| matches!(r, Row::Composer { .. })));
         let cards: Vec<&Row> = app.rows.iter().filter(|r| matches!(r, Row::Card { .. }) && !plain(r).is_empty()).collect();
-        assert!(plain(cards[0]).starts_with(" comment · 2-3 ─"), "{}", plain(cards[0]));
-        assert_eq!(plain(cards[1]), "メモ");
+        assert!(plain(cards[0]).starts_with(" comment · 2-3 "), "{}", plain(cards[0]));
+        if let Row::Card { line } = cards[0] {
+            assert_eq!(line.spans[0].style.bg, Some(Color::Yellow), "a saved comment's badge is yellow");
+            assert_eq!(line.spans[0].style.fg, Some(Color::Black));
+        }
+        assert_eq!(plain(cards[1]).trim_end(), "メモ");
 
         // 同じ範囲でもう一度: edit ラベルの入力欄がカードの場所に立ち、カードは隠れる。
         app.composing = Some(Input::new("メモ".into()));
         app.rebuild(40);
         let comp: Vec<&Row> = app.rows.iter().filter(|r| matches!(r, Row::Composer { .. })).collect();
-        assert!(plain(comp[0]).starts_with(" edit · 2-3 ─"), "{}", plain(comp[0]));
+        assert!(plain(comp[0]).starts_with(" edit · 2-3 "), "{}", plain(comp[0]));
         assert!(!app.rows.iter().any(|r| matches!(r, Row::Card { .. }) && plain(r).starts_with(" comment")), "the edited card gives way to the bar");
     }
 
