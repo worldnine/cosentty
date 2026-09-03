@@ -1877,3 +1877,35 @@ use super::support::*;
         app.goto_src(2);
         assert_eq!(app.cursor_fraction(), 0.5);
     }
+
+    /// 並び順の切り替えは取り直しではなく、さっき取った一覧の再利用。6つの
+    /// 順を巡ると 500 件の要求が6本飛び、サイトの 429 に当たっていた。
+    /// `^o` / `^u` は今まで通り取り直す(その結果も覚える)。
+    #[test]
+    fn a_fetched_list_is_reused_by_an_order_switch_while_young() {
+        use cosense::api::PageSummary;
+        use cosense::index::SortKey;
+        let mut app = page(&["title"]);
+        let p = PageSummary {
+            id: "id".into(),
+            title: "t".into(),
+            image: None,
+            descriptions: vec![],
+            updated: 1,
+            created: 0,
+            accessed: 0,
+            views: 0,
+            linked: 0,
+        };
+        assert!(app.cached_list("proj", SortKey::Updated).is_none(), "nothing fetched yet");
+        app.remember_list("proj", SortKey::Updated, 1, &[p]);
+        let (count, pages) = app.cached_list("proj", SortKey::Updated).expect("young entry");
+        assert_eq!((count, pages.len()), (1, 1));
+        // 順ごと・プロジェクトごとに別の一覧。
+        assert!(app.cached_list("proj", SortKey::Title).is_none());
+        assert!(app.cached_list("other", SortKey::Updated).is_none());
+        // 古くなった一覧は使わない(取り直す)。
+        let c = app.index_cache.get_mut(&("proj".to_string(), SortKey::Updated)).unwrap();
+        c.at = Instant::now() - INDEX_CACHE_SECS - Duration::from_secs(1);
+        assert!(app.cached_list("proj", SortKey::Updated).is_none(), "stale entry is a miss");
+    }

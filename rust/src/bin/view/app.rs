@@ -259,6 +259,12 @@ pub(crate) struct App {
     /// standing choice, which a fresh index has to be built from before
     /// there is an `Index` to ask.
     pub(crate) index_sort: cosense::index::SortKey,
+    /// Page lists already fetched this session, one per (project, order).
+    /// Switching the order in `s` reads from here while the entry is
+    /// young (`INDEX_CACHE_SECS`); `^o` / `^u` always refetch and refresh
+    /// it. Six orders × one 500-page request each is how the site's rate
+    /// limit was being hit (see `nav::ListCache`).
+    pub(crate) index_cache: HashMap<(String, cosense::index::SortKey), ListCache>,
     /// The sort menu over the index, and where its cursor is. Deliberately
     /// NOT part of the saved `Index`: a menu is something you are doing,
     /// not somewhere you have been.
@@ -593,6 +599,7 @@ impl App {
             index_display: String::new(),
             index_scrolled_at: None,
             index_sort: cosense::index::SortKey::default(),
+            index_cache: HashMap::new(),
             index_sort_menu: None,
             web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             web_dark: true,

@@ -120,7 +120,7 @@ pub fn layout(mode: PreviewMode, width: u16, height: u16) -> IndexLayout {
 /// Their names stay in English on screen. They are the API's vocabulary
 /// and the same words the site's own sort menu uses — names, not prose
 /// (see the note at the top of `view/main.rs`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum SortKey {
     /// Most recently edited first — the site top's own default.
     #[default]

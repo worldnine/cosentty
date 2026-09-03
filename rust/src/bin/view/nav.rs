@@ -404,11 +404,63 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
 /// of the server so it covers the whole project rather than whichever
 /// pages one request happened to bring back.
 pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String) {
+    open_index_from(app, ctx, project, filter, false);
+}
+
+/// One page list as the API returned it, kept so the next request for the
+/// same (project, order) can be answered without asking again.
+pub(crate) struct ListCache {
+    pub(crate) count: i64,
+    pub(crate) pages: Vec<cosense::api::PageSummary>,
+    pub(crate) at: Instant,
+}
+
+/// How long a fetched list may be reused by an order switch. Long enough
+/// to cycle through the six orders while deciding which one answers the
+/// question; short enough that a list is not hours behind the site.
+pub(crate) const INDEX_CACHE_SECS: Duration = Duration::from_secs(5 * 60);
+
+impl App {
+    /// The list fetched for (`project`, `sort`) if it is still young.
+    pub(crate) fn cached_list(
+        &self,
+        project: &str,
+        sort: cosense::index::SortKey,
+    ) -> Option<(i64, Vec<cosense::api::PageSummary>)> {
+        self.index_cache
+            .get(&(project.to_string(), sort))
+            .filter(|c| c.at.elapsed() <= INDEX_CACHE_SECS)
+            .map(|c| (c.count, c.pages.clone()))
+    }
+
+    pub(crate) fn remember_list(
+        &mut self,
+        project: &str,
+        sort: cosense::index::SortKey,
+        count: i64,
+        pages: &[cosense::api::PageSummary],
+    ) {
+        self.index_cache.insert(
+            (project.to_string(), sort),
+            ListCache { count, pages: pages.to_vec(), at: Instant::now() },
+        );
+    }
+}
+
+/// `reuse`: answer from `index_cache` when it has a young enough list for
+/// this (project, order); otherwise (and on a miss) fetch, and remember
+/// what came back either way.
+fn open_index_from(app: &mut App, ctx: &Ctx, project: &str, filter: String, reuse: bool) {
     use cosense::index::{Entry, Index};
     let sort = app.index_sort;
-    let (count, pages) =
-        match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, sort.name()) {
-            Ok(v) => v,
+    let cached = if reuse { app.cached_list(project, sort) } else { None };
+    let (count, pages) = match cached {
+        Some(v) => v,
+        None => match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, sort.name()) {
+            Ok(v) => {
+                app.remember_list(project, sort, v.0, &v.1);
+                v
+            }
             Err(e) => {
                 // Both, because this is reached from two places: from a
                 // page (no index open — the page's own status line shows
@@ -416,7 +468,8 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
                 app.toast_err(t!("ページ一覧を取得できません: {e}", "page list failed: {e}"));
                 return;
             }
-        };
+        },
+    };
     let visits = load_visits();
     let mut entries: Vec<Entry> = pages
         .into_iter()
@@ -499,16 +552,19 @@ pub(crate) fn clear_index_search(app: &mut App, ctx: &Ctx) {
 
 /// Re-open the list in `sort` order, keeping the filter that is in force.
 ///
-/// A refetch, not a local re-shuffle: the list holds at most
+/// A list per order, not a local re-shuffle: the list holds at most
 /// `INDEX_PAGE_LIMIT` pages, so re-ordering what is already in hand would
-/// silently sort the wrong 500 pages of a bigger project.
+/// silently sort the wrong 500 pages of a bigger project. The list for an
+/// order visited a moment ago is reused (`App::cached_list`) — cycling
+/// through the six orders used to cost six 500-page requests, which is
+/// what ran into the site's 429.
 pub(crate) fn resort_index(app: &mut App, ctx: &Ctx, sort: cosense::index::SortKey) {
     let project = app.index_project.clone();
     let filter = app.index.as_ref().map(|ix| ix.filter.clone()).unwrap_or_default();
     app.index_sort = sort;
     app.rebuild_related();
     app.laid_width = 0; // related rows may have moved
-    open_index(app, ctx, &project, filter);
+    open_index_from(app, ctx, &project, filter, true);
 }
 
 /// Fetch and render one page. Images are NOT downloaded here: they are

@@ -208,7 +208,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PageSummary {
     pub id: String,
     pub title: String,
