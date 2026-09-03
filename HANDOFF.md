@@ -42,6 +42,11 @@ cargo test                          # lib(163)含む全部
 - ツールチェーンは `rust/` の rustup override で 1.90.0。
   **git worktree では override が効かない**ので `RUSTUP_TOOLCHAIN=1.90.0` を付ける
   (`CARGO_TARGET_DIR=<本体>/rust/target` を足すと依存ビルドを再利用できる)
+- ただし**同じ target dir を共有するとバイナリは残らない**。worktree と本体が
+  `target/debug/view` を上書きし、`cargo build` は再リンクを省いて
+  `Finished in 0.79s` と出すことがある(実測。修正前の計測が修正後の
+  バイナリを走らせていた)。修正の前後を画面で比べるなら `CARGO_TARGET_DIR`
+  を分けるか、ビルドごとに `md5 -q target/debug/view` を取って同一性を確かめる
 
 ## ドキュメント索引
 

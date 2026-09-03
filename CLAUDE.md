@@ -10,6 +10,9 @@ Cosense(旧 Scrapbox)の TUI ビューワ/エディタ。本体は `rust/`(lib �
   override が効かず 1.89 で依存解決に失敗する**。worktree では
   `RUSTUP_TOOLCHAIN=1.90.0` を付け、`CARGO_TARGET_DIR=<本体>/rust/target` で
   依存ビルドを再利用する
+- **同じ target dir を共有するとバイナリは残らない**。worktree と本体が
+  `target/debug/view` を上書きし合い、`cargo build` は再リンクを省くことがある。
+  前後のビルドを比べるなら `CARGO_TARGET_DIR` を分けるか、`md5 -q` で確かめる
 - `rust/target/` は検索・読み込みの対象にしない
 
 ## コードの歩き方
