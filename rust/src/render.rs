@@ -509,11 +509,19 @@ fn decorate_inline(
     let mut rest = s;
 
     // Walk the string, handling `code`, [..] brackets, bare urls, #tags.
+    // Whichever token STARTS first is taken first: a `[link]` before a
+    // `code` span is a link, and a `[bracket]` inside a code span is code.
+    // (Taking the code span first, wherever it was, flushed everything in
+    // front of it as plain text — and a link earlier on the same line
+    // lost its brackets' meaning whenever the line also had some code.)
     while !rest.is_empty() {
-        // inline code
-        if let Some(start) = rest.find('`') {
-            if let Some(end_rel) = rest[start + 1..].find('`') {
-                let end = start + 1 + end_rel;
+        let tick = rest
+            .find('`')
+            .and_then(|start| rest[start + 1..].find('`').map(|e| (start, start + 1 + e)));
+        let bracket = rest.find('[').and_then(|start| matching_bracket(rest, start).map(|c| (start, c)));
+        match (tick, bracket) {
+            // inline code
+            (Some((start, end)), b) if b.map_or(true, |(bs, _)| start < bs) => {
                 push_plain(&mut spans, &rest[..start], links, pal, known, hits);
                 let code = &rest[start + 1..end];
                 spans.push(Span::styled(
@@ -521,18 +529,15 @@ fn decorate_inline(
                     Style::default().bg(Color::DarkGray).fg(Color::White),
                 ));
                 rest = &rest[end + 1..];
-                continue;
             }
-        }
-        // bracket form
-        if let Some(start) = rest.find('[') {
-            // `[[text]]` (bold) has to be matched as a PAIR: taking the
-            // first `]` would cut it at `[text`, and the notation would
-            // read as a link to a page whose name starts with a bracket.
-            // Balanced, so notation can nest: `[[[page]]]` is a bold link
-            // and `[* [page]]` is a decorated one. Closing at the first
-            // `]` cut both one bracket short, and the link inside was lost.
-            if let Some(close) = matching_bracket(rest, start) {
+            // bracket form
+            (_, Some((start, close))) => {
+                // `[[text]]` (bold) has to be matched as a PAIR: taking the
+                // first `]` would cut it at `[text`, and the notation would
+                // read as a link to a page whose name starts with a bracket.
+                // Balanced, so notation can nest: `[[[page]]]` is a bold link
+                // and `[* [page]]` is a decorated one. Closing at the first
+                // `]` cut both one bracket short, and the link inside was lost.
                 let doubled =
                     rest[start + 1..].starts_with('[') && rest[..close].ends_with(']');
                 push_plain(&mut spans, &rest[..start], links, pal, known, hits);
@@ -550,12 +555,13 @@ fn decorate_inline(
                     );
                 }
                 rest = &rest[close + 1..];
-                continue;
+            }
+            // no more special tokens
+            _ => {
+                push_plain(&mut spans, rest, links, pal, known, hits);
+                break;
             }
         }
-        // no more special tokens
-        push_plain(&mut spans, rest, links, pal, known, hits);
-        break;
     }
     spans
 }
@@ -2168,5 +2174,19 @@ mod tests {
             hits[1].target,
             HitTarget::Url { label: "Docs".into(), url: "https://example.com".into() }
         );
+    }
+
+    /// 同じ行の後ろに行内コードがあっても、手前のリンクはリンク。以前は
+    /// コード片を先に切り出し、その手前を全部プレーンで流していたので、
+    /// `[crowdin] … `#3117`` の crowdin が括弧のまま出ていた(2026-09-03 実測)。
+    /// 逆に、コード片の中の `[括弧]` はコードのまま。
+    #[test]
+    fn a_link_before_inline_code_on_the_same_line_is_still_a_link() {
+        let out = render_lines(&["title".into(), "a [crowdin] b `#3117` / c `[not a link]`".into()]);
+        let Block::Text(l) = &out.blocks[1] else { panic!() };
+        let texts: Vec<&str> = l.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, vec!["a ", "crowdin", " b ", " #3117 ", " / c ", " [not a link] "]);
+        assert_eq!(out.hits[1], vec![Hit { span: 1, target: HitTarget::Page("crowdin".into()) }]);
+        assert_eq!(out.extracted.links, vec!["crowdin"]);
     }
 }
