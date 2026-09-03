@@ -472,6 +472,16 @@ impl Ctx {
         self.project_settings(project).and_then(|s| s.theme)
     }
 
+    /// The project's proper name for the header, or the slug when the
+    /// settings are unreadable (a private project without a sid): the URL
+    /// slug is at least always true.
+    fn project_display(&self, project: &str) -> String {
+        match self.project_settings(project) {
+            Some(s) if !s.display_name.trim().is_empty() => s.display_name,
+            _ => project.to_string(),
+        }
+    }
+
     fn project_settings(&self, project: &str) -> Option<cosense::api::ProjectSettings> {
         if let Ok(cache) = self.project_settings.lock() {
             if let Some(settings) = cache.get(project) {

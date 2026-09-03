@@ -713,6 +713,7 @@ use super::support::*;
                 project: "proj".into(),
                 title: "B".into(),
                 header_colors: HeaderColors::fallback(),
+                project_display: String::new(),
                 page_id: "pid-B".into(),
                 lines: vec![PageLine {
                     id: "b0".into(),

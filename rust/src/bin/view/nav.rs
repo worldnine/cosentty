@@ -101,6 +101,7 @@ pub(crate) struct Loaded {
     pub(crate) title: String,
     /// Site-theme-derived header colors for this project.
     pub(crate) header_colors: HeaderColors,
+    pub(crate) project_display: String,
     /// Immutable page id (edit API / commit log).
     pub(crate) page_id: String,
     pub(crate) lines: Vec<PageLine>,
@@ -375,6 +376,7 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
         }
         Place::Index { project, state } => {
             app.index = Some(*state);
+            app.index_display = ctx.project_display(&project);
             app.index_project = project;
             app.overlay = None;
             arrived = true;
@@ -432,6 +434,7 @@ pub(crate) fn open_index(app: &mut App, ctx: &Ctx, project: &str, filter: String
     }
     app.index = Some(ix);
     app.index_project = project.to_string();
+    app.index_display = ctx.project_display(project);
     app.index_sort_menu = None;
     app.overlay = None;
 }
@@ -543,6 +546,7 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         project: project.to_string(),
         title: title.to_string(),
         header_colors: HeaderColors { fg: header_fg, bg: header_bg },
+        project_display: ctx.project_display(project),
         page_id: live_page_id(&page),
         lines,
         blocks: rendered.blocks,
@@ -726,6 +730,7 @@ impl App {
         self.project = l.project;
         self.title = l.title;
         self.header_colors = l.header_colors;
+        self.project_display = l.project_display;
         self.page_id = l.page_id;
         self.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Navigating leaves the joined room. Until the thread has re-joined

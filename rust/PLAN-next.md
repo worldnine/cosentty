@@ -248,7 +248,7 @@ akapen/src/effects.rs の toast_effect):
 - バナー色は akapen の黒地固定でなく、端末背景から作る手もある
   (edit_backdrop と同じ流儀)。ライト端末での見えを確認して決める
 
-### 5. ヘッダの整理
+### 5. ヘッダの整理 — **済(2026-09-03)。実施記録は末尾へ**
 
 面積に限りがあるのに詰め込みすぎている。現状: project/title + 時刻バッジ +
 [✎ 編集中] + [ソース] + [読み取り専用] + （コメント N） + 未読 + 選択情報。
@@ -369,6 +369,21 @@ relatedPages は下部の関連セクションだけでなく**リンク色の�
 ポーリング縮退、`get_project_theme` の cosmetic 例外)。残っていたのは文言で、
 HANDOFF / CLAUDE.md の「非公開プロジェクトの認証は COSENSE_SID」を直し、
 KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だけ」を明記した。
+
+### 実施記録: 5. ヘッダの整理(2026-09-03)
+
+- 左 `正式名称 / タイトル`。`ProjectSettings.display_name`(`displayName`)を足し、
+  `Ctx::project_display` が設定キャッシュ(テーマと同じ応答)から引く。読めなければ
+  スラッグ。`Loaded.project_display` → `App.project_display`、索引は `index_display`
+  (open_index と履歴復帰で埋める。テストが直接 `index` を置く場合は
+  `index_project` → `project` に後退)
+- 右端は状態だけ: `⏪ 履歴` / `未同期`(`web_unsynced`。NOTE-notifications の未決に
+  答える常駐表示)/ `読み取り専用` / `初回`・`未読 N`。`header_line` が幅に収まれば
+  右寄せ、収まらなければ左に続けて切る
+- 外したもの: コメント数、`[✎ 編集中]`、`[ソース]`、`[選択 a-b]`。いずれも別の場所に
+  印がある(検討欄の通り)
+- 未着手: ヘッダの `未同期` は resync の一瞬でも点く(mark_desynced → reload で消える)。
+  気になれば「N ms 以上続いたら」にする
 
 ### 実施記録: 4. トースト表示(2026-09-03)
 

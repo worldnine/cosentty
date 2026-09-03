@@ -215,6 +215,11 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // Where the typed text ends, in display columns — the caret's column.
     // Only meaningful while the line is open.
     let mut caret_col: Option<u16> = None;
+    // The project by its proper name, as on the page header.
+    let pname = [app.index_display.as_str(), app.index_project.as_str(), app.project.as_str()]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
     let head = if ix.filter_editing {
         // A full-text query has no count yet — the list on screen is still
         // the unsearched one, and calling its length a match count would be
@@ -229,7 +234,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         // text that precedes it rather than recomputed from the parts —
         // the two could not then disagree. Japanese titles are two columns
         // per character, which is exactly where a re-derivation goes wrong.
-        let lead = format!(" {} — {sigil}{}", app.project, ix.filter);
+        let lead = format!(" {pname} — {sigil}{}", ix.filter);
         caret_col = Some(
             UnicodeWidthStr::width(lead.as_str())
                 .min(area.width.saturating_sub(1) as usize) as u16,
@@ -241,16 +246,16 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         // hits" for a word that is on a thousand pages would be a plain
         // untruth, and the `+` is the whole correction it needs.
         let more = if ix.search_capped { "+" } else { "" };
-        format!(" {} — ?{q} ({}{more} hits){ro}", app.project, ix.entries.len())
+        format!(" {pname} — ?{q} ({}{more} hits){ro}", ix.entries.len())
     } else if ix.filter.is_empty() {
         let more = if ix.total > ix.entries.len() {
             format!(" of {}", ix.total)
         } else {
             String::new()
         };
-        format!(" {} — {} pages{}{ro}", app.project, ix.entries.len(), more)
+        format!(" {pname} — {} pages{}{ro}", ix.entries.len(), more)
     } else {
-        format!(" {} — /{} ({} match){ro}", app.project, ix.filter, shown)
+        format!(" {pname} — /{} ({} match){ro}", ix.filter, shown)
     };
     // The order rides at the right end of the header, where it does not
     // push the project and the count around as it changes length. `↓`
@@ -622,52 +627,36 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         return;
     }
 
-    // header
-    let sel_info = app
-        .selection
-        .map(|s| {
-            let (a, b) = s.range();
-            t!("  [選択 {}-{}]", "  [sel {}-{}]", a + 1, b + 1)
-        })
-        .unwrap_or_default();
-    // Unread badge: first visit anywhere, or how many lines changed since.
-    let unread = match (app.read_at, app.unread_count()) {
-        (None, _) => t!("  · 初回", "  · first visit"),
-        (Some(_), 0) => String::new(),
-        (Some(_), n) => t!("  · 未読 {n}", "  · {n} new"),
-    };
-    // `project/title`, the same shape as the page's URL — so a cross-project
-    // hop changes both the label and the Cosense-site-derived header color.
-    let time_badge = app
-        .time
-        .as_ref()
-        .map(|tm| {
-            let p = &tm.points[tm.pos];
-            format!(
-                "  ⏪ {}/{} · {}",
-                tm.pos + 1,
-                tm.points.len(),
-                cosense::theme::format_local(p.created)
-            )
-        })
-        .unwrap_or_default();
+    // header: `name / title` on the left — the project's proper name, or
+    // its slug until the settings are read — and, at the right end, only
+    // what is STATE and has no other sign: the snapshot being viewed, a
+    // page that has drifted from the server, read-only, unread lines.
+    // EDIT/SRC have the footer badge, the backdrop and the caret; the
+    // comment count has `l`; a selection has its footer hint. None of
+    // those earn a second badge here.
+    let name = if app.project_display.is_empty() { app.project.as_str() } else { app.project_display.as_str() };
+    let left = format!(" {name} / {}", app.title);
+    let mut badges: Vec<String> = Vec::new();
+    if let Some(tm) = app.time.as_ref() {
+        let p = &tm.points[tm.pos];
+        badges.push(format!("⏪ {}/{} · {}", tm.pos + 1, tm.points.len(), cosense::theme::format_local(p.created)));
+    }
+    if app.web_unsynced {
+        badges.push(ts!("未同期", "unsynced").to_string());
+    }
+    if !app.editable {
+        badges.push(ts!("読み取り専用", "read-only").to_string());
+    }
+    // Unread: first visit anywhere, or how many lines changed since.
+    match (app.read_at, app.unread_count()) {
+        (None, _) => badges.push(ts!("初回", "first visit").to_string()),
+        (Some(_), 0) => {}
+        (Some(_), n) => badges.push(t!("未読 {n}", "{n} new")),
+    }
+    let right = if badges.is_empty() { String::new() } else { format!("{} ", badges.join(" · ")) };
+    let head = header_line(&left, &right, area.width);
     f.render_widget(
-        Paragraph::new(Line::from(t!(
-            " {}/{}{}{}{}{}  （コメント {}）{}{} ",
-            " {}/{}{}{}{}{}  ({} comment(s)){}{} ",
-            app.project,
-            app.title,
-            time_badge,
-            // 画面の上下でモードを挟む: フッタのバッジと対になる、
-            // ヘッダ側の「編集中」サイン。
-            if app.session.is_some() { ts!("  [✎ 編集中]", "  [✎ editing]") } else { "" },
-            if app.mode == Mode::Source { ts!("  [ソース]", "  [source]") } else { "" },
-            if app.editable { "" } else { ts!("  [読み取り専用]", "  [read-only]") },
-            app.comments.len(),
-            unread,
-            sel_info
-        )))
-        .style(
+        Paragraph::new(head).style(
             Style::default()
                 .fg(app.header_colors.fg)
                 .bg(app.header_colors.bg)
@@ -2281,5 +2270,19 @@ impl App {
     /// Total content height in height units.
     pub(crate) fn total_height(&self) -> u16 {
         self.rows.iter().map(Row::height).sum()
+    }
+}
+
+/// One header row: `left` at the left edge, `right` flush with the right
+/// edge when both fit; otherwise the two simply follow each other and the
+/// row is clipped by the widget (the title is what the reader came for, so
+/// it is never the part that gives way).
+pub(crate) fn header_line(left: &str, right: &str, width: u16) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let lw = UnicodeWidthStr::width(left);
+    let rw = UnicodeWidthStr::width(right);
+    match (width as usize).checked_sub(lw + rw) {
+        Some(pad) if pad >= 2 || right.is_empty() => format!("{left}{}{right}", " ".repeat(pad)),
+        _ => format!("{left}  {right}"),
     }
 }

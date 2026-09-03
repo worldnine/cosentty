@@ -117,6 +117,7 @@ use super::support::*;
                 title: "other".into(),
                 page_id: "P2".into(),
                 header_colors: HeaderColors::fallback(),
+                project_display: String::new(),
                 lines: Vec::new(),
                 blocks: Vec::new(),
                 srcs: Vec::new(),
@@ -151,6 +152,7 @@ use super::support::*;
                 title: "t".into(),
                 page_id: "P2".into(),
                 header_colors: HeaderColors::fallback(),
+                project_display: String::new(),
                 lines: Vec::new(),
                 blocks: Vec::new(),
                 srcs: Vec::new(),
@@ -184,6 +186,7 @@ use super::support::*;
                 project: "proj".into(),
                 title: "next".into(),
                 header_colors: HeaderColors::fallback(),
+                project_display: String::new(),
                 page_id: "p2".into(),
                 lines: vec![],
                 blocks: vec![],
@@ -322,7 +325,7 @@ use super::support::*;
         let buf = term.backend().buffer().clone();
         assert_eq!(bg_of(&buf, "one"), CURSOR_BG, "the caret line floats on its band");
         assert_eq!(bg_of(&buf, "two"), backdrop, "every other line sits on the backdrop");
-        assert!(screen(&term).contains("✎ 編集中"), "the header says so too");
+        assert!(!screen(&term).contains("編集中"), "the header adds no third badge: backdrop, band and footer say it");
     }
 
     /// EDIT を見分ける残り二つのサイン: フッタのモードタグはヘッダ配色の
@@ -686,4 +689,45 @@ use super::support::*;
             cosense::theme::edit_backdrop(ctx.terminal_bg),
             "the backdrop reaches the edge"
         );
+    }
+
+    /// ヘッダは左に `正式名称 / タイトル`、右端に「状態で、ほかに印が無いもの」
+    /// だけ(未同期・読み取り専用・未読)。コメント数・編集中・ソース・選択情報は
+    /// 別の場所が言うので載せない。
+    #[test]
+    fn the_header_keeps_the_name_and_only_the_unsigned_states() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one"]);
+        app.project = "slug-1234".into();
+        app.project_display = "研究ノート".into();
+        app.read_at = None; // first visit: the one unread badge that needs no clock
+        app.comments.push(Comment {
+            project: "slug-1234".into(),
+            title: "title".into(),
+            start: 1,
+            end: 1,
+            line_texts: vec!["one".into()],
+            line_ids: vec!["id1".into()],
+            text: "c".into(),
+        });
+        let mut term = Terminal::new(TestBackend::new(50, 8)).unwrap();
+        let header = |term: &Terminal<TestBackend>| -> String {
+            let buf = term.backend().buffer();
+            (0..buf.area.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect::<String>()
+        };
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let h = header(&term).replace(' ', "");
+        assert!(h.starts_with(&format!("研究ノート/{}", app.title)), "{h:?}");
+        assert!(!h.contains("slug"), "the slug gives way to the proper name");
+        assert!(!h.contains("コメント"), "the count lives behind `l`");
+        assert!(h.ends_with("初回"), "right end: the unread badge only: {h:?}");
+
+        app.web_unsynced = true;
+        app.editable = false;
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let h = header(&term).replace(' ', "");
+        assert!(h.ends_with("未同期·読み取り専用·初回"), "{h:?}");
+        assert_eq!(header_line("a", "b ", 6), "a   b ", "right flush when it fits");
+        assert_eq!(header_line("abcd", "xy ", 6), "abcd  xy ", "otherwise they follow; the widget clips");
     }

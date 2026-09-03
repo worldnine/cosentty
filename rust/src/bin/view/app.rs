@@ -85,6 +85,9 @@ pub(crate) struct App {
     pub(crate) title: String,
     /// Cosense project's navbar colors, adapted over the terminal background.
     pub(crate) header_colors: HeaderColors,
+    /// The project's proper name (`displayName`) for the header; the slug
+    /// when unknown.
+    pub(crate) project_display: String,
     /// Immutable page id (the edit API and the commit log key on it).
     pub(crate) page_id: String,
     /// Raw page lines with per-line author/time metadata. Note `user_id` is
@@ -243,6 +246,8 @@ pub(crate) struct App {
     /// a `[/other-project]` link opens that project's index while the page
     /// underneath is still this one's.
     pub(crate) index_project: String,
+    /// Its proper name for the index header (slug when unknown).
+    pub(crate) index_display: String,
     /// When the index was last scrolled. Its scrollbar appears briefly at
     /// the screen edge while the list moves, then gets out of the way.
     pub(crate) index_scrolled_at: Option<Instant>,
@@ -524,6 +529,7 @@ impl App {
             project,
             title: String::new(),
             header_colors: HeaderColors::fallback(),
+            project_display: String::new(),
             page_id: String::new(),
             lines: Vec::new(),
             blocks: Vec::new(),
@@ -572,6 +578,7 @@ impl App {
             index_list_rect: Rect::default(),
             index_preview_rect: Rect::default(),
             index_project: String::new(),
+            index_display: String::new(),
             index_scrolled_at: None,
             index_sort: cosense::index::SortKey::default(),
             index_sort_menu: None,

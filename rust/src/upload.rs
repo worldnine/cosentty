@@ -249,6 +249,7 @@ mod tests {
             theme: None,
             upload_image_to: Some("gyazo".into()),
             gyazo_teams_name: Some("acme-inc".into()),
+            ..Default::default()
         };
         let none = Config::default();
         assert_eq!(Destination::resolve(&none, "p", None), Destination::Gcs, "knowing nothing stays inside");
@@ -271,7 +272,7 @@ mod tests {
         // is "nobody", even with a team name on it.
         assert_eq!(Destination::resolve_with(&none, "p", Some(&settings)).1, Decided::Project);
         assert_eq!(Destination::resolve_with(&file, "q", None).1, Decided::File);
-        let public_view = ProjectSettings { theme: Some("x".into()), upload_image_to: None, gyazo_teams_name: Some("org".into()) };
+        let public_view = ProjectSettings { theme: Some("x".into()), upload_image_to: None, gyazo_teams_name: Some("org".into()), ..Default::default() };
         assert_eq!(Destination::resolve_with(&none, "p", Some(&public_view)), (Destination::Gcs, Decided::Default));
     }
 

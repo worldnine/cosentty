@@ -297,6 +297,10 @@ pub struct RelatedPage {
 /// personal gyazo.com.
 #[derive(Debug, Default, Clone, Deserialize, PartialEq)]
 pub struct ProjectSettings {
+    /// The project's proper name (the site header's), as opposed to the
+    /// URL slug. Empty when the response has none.
+    #[serde(default, rename = "displayName")]
+    pub display_name: String,
     #[serde(default)]
     pub theme: Option<String>,
     #[serde(default, rename = "uploadImageTo")]
