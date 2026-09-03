@@ -589,7 +589,7 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
         // Past the newest snapshot is NOW — but only if NOW can be fetched.
         // See the Esc path: a failed reload keeps the snapshot, read-only.
         if reload_page(app, ctx) {
-            app.status.clear(); // the ⏪ position hint
+            app.status.clear(); // the history position hint
         }
     } else {
         show_snapshot(app, ctx, pos + 1);
