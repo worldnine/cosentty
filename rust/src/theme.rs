@@ -605,6 +605,110 @@ pub fn shimmer_level(pos: u16, len: u16, elapsed: f32) -> f32 {
     0.55 + 0.45 * intensity
 }
 
+/// `shimmer_level` turned sideways: the band runs ALONG one row, cell by
+/// cell, for a line that is one row tall (a `[URL]` whose picture is still
+/// coming). Same floor, same ceiling, so the two read as one signal.
+///
+/// The speed is NOT shared with the vertical case, and cannot be. Down a
+/// block the band travels a fixed number of ROWS per second, which suits
+/// three rows and thirty alike — each takes the sweep the time it needs.
+/// Along a row there is no such match: the notation is twenty to sixty cells
+/// wide, so six cells a second gives a ten-second sweep — longer than the
+/// download. The reader sees a still, dim line and calls the animation dead
+/// (measured: two or three cells of travel over a whole load, which is not
+/// motion). Here the SWEEP IS TIMED and the speed falls out of the width.
+pub fn shimmer_level_across(pos: u16, len: u16, elapsed: f32) -> f32 {
+    /// Seconds the band takes to cross the row, however wide it is.
+    const SWEEP: f32 = 1.2;
+    /// Seconds of quiet after it leaves, so a short row pulses rather than
+    /// strobes.
+    const TAIL: f32 = 0.5;
+    /// Cells the band fades out over on each side. Wider than the vertical
+    /// band's, because this one travels so much faster.
+    const HALF_WIDTH: f32 = 3.0;
+
+    // The band travels its own width beyond both ends, so it is fully clear
+    // of the row at each end of the sweep: no half-band parked on the first
+    // cell while the line ought to look settled.
+    let travel = len.max(1) as f32 + 2.0 * HALF_WIDTH;
+    let t = elapsed.max(0.0).rem_euclid(SWEEP + TAIL);
+    if t > SWEEP {
+        return 0.55;
+    }
+    let head = (t / SWEEP) * travel - HALF_WIDTH;
+    let intensity = (1.0 - (head - pos as f32).abs() / HALF_WIDTH).max(0.0);
+    0.55 + 0.45 * intensity
+}
+
+/// The terminal's palette as RGB — the sixteen named colours, the 256-colour
+/// cube, and the greyscale ramp.
+///
+/// A reader's own theme may render `DarkGray` as anything, so this is a
+/// guess, and it replaces the theme's colour for the cells the band has not
+/// reached. That is the trade: the alternative was the DIM attribute, which
+/// is faithful to the palette and invisible on a row that is already dark —
+/// and some terminals do not implement faint at all. The guess is only ever
+/// asked one question, how much brighter than the terminal background, and
+/// the band's peak keeps the theme's own colour (full level returns the
+/// style untouched).
+pub fn palette_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Black => Some((0, 0, 0)),
+        Color::Red => Some((205, 0, 0)),
+        Color::Green => Some((0, 205, 0)),
+        Color::Yellow => Some((205, 205, 0)),
+        Color::Blue => Some((0, 0, 238)),
+        Color::Magenta => Some((205, 0, 205)),
+        Color::Cyan => Some((0, 205, 205)),
+        Color::Gray => Some((229, 229, 229)),
+        Color::DarkGray => Some((127, 127, 127)),
+        Color::LightRed => Some((255, 0, 0)),
+        Color::LightGreen => Some((0, 255, 0)),
+        Color::LightYellow => Some((255, 255, 0)),
+        Color::LightBlue => Some((92, 92, 255)),
+        Color::LightMagenta => Some((255, 0, 255)),
+        Color::LightCyan => Some((0, 255, 255)),
+        Color::White => Some((255, 255, 255)),
+        Color::Indexed(n) => {
+            if n < 16 {
+                // The base sixteen at the palette's own values: index 8 is
+                // the dim grey, which is not `Color::DarkGray`'s story.
+                return Some(match n {
+                    0 => (0, 0, 0),
+                    1 => (128, 0, 0),
+                    2 => (0, 128, 0),
+                    3 => (128, 128, 0),
+                    4 => (0, 0, 128),
+                    5 => (128, 0, 128),
+                    6 => (0, 128, 128),
+                    7 => (192, 192, 192),
+                    8 => (128, 128, 128),
+                    9 => (255, 0, 0),
+                    10 => (0, 255, 0),
+                    11 => (255, 255, 0),
+                    12 => (0, 0, 255),
+                    13 => (255, 0, 255),
+                    14 => (0, 255, 255),
+                    _ => (255, 255, 255),
+                });
+            }
+            if n < 232 {
+                let v = n - 16;
+                let ch = |i: u8| -> u8 { if i == 0 { 0 } else { 55 + i * 40 } };
+                Some((ch(v / 36), ch((v / 6) % 6), ch(v % 6)))
+            } else {
+                // 232..=255: the greyscale ramp.
+                let g = 8 + (n - 232) * 10;
+                Some((g, g, g))
+            }
+        }
+        // `Reset`: the terminal's own default foreground, which is whatever
+        // the reader's theme says. Nothing to mix.
+        Color::Reset => None,
+    }
+}
+
 /// A barely-there wash marking a `code:` block as one surface.
 ///
 /// Derived from the TERMINAL background, not from the syntax theme: this
@@ -689,30 +793,31 @@ pub fn toast_bg(terminal_bg: (u8, u8, u8)) -> Color {
     }
 }
 
-/// Apply `shimmer_level` to one span's style: an RGB foreground is mixed
-/// toward the terminal background, which is the only way to modulate
-/// brightness without inventing a color the theme never chose.
+/// Apply `shimmer_level` to one span's style: the foreground is mixed toward
+/// the terminal background, which is the only way to modulate brightness
+/// without inventing a color the theme never chose.
 ///
-/// A named or indexed color has no components to mix, so it falls back to
-/// the DIM attribute — coarser, but the same signal. (In the viewer, code
-/// rows are syntax-highlighted and therefore RGB.)
+/// A named or indexed colour has no components of its own, so it goes
+/// through `palette_rgb` first. The alternative was the DIM attribute, and
+/// DIM turned out not to be a signal at all: a row already drawn in
+/// `DarkGray` (a waiting `[URL]`) dimmed by `DIM` is the same colour it was,
+/// so the band ran along it and nothing moved.
 pub fn shimmer_style(base: Style, terminal_bg: (u8, u8, u8), level: f32) -> Style {
     if level >= 0.995 {
         return base;
     }
-    match base.fg {
-        Some(Color::Rgb(r, g, b)) => {
-            let mix = |fg: u8, bg: u8| -> u8 {
-                (bg as f32 + (fg as f32 - bg as f32) * level).round().clamp(0.0, 255.0) as u8
-            };
-            base.fg(Color::Rgb(
-                mix(r, terminal_bg.0),
-                mix(g, terminal_bg.1),
-                mix(b, terminal_bg.2),
-            ))
-        }
-        _ if level < 0.75 => base.add_modifier(Modifier::DIM),
-        _ => base,
+    let mix = |fg: (u8, u8, u8)| -> Color {
+        let f = |a: u8, b: u8| -> u8 {
+            (b as f32 + (a as f32 - b as f32) * level).round().clamp(0.0, 255.0) as u8
+        };
+        Color::Rgb(f(fg.0, terminal_bg.0), f(fg.1, terminal_bg.1), f(fg.2, terminal_bg.2))
+    };
+    match base.fg.and_then(palette_rgb) {
+        Some(fg) => base.fg(mix(fg)),
+        // No foreground to work on at all: the coarse fallback is still
+        // better than silence.
+        None if level < 0.75 => base.add_modifier(Modifier::DIM),
+        None => base,
     }
 }
 
@@ -993,14 +1098,71 @@ mod shimmer_tests {
     }
 
     #[test]
-    fn a_named_color_falls_back_to_the_dim_attribute() {
+    fn a_named_color_is_mixed_through_the_palette() {
+        // The band that reads a loading picture's `[URL]` has a DarkGray
+        // foreground — a palette entry, not an RGB triple. Mixing it through
+        // the palette's grey is the whole reason that band became visible.
         let base = Style::default().fg(Color::DarkGray);
         assert_eq!(shimmer_style(base, (0, 0, 0), 1.0), base, "untouched at full");
-        assert!(!shimmer_style(base, (0, 0, 0), 0.9).add_modifier.contains(Modifier::DIM));
-        assert!(shimmer_style(base, (0, 0, 0), 0.55).add_modifier.contains(Modifier::DIM));
-        // A span with no foreground at all is still safe to pass through.
+        assert_eq!(
+            shimmer_style(base, (0, 0, 0), 0.55).fg,
+            Some(Color::Rgb(70, 70, 70)),
+            "the floor is a fifth of the way to a black terminal, not the same grey"
+        );
+        // The signal is a colour change, not the DIM attribute: grey dimmed
+        // by DIM on a dark terminal is the same grey the band just left.
+        assert!(!shimmer_style(base, (0, 0, 0), 0.55).add_modifier.contains(Modifier::DIM));
+        // A span with no foreground at all still gets the coarse fallback.
         assert!(shimmer_style(Style::default(), (0, 0, 0), 0.55)
             .add_modifier
             .contains(Modifier::DIM));
+        assert_eq!(shimmer_style(Style::default(), (0, 0, 0), 1.0), Style::default());
+    }
+
+    #[test]
+    fn the_sweep_along_a_row_is_timed_not_counted() {
+        // Half a second in, the band is halfway along ANY row — which is the
+        // point: at six cells a second a 48-cell `[URL]` never finished a
+        // sweep inside the download.
+        assert!(shimmer_level_across(24, 48, 0.6) > 0.99, "mid-sweep on a long row");
+        assert!(shimmer_level_across(6, 12, 0.6) > 0.99, "…and the same moment on a short one");
+        assert!(shimmer_level_across(47, 48, 0.6) < 0.6, "the far end of a long row waits");
+        // Fully clear of the row at both ends of the sweep.
+        assert_eq!(shimmer_level_across(0, 48, 0.0), 0.55);
+        assert_eq!(shimmer_level_across(47, 48, 1.2), 0.55);
+        // Quiet after it leaves, then back to the start.
+        assert_eq!(shimmer_level_across(0, 48, 1.5), 0.55);
+        assert!(
+            (shimmer_level_across(6, 48, 1.9) - shimmer_level_across(6, 48, 0.2)).abs() < 1e-4,
+            "the sweep repeats: one and two thirds of a second is the same phase as a fifth"
+        );
+        // Same floor and ceiling as the vertical band, so the two are one
+        // signal, and a degenerate row cannot divide by zero.
+        for len in [0u16, 1, 2, 60] {
+            for step in 0..120 {
+                for pos in 0..len.max(1) {
+                    let v = shimmer_level_across(pos, len, step as f32 / 40.0);
+                    assert!((0.55..=1.0).contains(&v), "len={len} pos={pos} -> {v}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_palette_answer_is_monotone_in_lightness() {
+        // Only the ordering matters to `shimmer_style`: a darker name must
+        // not resolve brighter than a lighter one, or the band inverts.
+        let lum = |c: Color| palette_rgb(c).map(|(r, g, b)| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32);
+        for (dark, light) in [
+            (Color::Black, Color::DarkGray),
+            (Color::DarkGray, Color::Gray),
+            (Color::Gray, Color::White),
+        ] {
+            assert!(lum(dark).unwrap() < lum(light).unwrap(), "{dark:?} vs {light:?}");
+        }
+        assert_eq!(palette_rgb(Color::Reset), None, "the terminal's own default: nothing to mix");
+        assert_eq!(palette_rgb(Color::Indexed(232)), Some((8, 8, 8)), "the grey ramp");
+        assert_eq!(palette_rgb(Color::Indexed(196)), Some((255, 0, 0)), "the 6x6x6 cube");
+        assert_eq!(palette_rgb(Color::Rgb(1, 2, 3)), Some((1, 2, 3)));
     }
 }
