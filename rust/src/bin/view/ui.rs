@@ -1177,6 +1177,19 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 }
             })
         };
+        // …and its band runs the whole width of the frame, frame columns
+        // included: the block cuts straight across the page. What belongs
+        // on top — the `▌` comment marks, the caret, the scrollbar thumb —
+        // is painted after the rows and lands over it.
+        let band_across = |f: &mut Frame, y: u16| {
+            let buf = f.buffer_mut();
+            for x in body.x..body.x + body.width {
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    c.set_symbol(" ");
+                    c.set_style(Style::default().bg(CARD_BG));
+                }
+            }
+        };
 
         match row {
             Row::Line { line, src, start, hang } => {
@@ -1226,11 +1239,13 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             }
             Row::Card { line } => {
                 if let Some(r) = bar_row(screen_y) {
+                    band_across(f, r.y);
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                 }
             }
             Row::Composer { line, caret } => {
                 if let Some(r) = bar_row(screen_y) {
+                    band_across(f, r.y);
                     f.render_widget(Paragraph::new(line.clone()).style(base), r);
                     if let Some(col) = caret {
                         // The hardware cursor marks the insertion point:

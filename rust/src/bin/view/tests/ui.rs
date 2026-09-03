@@ -949,3 +949,31 @@ use super::support::*;
         assert_eq!(rows.len(), 11);
         assert!(!plain(&rows[0]).contains("あと"));
     }
+
+    /// コメントの帯は枠の左端から右端まで、罫線の列も含めて突っ切る。
+    /// 左端の `▌` とスクロールバーのサムは帯の上に乗る。
+    #[test]
+    fn the_comment_band_cuts_across_the_whole_frame() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "one", "two"]);
+        app.cursor = 1;
+        let c = app.make_comment("note".into()).unwrap();
+        app.comments.push(c);
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer();
+        // カードの最初の行(バッジ行)は src 1 の行の次。
+        let (_, last) = app.src_rows(1).unwrap();
+        let y = app.text_rect.y + last as u16 + 1 - app.scroll;
+        let right = app.text_rect.x + app.text_rect.width + 1; // 右の枠列
+        assert_eq!(buf.cell((0, y)).unwrap().bg, CARD_BG, "left frame column is band");
+        assert_eq!(buf.cell((right, y)).unwrap().bg, CARD_BG, "right frame column is band");
+        assert_eq!(buf.cell((right, y)).unwrap().symbol(), " ", "the rule is covered");
+        // 帯の2行目(本文)にも枠列まで帯。
+        assert_eq!(buf.cell((0, y + 1)).unwrap().bg, CARD_BG);
+        // コメントの行(src 1)自身の左端は黄の `▌` のまま(帯はカード行だけ)。
+        let (first, _) = app.src_rows(1).unwrap();
+        let ly = app.text_rect.y + first as u16 - app.scroll;
+        assert_eq!(buf.cell((0, ly)).unwrap().symbol(), COMMENT_BAR);
+    }
