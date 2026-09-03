@@ -17,9 +17,10 @@
 //!
 //! - **silent** — the screen already answers: a page opened (the header
 //!   changed), a mode switched (the footer badge), a selection dropped.
-//! - **note** (`App::note`) — a quiet line in the footer's hint slot for a
-//!   few seconds: "copied", "✓ line 3", "top of page", "nothing to undo".
-//!   The reader who wonders finds it; nobody else is interrupted.
+//! - **note** (`App::note`) — a quiet line that overlays the footer's hint
+//!   slot for a few seconds, keys and status stepping aside: "copied",
+//!   "✓ line 3", "top of page", "nothing to undo". The reader who wonders
+//!   finds it; nobody else is interrupted.
 //! - **toast** (yellow) — must be read: "not here, do this instead", and
 //!   changes the reader did not make (someone else edited the page).
 //! - **toast_err** (red) — something failed. Lives twice as long.
@@ -87,16 +88,6 @@ impl App {
         }
         self.note = None;
         true
-    }
-
-    /// Append the note to a footer text that is showing something else
-    /// (keys, a standing status), so a boundary ("top of page") is still
-    /// said while a selection hint holds the slot.
-    pub(crate) fn with_note(&self, base: String) -> String {
-        match self.note.as_ref() {
-            Some((n, _)) if !n.is_empty() => format!("{base} · {n}"),
-            _ => base,
-        }
     }
 
     /// Say that something happened. Replaces whatever toast is showing.

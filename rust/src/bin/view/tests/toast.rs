@@ -114,17 +114,17 @@ use super::support::*;
         assert!(!row_text(&term, 10).contains("本文にありません"));
     }
 
-    /// 薄い段(note)は status を押しのけず、その後ろに乗る。キーヒントしか
-    /// 無いときはヒントの場所を借り、数秒で返す。索引のフッターでも同じ。
+    /// 薄い段(note)はヒント欄を数秒だけ丸ごと置き換える。キーも status も
+    /// 脇に退き、期限が来たら戻る。status 自体は消えない。索引のフッターでも同じ。
     #[test]
-    fn a_note_rides_behind_the_status_and_gives_the_hint_slot_back() {
+    fn a_note_overlays_the_hint_slot_and_gives_it_back() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
         let mut app = page(&["title", "one"]);
         app.note("ページの先頭です");
         assert_eq!(app.hint_body(&[]), "ページの先頭です", "alone, it takes the hint slot");
         app.status = "選択中 — j/k で広げる".into();
-        assert_eq!(app.hint_body(&[]), "選択中 — j/k で広げる · ページの先頭です");
+        assert_eq!(app.hint_body(&[]), "ページの先頭です", "the status steps aside, not beside");
         assert!(app.toast_text().is_empty(), "never a banner");
 
         assert!(!app.expire_note(), "still fresh");
@@ -143,6 +143,45 @@ use super::support::*;
             .collect::<String>()
             .replace(' ', "");
         assert!(footer.contains("本文にありません"), "{footer:?}");
+    }
+
+    /// バナーは帯の最終行に乗る。カーソル行は読者が見ている場所なので、
+    /// トーストが出ている間はその下に入らないよう、視界を1行ずらす。
+    #[test]
+    fn the_cursor_line_is_never_under_the_toast() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let mut app = page(&refs);
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        // ホイールでカーソル行を帯の最終行(トーストの行)まで送る。
+        app.cursor = 20;
+        app.follow = false;
+        let toast_row = 10u16;
+        let text_y = app.text_rect.y;
+        // カーソル行 20 が画面の toast_row に来る scroll。
+        app.scroll = (20 + text_y - toast_row) as u16;
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let row_of = |term: &Terminal<TestBackend>, needle: &str| -> Option<u16> {
+            let buf = term.backend().buffer();
+            (0..buf.area.height).find(|&y| {
+                let s: String = (0..buf.area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect();
+                s.contains(needle)
+            })
+        };
+        assert_eq!(row_of(&term, "line 20"), Some(toast_row), "without a toast the cursor may sit there");
+
+        app.toast("✓ copied");
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        assert_eq!(row_of(&term, "line 20"), Some(toast_row - 1), "one row up, clear of the banner");
+        assert!(row_of(&term, "✓ copied") == Some(toast_row));
+
+        // 消えたあとは元の自由に戻る(押し戻しはしない)。
+        app.dismiss_toast();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        assert_eq!(row_of(&term, "line 20"), Some(toast_row - 1), "nothing moves back on its own");
     }
 
     /// 失敗は見逃されてはいけないので、赤は黄の2倍残る。

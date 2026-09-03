@@ -894,6 +894,24 @@ impl App {
         }
     }
 
+    /// Keep the cursor's rows above `avoid_y` (the toast row) by scrolling
+    /// down as little as needed. `text_y` is the screen row of layout row
+    /// 0 at scroll 0. A cursor line taller than the band cannot be moved
+    /// clear and is left alone; so is a cursor already scrolled off-screen.
+    pub(crate) fn keep_cursor_above(&mut self, text_y: u16, avoid_y: u16, band_h: u16) {
+        let Some((_, last)) = self.cursor_rows() else { return };
+        let bottom = self.row_top(last) + self.rows[last].height(); // exclusive
+        if bottom <= self.scroll {
+            return; // above the viewport: not under anything
+        }
+        let last_y = text_y as i32 + (bottom - 1) as i32 - self.scroll as i32;
+        if last_y < avoid_y as i32 {
+            return;
+        }
+        let need = (last_y - avoid_y as i32 + 1) as u16;
+        self.scroll = self.scroll.saturating_add(need).min(self.max_scroll(band_h));
+    }
+
     /// Wheel scroll: move the viewport by `delta` height units and leave
     /// the cursor at its absolute line — scrolling back finds it where it
     /// was (akapen's `wheel_scroll`).

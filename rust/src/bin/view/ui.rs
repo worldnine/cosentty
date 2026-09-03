@@ -832,6 +832,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         app.follow_cursor(band_h);
         app.follow = false;
     }
+    // A toast floats on the band's last row. The cursor line is what the
+    // reader is looking at, so it never sits under the banner: while one
+    // is up, the viewport is nudged so the cursor's rows end above it.
+    if app.toast.is_some() {
+        app.keep_cursor_above(text.y, band_bot as u16, band_h);
+    }
 
     // EDIT の行またぎ文字選択の両端。キャレット行は自分の行の反転を
     // session 描画(caret_sel_bytes)が行うので、ここではそれ以外の行 —
@@ -1742,6 +1748,14 @@ impl App {
     }
 
     pub(crate) fn hint_body(&self, cursor_links: &[LinkItem]) -> String {
+        // The quiet level overlays the slot: for its few seconds the note
+        // is the whole hint — the keys and the standing status step aside
+        // rather than crowd it, and come back when it expires. The one
+        // exception is the ^g prefix: its next key is consumed whatever it
+        // is, so the reader must see what it accepts.
+        if let (Some((msg, _)), false) = (self.note.as_ref(), self.outline_prefix) {
+            return msg.clone();
+        }
         // The move mode says its own name and its own keys, in words: the
         // grabbed block is highlighted, but a highlight is a colour and a
         // colour alone must not be what tells the reader where they are.
@@ -1750,10 +1764,10 @@ impl App {
                 "MOVE — j/k 1行 · J/K 兄弟 · h/l 字下げ · Esc 確定",
                 "MOVE — j/k line · J/K sibling · h/l indent · Esc commit"
             );
-            return self.with_note(match self.status.is_empty() {
+            return match self.status.is_empty() {
                 true => keys,
                 false => format!("{keys} · {}", self.status),
-            });
+            };
         }
         if self.outline_prefix {
             return t!(
@@ -1768,10 +1782,10 @@ impl App {
             );
             // An upload's progress arrives while the keys are being typed;
             // it rides along behind the hint as MOVE's does.
-            return self.with_note(match self.status.is_empty() {
+            return match self.status.is_empty() {
                 true => keys,
                 false => format!("{keys} · {}", self.status),
-            });
+            };
         }
         if !cursor_links.is_empty() {
             let listed: Vec<String> = cursor_links
@@ -1788,14 +1802,10 @@ impl App {
                     format!("{}:{}{mark}", i + 1, l.label())
                 })
                 .collect();
-            return self.with_note(t!("Enter/f で開く → {}", "Enter/f open → {}", listed.join("  ")));
+            return t!("Enter/f で開く → {}", "Enter/f open → {}", listed.join("  "));
         }
         if !self.status.is_empty() {
-            return self.with_note(self.status.clone());
-        }
-        // The quiet level takes the key list's place for its few seconds.
-        if let Some((msg, _)) = self.note.as_ref() {
-            return msg.clone();
+            return self.status.clone();
         }
         if self.editable {
             t!("j/k 移動  Enter リンク  e 編集  o 行追加  u 取り消し  w ブラウザ  ? ヘルプ  q 終了", "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit")

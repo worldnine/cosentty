@@ -12,8 +12,8 @@ use super::support::*;
         app.note_web_failure("diagram: Chrome が見つかりません（ソースを表示します）".into());
         assert_eq!(
             app.hint_text(&[]),
-            "コミットに失敗しました: line 4 — 500 · diagram: Chrome が見つかりません（ソースを表示します）",
-            "the status leads; the note rides behind it",
+            "diagram: Chrome が見つかりません（ソースを表示します）",
+            "the note overlays the slot for its seconds; the status is kept underneath",
         );
         // When the note times out it takes only itself with it.
         let (msg, _) = app.note.clone().unwrap();
@@ -26,8 +26,11 @@ use super::support::*;
         app.note_web_failure("diagram: ブラウザがタイムアウトしました（ソースを表示します）".into());
         app.status.clear();
         assert!(app.hint_text(&[]).contains("ブラウザがタイムアウト"));
-        // The edit session and cursor links still outrank both.
+        // The note overlays even the cursor links' prompt for its seconds;
+        // they are back once it expires.
         let links = vec![LinkItem::Page("Somewhere".into())];
+        assert!(app.hint_text(&links).contains("ブラウザがタイムアウト"));
+        app.note = None;
         assert!(app.hint_text(&links).contains("Enter/f で開く"));
     }
 
