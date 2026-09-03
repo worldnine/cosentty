@@ -5,6 +5,48 @@
 
 use serde::Deserialize;
 use std::error::Error;
+use std::time::Duration;
+
+/// `send()` that takes "429 Too Many Requests" as the instruction it is:
+/// wait — for `Retry-After` when the server names a time, a doubling
+/// second or so otherwise — and ask again, a few times. The site rates
+/// everything under one roof, so a burst of picture fetches can leave the
+/// next page list refused; the reader should see the page a moment later,
+/// not an error. Any other status comes back as it is.
+pub trait SendPolite {
+    fn send_polite(self) -> reqwest::Result<reqwest::blocking::Response>;
+}
+
+/// How long to wait before attempt `attempt` (1-based) after a 429, given
+/// the `Retry-After` header if any: the header's seconds, capped so a
+/// misconfigured server cannot park the viewer; else 1s, 2s, 4s….
+pub fn retry_backoff(retry_after: Option<&str>, attempt: u32) -> Duration {
+    const CAP: u64 = 15;
+    match retry_after.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(secs) => Duration::from_secs(secs.clamp(1, CAP)),
+        None => Duration::from_secs((1u64 << attempt.saturating_sub(1)).min(CAP)),
+    }
+}
+
+const POLITE_ATTEMPTS: u32 = 4;
+
+impl SendPolite for reqwest::blocking::RequestBuilder {
+    fn send_polite(self) -> reqwest::Result<reqwest::blocking::Response> {
+        let mut req = self;
+        for attempt in 1..=POLITE_ATTEMPTS {
+            // A body that cannot be cloned (a stream) can only be sent once.
+            let Some(again) = req.try_clone() else { return req.send() };
+            let res = req.send()?;
+            if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == POLITE_ATTEMPTS {
+                return Ok(res);
+            }
+            let after = res.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(str::to_string);
+            std::thread::sleep(retry_backoff(after.as_deref(), attempt));
+            req = again;
+        }
+        unreachable!("the loop returns on its last attempt")
+    }
+}
 
 /// One way to authenticate a request, and the header that carries it.
 /// PAT / Service Account are what `cosense login` stores; the sid cookie
@@ -509,7 +551,7 @@ impl Client {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send()?;
+        let res = req.send_polite()?;
         if !res.status().is_success() {
             return Err(format!("HTTP {} for {}", res.status(), url).into());
         }
@@ -602,7 +644,7 @@ impl Client {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send()?;
+        let res = req.send_polite()?;
         if res.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(RelatedPages::default());
         }
@@ -640,7 +682,7 @@ impl Client {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send()?;
+        let res = req.send_polite()?;
         if res.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(false);
         }
@@ -676,7 +718,7 @@ impl Client {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send()?;
+        let res = req.send_polite()?;
         if !res.status().is_success() {
             return Err(format!("HTTP {} for {}", res.status(), url).into());
         }
@@ -729,11 +771,11 @@ impl Client {
             req = req.header(name, value);
             authenticated = true;
         }
-        let mut res = req.send()?;
+        let mut res = req.send_polite()?;
         // A stale sid must not hide a public project's appearance: retry the
         // public endpoint without credentials before falling back in the UI.
         if !res.status().is_success() && authenticated {
-            res = self.http.get(&url).header("Accept", "application/json").send()?;
+            res = self.http.get(&url).header("Accept", "application/json").send_polite()?;
         }
         if !res.status().is_success() {
             return Err(format!("HTTP {} for {}", res.status(), url).into());
@@ -782,7 +824,7 @@ impl Client {
             .json(&serde_json::json!({
                 "md5": md5, "size": bytes.len(), "contentType": content_type, "name": name,
             }))
-            .send()?;
+            .send_polite()?;
         if !res.status().is_success() {
             return Err(format!("HTTP {} for upload-request", res.status()).into());
         }
@@ -798,7 +840,7 @@ impl Client {
             .put(&signed)
             .header("Content-Type", content_type)
             .body(bytes.to_vec())
-            .send()?;
+            .send_polite()?;
         if !put.status().is_success() {
             let hint = if put.status().as_u16() == 403 { " (retrying a little later often works)" } else { "" };
             return Err(format!("HTTP {} for signed PUT{hint}", put.status()).into());
@@ -806,7 +848,7 @@ impl Client {
         let url = format!("{}/gcs/{project_id}/verify", self.cfg.base());
         let res = auth(self.http.post(&url))
             .json(&serde_json::json!({ "md5": md5, "fileId": file_id }))
-            .send()?;
+            .send_polite()?;
         if !res.status().is_success() {
             return Err(format!("HTTP {} for verify", res.status()).into());
         }
@@ -832,7 +874,7 @@ impl Client {
             .http
             .get(&url)
             .header("Accept", "application/json")
-            .send()
+            .send_polite()
             .ok()
             .map(|r| r.status().as_u16());
         crate::capability::Visibility::from_anonymous_status(status)
@@ -849,7 +891,7 @@ impl Client {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send()?;
+        let res = req.send_polite()?;
         if !res.status().is_success() {
             return Err(format!("HTTP {} for {}", res.status(), url).into());
         }
@@ -986,7 +1028,7 @@ impl Client {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send().map_err(|e| EditError::Other(e.to_string()))?;
+        let res = req.send_polite().map_err(|e| EditError::Other(e.to_string()))?;
         let status = res.status();
         let text = res.text().map_err(|e| EditError::Other(e.to_string()))?;
         if status.is_success() {
@@ -1118,4 +1160,18 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_429_waits_for_retry_after_or_doubles() {
+        assert_eq!(retry_backoff(Some("3"), 1), Duration::from_secs(3));
+        assert_eq!(retry_backoff(Some("999"), 1), Duration::from_secs(15), "capped");
+        assert_eq!(retry_backoff(Some("Wed, 21 Oct 2015 07:28:00 GMT"), 2), Duration::from_secs(2), "a date is not parsed: fall back");
+        assert_eq!(retry_backoff(None, 1), Duration::from_secs(1));
+        assert_eq!(retry_backoff(None, 3), Duration::from_secs(4));
+    }
 }

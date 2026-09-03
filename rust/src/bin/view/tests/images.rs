@@ -149,3 +149,25 @@ use super::support::*;
             "sliced image paints the reclaimed top row",
         );
     }
+
+    /// The download gate lets `IMAGE_PARALLEL` through and holds the rest
+    /// until a slot comes back.
+    #[test]
+    fn the_image_gate_counts_slots_and_gives_them_back() {
+        let gate = Slots::new(2);
+        let a = gate.acquire();
+        let b = gate.acquire();
+        assert_eq!(gate.in_use(), 2);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _c = gate.acquire();
+                tx.send(()).unwrap();
+            });
+            assert!(rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "third waits");
+            drop(a);
+            assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "…until a slot frees");
+        });
+        drop(b);
+        assert_eq!(gate.in_use(), 0);
+    }

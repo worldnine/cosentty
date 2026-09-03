@@ -26,6 +26,47 @@ pub(crate) fn diagram_max_cols(text_w: u16) -> u16 {
     text_w.min(IMAGE_MAX_COLS).max(1)
 }
 
+/// How many pictures download at once. See `start_image_loads`.
+pub(crate) const IMAGE_PARALLEL: usize = 4;
+
+/// A counting gate for the download threads: `acquire` waits for a slot
+/// and hands back a guard that returns it. Std has no semaphore; this is
+/// the twenty lines of one.
+pub(crate) struct Slots {
+    used: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
+    cap: usize,
+}
+
+pub(crate) struct Slot<'a>(&'a Slots);
+
+impl Slots {
+    pub(crate) const fn new(cap: usize) -> Self {
+        Slots { used: std::sync::Mutex::new(0), freed: std::sync::Condvar::new(), cap }
+    }
+    pub(crate) fn acquire(&self) -> Slot<'_> {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        while *used >= self.cap {
+            used = self.freed.wait(used).unwrap_or_else(|e| e.into_inner());
+        }
+        *used += 1;
+        Slot(self)
+    }
+    pub(crate) fn in_use(&self) -> usize {
+        *self.used.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut used = self.0.used.lock().unwrap_or_else(|e| e.into_inner());
+        *used -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+pub(crate) static IMAGE_SLOTS: Slots = Slots::new(IMAGE_PARALLEL);
+
 /// Rows a not-yet-decoded picture takes in a MIXED line (`inline_row`),
 /// so the text beside it does not jump when it lands. A picture on a line
 /// of its own reserves nothing: it shows as its `[URL]` row until it
@@ -191,6 +232,11 @@ impl App {
             let fetcher = Arc::clone(&ctx.fetcher);
             let picker = ctx.picker.clone();
             std::thread::spawn(move || {
+                // A page of thirty pictures is thirty requests; fired at
+                // once they get the whole site rate-limited (429 on the
+                // next page list, measured). A few at a time is as fast as
+                // the network lets them be anyway.
+                let _slot = IMAGE_SLOTS.acquire();
                 // download → decode → resize → protocol-encode, all here
                 let res = fetcher
                     .fetch(&url)

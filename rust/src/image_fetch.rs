@@ -6,7 +6,7 @@
 //! Scrapbox /files/ URLs are downloaded directly, authenticated with the
 //! user credential (PAT / sid cookie) when one is configured.
 
-use crate::api::Credential;
+use crate::api::{Credential, SendPolite};
 use image::DynamicImage;
 use std::error::Error;
 use std::path::PathBuf;
@@ -115,7 +115,7 @@ impl ImageFetcher {
             .http
             .get(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .send()?
+            .send_polite()?
             .error_for_status()?;
         let v: serde_json::Value = res.json()?;
         v.get("url")
@@ -127,13 +127,13 @@ impl ImageFetcher {
     /// Gyazo's oEmbed endpoint: `{"url": "https://i.gyazo.com/<id>.jpg", …}`.
     fn gyazo_oembed_url(&self, page_url: &str) -> Result<String, Box<dyn Error>> {
         let url = format!("https://api.gyazo.com/api/oembed?url={page_url}");
-        let res = self.http.get(&url).send()?.error_for_status()?;
+        let res = self.http.get(&url).send_polite()?.error_for_status()?;
         let v: serde_json::Value = res.json()?;
         oembed_image_url(&v).ok_or_else(|| "no url in gyazo oembed response".into())
     }
 
     fn og_image(&self, page_url: &str) -> Result<String, Box<dyn Error>> {
-        let html = self.http.get(page_url).send()?.error_for_status()?.text()?;
+        let html = self.http.get(page_url).send_polite()?.error_for_status()?.text()?;
         og_image_from_html(&html).ok_or_else(|| "og:image not found".into())
     }
 
@@ -154,7 +154,7 @@ impl ImageFetcher {
                 req = req.header(name, value);
             }
         }
-        let res = req.send()?.error_for_status()?;
+        let res = req.send_polite()?.error_for_status()?;
         Ok(res.bytes()?.to_vec())
     }
 }
