@@ -564,7 +564,13 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
             app.toast(t!("すでに最新です", "already at NOW"));
             return;
         }
-        match ctx.client.list_snapshots(&app.project, &app.page_id) {
+        // The list fetched with the page is used as it stands; only when
+        // it is not known (yet) does ← ask the server itself.
+        let listed = match app.snapshots.clone() {
+            Some(points) => Ok(points),
+            None => ctx.client.list_snapshots(&app.project, &app.page_id),
+        };
+        match listed {
             Ok(points) if !points.is_empty() => {
                 let last = points.len() - 1;
                 app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
@@ -640,9 +646,10 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.follow = true;
     app.start_image_loads(ctx);
     app.time.as_mut().unwrap().pos = idx;
+    // NOW is the last position, as on the header: three snapshots make 4.
     app.status = t!("履歴 {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新", "history {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
         idx + 1,
-        len,
+        len + 1,
         cosense::theme::format_local(created),
         relative_age(created),
     );

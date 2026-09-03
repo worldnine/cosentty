@@ -442,6 +442,13 @@ pub(crate) struct App {
     pub(crate) uploads_on: bool,
     pub(crate) related_tx: mpsc::Sender<RelatedMsg>,
     pub(crate) related_rx: mpsc::Receiver<RelatedMsg>,
+    /// The page's snapshot stamps (oldest → newest), fetched in the
+    /// background with the related block so the header can count NOW as
+    /// `N+1/N+1` before the reader ever presses ←. `None` = not known yet
+    /// (or the fetch failed; ← then asks again itself).
+    pub(crate) snapshots: Option<Vec<cosense::api::SnapshotStamp>>,
+    pub(crate) snapshots_tx: mpsc::Sender<SnapshotsMsg>,
+    pub(crate) snapshots_rx: mpsc::Receiver<SnapshotsMsg>,
     /// Flattened related entries in render order. Entry `i` renders with
     /// the VIRTUAL source index `lines.len() + i`, so the cursor, Enter and
     /// mouse clicks address related rows exactly like body lines.
@@ -524,6 +531,7 @@ impl App {
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         let (link_probe_res_tx, link_probe_rx) = mpsc::channel();
         let (related_tx, related_rx) = mpsc::channel();
+        let (snapshots_tx, snapshots_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -650,6 +658,9 @@ impl App {
             uploads_on: false,
             related_tx,
             related_rx,
+            snapshots: None,
+            snapshots_tx,
+            snapshots_rx,
             virtual_items: Vec::new(),
             light: false,
         }

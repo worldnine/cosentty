@@ -591,6 +591,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         }
         // The related-pages block came back: sections below the page, and
         // the page's own word on which of its links are live.
+        app.drain_snapshots(); // header count; the next draw picks it up
         if app.drain_related() {
             rerender(app, ctx);
             app.laid_width = 0; // related rows joined the layout

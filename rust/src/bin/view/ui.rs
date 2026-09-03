@@ -668,16 +668,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let name = if app.project_display.is_empty() { app.project.as_str() } else { app.project_display.as_str() };
     let left = format!(" {name} / {}", app.title);
     let mut badges: Vec<String> = Vec::new();
+    // The position counts NOW as the newest entry: `4/4` while reading the
+    // live page with three snapshots, and ← walks the number down.
     let stamp = app.shown_updated();
-    match app.time.as_ref() {
-        Some(tm) => badges.push(format!(
-            "{}/{} · {}",
-            tm.pos + 1,
-            tm.points.len(),
-            cosense::theme::format_local(stamp)
-        )),
-        None if stamp > 0 => badges.push(cosense::theme::format_local(stamp)),
-        None => {}
+    let date = if stamp > 0 { cosense::theme::format_local(stamp) } else { String::new() };
+    match (app.history_position(), date.is_empty()) {
+        (Some((pos, total)), false) => badges.push(format!("{pos}/{total} · {date}")),
+        (Some((pos, total)), true) => badges.push(format!("{pos}/{total}")),
+        (None, false) => badges.push(date),
+        (None, true) => {}
     }
     if app.web_unsynced {
         badges.push(ts!("未同期", "unsynced").to_string());

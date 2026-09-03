@@ -750,7 +750,11 @@ use super::support::*;
         };
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let now_stamp = cosense::theme::format_local(1_700_000_060).replace(' ', "");
-        assert!(header(&term).ends_with(&now_stamp), "{:?}", header(&term));
+        assert!(header(&term).ends_with(&now_stamp), "no list yet: the date alone: {:?}", header(&term));
+        // 快照一覧が届くと NOW が最後の位置として数えられる: 3件なら 4/4。
+        app.snapshots = Some((0..3).map(|i| cosense::api::SnapshotStamp { id: format!("s{i}"), created: i }).collect());
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        assert!(header(&term).ends_with(&format!("4/4·{now_stamp}")), "{:?}", header(&term));
         let live_bg = term.backend().buffer().cell((0, 0)).unwrap().style().bg;
         assert_eq!(live_bg, Some(app.header_colors.bg));
 
@@ -758,7 +762,7 @@ use super::support::*;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let h = header(&term);
         let old_stamp = cosense::theme::format_local(1).replace(' ', "");
-        assert!(h.ends_with(&format!("1/1·{old_stamp}")), "the same slot, now position then the snapshot's stamp: {h:?}");
+        assert!(h.ends_with(&format!("1/2·{old_stamp}")), "one snapshot + NOW = 2; the oldest is 1: {h:?}");
         assert!(!h.contains('⏪'), "no emoji arrows");
         let (_, purple) = cosense::theme::history_header_colors(ctx.terminal_bg);
         let buf = term.backend().buffer();

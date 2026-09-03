@@ -67,6 +67,8 @@ pub(crate) fn sort_related(pages: &mut [&cosense::api::RelatedPage], sort: cosen
 /// the block itself — `None` when the request failed, which still has to
 /// come back so the page stops waiting on it.
 pub(crate) type RelatedMsg = (String, String, Option<cosense::api::RelatedPages>);
+/// `(project, page id, stamps)` — `None` when the list could not be fetched.
+pub(crate) type SnapshotsMsg = (String, String, Option<Vec<cosense::api::SnapshotStamp>>);
 
 /// The page-level facts the related-pages block has to be read against.
 ///
@@ -789,6 +791,49 @@ impl App {
         self.start_image_loads(ctx);
         self.start_web_renders(capability::Trigger::Auto);
         self.start_related_load(ctx);
+        self.start_snapshots_load(ctx);
+    }
+
+    /// Fetch the snapshot list in the background (same gate and reason as
+    /// the related block: nothing on screen waits for it). The header shows
+    /// `N+1/N+1` once it lands; until then, the date alone.
+    pub(crate) fn start_snapshots_load(&mut self, ctx: &Ctx) {
+        self.snapshots = None;
+        if !self.related_fetch || self.page_id.is_empty() {
+            return; // tests, or a page that does not exist yet
+        }
+        let tx = self.snapshots_tx.clone();
+        let client = ctx.client.clone();
+        let (project, page_id) = (self.project.clone(), self.page_id.clone());
+        std::thread::spawn(move || {
+            let stamps = client.list_snapshots(&project, &page_id).ok();
+            let _ = tx.send((project, page_id, stamps));
+        });
+    }
+
+    /// Install a snapshot list that arrived. `true` = the header changed.
+    pub(crate) fn drain_snapshots(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((project, page_id, stamps)) = self.snapshots_rx.try_recv() {
+            if project != self.project || page_id != self.page_id {
+                continue; // for a page the reader has left
+            }
+            if let Some(stamps) = stamps {
+                self.snapshots = Some(stamps);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Where the shown page stands in its history, counting NOW as the last
+    /// position: `(position, total)` — `4/4` for the live page with three
+    /// snapshots, `3/4` one step back. `None` until the list is known.
+    pub(crate) fn history_position(&self) -> Option<(usize, usize)> {
+        match self.time.as_ref() {
+            Some(tm) => Some((tm.pos + 1, tm.points.len() + 1)),
+            None => self.snapshots.as_ref().map(|s| (s.len() + 1, s.len() + 1)),
+        }
     }
 
     /// Go and get this page's related-pages block, which the v2 body does
