@@ -216,14 +216,23 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 app.ime_guard = None; // back to ASCII for command mode
                 app.status.clear(); // the composer's key hint goes with it
             }
+            // A line break: Shift+Enter (where the terminal can tell it
+            // from Enter — the kitty keyboard protocol, requested at
+            // startup), Alt+Enter (ESC CR, which classic terminals send),
+            // or ^j (akapen's key, works everywhere). Enter alone saves.
+            (KeyCode::Enter, _)
+                if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                if let Some(c) = app.composing.as_mut() {
+                    c.insert_char('\n');
+                }
+            }
             (KeyCode::Enter, _) => {
                 let input = app.composing.take().unwrap();
                 app.ime_guard = None; // back to ASCII for command mode
                 finish_composer(app, input);
             }
-            // ^j puts a line break in the comment (Enter is taken by
-            // "save"; akapen uses the same key). ↑/↓ move between the
-            // lines of the draft, keeping the column.
+            // ↑/↓ move between the lines of the draft, keeping the column.
             (KeyCode::Char('j'), true) => {
                 if let Some(c) = app.composing.as_mut() {
                     c.insert_char('\n');
@@ -532,9 +541,9 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             app.laid_width = 0; // the bar opens under the range
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
             app.status = if editing {
-                t!("コメントを編集 · Enter 置き換え · ^j 改行 · Esc 取消", "edit comment · Enter replace · ^j newline · Esc cancel")
+                t!("コメントを編集 · Enter 置き換え · S-Enter/^j 改行 · Esc 取消", "edit comment · Enter replace · S-Enter/^j newline · Esc cancel")
             } else {
-                t!("コメントを入力 · Enter 保存 · ^j 改行 · Esc 取消", "type comment · Enter save · ^j newline · Esc cancel")
+                t!("コメントを入力 · Enter 保存 · S-Enter/^j 改行 · Esc 取消", "type comment · Enter save · S-Enter/^j newline · Esc cancel")
             };
         }
         (KeyCode::Char('s'), false) => send_comments(app, ctx),

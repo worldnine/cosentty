@@ -442,6 +442,11 @@ KEYMAP の「認証」節に「sid が必要なのは ws push と mmd 描画だ�
     入力欄を閉じたら status のキー案内も消す(残っていた)。テスト:
     `the_composer_takes_line_breaks_with_ctrl_j`、`a_tall_draft_shows_a_window_around_the_caret`、
     `the_composer_wraps_around_line_breaks_too`
+  - **Shift+Enter で改行**(同日): 古い端末には Enter と同じバイトなので、起動時に
+    `supports_keyboard_enhancement` を確かめ、話せる端末には kitty keyboard protocol
+    の DISAMBIGUATE を要求(終了時に Pop)。Shift+Enter / Alt+Enter(ESC CR)/ `^j` の
+    どれでも改行、Enter だけが保存。herdr の端末が話すかは未確認——話さなければ
+    Shift+Enter は Enter(保存)になるので、その場合は Alt+Enter か `^j`
   - **左端の帯**(同日): コメントの付いた行は左フレーム列に黄の `▌`、入力中の範囲は
     シアンの `▌`。キャレット `>` より後に描くので重なれば帯が勝つ(ユーザー指示
     「キャレットとかぶっていい」)。`commented_lines_wear_a_yellow_bar_in_the_frame_column`

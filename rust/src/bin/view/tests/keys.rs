@@ -495,6 +495,15 @@ use super::support::*;
             handle_key(&mut app, &ctx, key(KeyCode::Char(ch)));
         }
         assert_eq!(app.composing.as_ref().unwrap().buf, "ab\ncde");
+        // Shift+Enter と Alt+Enter も改行(保存しない)。
+        let shift_enter = event::KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let alt_enter = event::KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        handle_key(&mut app, &ctx, shift_enter);
+        handle_key(&mut app, &ctx, alt_enter);
+        assert_eq!(app.composing.as_ref().unwrap().buf, "ab\ncde\n\n");
+        assert!(app.comments.is_empty(), "a modified Enter never saves");
+        handle_key(&mut app, &ctx, key(KeyCode::Backspace));
+        handle_key(&mut app, &ctx, key(KeyCode::Backspace));
         // ↑ は前の行の同じ桁(3桁目は無いので行末)、↓ で戻る。
         handle_key(&mut app, &ctx, key(KeyCode::Up));
         assert_eq!(app.composing.as_ref().unwrap().cur, 2);

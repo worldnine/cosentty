@@ -63,7 +63,8 @@ use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_parts};
 
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
@@ -195,6 +196,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // mouse reporting only loses that, so it is not fatal. Bracketed paste
     // lets the composer take multi-line pastes as ONE event.
     let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // Shift+Enter is the same byte as Enter to a classic terminal. Where
+    // the terminal speaks the kitty keyboard protocol (kitty, WezTerm,
+    // Ghostty, iTerm2, Alacritty, …), ask it to disambiguate so the
+    // composer can take Shift+Enter as a line break. Elsewhere the
+    // request is not sent and `^j` / Alt+Enter remain the way.
+    let keyboard_enhanced =
+        matches!(ratatui::crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    if keyboard_enhanced {
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     // Compile the macOS IME helper in the background so the first composer
     // open never blocks on swiftc.
     cosense::ime::start_background_build();
@@ -413,6 +427,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   3. `Stop` ends the worker loop, and the join makes "no browser and
     //      no worker outlive this process" a fact rather than a hope.
     web_backend.shutdown();
+    if keyboard_enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         std::io::stdout(),
         SetCursorStyle::DefaultUserShape,

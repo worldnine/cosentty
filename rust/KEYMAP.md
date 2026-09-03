@@ -43,7 +43,7 @@ akapen と同じ Swift ヘルパ（Carbon TIS、アクセシビリティ権限�
 入力欄は readline 風の行内編集に対応：`←`/`→`（`^b`/`^f`）カーソル移動 · `^a`/`^e` 行頭/行末 ·
 `^w` 直前の語を削除 · `^u` 行頭まで削除 · `Del`/`^d` カーソル位置を削除。
 日本語の文を途中から直せる（全消しして打ち直さない）。
-コメント欄は**複数行**にできる：`^j` で改行（Enter は保存。akapen と同じ）、`↑`/`↓`（`^p`/`^n`）で
+コメント欄は**複数行**にできる：`Shift+Enter`（端末が kitty keyboard protocol を話すとき——kitty · WezTerm · Ghostty · iTerm2 · Alacritty 等。起動時に `supports_keyboard_enhancement` で確かめて DISAMBIGUATE を要求する）、`Alt+Enter`（ESC CR。古い端末でも届く）、`^j`（akapen の鍵。どこでも効く）のどれでも改行。Enter は保存。`↑`/`↓`（`^p`/`^n`）で
 行の間を桁を保って移動、`^a`/`^e` はその行の頭と末尾。
 
 ## 認証
