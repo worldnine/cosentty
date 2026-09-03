@@ -729,7 +729,8 @@ use super::support::*;
         let h = header(&term).replace(' ', "");
         assert!(h.ends_with("未同期·読み取り専用"), "{h:?}");
         assert_eq!(header_line("a", "b ", 6), "a   b ", "right flush when it fits");
-        assert_eq!(header_line("abcd", "xy ", 6), "abcd  xy ", "otherwise they follow; the widget clips");
+        assert_eq!(header_line("abcd", "xy ", 6), "a… xy ", "otherwise the left is cut: the badges win");
+        assert_eq!(header_line("日本語のタイトル", "3/12 ", 12), "日本…  3/12 ", "cut on a character boundary; the badges keep their place");
     }
 
     /// ヘッダ右端の日時は「いま見ているページが書かれた時」。NOW では最新行の
@@ -757,7 +758,7 @@ use super::support::*;
         term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let h = header(&term);
         let old_stamp = cosense::theme::format_local(1).replace(' ', "");
-        assert!(h.ends_with(&format!("{old_stamp}·1/1")), "the same slot, now the snapshot's: {h:?}");
+        assert!(h.ends_with(&format!("1/1·{old_stamp}")), "the same slot, now position then the snapshot's stamp: {h:?}");
         assert!(!h.contains('⏪'), "no emoji arrows");
         let (_, purple) = cosense::theme::history_header_colors(ctx.terminal_bg);
         let buf = term.backend().buffer();

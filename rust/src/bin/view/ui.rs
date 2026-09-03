@@ -671,10 +671,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let stamp = app.shown_updated();
     match app.time.as_ref() {
         Some(tm) => badges.push(format!(
-            "{} · {}/{}",
-            cosense::theme::format_local(stamp),
+            "{}/{} · {}",
             tm.pos + 1,
-            tm.points.len()
+            tm.points.len(),
+            cosense::theme::format_local(stamp)
         )),
         None if stamp > 0 => badges.push(cosense::theme::format_local(stamp)),
         None => {}
@@ -2306,15 +2306,16 @@ impl App {
 }
 
 /// One header row: `left` at the left edge, `right` flush with the right
-/// edge when both fit; otherwise the two simply follow each other and the
-/// row is clipped by the widget (the title is what the reader came for, so
-/// it is never the part that gives way).
+/// edge. When both do not fit, the RIGHT side wins: the states (history
+/// position, date, unsynced, read-only) are what the header is for, while
+/// the name and title are also on the page itself — so the left is cut to
+/// `…` for whatever room remains.
 pub(crate) fn header_line(left: &str, right: &str, width: u16) -> String {
     use unicode_width::UnicodeWidthStr;
-    let lw = UnicodeWidthStr::width(left);
+    let width = width as usize;
     let rw = UnicodeWidthStr::width(right);
-    match (width as usize).checked_sub(lw + rw) {
-        Some(pad) if pad >= 2 || right.is_empty() => format!("{left}{}{right}", " ".repeat(pad)),
-        _ => format!("{left}  {right}"),
-    }
+    let room = width.saturating_sub(rw + 1); // one blank before the badges
+    let left = if UnicodeWidthStr::width(left) > room { truncate_width(left, room) } else { left.to_string() };
+    let pad = width.saturating_sub(UnicodeWidthStr::width(left.as_str()) + rw);
+    format!("{left}{}{right}", " ".repeat(pad))
 }
