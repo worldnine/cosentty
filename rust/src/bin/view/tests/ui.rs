@@ -988,3 +988,43 @@ use super::support::*;
         assert!(app.rows.iter().any(|r| matches!(r, Row::Aside { .. })), "the section heading is an aside");
         assert!(!app.rows.iter().any(|r| matches!(r, Row::Card { .. })), "and no comment card is woven");
     }
+
+    /// 選択中はソフトキャレット(セル反転)を描かない。キャレットは選択の端
+    /// にいるので、その外側の文字を反転させると選択が1文字広く見える——
+    /// `Garry` を選んで直後が全角の `・` だと、その2セルの箱まで反転して
+    /// `Garry・` を選んだように見えた(2026-09-04 実測)。
+    #[test]
+    fn the_soft_caret_stays_out_of_a_selections_way() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let raw = "Aleksej・Garry・Jeffrey";
+        let mut app = page(&["title", raw]);
+        app.rebuild(60);
+        app.cursor = 1;
+        handle_key(&mut app, &ctx, key(KeyCode::Char('i')));
+        let g = raw.find("Garry").unwrap();
+        {
+            let s = app.session.as_mut().unwrap();
+            s.input.cur = g;
+            s.sel_from = Some((1, g));
+            s.input.cur = g + "Garry".len();
+        }
+        let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer();
+        let (first, _) = app.src_rows(1).unwrap();
+        let y = app.text_rect.y + first as u16;
+        let rev = |x: u16| buf.cell((x, y)).unwrap().style().add_modifier.contains(Modifier::REVERSED);
+        let gx = app.text_rect.x + str_width("Aleksej・") as u16;
+        for k in 0..5 {
+            assert!(rev(gx + k), "Garry's cell {k} is reversed");
+        }
+        assert!(!rev(gx - 1), "the ・ before is not");
+        assert!(!rev(gx + 5), "the ・ after — the caret's cell — is not reversed while selecting");
+        assert!(!rev(gx + 6));
+        // 選択を外せばソフトキャレットは戻る。
+        app.session.as_mut().unwrap().sel_from = None;
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer();
+        assert!(buf.cell((gx + 5, y)).unwrap().style().add_modifier.contains(Modifier::REVERSED), "no selection: the caret cell is painted again");
+    }

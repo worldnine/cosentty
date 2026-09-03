@@ -1489,9 +1489,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 f.set_cursor_position(ratatui::layout::Position::new(x as u16, y as u16));
                 // ソフト描画のキャレット: 同じセルの REVERSED をトグルする。
                 // ハードウェアカーソルの形状変更(点滅バー)に応えない端末
-                // でもキャレットが見えるように、常に併走させる。選択の
-                // REVERSED の中では反転が外れて「素」に戻り、そこでも際立つ。
-                if let Some(c) = f.buffer_mut().cell_mut((x as u16, y as u16)) {
+                // でもキャレットが見えるように、常に併走させる。
+                //
+                // ただし選択があるあいだは描かない。キャレットは常に選択の
+                // 端にいるので、その外側の文字のセルを反転させると選択が
+                // 1文字広く見える(`Garry` を選ぶと直後の全角 `・` の箱まで
+                // 反転して `Garry・` に見えた)。選択の端がキャレットの位置
+                // そのものだし、点滅バーもそこにある。
+                let selecting = s.sel_ends().is_some();
+                if let (false, Some(c)) = (selecting, f.buffer_mut().cell_mut((x as u16, y as u16))) {
                     let st = c.style();
                     let st = if st.add_modifier.contains(Modifier::REVERSED) {
                         st.remove_modifier(Modifier::REVERSED)
