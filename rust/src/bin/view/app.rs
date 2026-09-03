@@ -28,7 +28,9 @@ pub(crate) enum Row {
         indent: usize,
         item: bool,
         images: Vec<(u16, u16, String)>,
-        texts: Vec<(u16, u16, Line<'static>)>,
+        /// `(row, col, piece)`: the piece knows which part of the block
+        /// and which column of that part it shows, for the click path.
+        texts: Vec<(u16, u16, TextPiece)>,
     },
     /// An image still downloading in the background: one row showing the
     /// notation as written, `[URL]`, with the same brightness band a

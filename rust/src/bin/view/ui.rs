@@ -1117,12 +1117,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 }
                 // Text first: a picture paints its own cells over the top,
                 // and nothing here may write into them.
-                for (row_off, col, line) in texts {
+                for (row_off, col, piece) in texts {
                     if let Some(r) = one_row(screen_y + *row_off as i32) {
                         let w = r.width.saturating_sub(*col);
                         if w > 0 {
                             f.render_widget(
-                                Paragraph::new(line.clone()).style(base),
+                                Paragraph::new(piece.line.clone()).style(base),
                                 Rect::new(r.x + *col, r.y, w, 1),
                             );
                         }
@@ -1348,6 +1348,18 @@ pub(crate) struct Placed<T> {
     pub(crate) what: T,
 }
 
+/// One row's worth of one text part, and where in the UNWRAPPED part it
+/// begins — what turns a clicked cell back into a span of the renderer's
+/// line (see `App::link_at_screen_position`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextPiece {
+    /// Index into the `items` given to `layout_inline`.
+    pub(crate) part: usize,
+    /// Display column of the part's text this piece starts at.
+    pub(crate) start: usize,
+    pub(crate) line: Line<'static>,
+}
+
 /// A line laid out the way a browser lays out inline images: items run
 /// left to right, and each picture sits ON the text line — its BOTTOM
 /// edge level with the text, growing upwards — so the words before and
@@ -1361,10 +1373,10 @@ pub(crate) fn layout_inline(
     items: &[Inline],
     indent: usize,
     width: usize,
-) -> (Vec<Placed<String>>, Vec<Placed<Line<'static>>>, u16) {
+) -> (Vec<Placed<String>>, Vec<Placed<TextPiece>>, u16) {
     let body = width.saturating_sub(indent).max(1);
     let mut images: Vec<Placed<String>> = Vec::new();
-    let mut texts: Vec<Placed<Line<'static>>> = Vec::new();
+    let mut texts: Vec<Placed<TextPiece>> = Vec::new();
     // The box being filled: its top row, how tall it is so far, how far
     // along it we are, and what has been put in it (positions are relative
     // to the box, resolved against its height when it is flushed).
@@ -1372,7 +1384,7 @@ pub(crate) fn layout_inline(
     let mut box_h = 1u16;
     let mut x = 0usize;
     let mut pending_img: Vec<(u16, u16, u16, String)> = Vec::new(); // (col, w, h, url)
-    let mut pending_txt: Vec<(u16, Line<'static>)> = Vec::new(); // (col, text)
+    let mut pending_txt: Vec<(u16, TextPiece)> = Vec::new(); // (col, text)
 
     // Close the current box: pictures sit on the text line, so each one is
     // placed so its LAST row is the box's last row.
@@ -1382,11 +1394,11 @@ pub(crate) fn layout_inline(
                 let row = top + box_h - h;
                 images.push(Placed { row, col: col + indent as u16, what: url });
             }
-            for (col, line) in pending_txt.drain(..) {
+            for (col, piece) in pending_txt.drain(..) {
                 texts.push(Placed {
                     row: top + box_h - 1,
                     col: col + indent as u16,
-                    what: line,
+                    what: piece,
                 });
             }
             top += box_h;
@@ -1395,7 +1407,7 @@ pub(crate) fn layout_inline(
         };
     }
 
-    for item in items {
+    for (part, item) in items.iter().enumerate() {
         match item {
             Inline::Image { url, w, h } => {
                 let w = (*w).min(body as u16);
@@ -1408,6 +1420,9 @@ pub(crate) fn layout_inline(
             }
             Inline::Text(line) => {
                 let mut rest = line.clone();
+                // How far into the part's text the next piece begins. The
+                // wrap drops nothing, so the widths of the pieces add up.
+                let mut start = 0usize;
                 loop {
                     let room = body.saturating_sub(x);
                     // Too little room to say anything: start a new box.
@@ -1420,7 +1435,8 @@ pub(crate) fn layout_inline(
                     let used = str_width(
                         &first.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
                     );
-                    pending_txt.push((x as u16, first));
+                    pending_txt.push((x as u16, TextPiece { part, start, line: first }));
+                    start += used;
                     x += used;
                     let tail: Vec<Span<'static>> =
                         pieces.flat_map(|l| l.spans.into_iter()).collect();
@@ -2257,20 +2273,7 @@ impl App {
         // `screen_row == 0` is the normal content anchor one row below the
         // top rule. Once scrolled, `-1` is valid: content reclaims the screen
         // row where that rule used to be.
-        let want = self.scroll as i32 + screen_row;
-        if want < 0 {
-            return None;
-        }
-        let want = want as u32;
-        let mut y = 0u32;
-        for row in &self.rows {
-            let h = row.height() as u32;
-            if want < y + h {
-                return Some(row);
-            }
-            y += h;
-        }
-        None
+        self.row_and_offset_at_screen_row(screen_row).map(|(row, _)| row)
     }
 
     /// The source line rendered at `screen_row`; `None` on a card row or
@@ -2290,6 +2293,40 @@ impl App {
             .filter(|i| matches!(self.blocks.get(*i), Some(Block::Text(_))))?;
         let Some(Block::Text(line)) = self.blocks.get(i) else { return None };
         Some((line, self.hits.get(i).map(|v| v.as_slice()).unwrap_or(&[])))
+    }
+
+    /// The parts of a mixed text-and-picture line and what can be followed
+    /// on it. `Hit::span` counts the spans of the TEXT parts in order.
+    pub(crate) fn inline_block_at(
+        &self,
+        src: usize,
+    ) -> Option<(&[cosense::render::InlinePart], &[cosense::render::Hit])> {
+        let i = self
+            .srcs
+            .iter()
+            .position(|s| *s == src)
+            .filter(|i| matches!(self.blocks.get(*i), Some(Block::Inline { .. })))?;
+        let Some(Block::Inline { parts, .. }) = self.blocks.get(i) else { return None };
+        Some((parts, self.hits.get(i).map(|v| v.as_slice()).unwrap_or(&[])))
+    }
+
+    /// `row_at_screen_row`, plus how many rows into that row the screen
+    /// row is — a picture row is several rows tall.
+    pub(crate) fn row_and_offset_at_screen_row(&self, screen_row: i32) -> Option<(&Row, u16)> {
+        let want = self.scroll as i32 + screen_row;
+        if want < 0 {
+            return None;
+        }
+        let want = want as u32;
+        let mut y = 0u32;
+        for row in &self.rows {
+            let h = row.height() as u32;
+            if want < y + h {
+                return Some((row, (want - y) as u16));
+            }
+            y += h;
+        }
+        None
     }
 
     /// Y offset (in height units) of row index `i` from the top.

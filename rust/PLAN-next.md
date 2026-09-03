@@ -287,8 +287,17 @@ akapen/src/effects.rs の toast_effect):
     (`a_fetched_list_is_reused_by_an_order_switch_while_young`)
   - 依存: なし。本文検索(`/`→`?`)は毎回叩くまま(問いが毎回違うので)
 
-- Block::Inline(画像と文字が混ざった行)のリンククリック: レンダラが Hit を
-  捨てているので拾えない。ピースごとの座標を持たせれば直る(改善案 P4 の残り)
+- **済(2026-09-03)** Block::Inline(画像と文字が混ざった行)のリンククリック。
+  レンダラが Hit を捨てていたのを、テキスト部品を通したスパン番号で残す
+  (`Hit::span` の約束を追記)。レイアウト(`layout_inline`)は文字の片ごとに
+  `TextPiece { part, start }` を持ち、`App::inline_link_at` が押されたセルを
+  部品の折り返し前の列 → スパン → Hit と逆引きする
+  - 現在の動作: 混ざった行のリンクをクリックしても何も起きない(Enter は効く)
+  - 期待する動作: 通常の行と同じくクリックで開く。画像の上の段や画像の上では何もしない
+  - 再現手順: `本文 [リンク] [画像URL] 後 [Docs https://…]` の行で各リンクをクリック
+  - 完了条件: `links_on_a_line_of_text_and_pictures_are_mouse_hit_targets`、
+    `a_mixed_text_and_picture_line_keeps_its_hits_across_its_text_parts`
+  - 依存: なし
 - ヘルプ画面のモード別再構成(READ / EDIT / 一覧 / オーバーレイ)
 
 ## 将来メモ(今はやらない)

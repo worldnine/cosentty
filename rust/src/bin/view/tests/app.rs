@@ -1909,3 +1909,44 @@ use super::support::*;
         c.at = Instant::now() - INDEX_CACHE_SECS - Duration::from_secs(1);
         assert!(app.cached_list("proj", SortKey::Updated).is_none(), "stale entry is a miss");
     }
+
+    /// 画像と文字が混ざった行のリンクも押せる。レイアウトが各テキスト片に
+    /// 「どの部品の何列目から」を持ち、レンダラの Hit(テキスト部品を通した
+    /// スパン番号)へ逆引きする。画像の右に続く文字も、折り返して下の箱に
+    /// 落ちた文字も同じ道。
+    #[test]
+    fn links_on_a_line_of_text_and_pictures_are_mouse_hit_targets() {
+        let mut app = page(&[
+            "t",
+            "see [Target] [https://example.com/a.png] then [Docs https://example.com]",
+        ]);
+        // 画像は未着(24×8 のプレースホルダ)。行は8行の高さで、文字は
+        // 最下段(row 7)に画像の左右へ置かれる: `see Target ` は col 0..、
+        // ` then Docs` は col 11+24=35 から。
+        app.rebuild(80);
+        let Some(Row::Inline { height, texts, .. }) = app.rows.get(1) else {
+            panic!("expected an inline row, got {:?}", app.rows.get(1).map(Row::height))
+        };
+        assert_eq!(*height, 8);
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        let last = (*height - 1) as i32;
+        // 左の片の中のリンク。
+        assert_eq!(
+            app.link_at_screen_position(1 + last, 5),
+            Some((1, LinkItem::Page("Target".into())))
+        );
+        // 画像の右の片の中のリンク(2つ目のテキスト部品なので Hit のスパン
+        // 番号は1つ目の分だけ先へずれている)。
+        let docs_col = 35 + " then ".len() + 1;
+        assert_eq!(
+            app.link_at_screen_position(1 + last, docs_col),
+            Some((
+                1,
+                LinkItem::Url { label: "Docs".into(), url: "https://example.com".into() }
+            ))
+        );
+        // 文字の無い列・画像の上の段は何でもない。
+        assert_eq!(app.link_at_screen_position(1 + last, 1), None, "plain text");
+        assert_eq!(app.link_at_screen_position(1 + last, 20), None, "the picture");
+        assert_eq!(app.link_at_screen_position(1, 5), None, "a row above the text line");
+    }

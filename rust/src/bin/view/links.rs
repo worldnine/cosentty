@@ -901,7 +901,11 @@ impl App {
         if self.mode != Mode::View || self.session.is_some() {
             return None;
         }
-        let Row::Line { line, src, start, hang } = self.row_at_screen_row(screen_row)? else {
+        let (row, row_off) = self.row_and_offset_at_screen_row(screen_row)?;
+        if let Row::Inline { src, texts, .. } = row {
+            return self.inline_link_at(*src, texts, row_off, col);
+        }
+        let Row::Line { line, src, start, hang } = row else {
             return None;
         };
         // A related-page row (a virtual line below the page) has exactly
@@ -948,6 +952,56 @@ impl App {
             spans.get(h.span).is_some_and(|(from, w)| *from <= want && want < from + w)
         })?;
         self.item_for_hit(*src, &hit.target).map(|item| (*src, item))
+    }
+
+    /// The click path for a line of text and pictures. The layout said
+    /// which piece of which text part sits where (`TextPiece`); the
+    /// renderer's hits count the spans of the text parts in order. So:
+    /// find the piece under the cell, turn the cell into a column of that
+    /// part's unwrapped text, and find the span the column falls in.
+    fn inline_link_at(
+        &self,
+        src: usize,
+        texts: &[(u16, u16, TextPiece)],
+        row_off: u16,
+        col: usize,
+    ) -> Option<(usize, LinkItem)> {
+        use cosense::render::InlinePart;
+        let (parts, hits) = self.inline_block_at(src)?;
+        let piece_w = |l: &Line<'static>| -> usize {
+            l.spans.iter().map(|s| str_width(s.content.as_ref())).sum()
+        };
+        let (_, pcol, piece) = texts.iter().find(|(r, c, p)| {
+            *r == row_off && (*c as usize) <= col && col < *c as usize + piece_w(&p.line)
+        })?;
+        let want = piece.start + (col - *pcol as usize);
+        // Spans of the text parts before this one, which the hits of this
+        // part are shifted past.
+        let mut base = 0usize;
+        let mut full: Option<&Line<'static>> = None;
+        for (i, part) in parts.iter().enumerate() {
+            let InlinePart::Text(line) = part else { continue };
+            if i == piece.part {
+                full = Some(line);
+                break;
+            }
+            base += line.spans.len();
+        }
+        let full = full?;
+        let mut at = 0usize;
+        let mut spans = Vec::with_capacity(full.spans.len());
+        for sp in &full.spans {
+            let w = str_width(sp.content.as_ref());
+            spans.push((at, w));
+            at += w;
+        }
+        let hit = hits.iter().find(|h| {
+            h.span
+                .checked_sub(base)
+                .and_then(|i| spans.get(i))
+                .is_some_and(|(from, w)| *from <= want && want < from + w)
+        })?;
+        self.item_for_hit(src, &hit.target).map(|item| (src, item))
     }
 
     /// Turn what the renderer drew into what this viewer does with it: a

@@ -241,7 +241,10 @@ pub struct Extracted {
 /// cheaper and impossible to get out of step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
-    /// Index into the rendered line's `spans`.
+    /// Index into the rendered line's `spans`. For a [`Block::Inline`] the
+    /// line is the block's `InlinePart::Text` parts read in order, as if
+    /// their spans were one line (a picture part has no spans and adds
+    /// nothing to the count).
     pub span: usize,
     pub target: HitTarget,
 }
@@ -1016,6 +1019,9 @@ fn inline_parts(
         runs.push((text_from, body.len()));
         order.push(Err(runs.len() - 1));
     }
+    // Hits count spans across the text parts in order (see `Hit::span`),
+    // so a later part's hits are shifted past the spans before it.
+    let mut span_base = 0usize;
     for item in order {
         match item {
             Ok(url) => {
@@ -1024,8 +1030,12 @@ fn inline_parts(
             }
             Err(idx) => {
                 let (from, to) = runs[idx];
-                let spans = decorate_inline(&body[from..to], links, images, pal, known, hits);
+                let mut run_hits = Vec::new();
+                let spans =
+                    decorate_inline(&body[from..to], links, images, pal, known, &mut run_hits);
                 if !spans.is_empty() {
+                    merge_hits(hits, run_hits, span_base);
+                    span_base += spans.len();
                     parts.push(InlinePart::Text(Line::from(spans)));
                 }
             }
@@ -1279,13 +1289,12 @@ pub fn render_lines_with(
         // picture at all, because splitting the line also collects its
         // links — doing that speculatively would count them twice.
         if !line_images(body).is_empty() {
-            // The hits of a mixed text-and-picture line would be indices
-            // into its PIECES, which the viewer positions itself; they do
-            // not address the block's line. Dropped rather than filed
-            // wrongly — such a line is not clickable today either.
-            let mut inline_hits = Vec::new();
-            let parts =
-                inline_parts(body, &mut ex.links, &mut ex.images, pal, known, &mut inline_hits);
+            // The hits of a mixed text-and-picture line count the spans of
+            // its text parts in order (see `Hit::span`); the viewer lays the
+            // parts out itself and maps a clicked cell back to one of those
+            // spans (`App::link_at_screen_position`). No shift: the indent
+            // and bullet are drawn by the viewer, not carried as spans.
+            let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal, known, &mut hits);
             emit!(Block::Inline { indent: text_column(level), item: level > 0, parts });
             i += 1;
             continue;
@@ -2130,5 +2139,34 @@ mod tests {
         // Same for the single-bracket decoration form.
         let out = render("[* [改善案]]");
         assert_eq!(out.extracted.links, vec!["改善案".to_string()]);
+    }
+
+    /// A line of text and pictures used to lose its links: the hits went
+    /// into a vector nobody read. They now count the spans of the TEXT
+    /// parts in order, which is the one coordinate the viewer can map a
+    /// clicked cell back to (it lays the parts out itself).
+    #[test]
+    fn a_mixed_text_and_picture_line_keeps_its_hits_across_its_text_parts() {
+        let out = render_lines(&[
+            "title".into(),
+            "本文 [Target] [https://example.com/a.png] 後 [Docs https://example.com]".into(),
+        ]);
+        let Block::Inline { parts, .. } = &out.blocks[1] else { panic!("expected an inline block") };
+        let spans: Vec<String> = parts
+            .iter()
+            .flat_map(|p| match p {
+                InlinePart::Text(l) => l.spans.iter().map(|s| s.content.to_string()).collect(),
+                InlinePart::Image(_) => Vec::new(),
+            })
+            .collect();
+        let hits = &out.hits[1];
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(spans[hits[0].span], "Target");
+        assert_eq!(hits[0].target, HitTarget::Page("Target".into()));
+        assert_eq!(spans[hits[1].span], "Docs", "the second part's hit is shifted past the first part's spans");
+        assert_eq!(
+            hits[1].target,
+            HitTarget::Url { label: "Docs".into(), url: "https://example.com".into() }
+        );
     }
 }
