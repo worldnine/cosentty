@@ -12,9 +12,11 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 - 引数なしは `help-jp` の索引
 - 非公開プロジェクトの読み・書き・検索は `cosense login` の PAT / Service Account
   で完結する(`~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」)。
-  `COSENSE_SID` の connect.sid が要るのは **ws push 同期**と **web レンダラ(mmd)**、
-  それと**プロジェクト設定の読み取り**(テーマ、画像のアップロード先)だけで、
-  無ければ 3秒ポーリング・「非公開の図は描けない」・アップロード先 `gcs` に縮退する
+  `COSENSE_SID` の connect.sid が要るのは **ws push 同期**と**プロジェクト設定の
+  読み取り**(テーマ、画像のアップロード先)、それと**既定でオフの web レンダラ**
+  (`COSENSE_WEB_RENDER=manual|auto` で上げたときの非公開ページ描画)だけ。
+  無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
+  いなければ図はテキストかコードで出る)
 - 自前の設定ファイルは `~/.config/cosense-tui/config.toml`(画像のアップロード先の
   上書き。書き方は `rust/src/config.rs` 冒頭)。無くてよい
 - 主なフラグ: `--light`/`--dark`/`--theme`、`--preview`、`--ime jp|en`、`--lang`、`--download-dir`
@@ -25,7 +27,10 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 - lib(`cosense`): `api` `render` `wrap` `theme` `ws` `webrender` `chrome`
   `capability` `outline` `editops` `comment` `index`(一覧の状態・並び順・
   絞り込み/検索の一致) `highlight`(コードブロックの syntect。検索語の
-  ハイライトとは別物) ほか
+  ハイライトとは別物) `math`(数式の組図: `code:tex` ブロックとインライン
+  `[$ ... ]` の共通部) ほか
+- `code:mmd` / `code:tex` は**テキスト描画が本流**。`mmd_text`(viewer側の
+  アダプタ)と `NOTE-mmd-text.md` / `NOTE-math-text.md` を参照
 - viewer(`rust/src/bin/view/`): `main`(起動+イベントループ)/ `app`(状態)/
   `keys` / `mouse` / `session`(EDIT)/ `editing`(コミット・undo)/ `outline` /
   `sync`(ws・resync)/ `nav` / `links` / `images` / `web` / `ui`(描画)/
@@ -35,8 +40,8 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 ## ビルドとテスト
 
 ```bash
-cd rust && cargo test --bin view   # viewer(228 tests)
-cargo test                          # lib(163)含む全部
+cd rust && cargo test --bin view   # viewer(320 tests)
+cargo test                          # lib(197)含む全部
 ```
 
 - ツールチェーンは `rust/` の rustup override で 1.90.0。
@@ -57,6 +62,10 @@ cargo test                          # lib(163)含む全部
 - `rust/SPEC-edit-session.md` — EDIT セッションの仕様
 - `rust/NOTE-webrender-handoff.md` — web レンダラ(mmd 描画)MVP の詳細設計・
   調査記録(旧 HANDOFF.md の全文)
+- `rust/NOTE-mmd-text.md` — Mermaid のテキスト描画(本流。ブラウザ描画は
+  既定でオフ)
+- `rust/NOTE-math-text.md` — 数式のテキスト描画(`code:tex` とインライン
+  `[$ ... ]`)
 - `rust/NOTE-websocket-sync.md` / `NOTE-outline-editing.md` /
   `NOTE-edit-selection.md` — 各機能の設計メモ
 
