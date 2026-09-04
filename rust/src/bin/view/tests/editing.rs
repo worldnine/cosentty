@@ -32,7 +32,7 @@ use super::support::*;
         // given for a week. The next reader of the old text would be served
         // a picture of something else.
         let ctx = test_ctx();
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.render_policy = capability::RenderPolicy::Auto;
         app.rebuild(80);
         let key_a = app

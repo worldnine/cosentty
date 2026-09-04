@@ -528,7 +528,14 @@ impl App {
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
         for b in &self.blocks {
-            let Block::Artifact { kind, code, rows, last_src, .. } = b else { continue };
+            let Block::Artifact { kind, code, rows, last_src, indent } = b else { continue };
+            // The text tier is the mainline: what it can draw is already
+            // drawn, so nothing automatic goes looking for a picture of it.
+            // `R` still does — that key means "show me the browser's own
+            // version", and the reader who pressed it gets it.
+            if trigger == capability::Trigger::Auto && self.drawn_as_text(*kind, code, *indent) {
+                continue;
+            }
             // An open session does NOT hold up the rest of the page: only
             // the block under the caret waits, because that one line's
             // buffer has not been committed yet (every caret MOVE commits
@@ -586,6 +593,22 @@ impl App {
             return false;
         }
         queued
+    }
+
+    /// Does the text tier draw this block at the pane's current width? The
+    /// answer decides whether the browser is worth involving at all — and it
+    /// is width-dependent, because a drawing wider than the pane declines
+    /// and lets the picture through.
+    pub(crate) fn drawn_as_text(&self, kind: ArtifactKind, code: &str, indent: usize) -> bool {
+        let text_w = Self::text_width(self.mode, self.laid_width).saturating_sub(indent);
+        match kind {
+            ArtifactKind::Mermaid => {
+                self.mermaid_text && mmd_text::render_text(code, text_w).is_some()
+            }
+            ArtifactKind::Math => {
+                self.math_text && cosense::math::render_text(code, text_w).is_some()
+            }
+        }
     }
 
     /// The browser hit a login wall. This says something about the COOKIE,

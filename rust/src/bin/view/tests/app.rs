@@ -134,7 +134,7 @@ use super::support::*;
     // ---------------------------------------------------------------
     #[test]
     fn each_mermaid_block_is_requested_against_its_own_cosense_line_id() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.rebuild(80);
         app.start_web_renders(capability::Trigger::Auto);
         let rx = app.web_jobs_rx.take().unwrap();
@@ -199,7 +199,7 @@ use super::support::*;
 
     #[test]
     fn an_open_session_only_holds_back_the_block_under_the_caret() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.rebuild(80);
         let session_on = |app: &mut App, line: usize| {
             app.session = Some(EditSession {
@@ -343,7 +343,7 @@ use super::support::*;
     // ---------------------------------------------------------------
     #[test]
     fn by_default_opening_a_page_shows_cached_diagrams_and_starts_no_browser() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
         let backend = run_pass(&mut app, capability::Trigger::Auto);
@@ -363,7 +363,7 @@ use super::support::*;
 
     #[test]
     fn r_renders_the_artifacts_the_page_load_could_not() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
         let backend = run_pass(&mut app, capability::Trigger::Auto);
@@ -387,7 +387,7 @@ use super::support::*;
 
     #[test]
     fn auto_draws_on_load_and_off_draws_never() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.render_policy = capability::RenderPolicy::Auto;
         app.rebuild(80);
         app.start_web_renders(capability::Trigger::Auto);
@@ -408,7 +408,7 @@ use super::support::*;
 
     #[test]
     fn no_sid_on_a_public_project_renders_anonymously_and_leaves_rest_alone() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.editable = true;
         app.caps = capability::Capabilities {
             sid: false,
@@ -448,7 +448,7 @@ use super::support::*;
 
     #[test]
     fn unknown_visibility_waits_for_an_explicit_r() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.caps.sid = false;
         app.caps.visibility = capability::Visibility::Unknown;
         app.render_policy = capability::RenderPolicy::Auto;
@@ -477,7 +477,7 @@ use super::support::*;
     fn a_rendering_diagram_pulses_its_code_and_stops_when_it_lands() {
         use ratatui::{backend::TestBackend, Terminal};
         let ctx = test_ctx();
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.rebuild(80);
         app.start_web_renders(capability::Trigger::Auto);
         app.rebuild(80);

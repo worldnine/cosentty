@@ -110,7 +110,7 @@ use super::support::*;
     #[test]
     fn r_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
         let ctx = test_ctx();
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
         let keys = diagram_keys(&app);
@@ -185,7 +185,7 @@ use super::support::*;
 
     #[test]
     fn no_sid_on_a_private_project_serves_the_cache_and_never_launches_a_browser() {
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.editable = true; // a PAT / service account is reading this page
         app.caps = capability::Capabilities {
             sid: false,
@@ -460,7 +460,7 @@ use super::support::*;
     #[test]
     fn the_ui_thread_never_waits_for_the_browser() {
         let backend = Arc::new(cosense::webrender::FakeBackend::new());
-        let mut app = mermaid_page();
+        let mut app = web_tier_page();
         app.rebuild(80);
         let key = app
             .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)

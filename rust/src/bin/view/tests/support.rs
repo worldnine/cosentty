@@ -165,6 +165,19 @@ use crate::*;
         app
     }
 
+    /// The same page, seen by a reader whose text tier cannot draw it — an
+    /// unknown diagram type, a pane too narrow, `COSENSE_MERMAID=off`. This
+    /// is the fixture for the BROWSER tier: since the text tier became the
+    /// mainline, nothing automatic asks for a picture of a block the
+    /// terminal already drew, so a test about pictures has to be about the
+    /// blocks that need one.
+    pub(crate) fn web_tier_page() -> App {
+        let mut app = mermaid_page();
+        app.mermaid_text = false;
+        app.math_text = false;
+        app
+    }
+
     /// Wire a page to a worker and a fake backend, and run one pass.
     /// Returns the backend so the test can count what it was asked to do.
     pub(crate) fn run_pass(

@@ -229,6 +229,27 @@ fn a_diagram_dims_its_rules_and_leaves_its_words_alone() {
 }
 
 #[test]
+fn nothing_automatic_goes_looking_for_a_picture_of_a_drawn_block() {
+    // テキスト段が本流。端末で既に描けている図のために
+    // Chromeを起こすのは、このviewerで一番高い何もしない仕事。
+    let mut app = page(&["t", "code:mmd", " flowchart LR", "  A-->B"]);
+    app.page_id = "PAGE".into();
+    app.render_policy = capability::RenderPolicy::Auto;
+    app.rebuild(80);
+    assert!(!app.start_web_renders(capability::Trigger::Auto), "no job on load");
+    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "nothing queued");
+
+    // `R` は「ブラウザの本物を見せて」という意思なので、それは通る。
+    assert!(app.start_web_renders(capability::Trigger::Manual), "R asks anyway");
+
+    // 端末側で描けない図は、これまでどおり自動で取りに行く。
+    let mut app = web_tier_page();
+    app.render_policy = capability::RenderPolicy::Auto;
+    app.rebuild(80);
+    assert!(app.start_web_renders(capability::Trigger::Auto), "the browser is the answer here");
+}
+
+#[test]
 fn an_ascii_diagram_dims_nothing() {
     // `COSENSE_MERMAID=ascii` の罫線は `- | + > v`。ラベルにも出る字なので
     // 字では二層を見分けられない——だから何も薬めない。
