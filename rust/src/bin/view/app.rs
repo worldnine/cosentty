@@ -674,7 +674,7 @@ impl App {
             caps: capability::Capabilities::default(),
             render_policy: capability::RenderPolicy::from_env(),
             mermaid_text: !mmd_text::text_tier_off(),
-            math_text: !math_text::text_tier_off(),
+            math_text: !cosense::math::text_tier_off(),
             vis_rx,
             vis_tx,
             vis_asked: None,

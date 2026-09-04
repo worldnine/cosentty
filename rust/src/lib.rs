@@ -9,6 +9,7 @@ pub mod highlight;
 pub mod image_fetch;
 pub mod index;
 pub mod lang;
+pub mod math;
 pub mod ime;
 pub mod outline;
 pub mod render;

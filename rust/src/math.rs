@@ -1,15 +1,23 @@
-//! `code:tex` / `code:latex` のテキスト描画(NOTE-math-text.md)。
+//! 数式のテキスト描画(NOTE-math-text.md)。
 //!
-//! 描画本体は `term-maths`。こちらは入力の整形・非対応の見分け・
-//! 幅の見張りだけを持つ。mmd_text と同じ縮退の作法:
-//! テキスト段 → (mathにブラウザ段はない) → コード行。
+//! ブロック(`code:tex` / `code:latex`)とインライン(`[$ ... ]`)の
+//! 両方がここを通る。描画本体は `term-maths`。こちらは入力の整形・
+//! 非対応の見分け・幅の見張りだけを持つ。縮退の作法は mmd と同じ:
+//! テキスト段 → (math にブラウザ段はない) → ソース。
 
-use crate::session::str_width;
+/// Display width of a string in terminal columns.
+fn str_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(s)
+}
 
-/// `COSENSE_MATH=off`: 数式をテキストで組まず、コードブロックのまま見せる。
+/// `COSENSE_MATH=off`: 数式をテキストで組まず、書かれたまま見せる。
 /// 罫線・大括弧・数学記号を持たないフォントの逃げ道。
-pub(crate) fn text_tier_off() -> bool {
-    std::env::var("COSENSE_MATH").unwrap_or_default() == "off"
+pub fn text_tier_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // インラインは1行に何個でも出てくるので、描画のたびに
+    // 環境変数を引かない。途中で変わる値でもない。
+    *OFF.get_or_init(|| std::env::var("COSENSE_MATH").unwrap_or_default() == "off")
 }
 
 /// 行末の `\\` は「次の行がある」という記号なので、最後の行に付いていると
@@ -57,8 +65,8 @@ fn is_blank(code: &str) -> bool {
     code.lines().all(|l| l.trim().is_empty())
 }
 
-/// lib に描かせる。失敗・panic・幅超過・非対応は `None` で縮退せよ。
-pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
+/// ブロック数式を組む。失敗・panic・幅超過・非対応は `None` で縮退せよ。
+pub fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
     if is_blank(code) {
         return None;
     }
@@ -81,6 +89,31 @@ pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
         return None;
     }
     Some(lines)
+}
+
+/// インライン `[$ ... ]` を1行の文字列にする。分数のように**2行以上**に
+/// 組まれる式は受けない——行の高さが変わると折り返しも選択もカーソル列も
+/// 崩れるので、周りの本文と同じ行に置けるものだけを置く。受けなかった式は
+/// 呼び手が LaTeX のまま見せる。
+pub fn render_inline(latex: &str) -> Option<String> {
+    if text_tier_off() || latex.trim().is_empty() {
+        return None;
+    }
+    let src = trim_trailing_row_break(latex);
+    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        term_maths::render(&src).to_string()
+    }))
+    .ok()?;
+    if looks_unparsed(&rendered) {
+        return None;
+    }
+    let mut rows = rendered.lines();
+    let only = rows.next()?;
+    if rows.next().is_some() {
+        return None;
+    }
+    let only = only.trim();
+    (!only.is_empty()).then(|| only.to_string())
 }
 
 #[cfg(test)]

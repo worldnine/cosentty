@@ -2243,7 +2243,7 @@ impl App {
                                 mmd_text::render_text(code, text_w.saturating_sub(*indent))
                             }
                             ArtifactKind::Math => {
-                                math_text::render_text(code, text_w.saturating_sub(*indent))
+                                cosense::math::render_text(code, text_w.saturating_sub(*indent))
                             }
                         };
                         if let Some(lines) = drawn {

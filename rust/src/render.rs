@@ -498,6 +498,13 @@ fn style_url(pal: &Palette) -> Style {
     Style::default().fg(pal.url).add_modifier(Modifier::UNDERLINED)
 }
 
+/// An inline formula. It borrows the code colour — what is inside the
+/// brackets is not prose but notation — without the underline, which in
+/// this viewer means "you can press Enter here".
+fn style_formula(pal: &Palette) -> Style {
+    Style::default().fg(pal.code_fence)
+}
+
 /// Service subdomains of gyazo.com that are NOT Teams org names.
 const GYAZO_SERVICE_SUBS: [&str; 6] = ["i", "t", "thumb", "www", "api", "upload"];
 
@@ -865,6 +872,21 @@ fn decorate_bracket(
     // very thing it was about.
     if inner.trim().is_empty() {
         spans.push(Span::raw(format!("[{inner}]")));
+        return;
+    }
+    // formula: [$ E = mc^2 ]. Cosense's own notation, and the one bracket
+    // whose inside is NOT Cosense text — it is LaTeX, so no link, no
+    // decoration, no icon is read out of it.
+    if let Some(latex) = inner.strip_prefix('$') {
+        spans.push(match crate::math::render_inline(latex) {
+            Some(text) => Span::styled(text, style_formula(pal)),
+            // Two-row formulas (fractions, roots, sums) would change the
+            // height of a line the whole viewer measures in single rows.
+            // Until inline math gets its own multi-row treatment, the
+            // LaTeX itself is shown — it is what the writer typed, and it
+            // still reads as a formula.
+            None => Span::styled(latex.trim().to_string(), style_formula(pal)),
+        });
         return;
     }
     // decoration: [* text] [** text] [*/ text] [- strike] [_ underline]
@@ -1838,6 +1860,54 @@ mod tests {
         assert!((25..=29).all(|i| code_span_at(&refs, i).is_none()));
         let flags = code_line_flags(&refs);
         assert!((25..=29).all(|i| !flags[i]));
+    }
+
+    #[test]
+    fn an_inline_formula_is_set_in_the_line() {
+        let lines: Vec<String> = [
+            "title",
+            r"[$ E = mc^2 ]",
+            r"1行に複数も書ける: [$ 3 \times 2 ]は[$ 2 \times 3 ]と同じ",
+            r"数式内に]を含む場合: [$ [x-3]+a^2 ]",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let got: Vec<String> = render_lines(&lines).blocks.iter().map(plain).collect();
+        assert_eq!(
+            got,
+            vec![
+                "title",
+                "E = mc²",
+                "1行に複数も書ける: 3 × 2は2 × 3と同じ",
+                "数式内に]を含む場合: [x - 3] + a²",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inline_formula_is_not_a_page_link() {
+        // 括弧の中は Cosense の文ではなく LaTeX なので、リンクも
+        // 装飾もアイコンも読み取らない。
+        let lines =
+            vec!["title".to_string(), r"[$ E = mc^2 ]".to_string(), "[普通のリンク]".to_string()];
+        let out = render_lines(&lines);
+        assert_eq!(out.extracted.links, vec!["普通のリンク"], "{:?}", out.extracted.links);
+        assert!(
+            out.hits.iter().flatten().all(|h| {
+                !matches!(&h.target, HitTarget::Page(p) if p.contains('$'))
+            }),
+            "no followable target on a formula"
+        );
+    }
+
+    #[test]
+    fn a_two_row_inline_formula_shows_its_latex() {
+        // 分数・根号は行の高さを変えてしまうので、行の中には置けない。
+        // 書かれた LaTeX をそのまま見せる(括弧と `$` だけ落ちる)。
+        let lines = vec!["title".to_string(), r"解は[$ \frac{-b}{2a} ]だ".to_string()];
+        let got: Vec<String> = render_lines(&lines).blocks.iter().map(plain).collect();
+        assert_eq!(got, vec!["title", r"解は\frac{-b}{2a}だ"]);
     }
 
     #[test]
