@@ -5,15 +5,19 @@
 
 use crate::session::str_width;
 
-/// lib に任せる型。未知は縮退(画像 → コード行)。
-fn supported(code: &str) -> bool {
-    let first = code
-        .lines()
+/// 先頭の図型。判定とCJK補正で同じ値を使う。
+fn diagram_word(code: &str) -> &str {
+    code.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .unwrap_or("");
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap_or("")
+}
+
+/// lib に任せる型。未知は縮退(画像 → コード行)。
+fn supported(code: &str) -> bool {
     matches!(
-        first.split_whitespace().next().unwrap_or(""),
+        diagram_word(code),
         "flowchart"
             | "graph"
             | "sequenceDiagram"
@@ -52,15 +56,60 @@ pub(crate) fn ascii_mode() -> bool {
     std::env::var("COSENSE_MERMAID").unwrap_or_default() == "ascii"
 }
 
-/// lib に描かせる。失敗・幅超過は `None` で縮退せよ。
+/// lib の `Grid` は表示セルを `Vec<char>` で持つ。CJK文字は幅2として
+/// xを2進める一方、空けた2セル目もserializeしてしまうため、
+/// `開始` が `開 始` になり、右罫線も1文字ごとに1列ずれる。
+/// flowchart/sequence は全行がこのGrid由来なので、幅2文字の直後の
+/// continuation cellを落として本来の端末セル列へ戻す。
+fn remove_wide_continuation_cells(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    for chunk in rendered.split_inclusive('\n') {
+        let (line, newline) = match chunk.strip_suffix('\n') {
+            Some(line) => (line, true),
+            None => (chunk, false),
+        };
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            out.push(ch);
+            if unicode_width::UnicodeWidthChar::width(ch) == Some(2) {
+                // 行末ではcontinuation cellがtrim済みのこともある。
+                let _ = chars.next();
+            }
+        }
+        if newline {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn uses_char_grid(code: &str) -> bool {
+    matches!(
+        diagram_word(code),
+        "flowchart" | "graph" | "sequenceDiagram" | "stateDiagram" | "stateDiagram-v2"
+    )
+}
+
+/// lib に描かせる。失敗・panic・幅超過は `None` で縮退せよ。
 pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
     if !supported(code) {
         return None;
     }
-    let out = if ascii_mode() {
-        mermaid_text::render_ascii_with_width(code, Some(width.max(1))).ok()?
+    // Mermaidパーサは入力を受ける境界。既知のCJK classDiagramを含め、
+    // lib内panicをviewer全体の終了にしない。
+    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ascii_mode() {
+            mermaid_text::render_ascii_with_width(code, Some(width.max(1)))
+        } else {
+            mermaid_text::render_with_width(code, Some(width.max(1)))
+        }
+    }))
+    .ok()?
+    .ok()?;
+    let out = if uses_char_grid(code) {
+        remove_wide_continuation_cells(&rendered)
     } else {
-        mermaid_text::render_with_width(code, Some(width.max(1))).ok()?
+        rendered
     };
     let lines: Vec<String> = out.lines().map(str::to_string).collect();
     if lines.is_empty() {
@@ -109,6 +158,36 @@ mod tests {
                 assert!(str_width(l) <= 60, "too wide: {l}");
             }
         }
+    }
+
+    #[test]
+    fn cjk_grid_continuation_cells_are_removed() {
+        assert_eq!(
+            remove_wide_continuation_cells("│ 開 始  │\n╔═[alt]══[成═功═]══╗"),
+            "│ 開始 │\n╔═[alt]══[成功]══╗"
+        );
+        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60)
+            .expect("flowchart draws");
+        let joined = out.join("\n");
+        assert!(joined.contains("開始"), "phantom cell remains: {joined}");
+        assert!(!joined.contains("開 始"), "phantom cell remains: {joined}");
+        let top = out.iter().find(|l| l.contains('┌')).expect("top");
+        let middle = out.iter().find(|l| l.contains("開始")).expect("middle");
+        assert_eq!(str_width(top), str_width(middle), "box sides align");
+    }
+
+    #[test]
+    fn sequence_cjk_block_fill_is_not_serialized_as_text() {
+        let out = render_text(
+            "sequenceDiagram\n A->>B: 要件定義書\n alt 成功\n B->>A: 承認\n end",
+            60,
+        )
+        .expect("sequence draws")
+        .join("\n");
+        for want in ["要件定義書", "成功", "承認"] {
+            assert!(out.contains(want), "{want}: {out}");
+        }
+        assert!(!out.contains("成═功") && !out.contains("承░認"), "{out}");
     }
 
     #[test]

@@ -33,7 +33,11 @@
 flowchart・sequence・pie・er・gantt・gitGraph・class・journey・
 mindmap・timeline・xychart・sankey・block・packet・quadrant・
 requirement・architecture。state 系は lib が Err なら縮退。
-CJK は字間開きの流儀・sequence 箱は `░` 塗りになるのは lib の味。
+sequence 箱は `░` 塗りになるのは lib の味。CJK の字間開きと罫線ずれは
+lib の `Grid(Vec<char>)` が全角の continuation cell までserializeする不具合だった。
+flowchart・sequence・state は `remove_wide_continuation_cells` で出力後に補正する。
+補正前 `開 始` / `[成═功═]` → 補正後 `開始` / `[成功]`。`classDiagram`
+などlib内panicもあるため、呼び出し境界を `catch_unwind` し、失敗時は画像へ縮退する。
 
 ## toolchain bump(1.90.0 → 1.92)
 
