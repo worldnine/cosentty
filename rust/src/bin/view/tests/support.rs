@@ -202,8 +202,8 @@ use crate::*;
     pub(crate) fn diagram_keys(app: &App) -> Vec<String> {
         let mut out = Vec::new();
         for b in &app.blocks {
-            if let Block::WebRender { kind, code, last_src, .. } = b {
-                if let Some(r) = app.web_request(*kind, code, *last_src) {
+            if let Block::Artifact { kind, code, last_src, .. } = b {
+                if let Some(r) = kind.web().and_then(|k| app.web_request(k, code, *last_src)) {
                     out.push(r.cache_key());
                 }
             }

@@ -57,7 +57,7 @@ use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::highlight::Highlighter;
 use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
-    render_lines_with, Block, CodeSpan, LinkTruth,
+    render_lines_with, ArtifactKind, Block, CodeSpan, LinkTruth,
 };
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_parts};
 
@@ -790,6 +790,7 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
 mod tests;
 mod images;
 use images::*;
+mod math_text;
 mod mmd_text;
 mod links;
 use links::*;

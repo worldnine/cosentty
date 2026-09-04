@@ -33,13 +33,13 @@ pub enum Block {
     Inline { indent: usize, item: bool, parts: Vec<InlinePart> },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
-    /// A code block Cosense draws as a picture in the browser (today: only
-    /// Mermaid). The viewer shows the rendered artifact when it has one and
-    /// falls back to `rows` — the ordinary highlighted code block — until
-    /// then, or forever if no browser is available. See `crate::webrender`.
-    WebRender {
-        kind: crate::webrender::WebKind,
-        /// The block's own source (the mermaid text), for the render key.
+    /// A code block that is really a PICTURE of something: a Mermaid
+    /// diagram, a LaTeX formula. The viewer draws it as text when it can,
+    /// falls back to the browser's own rendering where one exists, and to
+    /// `rows` — the ordinary highlighted code block — when neither works.
+    Artifact {
+        kind: ArtifactKind,
+        /// The block's own source (the diagram or formula text).
         code: String,
         /// The plain code-block presentation: `(source line, styled line)`
         /// for the `code:` header and every continuation line.
@@ -53,6 +53,28 @@ pub enum Block {
         /// bullet (matching Cosense web).
         indent: usize,
     },
+}
+
+/// What an [`Block::Artifact`] is a picture of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArtifactKind {
+    /// `code:mmd` — a Mermaid diagram.
+    Mermaid,
+    /// `code:tex` — a LaTeX formula.
+    Math,
+}
+
+impl ArtifactKind {
+    /// The browser fallback for this kind, where there is one. Cosense draws
+    /// formulas with KaTeX, but the element it hangs them off has not been
+    /// pinned down the way `#mermaid-preview-<lineId>` was, so math stops at
+    /// text and source rather than screenshotting a guess.
+    pub fn web(self) -> Option<crate::webrender::WebKind> {
+        match self {
+            ArtifactKind::Mermaid => Some(crate::webrender::WebKind::Mermaid),
+            ArtifactKind::Math => None,
+        }
+    }
 }
 
 /// One part of a mixed text-and-picture line (see [`Block::Inline`]).
@@ -242,14 +264,26 @@ pub fn table_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
 /// (documented on scrapbox.io/help-jp/Mermaid). Matching is
 /// case-insensitive, and a bare extension-less name never counts.
 pub fn mermaid_lang(lang: &str) -> bool {
+    lang_is(lang, &["mmd", "mermaid"])
+}
+
+/// Is this `code:` block a LaTeX formula? Cosense's help calls out `tex` and
+/// `latex`; the same file-name rule as Mermaid applies (`code:eq.tex`).
+pub fn math_lang(lang: &str) -> bool {
+    lang_is(lang, &["tex", "latex"])
+}
+
+/// A `code:` label names one of `names`, either outright (`code:tex`) or as
+/// the extension of a file name (`code:proof.tex`).
+fn lang_is(lang: &str, names: &[&str]) -> bool {
     let name = lang.trim().to_ascii_lowercase();
     if name.is_empty() {
         return false;
     }
-    if name == "mmd" || name == "mermaid" {
+    if names.contains(&name.as_str()) {
         return true;
     }
-    matches!(name.rsplit_once('.'), Some((_, ext)) if ext == "mmd" || ext == "mermaid")
+    matches!(name.rsplit_once('.'), Some((_, ext)) if names.contains(&ext))
 }
 
 /// Cosense web recognises Mermaid previews only at outline levels 0–2.
@@ -1252,10 +1286,16 @@ pub fn render_lines_with(
                 Span::raw(indent.clone()),
                 Span::styled(format!("code:{lang}"), style_block_label(pal)),
             ]);
-            // A Mermaid block is collected whole and handed to the web
-            // renderer; everything else emits the header row right away.
-            let webbable = mermaid_lang(&lang);
-            if !webbable {
+            // A diagram or a formula is collected whole and drawn as one
+            // artifact; everything else emits its header row right away.
+            let artifact = if mermaid_lang(&lang) {
+                Some(ArtifactKind::Mermaid)
+            } else if math_lang(&lang) {
+                Some(ArtifactKind::Math)
+            } else {
+                None
+            };
+            if artifact.is_none() {
                 hits.push(Hit { span: 0, target: HitTarget::BlockLabel });
                 emit!(Block::Text(header.clone()), 1);
             }
@@ -1323,7 +1363,7 @@ pub fn render_lines_with(
                     }
                 }
             }
-            if webbable {
+            if let Some(kind) = artifact {
                 // Cosense attaches the preview to the block's LAST content
                 // line. With no content there is nothing to draw, so such a
                 // block stays an ordinary (empty) code block.
@@ -1331,8 +1371,8 @@ pub fn render_lines_with(
                     Some(last_src) => {
                         let mut rows = vec![(i, header)];
                         rows.extend(code_rows);
-                        emit!(Block::WebRender {
-                            kind: crate::webrender::WebKind::Mermaid,
+                        emit!(Block::Artifact {
+                            kind,
                             code: bodies.join("\n"),
                             rows,
                             last_src,
@@ -1506,7 +1546,7 @@ mod tests {
                 .join(""),
             Block::Text(l) => l.spans.iter().map(|s| s.content.as_ref()).collect(),
             Block::Table(_) => "[TABLE]".into(),
-            Block::WebRender { rows, .. } => rows
+            Block::Artifact { rows, .. } => rows
                 .iter()
                 .map(|(_, l)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                 .collect::<Vec<_>>()
@@ -1668,7 +1708,7 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Block::WebRender { code, rows, last_src, .. } => Some((code, rows, *last_src)),
+                Block::Artifact { code, rows, last_src, .. } => Some((code, rows, *last_src)),
                 _ => None,
             })
             .collect();
@@ -1706,7 +1746,7 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Block::WebRender { last_src, .. } => Some(*last_src),
+                Block::Artifact { last_src, .. } => Some(*last_src),
                 _ => None,
             })
             .collect();
@@ -1762,7 +1802,7 @@ mod tests {
             .blocks
             .iter()
             .filter_map(|b| match b {
-                Block::WebRender { indent, .. } => Some(*indent),
+                Block::Artifact { indent, .. } => Some(*indent),
                 _ => None,
             })
             .collect();
@@ -1789,7 +1829,7 @@ mod tests {
         // No content line means no line id to hang a preview off.
         let lines: Vec<String> = ["title", "code:mmd"].iter().map(|s| s.to_string()).collect();
         let out = render_lines(&lines);
-        assert!(!out.blocks.iter().any(|b| matches!(b, Block::WebRender { .. })));
+        assert!(!out.blocks.iter().any(|b| matches!(b, Block::Artifact { .. })));
         assert!(out.blocks.iter().any(|b| plain(b).contains("code:mmd")));
     }
 

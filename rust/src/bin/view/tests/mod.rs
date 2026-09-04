@@ -2,6 +2,7 @@
 
 mod support;
 mod app;
+mod math_text;
 mod mmd_text;
 mod editing;
 mod images;

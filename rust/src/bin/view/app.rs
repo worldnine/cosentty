@@ -377,6 +377,9 @@ pub(crate) struct App {
     pub(crate) render_policy: capability::RenderPolicy,
     /// lib 検証 spike 用のテキスト段旗。手書き分支と同名・同意味。
     pub(crate) mermaid_text: bool,
+    /// 数式のテキスト段旗(`COSENSE_MATH=off` で降ろす)。図とは別の
+    /// ライブラリ・別のフォント事情なので、旗も分けて持つ。
+    pub(crate) math_text: bool,
     /// Visibility answers from the background probe (project, verdict).
     pub(crate) vis_rx: mpsc::Receiver<(String, capability::Visibility)>,
     pub(crate) vis_tx: mpsc::Sender<(String, capability::Visibility)>,
@@ -671,6 +674,7 @@ impl App {
             caps: capability::Capabilities::default(),
             render_policy: capability::RenderPolicy::from_env(),
             mermaid_text: !mmd_text::text_tier_off(),
+            math_text: !math_text::text_tier_off(),
             vis_rx,
             vis_tx,
             vis_asked: None,

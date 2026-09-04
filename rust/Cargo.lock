@@ -456,6 +456,7 @@ dependencies = [
  "syntect",
  "tachyonfx",
  "tempfile",
+ "term-maths",
  "toml",
  "tungstenite",
  "two-face",
@@ -2619,6 +2620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-latex-parser"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30b0949524549f0f83d8a14c71e9b378c45307a77bb6ea6bb969d1399d5ae134"
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3059,6 +3066,17 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "term-maths"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26ccccf7b1e429ef47ef4a82726346feefdb67169e6a9d8d97fc6d3707640a05"
+dependencies = [
+ "rust-latex-parser",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

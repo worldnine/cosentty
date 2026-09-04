@@ -22,6 +22,7 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 tachyonfx = { version = "0.25", features = ["std-duration"] }
 # mmd テキスト描画の lib 検証用 spike(mmd-lib-spike)。手書き分支と見比べるため。
 mermaid-text = "0.57"
+term-maths = "1.0"
 
 [build-dependencies]
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }

@@ -49,14 +49,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = render_lines(&texts);
     let mut reqs: Vec<WebRequest> = Vec::new();
     for b in &out.blocks {
-        let Block::WebRender { kind, code, last_src, .. } = b else { continue };
+        let Block::Artifact { kind, code, last_src, .. } = b else { continue };
+        // Only the kinds the browser draws. Math is text-or-source, so it
+        // has no selector to smoke-test.
+        let Some(kind) = kind.web() else { continue };
         let line_id = page.lines[*last_src].id.clone();
         println!(
             "  block last_src={last_src} line_id={line_id} selector={}",
             kind.selector(&line_id)
         );
         reqs.push(WebRequest {
-            kind: *kind,
+            kind,
             project: project.clone(),
             title: title.clone(),
             page_id: page.id.clone(),

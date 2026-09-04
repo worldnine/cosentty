@@ -2181,7 +2181,7 @@ impl App {
         for (b, &src) in self.blocks.iter().zip(self.srcs.iter()) {
             if let Some((eline, ebuf)) = edit {
                 if src == eline
-                    && !matches!(b, Block::Table(_) | Block::WebRender { .. })
+                    && !matches!(b, Block::Table(_) | Block::Artifact { .. })
                 {
                     raw_rows(&mut content, ebuf, src);
                     continue;
@@ -2219,9 +2219,10 @@ impl App {
                         content.push(Row::Line { line, src: row_src, start: 0, hang: 0 });
                     }
                 }
-                Block::WebRender { kind, code, rows, last_src, indent } => {
-                    let key = self
-                        .web_request(*kind, code, *last_src)
+                Block::Artifact { kind, code, rows, last_src, indent } => {
+                    let key = kind
+                        .web()
+                        .and_then(|k| self.web_request(k, code, *last_src))
                         .map(|r| r.cache_key());
                     // While the edit session is inside this block the reader
                     // is working on the raw source, so the picture steps
@@ -2232,10 +2233,20 @@ impl App {
                     // lib 検証 spike のテキスト段。編集中は素のソース契約が勝つ。
                     // level 1–2は図全体だけを右へ送り、箇条書き記号は描かない。
                     // 描画幅もその分だけ絞る。
-                    if !editing_here && self.mermaid_text {
-                        if let Some(lines) =
-                            mmd_text::render_text(code, text_w.saturating_sub(*indent))
-                        {
+                    let text_tier = match kind {
+                        ArtifactKind::Mermaid => self.mermaid_text,
+                        ArtifactKind::Math => self.math_text,
+                    };
+                    if !editing_here && text_tier {
+                        let drawn = match kind {
+                            ArtifactKind::Mermaid => {
+                                mmd_text::render_text(code, text_w.saturating_sub(*indent))
+                            }
+                            ArtifactKind::Math => {
+                                math_text::render_text(code, text_w.saturating_sub(*indent))
+                            }
+                        };
+                        if let Some(lines) = drawn {
                             for text in lines {
                                 let line = Line::from(format!("{}{text}", " ".repeat(*indent)));
                                 for w in
@@ -2561,7 +2572,7 @@ impl App {
     /// picture, the source line that owns that picture's row.
     pub(crate) fn diagram_row_owner(&self, src: usize) -> Option<usize> {
         self.blocks.iter().find_map(|b| {
-            let Block::WebRender { rows, last_src, .. } = b else { return None };
+            let Block::Artifact { rows, last_src, .. } = b else { return None };
             if !rows.iter().any(|(rsrc, _)| *rsrc == src) {
                 return None;
             }
