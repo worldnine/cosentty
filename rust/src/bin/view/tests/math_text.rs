@@ -89,12 +89,31 @@ fn a_formula_too_wide_for_the_pane_falls_back_to_source() {
 }
 
 #[test]
-fn a_nested_formula_moves_right_without_a_bullet() {
-    let mut app = page(&["t", " code:tex", "  \\frac{a}{b}"]);
+fn one_step_of_indent_is_already_too_deep_for_a_formula() {
+    // 図と違って数式は左端だけ。箇条書きの下に入った時点で
+    // コードブロックですらなくなり、各行がそのままリストの行になる。
+    for header in [" code:tex", "　　code:latex"] {
+        let body = format!("{} \\frac{{a}}{{b}}", " ".repeat(header.chars().count()));
+        let mut app = page(&["親", header, &body]);
+        app.page_id = "PAGE".into();
+        app.rebuild(80);
+        let text = text_rows(&app);
+        for source in [header.trim(), r"\frac{a}{b}"] {
+            assert!(
+                text.iter().any(|t| t.contains('•') && t.contains(source)),
+                "{source} stays a list row: {text:?}"
+            );
+        }
+        assert!(!text.iter().any(|t| t.contains('─')), "not drawn: {text:?}");
+    }
+}
+
+#[test]
+fn a_formula_at_the_left_margin_still_draws() {
+    let mut app = page(&["t", "code:tex", " \\frac{a}{b}"]);
     app.page_id = "PAGE".into();
     app.rebuild(80);
     let text = text_rows(&app);
-    let bar = text.iter().find(|t| t.contains('─')).expect("drawn");
-    assert!(bar.starts_with("  "), "indented by one level: {bar:?}");
+    assert!(text.iter().any(|t| t.contains('─')), "drawn: {text:?}");
     assert!(!text.iter().any(|t| t.contains('•')), "no bullet: {text:?}");
 }

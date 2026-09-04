@@ -44,6 +44,14 @@ lib は知らない命令をエラーにせず**そのまま吐く**(`\begin{ali
 `\begin{align}` / `\qquad` は非対応。`pmatrix` / `bmatrix` / `cases` /
 `\frac` / `\sqrt` / `\int` / `\sum` / `\lim` / ギリシャ文字 / 上下付きは通る。
 
+## 段: 左端だけ
+
+図は2段まで入れ子にできるが、数式は**0段だけ**(`MATH_MAX_INDENT`)。
+箇条書きのインデントが1段でも付いた時点で、コードブロックとしても認識せず、
+`code:tex` の行も中身の行もそれぞれ普通のリストの行になる
+(mmd の3段目以降と同じ扱い)。境界は `artifact_too_deep` が一箇所で持ち、
+`code_span_at` / `code_line_flags` / `render_lines_with` の3つが同じ答えを見る。
+
 ## 幅
 
 数式は折り返せない(2次元の組みが崩れる)。ペイン幅に入らなければ描かず、

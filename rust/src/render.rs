@@ -144,7 +144,7 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
     let mut k = 0;
     while k < lines.len() {
         let (_, header_indent, body) = indent_info(lines[k]);
-        if !body.starts_with("code:") || mermaid_too_deep(header_indent, body) {
+        if !body.starts_with("code:") || artifact_too_deep(header_indent, body) {
             k += 1;
             continue;
         }
@@ -191,7 +191,7 @@ pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
     let mut k = 0;
     while k < lines.len() {
         let (_, header_indent, body) = indent_info(lines[k]);
-        if !body.starts_with("code:") || mermaid_too_deep(header_indent, body) {
+        if !body.starts_with("code:") || artifact_too_deep(header_indent, body) {
             k += 1;
             continue;
         }
@@ -286,20 +286,36 @@ fn lang_is(lang: &str, names: &[&str]) -> bool {
     matches!(name.rsplit_once('.'), Some((_, ext)) if names.contains(&ext))
 }
 
-/// Cosense web recognises Mermaid previews only at outline levels 0–2.
-/// At level 3 onward the `code:` header and every following line are ordinary
-/// list items, each keeping its own indentation.
-fn mermaid_too_deep(header_indent: usize, body: &str) -> bool {
-    header_indent > MERMAID_MAX_INDENT
-        && body
-            .strip_prefix("code:")
-            .map(mermaid_lang)
-            .unwrap_or(false)
+/// Is this `code:` header nested deeper than its kind survives? Past the
+/// limit the header and every line under it are ordinary list items, each
+/// keeping its own indentation — the block is not even a code block.
+fn artifact_too_deep(header_indent: usize, body: &str) -> bool {
+    let Some(lang) = body.strip_prefix("code:") else { return false };
+    match artifact_max_indent(lang) {
+        Some(max) => header_indent > max,
+        None => false,
+    }
+}
+
+/// How deep a `code:` block of this kind may nest and still be drawn.
+/// `None` for ordinary code, which nests as deep as anyone likes.
+fn artifact_max_indent(lang: &str) -> Option<usize> {
+    if mermaid_lang(lang) {
+        return Some(MERMAID_MAX_INDENT);
+    }
+    if math_lang(lang) {
+        return Some(MATH_MAX_INDENT);
+    }
+    None
 }
 
 /// How deep a Mermaid block may nest and still be drawn as a diagram, which is
 /// where Cosense stops too. Deeper than this the whole block reads as list text.
 pub const MERMAID_MAX_INDENT: usize = 2;
+
+/// A formula stops at the left margin: the moment a bullet's indent appears,
+/// the block is list text, not mathematics.
+pub const MATH_MAX_INDENT: usize = 0;
 
 /// A blank run separates two code blocks even when the next `code:` header is
 /// more deeply indented. Without this boundary a level-0 Mermaid block absorbs
@@ -1274,7 +1290,7 @@ pub fn render_lines_with(
         // Cosense treats its header and body as independent list rows.
         if let Some(rest) = body
             .strip_prefix("code:")
-            .filter(|_| !mermaid_too_deep(raw_len, body))
+            .filter(|_| !artifact_too_deep(raw_len, body))
         {
             let lang = rest.trim().to_string();
             let code_indent = raw_len;
@@ -1822,6 +1838,42 @@ mod tests {
         assert!((25..=29).all(|i| code_span_at(&refs, i).is_none()));
         let flags = code_line_flags(&refs);
         assert!((25..=29).all(|i| !flags[i]));
+    }
+
+    #[test]
+    fn a_formula_only_survives_at_the_left_margin() {
+        // 図は2段まで入れ子にできるが、数式は0段だけ。
+        let lines: Vec<String> = [
+            "title",
+            "code:tex",
+            " \\frac{a}{b}",
+            "",
+            " code:tex",
+            "  \\frac{c}{d}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let indents: Vec<usize> = out
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Artifact { indent, .. } => Some(*indent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(indents, vec![0], "only the flush block is a formula");
+
+        let plain_rows: Vec<String> = out.blocks.iter().map(plain).collect();
+        assert!(plain_rows.iter().any(|s| s.contains("• code:tex")), "{plain_rows:?}");
+        assert!(plain_rows.iter().any(|s| s.contains(r"• \frac{c}{d}")), "{plain_rows:?}");
+
+        // コードブロックではないので、編集側も普通の行として扱う。
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        assert!((4..=5).all(|i| code_span_at(&refs, i).is_none()));
+        let flags = code_line_flags(&refs);
+        assert!((4..=5).all(|i| !flags[i]));
     }
 
     #[test]
