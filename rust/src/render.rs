@@ -1441,7 +1441,14 @@ pub fn render_lines_with(
             // block). Popping just one used to fold "code + N blanks" into
             // "code + 1 blank": the rest became empty code rows, and the
             // highlighter's `lines()` then dropped them outright.
-            while bodies.last().map(|b| b.trim().is_empty()).unwrap_or(false) {
+            //
+            // Only a FLUSH line is handed back, though. A whitespace-only
+            // line is blank CODE — the writer parked a cursor there (Enter
+            // inside the block types one) — and popping it pushed it out of
+            // the block, where the empty-bullet rule turned it into a dot
+            // below the drawn diagram. The indent is the membership, here
+            // as everywhere: deleting it is what leaves the block.
+            while raws.last().map(|&j| lines[j].is_empty()).unwrap_or(false) {
                 bodies.pop();
                 raws.pop();
                 j -= 1;
@@ -2084,6 +2091,43 @@ mod tests {
         let out = render_lines(&lines);
         assert!(!out.blocks.iter().any(|b| matches!(b, Block::Artifact { .. })));
         assert!(out.blocks.iter().any(|b| plain(b).contains("code:mmd")));
+    }
+
+    #[test]
+    fn a_blank_code_line_keeps_its_block_instead_of_becoming_a_bullet() {
+        // 実ページで起きたこと:ブロックの末尾でEnterして積んだ空行(深さを
+        // 継承した空白行)が、末尾の「後続空行を手渡す」popでブロックから
+        // 押し出され、空の箇条書き(ドット)として図の下に残っていた。
+        // インデントはメンバーシップなので、空行は空のコードとして残る。
+        let lines: Vec<String> = [
+            "[* mindmap]",
+            "code:mindmap.mmd",
+            " mindmap",
+            "  root((mindmap))",
+            "    Origins",
+            "    Research",
+            "    ",
+            "    ",
+            "    ",
+            "",
+            "[* timeline]",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let got: Vec<String> = out.blocks.iter().map(plain).collect();
+        assert!(
+            !got.iter().any(|s| s.contains('•')),
+            "no dots below the drawing: {got:?}"
+        );
+        // 空行はブロックの内側。最終行は最後の空行になる。
+        let Block::Artifact { last_src, .. } = &out.blocks[1] else {
+            panic!("{:?}", out.blocks[1])
+        };
+        assert_eq!(*last_src, 8, "the blanks are the block's tail");
+        // フラッシュの空行だけは相変わらず手渡される(ページの空行)。
+        assert_eq!(got[2], "[BLANK]");
     }
 
     #[test]
