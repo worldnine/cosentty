@@ -528,7 +528,7 @@ impl App {
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
         for b in &self.blocks {
-            let Block::WebRender { kind, code, rows, last_src } = b else { continue };
+            let Block::WebRender { kind, code, rows, last_src, .. } = b else { continue };
             // An open session does NOT hold up the rest of the page: only
             // the block under the caret waits, because that one line's
             // buffer has not been committed yet (every caret MOVE commits
@@ -683,7 +683,7 @@ impl App {
             return out;
         }
         for b in &self.blocks {
-            let Block::WebRender { kind, code, rows, last_src } = b else { continue };
+            let Block::WebRender { kind, code, rows, last_src, .. } = b else { continue };
             let Some(req) = self.web_request(*kind, code, *last_src) else { continue };
             if !self.web_pending.contains(&req.cache_key()) {
                 continue;

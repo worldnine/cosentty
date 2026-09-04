@@ -48,6 +48,10 @@ pub enum Block {
         /// preview element off THAT line's id, not the header's (verified
         /// live — see NOTE-webrender-handoff.md).
         last_src: usize,
+        /// Display columns the artifact is pushed right. Mermaid previews
+        /// may nest two levels, but unlike ordinary list rows they wear no
+        /// bullet (matching Cosense web).
+        indent: usize,
     },
 }
 
@@ -107,7 +111,7 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
     let mut k = 0;
     while k < lines.len() {
         let (_, header_indent, body) = indent_info(lines[k]);
-        if !body.starts_with("code:") {
+        if !body.starts_with("code:") || mermaid_too_deep(header_indent, body) {
             k += 1;
             continue;
         }
@@ -122,6 +126,9 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
                 j += 1;
                 end = j; // a real code row: the block reaches at least here
             } else if lines[j].trim().is_empty() {
+                if blank_precedes_code_header(lines, j) {
+                    break;
+                }
                 j += 1; // may turn out to be trailing — `end` stays put
             } else {
                 break;
@@ -146,7 +153,7 @@ pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
     let mut k = 0;
     while k < lines.len() {
         let (_, header_indent, body) = indent_info(lines[k]);
-        if !body.starts_with("code:") {
+        if !body.starts_with("code:") || mermaid_too_deep(header_indent, body) {
             k += 1;
             continue;
         }
@@ -158,6 +165,9 @@ pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
                 j += 1;
                 end = j;
             } else if lines[j].trim().is_empty() {
+                if blank_precedes_code_header(lines, j) {
+                    break;
+                }
                 j += 1;
             } else {
                 break;
@@ -220,6 +230,33 @@ pub fn mermaid_lang(lang: &str) -> bool {
         return true;
     }
     matches!(name.rsplit_once('.'), Some((_, ext)) if ext == "mmd" || ext == "mermaid")
+}
+
+/// Cosense web recognises Mermaid previews only at outline levels 0–2.
+/// At level 3 onward the `code:` header and every following line are ordinary
+/// list items, each keeping its own indentation.
+fn mermaid_too_deep(header_indent: usize, body: &str) -> bool {
+    header_indent > 2
+        && body
+            .strip_prefix("code:")
+            .map(mermaid_lang)
+            .unwrap_or(false)
+}
+
+/// A blank run separates two code blocks even when the next `code:` header is
+/// more deeply indented. Without this boundary a level-0 Mermaid block absorbs
+/// every later level as source, and the duplicate diagram declarations make the
+/// whole combined block fail to render.
+fn blank_precedes_code_header<T: AsRef<str>>(lines: &[T], blank: usize) -> bool {
+    lines.iter().skip(blank + 1).find_map(|line| {
+        let line = line.as_ref();
+        if line.trim().is_empty() {
+            None
+        } else {
+            let (_, _, body) = indent_info(line);
+            Some(body.starts_with("code:"))
+        }
+    }) == Some(true)
 }
 
 /// Links and images discovered while rendering, for navigation and prefetch.
@@ -1175,7 +1212,12 @@ pub fn render_lines_with(
         }
 
         // code block: `code:name.ext` header + indented continuation lines.
-        if let Some(rest) = body.strip_prefix("code:") {
+        // Mermaid nested at level 3+ is deliberately NOT consumed here:
+        // Cosense treats its header and body as independent list rows.
+        if let Some(rest) = body
+            .strip_prefix("code:")
+            .filter(|_| !mermaid_too_deep(raw_len, body))
+        {
             let lang = rest.trim().to_string();
             let code_indent = raw_len;
             // Cosense serves a code block as a file, so the header line is
@@ -1199,9 +1241,17 @@ pub fn render_lines_with(
             let mut bodies: Vec<String> = Vec::new();
             while j < lines.len() {
                 let (_, rl, _) = indent_info(&lines[j]);
-                if rl > code_indent || lines[j].trim().is_empty() {
+                if rl > code_indent {
                     // strip the block's base indent (code_indent+1 ws chars),
                     // preserving deeper (relative) indentation.
+                    let stripped = strip_leading_ws(&lines[j], code_indent + 1);
+                    bodies.push(stripped);
+                    raws.push(j);
+                    j += 1;
+                } else if lines[j].trim().is_empty() {
+                    if blank_precedes_code_header(lines, j) {
+                        break;
+                    }
                     let stripped = strip_leading_ws(&lines[j], code_indent + 1);
                     bodies.push(stripped);
                     raws.push(j);
@@ -1262,6 +1312,7 @@ pub fn render_lines_with(
                             code: bodies.join("\n"),
                             rows,
                             last_src,
+                            indent: text_column(level),
                         });
                     }
                     None => {
@@ -1641,6 +1692,72 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Text(_)) && plain(b).contains("let a = 1")));
+    }
+
+    #[test]
+    fn mermaid_nests_twice_without_bullets_then_becomes_plain_list_rows() {
+        // 実ページの表記そのまま。`code::test.mmd` もファイル名が
+        // `:test.mmd` なだけで、拡張子によりMermaidと判定される。
+        let lines: Vec<String> = [
+            "title",
+            "code::test.mmd",
+            "   flowchart LR",
+            "     TUI-- CDP -->Chrome",
+            "     Chrome-- PNG -->TUI",
+            "",
+            "",
+            " code:test.mmd",
+            "   flowchart LR",
+            "     TUI-- CDP -->Chrome",
+            "     Chrome-- PNG -->TUI",
+            "",
+            "",
+            "　　code::test.mmd",
+            "   flowchart LR",
+            "     TUI-- CDP -->Chrome",
+            "     Chrome-- PNG -->TUI",
+            "",
+            "",
+            "",
+            "  code::test.mmd",
+            "   flowchart LR",
+            "     TUI-- CDP -->Chrome",
+            "     Chrome-- PNG -->TUI",
+            "",
+            "   code::test.mmd",
+            "   flowchart LR",
+            "     TUI-- CDP -->Chrome",
+            "     Chrome-- PNG -->TUI",
+            "     Chrome-- PNG -->TUI",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let indents: Vec<usize> = out
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::WebRender { indent, .. } => Some(*indent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            indents,
+            vec![0, 2, 4, 4],
+            "blank-separated levels 0, 1 and 2 draw independently"
+        );
+
+        let plain_rows: Vec<String> = out.blocks.iter().map(plain).collect();
+        assert!(plain_rows.iter().any(|s| s.contains("• code::test.mmd")));
+        assert!(plain_rows.iter().any(|s| s.contains("• flowchart LR")));
+        assert!(plain_rows.iter().any(|s| s.contains("• TUI-- CDP -->Chrome")));
+        assert!(plain_rows.iter().any(|s| s.contains("• Chrome-- PNG -->TUI")));
+
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        assert!((25..=29).all(|i| code_span_at(&refs, i).is_none()));
+        let flags = code_line_flags(&refs);
+        assert!((25..=29).all(|i| !flags[i]));
     }
 
     #[test]

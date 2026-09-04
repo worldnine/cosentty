@@ -2216,7 +2216,7 @@ impl App {
                         content.push(Row::Line { line, src: row_src, start: 0, hang: 0 });
                     }
                 }
-                Block::WebRender { kind, code, rows, last_src } => {
+                Block::WebRender { kind, code, rows, last_src, indent } => {
                     let key = self
                         .web_request(*kind, code, *last_src)
                         .map(|r| r.cache_key());
@@ -2227,10 +2227,14 @@ impl App {
                         .map(|(eline, _)| rows.iter().any(|(rsrc, _)| *rsrc == eline))
                         .unwrap_or(false);
                     // lib 検証 spike のテキスト段。編集中は素のソース契約が勝つ。
+                    // level 1–2は図全体だけを右へ送り、箇条書き記号は描かない。
+                    // 描画幅もその分だけ絞る。
                     if !editing_here && self.mermaid_text {
-                        if let Some(lines) = mmd_text::render_text(code, text_w) {
-                            for line in lines {
-                                let line = Line::from(line);
+                        if let Some(lines) =
+                            mmd_text::render_text(code, text_w.saturating_sub(*indent))
+                        {
+                            for text in lines {
+                                let line = Line::from(format!("{}{text}", " ".repeat(*indent)));
                                 for w in
                                     wrap_line_parts(&line, text_w, &hanging_prefix(&line))
                                 {
@@ -2255,7 +2259,7 @@ impl App {
                             url: k.clone(),
                             height: info.cells_h.max(1),
                             src: *last_src,
-                            indent: 0,
+                            indent: *indent,
                             item: false,
                         });
                         continue;
