@@ -1849,6 +1849,77 @@ pub(crate) fn shimmer_across(line: &Line<'static>, app: &App, ctx: &Ctx) -> Line
     Line::from(spans)
 }
 
+/// The help panel's rows: four sections, one per place the keys work in.
+/// The panel does not scroll, so this stays at 26 rows (a 30-row terminal
+/// shows them all) and every row fits the 90-cell panel. The label column
+/// is 12 display cells wide. Japanese labels are two cells per character,
+/// so each language pads its own labels here rather than through a
+/// `{:<12}` that counts bytes.
+pub(crate) fn help_keys(app: &App) -> Vec<String> {
+    let mut keys: Vec<String> = vec![
+        t!("── READ ──", "── READ ──"),
+        t!("移動        j/k · g/G · ^u/^d · PgUp/PgDn · [ 戻る · ] 進む",
+           "move        j/k · g/G · ^u/^d · PgUp/PgDn · [ back · ] forward"),
+        t!("選択        Shift+↑↓ · J/K で広げる",
+           "select      Shift+↑↓ · J/K extend"),
+        t!("リンク      Enter/f で開く: ページ · 📎 ファイル → 保存先 · ↗ URL → ブラウザ",
+           "link        Enter/f open: page · 📎 file → download dir · ↗ URL → browser"),
+        t!("            Tab/S-Tab 次/前のリンク行へ",
+           "            Tab/S-Tab next/previous link line"),
+        t!("マウス      クリックでリンク/行移動 · ドラッグで選択 · ホイールでスクロール",
+           "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
+        t!("表示        z ソース · w ブラウザ · t 行の詳細",
+           "view        z source · w browser · t line detail"),
+        t!("履歴        ← 古い版 · → 新しい版 · Esc 最新へ（履歴中は読むだけ）",
+           "history     ← older · → newer · Esc NOW (read-only back there)"),
+        t!("図          code:mmd は罫線・表で描く（テキスト優先）· R で未生成分を描く",
+           "diagram     code:mmd draws as text first · R renders the missing ones"),
+        t!("出力        y カーソル行/選択をコピー · Y ページ全体",
+           "output      y copy line/selection · Y whole page"),
+        t!("取り消し    u · ^z 取り消し · ^r やり直し（どのコミットも戻せます）",
+           "undo        u · ^z undo · ^r redo (every commit is reversible)"),
+        t!("終了        q 二度押し · ^c 即終了",
+           "quit        q twice · ^c at once"),
+        t!("── EDIT ──", "── EDIT ──"),
+    ];
+    if app.editable {
+        keys.extend([
+            t!("編集        e 行末 · i 行頭 · o/O 行を追加 · ダブルクリック",
+               "edit        e line end · i line start · o/O new line · double-click"),
+            t!("            編集中: そのまま入力 · ↑↓ 行移動 · Enter 改行 · ⌫@行頭 前と結合 · Esc 終了",
+               "            in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done"),
+            t!("            ^k 行を削る · ^y コピー · ^e $EDITOR で全体 · ^v 画像を貼る",
+               "            ^k cut line · ^y copy · ^e whole page in $EDITOR · ^v paste image"),
+            t!("構造編集    m 掴む: j/k/↑↓ 1行 · J/K 兄弟 · h/l 字下げ · Esc/Enter/m 確定（他キーも）",
+               "outline     m grab: j/k/↑↓ line · J/K sibling · h/l indent · Esc/Enter/m done (any key does)"),
+            t!("            Ctrl+←→↑↓ 行/範囲 · Alt+←→↑↓ ブロック · ^g h/j/k/l と H/J/K/L（選択中×）",
+               "            Ctrl+arrows line/range · Alt+arrows block · ^g h/j/k/l and H/J/K/L (no selection)"),
+        ]);
+    } else {
+        keys.push(t!(
+            "編集        できません — このアカウントはプロジェクトのメンバーではありません",
+            "edit        unavailable — this account is not a project member"
+        ));
+    }
+    keys.extend([
+        t!("── 一覧 ──", "── index ──"),
+        t!("一覧        ^o 開く · / 絞り込み（Tab で本文検索） · s 並び順 · ^o 再びでプロジェクト",
+           "index       ^o open · / filter (Tab: full-text) · s order · ^o again: projects"),
+        t!("            j/k · g/G · Tab 一覧/抜粋 · Enter 開く · ^u 戻す · [ 戻る · q 終了",
+           "            j/k · g/G · Tab list/excerpt · Enter open · ^u back · [ back · q quit"),
+        t!("── オーバーレイ ──", "── overlays ──"),
+        t!("コメント    c 書く（再cは編集） · s 送る · l 一覧（Enter 移動 · d 削除 · y コピー）",
+           "comments    c write (again: edit) · s send · l list (Enter jump · d delete · y copy)"),
+        t!("            入力中は ^j 改行 · Enter 保存 · Esc 取消 · 複数リンクも一覧から選ぶ",
+           "            typing: ^j newline · Enter save · Esc cancel · several links: pick a list"),
+        t!("ヘルプ      ? は一覧・オーバーレイでも開く · Esc 閉じる",
+           "help        ? works in the index and on overlays too · Esc closes"),
+        t!("            編集中・入力中の ? は文字になる（Esc で抜けて ?）",
+           "            ? types a ? while editing/typing (Esc out, then ?)"),
+    ]);
+    keys
+}
+
 /// Draw the open overlay as a centered panel.
 pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     let (title, items, cursor): (String, Vec<String>, usize) = match app.overlay.as_ref() {
@@ -1904,83 +1975,7 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
             };
             (t!("行の詳細", "line detail"), items, usize::MAX)
         }
-        Some(Overlay::Help) => {
-            // The label column is 12 display cells wide. Japanese labels
-            // are two cells per character, so each language pads its own
-            // labels here rather than through a `{:<12}` that counts bytes.
-            let mut keys: Vec<String> = vec![
-                t!("移動        j/k · g/G · ^u/^d · PgUp/PgDn",
-                   "move        j/k · g/G · ^u/^d · PgUp/PgDn"),
-                t!("リンク      Enter/f で開く: ページ · 📎 ファイル → 保存先 · ↗ URL → ブラウザ",
-                   "link        Enter/f open: page · 📎 file → download dir · ↗ URL → browser"),
-                t!("            Tab/S-Tab 次/前のリンク行へ",
-                   "            Tab/S-Tab next/previous link line"),
-                t!("マウス      クリックでリンク/行移動 · ドラッグで選択 · ホイールでスクロール",
-                   "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
-                t!("移動履歴    [ 戻る · ] 進む", "history     [ back · ] forward"),
-                t!("表示切替    z 表示⇄ソース（行番号つき raw）", "source      z view⇄source (raw with line numbers)"),
-                t!("ページ一覧  ^o 一覧＋抜粋 · / 絞り込み（Tab で本文検索）· s 並び順 · ^o もう一度でプロジェクト一覧 · q 終了",
-                   "index       ^o list + excerpt · / filter (Tab: full-text) · s order · ^o again: projects · q quit"),
-            ];
-            if app.editable {
-                keys.extend([
-                    t!("編集        e 行末 · i 行頭 · o/O 行を追加 · ダブルクリック — モードレスな編集",
-                       "edit        e line end · i line start · o/O new line · double-click — modeless"),
-                    t!("            編集中: そのまま入力 · ↑↓ 行移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Esc 終了",
-                       "            in session: type freely · ↑↓ lines · Enter new line · ⌫@BOL join · Esc done"),
-                    t!("            x 行/選択を削除 · ^e ページ全体を $EDITOR で編集 · コミットは自動",
-                       "            x delete line/selection · ^e whole page in $EDITOR · commits are automatic"),
-                    t!("            画像: 編集中に ^v でクリップボードの画像 / 画像ファイルのパスを貼る → アップロードして [URL]",
-                       "            images: while editing, ^v pastes the clipboard image / paste an image file's path → uploaded as [URL]"),
-                    t!("構造編集    m 移動モード（ブロックをつかむ）: j/k/↑↓ 1行 · J/K 兄弟ごと",
-                       "outline     m move mode (grab a block): j/k/↑↓ one line · J/K whole sibling"),
-                    t!("            h/l/←→ 字下げ · Esc/Enter/m 確定（掴んだまま他のキーを押すと確定）",
-                       "            h/l/←→ indent · Esc/Enter/m commit (any other key commits too)"),
-                    t!("            Ctrl+←/→/↑/↓ 行・選択範囲 · Alt+←/→/↑/↓ ブロック",
-                       "            Ctrl+←/→/↑/↓ line/range · Alt+←/→/↑/↓ block"),
-                    t!("            ^g h/j/k/l 行 左/下/上/右 · ^g H/J/K/L ブロック（選択中は不可）",
-                       "            ^g h/j/k/l line left/down/up/right · ^g H/J/K/L block (no selection)"),
-                    t!("取り消し    u 取り消し · ^r やり直し（どのコミットも戻せます）",
-                       "undo        u undo · ^r redo (every commit is reversible)"),
-                ]);
-            } else {
-                keys.push(t!(
-                    "編集        できません — このアカウントはプロジェクトのメンバーではありません",
-                    "edit        unavailable — this account is not a project member"
-                ));
-            }
-            keys.extend([
-                t!("ブラウザ    w カーソル行でページを開く", "browser     w open page at cursor line"),
-                t!("ページ履歴  ← 古い履歴 · → 新しい · Esc 最新へ戻る（履歴中は読み取り専用）",
-                   "time        ← older snapshot · → newer · Esc back to NOW (read-only while back)"),
-                t!("コメント    c 書く（同じ範囲で再度 c = 編集）· s 送る · l 一覧（Enter 移動 · d 削除 · y コピー · s 送る）",
-                   "comment     c write (c again on the range: edit) · s send · l list (Enter jump · d delete · y copy · s send)"),
-                t!("行の詳細    t この行をいつ誰が更新したか", "detail      t who/when edited this line"),
-                t!("図          code:mmd / code:mermaid / code:<名前>.mmd を図として描く。描ける型は",
-                   "diagram     code:mmd / code:mermaid / code:<name>.mmd draw as pictures, text first"),
-                t!("            まず罫線・表で出し(COSENSE_MERMAID=off で止める)、描けないものだけ",
-                   "            text where possible (COSENSE_MERMAID=off stops that), otherwise"),
-                t!("            ヘッドレス Chrome で実際の Cosense ページを撮って切り出す",
-                   "            screenshotted from the real Cosense page by headless Chrome"),
-                t!("            （場所は COSENSE_CHROME）。ブラウザが無い、COSENSE_SID 無しで",
-                   "            (COSENSE_CHROME to point at it). No browser, a private page"),
-                t!("            非公開ページ、Mermaid のエラーのときはコードブロックのまま。",
-                   "            without COSENSE_SID, or a Mermaid error → the code block stays."),
-                t!("            R でこのページの未生成分を描く。ページを開いただけでは",
-                   "            R renders this page's missing web artifacts. Opening a page"),
-                t!("            キャッシュ済みしか出ない（ブラウザは高価なので、頼んだときに",
-                   "            only shows cached ones: a browser is expensive, so it starts"),
-                t!("            起動する）。COSENSE_WEB_RENDER=auto|off で振る舞いを変えられ、",
-                   "            when you ask. COSENSE_WEB_RENDER=auto|off changes that;"),
-                t!("            COSENSE_WEB_IDLE_SECS でブラウザを残す長さを決められる。",
-                   "            COSENSE_WEB_IDLE_SECS is how long the browser stays warm."),
-                t!("出力        y カーソル行/選択をコピー · Y ページ全体", "output      y copy line/selection · Y whole page"),
-                t!("画面        ? ヘルプ", "screen      ? help"),
-                t!("終了        q 二度押し（未送信のコメントがあれば件数を添えて問う）",
-                   "quit        q twice (asks, naming unsent comments)"),
-            ]);
-            (t!("キー割り当て", "keys"), keys, usize::MAX)
-        }
+        Some(Overlay::Help) => (t!("キー割り当て", "keys"), help_keys(app), usize::MAX),
         None => return,
     };
 

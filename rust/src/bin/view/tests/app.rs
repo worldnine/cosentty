@@ -1157,9 +1157,9 @@ use super::support::*;
         assert!(app.note_text().contains("copied"), "note: {}", app.note_text());
 
         app.overlay = Some(Overlay::Help);
-        // Tall enough for every help line, diagram notes included: the
-        // panel clips from the bottom, and this test reads the whole list.
-        // (35: the text-first diagram row joined the list.)
+        // Tall enough for every help line: the panel clips from the
+        // bottom, and this test reads the whole list. (26 rows in four
+        // sections: READ / EDIT / index / overlays.)
         let mut t = Terminal::new(TestBackend::new(100, 35)).unwrap();
         t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let screen: String = {
@@ -1177,10 +1177,98 @@ use super::support::*;
         assert!(screen.contains("Esc close"));
         assert!(!screen.contains("移動"), "and nothing Japanese is left behind");
         // Keys and env vars are names, not words: they read the same either way.
-        assert!(screen.contains("COSENSE_WEB_IDLE_SECS"));
+        assert!(screen.contains("── EDIT ──"), "the edit section: {screen}");
+        assert!(screen.contains("── index ──"), "the index section: {screen}");
+        assert!(screen.contains("── overlays ──"), "the overlay section: {screen}");
+        assert!(screen.contains("quit        q twice"));
         assert!(screen.contains("^u/^d · PgUp/PgDn"));
 
         cosense::lang::set_for_thread(cosense::lang::Lang::Ja);
+    }
+
+    /// The help is four sections, one per place the keys work in — and
+    /// the stale `x deletes` row is gone (`x` now explains itself).
+    #[test]
+    fn the_help_lists_four_sections_and_no_stale_deletion_key() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["title", "body"]);
+        app.editable = true;
+        app.overlay = Some(Overlay::Help);
+        let mut t = Terminal::new(TestBackend::new(100, 35)).unwrap();
+        t.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let screen: String = {
+            let buf = t.backend().buffer().clone();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for section in ["── READ ──", "── EDIT ──"] {
+            assert!(screen.contains(section), "missing {section}: {screen}");
+        }
+        // Wide glyphs occupy two cells (grapheme + filler space), so CJK
+        // assertions read the screen with the filler taken out.
+        let packed: String = screen.chars().filter(|c| *c != ' ').collect();
+        for section in ["──一覧──", "──オーバーレイ──"] {
+            assert!(packed.contains(section), "missing {section}: {screen}");
+        }
+        assert!(!packed.contains("x行/選択を削除"), "stale deletion row: {screen}");
+        assert!(!screen.contains("COSENSE_WEB_IDLE_SECS"), "the diagram notes moved to KEYMAP: {screen}");
+    }
+
+    /// The panel does not scroll, so every help row fits its 90 cells
+    /// (2 for the cursor marker) in both languages — a clipped row reads
+    /// as a different key.
+    #[test]
+    fn every_help_row_fits_the_panel_in_both_languages() {
+        use cosense::lang::{set_for_thread, Lang};
+        for lang in [Lang::Ja, Lang::En] {
+            set_for_thread(lang);
+            let app = page(&["title", "body"]);
+            let rows = help_keys(&app);
+            assert_eq!(rows.len(), 26, "four sections, nothing clipped vertically");
+            for r in &rows {
+                assert!(
+                    str_width(r) <= 88,
+                    "clipped: {r} ({} cells)",
+                    str_width(r)
+                );
+            }
+        }
+        set_for_thread(Lang::Ja);
+    }
+
+    /// `?` opens the help from the index (filter line closed) and from
+    /// any overlay — the sections it lists would otherwise be unreachable
+    /// where they are needed. While the filter line is open `?` stays a
+    /// filter character.
+    #[test]
+    fn question_opens_help_from_the_index_and_from_an_overlay() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "body"]);
+        app.rebuild(100);
+        let mk = |title: &str| cosense::index::Entry {
+            title: title.into(),
+            updated: now_secs(),
+            descriptions: vec!["body".into()],
+            unread: false,
+            ..Default::default()
+        };
+        let entries = vec![mk("a"), mk("b")];
+        let n = entries.len();
+        app.index = Some(cosense::index::Index::new(entries, n, cosense::index::SortKey::Updated));
+        assert!(!app.index.as_ref().unwrap().filter_editing, "filter line closed");
+        handle_key(&mut app, &ctx, key(KeyCode::Char('?')));
+        assert!(matches!(app.overlay, Some(Overlay::Help)), "? in the index should open help");
+
+        app.overlay = Some(Overlay::LineInfo);
+        handle_overlay_key(&mut app, &ctx, KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(matches!(app.overlay, Some(Overlay::Help)), "? on an overlay should open help");
     }
 
     /// Eyeball the help and footer: prints the drawn screen so the mixed

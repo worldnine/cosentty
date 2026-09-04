@@ -104,6 +104,9 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         }
         (KeyCode::Char('c'), true) => return Action::Quit,
         (KeyCode::Char('/'), false) => ix.begin_filter(),
+        // Help opens here too (the filter line captures every key while
+        // it is open, so `?` typed there stays a filter character).
+        (KeyCode::Char('?'), false) => app.overlay = Some(Overlay::Help),
         // `^o` again: one level up. Over a project's pages it lists the
         // projects; over the projects it fetches them again (the page
         // list's `^o` refetches too).
@@ -675,6 +678,12 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         KeyCode::Esc => Act::Close,
         // `t` toggles the line-detail overlay back off.
         KeyCode::Char('t') if is_line_info => Act::Close,
+        // Help opens from any overlay, replacing it (reopening the list
+        // starts at the top, exactly as `l` does).
+        KeyCode::Char('?') => {
+            app.overlay = Some(Overlay::Help);
+            Act::None
+        }
         KeyCode::Enter => Act::Activate,
         KeyCode::Down => Act::Down,
         KeyCode::Up => Act::Up,
