@@ -57,9 +57,9 @@ akapen と同じ Swift ヘルパ（Carbon TIS、アクセシビリティ権限�
 3. `users[]` の Personal Access Token（origin 一致、`x-personal-access-token`）
 4. `COSENSE_SID` 環境変数（connect.sid cookie、レガシーフォールバック）
 
-読み・書き・検索は 1〜3 だけで完結する。sid が**必要**なのは websocket push 同期と
-web レンダラ（非公開プロジェクトの mmd 描画）の2つで、どちらも無ければ縮退する
-（`同期: poll` / 「非公開の図を描画するには connect.sid が必要です」）。
+読み・書き・検索は 1〜3 だけで完結する。sid が必要なのは websocket push 同期(と、
+既定でオフの web レンダラを上げたときの非公開ページ描画)だけ。無ければ縮退する
+（`同期: poll` / レンダラを上げていなければ何も起きない）。
 
 起動時のステータス行に `認証: pat`（英語表示では `auth: pat`）のように表示される。未認証なら公開プロジェクトの
 読み取り専用（`cosense login https://scrapbox.io` で有効化）。非公開プロジェクトの閲覧・
@@ -522,9 +522,11 @@ gyazo に加え、任意の http(s) 画像 URL（拡張子つき）とリンク�
 
 描ける型(flowchart・sequence・pie・gantt・gitGraph・class・er・journey・mindmap・
 timeline・xychart 他)はまず**罫線・表のテキスト描画**(`mermaid-text` による)で出し、
-描けないものだけブラウザ画像 → 素のコード行に落ちる。**テキスト描画が本流**なので、
-自動の経路は描けている図の絵を取りに行かない(Chrome を起こさない)。
-ブラウザが描いた本物を見たければ `R`、ページごと見たければ `w` で web を開く。テキスト描画は即時・オフラインで、
+描けないものだけ素のコード行に落ちる。**テキスト描画が本流**で、ブラウザ描画は既定で**オフ**
+(`COSENSE_WEB_RENDER` の既定)。Chrome の起動も、キャッシュ I/O も、非公開ページ用の
+sid も不要になる。ブラウザが描いた本物が必要になったら `COSENSE_WEB_RENDER=manual`(ページごと
+`R`)か `=auto` で上げる。ページごと見るだけなら `w` で web を開くほうが早い。
+テキスト描画は即時・オフラインで、
 選択・検索・コピーが効く。編集中のブロックは素のソースに戻る。`COSENSE_MERMAID=off` で
 テキスト段を止めて以前の振る舞い(画像 → コード行)に戻せる。フォントに罫線グリフが
 無い等で崩れるときは `COSENSE_MERMAID=ascii`(`+ - | > <` だけで描く)。
@@ -559,12 +561,14 @@ ProjectCSS つきブロックも同じ経路に載せられる。
 - **private project**: ブラウザには `connect.sid`（`--sid` / `COSENSE_SID`）だけを CDP の
   `Network.setCookie` で渡す。argv・ログ・エラー表示・キャッシュキーには一切載らない。
   public project は SID なしで動く。
-- **Web artifact の描画は既定で `R` キー**（`COSENSE_WEB_RENDER=manual`）。ブラウザの起動は
-  このビューアが行う中で最も高価な操作なので、ページを開いた時点では**ディスクキャッシュに
+- **Web artifact の描画は既定でオフ**。上げるには `COSENSE_WEB_RENDER=manual`(`R` で描く)か
+  `=auto`(読み込み時に描く)。ブラウザの起動は
+  このビューアが行う中で最も高価な操作なので、manualではページを開いた時点で**ディスクキャッシュに
   あるものだけ**を表示する。cache miss は `R` で1バッチまとめて描画する。Mermaidだけでなく、
   将来のTeX・`.icon`・ProjectCSS描画も同じキーを使う。manualではソース編集後もChromeを
   自動起動せず、新しいartifactがcacheになければソース表示へ戻る。`auto`はページ表示時と
-  ソース更新後に自動描画し、`off`はワーカー・バックエンド・cache I/Oを一切動かさない。
+  ソース更新後に自動描画する。offではワーカー・バックエンド・cache I/Oを一切動かさず、
+  Chrome の検出も行わない。
   EDITセッション中の`R`は通常の文字入力。
 - **ブラウザの保温**: バッチの後 15 秒はブラウザを生かしたままにする（温まったブラウザでの
   再描画は約 2 倍速い）。`COSENSE_WEB_IDLE_SECS=0..300` で変更でき、`0` はバッチごとに終了。

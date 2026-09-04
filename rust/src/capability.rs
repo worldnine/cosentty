@@ -81,21 +81,26 @@ impl SyncState {
 /// When diagrams may be drawn. `COSENSE_WEB_RENDER`, default `manual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderPolicy {
-    /// Page load consults the disk cache only; `R` renders the rest.
+    /// No worker, no backend, no cache I/O — code blocks, always. This is
+    /// the default: the text tier is the mainline, and the browser is a
+    /// special-purpose tool the reader raises when they want it
+    /// (`COSENSE_WEB_RENDER=manual|auto`). It also keeps a session without
+    /// a `connect.sid` at full strength — rendering was one of the two
+    /// things only the sid could do.
     #[default]
+    Off,
+    /// Page load consults the disk cache only; `R` renders the rest.
     Manual,
     /// Every renderable miss is drawn as the page loads.
     Auto,
-    /// No worker, no backend, no cache I/O — code blocks, always.
-    Off,
 }
 
 impl RenderPolicy {
     pub fn from_env() -> Self {
         match std::env::var("COSENSE_WEB_RENDER").ok().as_deref() {
+            Some("manual") => RenderPolicy::Manual,
             Some("auto") => RenderPolicy::Auto,
-            Some("off") => RenderPolicy::Off,
-            _ => RenderPolicy::Manual,
+            _ => RenderPolicy::Off,
         }
     }
 }

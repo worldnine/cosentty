@@ -16,11 +16,15 @@
   型ゲート → lib 描画 → 行分割 → 幅超過チェック → `None` で縮退
 - lib が Err の型・未知の型は描かない(画像 → コード行へ)
 
-## 位置づけ: テキスト段が本流
+## 位置づけ: テキスト段が本流、ブラウザは既定でオフ
 
-ブラウザ描画は「テキストで描けないものの受け皿」に降りた。端末で読むぶんには
-テキストが正本で、**本物を見たければ `w` で web を開けばいい**——ページの
-deep-link はもともとそのためにある。
+ブラウザ描画は「テキストで描けないものの受け皿」に降りたうえで、**既定では動かない**
+(`RenderPolicy::Off`。`COSENSE_WEB_RENDER=manual|auto` で上げる)。テキストで
+読めてしまうもののために Chrome を起こすのは高すぎるし、オフならキャッシュ I/O も
+Chrome の検出も起きない——**sid への依存が websocket 同期だけになる**。端末で読む
+ぶんにはテキストが正本で、**本物を見たければ `w` で web を開けばいい**——ページの
+deep-link はもともとそのためにある。コード(ワーカー・backend・キャッシュ・認証の
+縮退)は全部生きていて、上げれば即使える。
 
 その帰結として、**自動の経路はテキストで描ける図の絵を取りに行かない**
 (`App::drawn_as_text`)。描けている図のために Chrome を起こすのは、この
@@ -44,21 +48,22 @@ viewer で一番高い「何もしない仕事」だった。`R` は別で、あ
 flowchart・sequence・pie・er・gantt・gitGraph・class・journey・
 mindmap・timeline・xychart・sankey・block・packet・quadrant・
 requirement・architecture。state 系は lib が Err なら縮退。
-sequence 箱は `░` 塗りになるのは lib の味。CJK の字間開きと罫線ずれは
-lib の `Grid(Vec<char>)` が全角の continuation cell までserializeする不具合だった。
+sequence 箱は `░` 塗りになるのは lib の味。CJK の字間開きと罫線ずれは、
+lib の `Grid(Vec<char>)` が全角の continuation cell までserializeする不具合だった
+(出力後の補正で対処している)。
 flowchart・sequence・state は `remove_wide_continuation_cells` で出力後に補正する。
 補正前 `開 始` / `[成═功═]` → 補正後 `開始` / `[成功]`。`classDiagram`
 などlib内panicもあるため、呼び出し境界を `catch_unwind` し、失敗時は画像へ縮退する。
 Cosense webに合わせ、Mermaidブロックは先頭空白0〜2個まで図として扱う。
 1・2段目は図全体を `text_column(level)` だけ右へ送るが、READではビュレットを
 描かない。EDITでソースへ戻した間だけ、`code:` ヘッダーにビュレットを置く
-（caretがヘッダーでも本体でも同じ）。本体のコード行には置かない。
+（caretがヘッダーにあっても本体にあっても同じ）。本体のコード行には置かない。
 3段目以降は `code:` ヘッダーも本体もコードブロックとして消費せず、各行自身の
 空白数どおりの通常リストに戻す。`code_span_at` / `code_line_flags` も同じ境界を
 使う。画像縮退側の `Row::Image` も同じインデントを使い、`item: false` とする。
 また、空行の先に別の `code:` ヘッダーがある場合は、後者がより深い段でも前の
 コード本文へ吸収しない。空行なしの `code:` は従来どおり本文になり、コード内の
-空行はインデント付き空行で表す。
+空行はインデント付き空行で表現する。
 
 ## toolchain bump(1.90.0 → 1.92)
 

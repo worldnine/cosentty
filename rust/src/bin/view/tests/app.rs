@@ -341,8 +341,36 @@ use super::support::*;
     // ---------------------------------------------------------------
     // Render policy: when a browser is allowed to start at all.
     // ---------------------------------------------------------------
+    /// The default policy is OFF: no worker, no backend, no cache I/O, and
+    /// nothing automatic asks the browser for anything. The text tier is
+    /// the mainline; the browser is a tool the reader raises when they want
+    /// it (`COSENSE_WEB_RENDER=manual|auto`) — and a session without a
+    /// `connect.sid` stays at full strength.
     #[test]
-    fn by_default_opening_a_page_shows_cached_diagrams_and_starts_no_browser() {
+    fn the_default_policy_is_off_and_touches_nothing() {
+        let mut app = web_tier_page();
+        // The fixture raises Auto for the render-pipeline tests; the DEFAULT
+        // is whatever the environment says, which here is nothing.
+        app.render_policy = capability::RenderPolicy::from_env();
+        assert_eq!(app.render_policy, capability::RenderPolicy::Off);
+        app.rebuild(80);
+        assert!(!app.start_web_renders(capability::Trigger::Auto));
+        assert!(!app.start_web_renders(capability::Trigger::Manual));
+        assert!(
+            app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+            "no job was ever queued"
+        );
+        // The note names the way out.
+        handle_key(&mut app, &test_ctx(), key(KeyCode::Char('R')));
+        assert!(
+            app.note.as_ref().is_some_and(|n| n.0.contains("COSENSE_WEB_RENDER")),
+            "R says why: {:?}",
+            app.note
+        );
+    }
+
+    #[test]
+    fn a_manual_page_load_shows_cached_diagrams_and_starts_no_browser() {
         let mut app = web_tier_page();
         app.render_policy = capability::RenderPolicy::Manual;
         app.rebuild(80);
