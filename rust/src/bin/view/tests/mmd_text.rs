@@ -41,6 +41,50 @@ fn editing_a_drawn_block_shows_source() {
         text.iter().any(|t| t.contains("flowchart LR")),
         "raw source while editing: {text:?}"
     );
+    assert!(!text.iter().any(|t| t.contains('•')), "top-level header has no bullet");
+}
+
+#[test]
+fn nested_mermaid_edit_shows_a_bullet_on_its_header_only() {
+    for (header, body, edge, expected_header) in [
+        ("　code:mmd", "  flowchart LR", "   A-->B", "• code:mmd"),
+        (
+            "　　code:mmd",
+            "   flowchart LR",
+            "    A-->B",
+            "  • code:mmd",
+        ),
+    ] {
+        // The marker is present whether the caret is on the header itself or
+        // on another source line in the block.
+        for caret in [1, 2] {
+            let source = ["親", header, body, edge];
+            let mut app = page(&source);
+            app.session = Some(EditSession {
+                line: caret,
+                input: Input::new(source[caret].into()),
+                orig: source[caret].into(),
+                want_col: None,
+                sel_from: None,
+            });
+            app.rebuild(80);
+            let text = text_rows(&app);
+            let bullet_rows: Vec<&str> = text
+                .iter()
+                .filter(|t| t.contains('•'))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                bullet_rows,
+                vec![expected_header],
+                "level header={header:?}, caret={caret}: {text:?}"
+            );
+            assert!(
+                text.iter().any(|t| t.contains("flowchart LR") && !t.contains('•')),
+                "body remains code without a bullet: {text:?}"
+            );
+        }
+    }
 }
 
 #[test]

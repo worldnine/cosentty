@@ -39,7 +39,9 @@ flowchart・sequence・state は `remove_wide_continuation_cells` で出力後�
 補正前 `開 始` / `[成═功═]` → 補正後 `開始` / `[成功]`。`classDiagram`
 などlib内panicもあるため、呼び出し境界を `catch_unwind` し、失敗時は画像へ縮退する。
 Cosense webに合わせ、Mermaidブロックは先頭空白0〜2個まで図として扱う。
-1・2段目は図全体を `text_column(level)` だけ右へ送るが、ビュレットは描かない。
+1・2段目は図全体を `text_column(level)` だけ右へ送るが、READではビュレットを
+描かない。EDITでソースへ戻した間だけ、`code:` ヘッダーにビュレットを置く
+（caretがヘッダーでも本体でも同じ）。本体のコード行には置かない。
 3段目以降は `code:` ヘッダーも本体もコードブロックとして消費せず、各行自身の
 空白数どおりの通常リストに戻す。`code_span_at` / `code_line_flags` も同じ境界を
 使う。画像縮退側の `Row::Image` も同じインデントを使い、`item: false` とする。

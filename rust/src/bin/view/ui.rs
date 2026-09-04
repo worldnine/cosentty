@@ -2114,9 +2114,12 @@ impl App {
                 display_caret(&s.input.buf, b, edit_code),
             ))
         });
-        let raw_rows = |content: &mut Vec<Row>, buf: &str, src: usize| {
+        let raw_rows =
+            |content: &mut Vec<Row>, buf: &str, src: usize, mermaid_header_bullet: bool| {
             // The indent renders as its bullet (dim) — same shape as the
-            // view — while the underlying data stays whitespace.
+            // view — while the underlying data stays whitespace. A nested
+            // Mermaid header is the one exception inside code: in EDIT only,
+            // its gutter wears a bullet while body rows remain plain code.
             let disp = session_display(buf, edit_code);
             let prefix = if edit_code.is_some() { 0 } else { display_prefix_bytes(buf) };
             let wrapped = SessionWrap::new(&disp, text_w, session_hang(buf, edit_code));
@@ -2130,6 +2133,17 @@ impl App {
                     // bullet — the same shape READ has always had.
                     spans.push(Span::raw(" ".repeat(wrapped.indent_of(k))));
                 }
+                // session_display deliberately keeps a code gutter as spaces.
+                // Replace that visual prefix after caret/selection offsets were
+                // computed; both forms occupy the same number of terminal cells.
+                let visual_from = if k == 0 && mermaid_header_bullet {
+                    let gutter = edit_code.map(|span| span.gutter_cols()).unwrap_or(0).min(seg.len());
+                    spans.push(Span::raw(" ".repeat(gutter.saturating_sub(2))));
+                    spans.push(Span::styled("• ".to_string(), Style::default().fg(Color::DarkGray)));
+                    gutter
+                } else {
+                    0
+                };
                 let mut push = |text: &str, selected: bool, dim: bool| {
                     if text.is_empty() {
                         return;
@@ -2163,6 +2177,7 @@ impl App {
                 for (from, to, selected) in
                     [(0, lo, false), (lo, hi, true), (hi, seg.len(), false)]
                 {
+                    let from = from.max(visual_from);
                     if from >= to {
                         continue;
                     }
@@ -2180,7 +2195,7 @@ impl App {
                 if src == eline
                     && !matches!(b, Block::Table(_) | Block::WebRender { .. })
                 {
-                    raw_rows(&mut content, ebuf, src);
+                    raw_rows(&mut content, ebuf, src, false);
                     continue;
                 }
             }
@@ -2207,7 +2222,7 @@ impl App {
                         if let Some((eline, ebuf)) = edit {
                             if row_src == eline {
                                 if !emitted_raw {
-                                    raw_rows(&mut content, ebuf, row_src);
+                                    raw_rows(&mut content, ebuf, row_src, false);
                                     emitted_raw = true;
                                 }
                                 continue;
@@ -2265,15 +2280,30 @@ impl App {
                         continue;
                     }
                     // No artifact (yet, or ever): the plain code block, with
-                    // the session's caret row swapped to raw source.
+                    // the session's caret row swapped to raw source. In EDIT,
+                    // nested Mermaid wears a bullet on its header only.
+                    let header_src = rows.first().map(|(src, _)| *src);
                     for (rsrc, line) in rows {
+                        let header_bullet = editing_here
+                            && *indent > 0
+                            && header_src == Some(*rsrc);
                         if let Some((eline, ebuf)) = edit {
                             if *rsrc == eline {
-                                raw_rows(&mut content, ebuf, *rsrc);
+                                raw_rows(&mut content, ebuf, *rsrc, header_bullet);
                                 continue;
                             }
                         }
-                        for w in wrap_line_parts(line, text_w, &hanging_prefix(line)) {
+                        let mut line = line.clone();
+                        if header_bullet {
+                            // Header rows are built as [indent, code label].
+                            // Insert the marker between them without disturbing
+                            // the code label's syntax/theme style.
+                            line.spans.insert(
+                                1.min(line.spans.len()),
+                                Span::styled("• ".to_string(), Style::default().fg(Color::DarkGray)),
+                            );
+                        }
+                        for w in wrap_line_parts(&line, text_w, &hanging_prefix(&line)) {
                             content.push(Row::Line {
                                 line: w.line,
                                 src: *rsrc,
