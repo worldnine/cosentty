@@ -2269,6 +2269,36 @@ impl App {
                     && !matches!(b, Block::Table(_) | Block::Artifact { .. })
                 {
                     raw_rows(&mut content, ebuf, src);
+                    // The line's inline formulas, drawn under it (cosense
+                    // web previews them while the line is being edited).
+                    // Same chrome as the block preview: a dim bar on every
+                    // row, a label saying what it is — the caret line shows
+                    // RAW notation, so even a one-row formula loses its
+                    // rendering while edited, and all of them preview.
+                    // Only OUTSIDE code: inside a code block `[$ ]` is
+                    // literal text, and the notation bargain says so.
+                    if edit_code.is_none() {
+                        let latexes = cosense::render::inline_formulas(ebuf);
+                        if let Some(preview) =
+                            cosense::math::preview_line(&latexes).filter(|p| p.width <= text_w)
+                        {
+                            let dim = Style::default().fg(Color::DarkGray);
+                            content.push(Row::Aside {
+                                line: Line::from(vec![Span::styled(
+                                    format!("▏ {}", t!("プレビュー", "preview")),
+                                    dim,
+                                )]),
+                            });
+                            for row in &preview.rows {
+                                content.push(Row::Aside {
+                                    line: Line::from(vec![
+                                        Span::styled("▏ ".to_string(), dim),
+                                        Span::raw(row.clone()),
+                                    ]),
+                                });
+                            }
+                        }
+                    }
                     continue;
                 }
             }

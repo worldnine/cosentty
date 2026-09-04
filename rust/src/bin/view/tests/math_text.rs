@@ -306,6 +306,57 @@ fn an_unsettable_formula_previews_nothing() {
 }
 
 #[test]
+fn editing_a_line_with_inline_formulas_previews_them_beside_it() {
+    // cosense web と同じ:行の編集中、行の中の [$ ... ] を下に横並びで
+    // 組んで出す。行のプレビューだから、ブロックのプレビューと同じ
+    // 薄罫とラベルで添え物であることを示す。
+    let ctx = test_ctx();
+    let mut app = page(&[
+        "t",
+        r"積分[$ \int_0^1 x^2 dx ]と和[$ \sum_{i=1}^{n} i ]を並べても1つの文",
+    ]);
+    app.rebuild(80);
+    enter_session(&mut app, &ctx, 1, 6);
+    app.rebuild(80);
+    let preview = preview_rows(&app);
+    assert!(preview.iter().any(|t| t.contains("プレビュー")), "{preview:?}");
+    assert!(
+        preview.iter().any(|t| t.contains("x² dx")),
+        "the integral is drawn: {preview:?}"
+    );
+    // 横に並ぶ:積分と和が同じ行に載っている。
+    assert!(
+        preview.iter().any(|t| t.contains("x² dx") && t.contains("∑")),
+        "side by side: {preview:?}"
+    );
+}
+
+#[test]
+fn a_line_without_formulas_previews_nothing() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", "ただの行 [リンク] だけ"]);
+    app.rebuild(80);
+    enter_session(&mut app, &ctx, 1, 6);
+    app.rebuild(80);
+    assert!(preview_rows(&app).is_empty(), "no formulas, no preview");
+}
+
+#[test]
+fn a_line_inside_a_code_block_previews_no_inline_math() {
+    // コードの中に [$ ] は数式ではない(記法が効かない約束の場所)。
+    // 普通のコードブロックはText行として編集されるので、ここで止める。
+    let ctx = test_ctx();
+    let mut app = page(&["t", "code:python", " x = [$ 1 ]"]);
+    app.rebuild(80);
+    enter_session(&mut app, &ctx, 2, 4);
+    app.rebuild(80);
+    assert!(
+        preview_rows(&app).is_empty(),
+        "[$ ] inside code is literal text, not a formula"
+    );
+}
+
+#[test]
 fn a_formula_at_the_left_margin_still_draws() {
     let mut app = page(&["t", "code:tex", " \\frac{a}{b}"]);
     app.page_id = "PAGE".into();

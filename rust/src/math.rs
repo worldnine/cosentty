@@ -101,6 +101,7 @@ pub fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
 
 /// 組まれた式。行の中に置くには、高さだけでなく**どの行が本文と
 /// 揃う行なのか**が要る。分数なら真ん中の罫線の行。
+#[derive(Debug)]
 pub struct Rendered {
     /// 各行。すべて同じ表示幅に揃えられている。
     pub rows: Vec<String>,
@@ -142,9 +143,60 @@ pub fn render_inline(latex: &str) -> Option<String> {
     (!only.is_empty()).then(|| only.to_string())
 }
 
+/// いくつもの式を**横に並べて**1枚の組図にする(本文行に複数のインライン
+/// 数式があるときのプレビュー用)。各式のベースラインをそろえる ——
+/// 1行の式はその行に立ち、分数はまたぐ。余白は削る。
+pub fn join_beside(blocks: &[Rendered]) -> Option<Rendered> {
+    let above = blocks.iter().map(|b| b.baseline).max()?;
+    let below = blocks
+        .iter()
+        .map(|b| b.rows.len().saturating_sub(1 + b.baseline))
+        .max()?;
+    let mut rows = Vec::with_capacity(above + below + 1);
+    for off in -(above as i32)..=(below as i32) {
+        let mut line = String::new();
+        for b in blocks {
+            let idx = b.baseline as i32 + off;
+            if (0..b.rows.len() as i32).contains(&idx) {
+                line.push_str(&b.rows[idx as usize]);
+            } else {
+                line.push_str(&" ".repeat(b.width));
+            }
+        }
+        rows.push(line.trim_end().to_string());
+    }
+    let width = rows.iter().map(|r| str_width(r)).max()?;
+    (!rows.is_empty()).then(|| Rendered { rows, baseline: above, width })
+}
+
+/// 1行に書かれたインライン数式を全部組んで、横に並べた1枚にする。
+/// 一つも組めなければ None。
+pub fn preview_line(latexes: &[String]) -> Option<Rendered> {
+    let blocks: Vec<Rendered> =
+        latexes.iter().filter_map(|l| render_rows(l)).collect();
+    join_beside(&blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formulas_join_beside_on_a_shared_baseline() {
+        let frac = render_rows(r"\frac{a}{b}").expect("draws");
+        let plain = render_rows(r"x = 1").expect("draws");
+        let joined = join_beside(&[frac, plain]).expect("draws");
+        // 分数は3行(上1+ベースライン+下1)、x = 1 はベースラインに立つ。
+        // 並べると高さ3で、x = 1 は真ん中の行に来る。
+        assert_eq!(joined.rows.len(), 3, "{joined:?}");
+        assert_eq!(joined.baseline, 1);
+        assert!(joined.rows[1].contains("x = 1"), "{joined:?}");
+        assert!(joined.rows[0].contains('a') && joined.rows[2].contains('b'), "{joined:?}");
+        // 各行の行末の空白は削られている。
+        for r in &joined.rows {
+            assert_eq!(r.trim_end(), r, "{joined:?}");
+        }
+    }
 
     #[test]
     fn help_page_formulas_all_draw() {

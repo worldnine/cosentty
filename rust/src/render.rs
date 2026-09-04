@@ -857,7 +857,7 @@ fn star_style(stars: usize, pal: &Palette) -> Style {
 /// Taking the FIRST `]` cuts `[* [改善案]]` at `[改善案`, and the link
 /// inside a decoration is lost — it renders as text with a stray bracket
 /// and cannot be followed.
-fn matching_bracket(s: &str, open: usize) -> Option<usize> {
+pub fn matching_bracket(s: &str, open: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (i, c) in s[open..].char_indices() {
         match c {
@@ -1254,6 +1254,35 @@ fn tall_formula_rows(inner: &str) -> Option<(String, crate::math::Rendered)> {
     let latex = inner.strip_prefix('$')?;
     let r = crate::math::render_rows(latex)?;
     (r.rows.len() > 1).then(|| (latex.trim().to_string(), r))
+}
+
+/// Every `[$ ... ]` formula on a line, left to right — the same reading the
+/// renderer draws with (`decorate_bracket`), exposed for the editor's live
+/// preview. Backtick-quoted spans are text ABOUT notation, not notation.
+pub fn inline_formulas(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    loop {
+        let tick = rest.find('`');
+        let open = rest.find('[');
+        match (tick, open) {
+            (Some(t), Some(o)) if t < o => {
+                let after = &rest[t + 1..];
+                match after.find('`') {
+                    Some(close) => rest = &after[close + 1..],
+                    None => return out,
+                }
+            }
+            (_, Some(o)) => {
+                let Some(end) = matching_bracket(rest, o) else { return out };
+                if let Some(latex) = rest[o + 1..end].strip_prefix('$') {
+                    out.push(latex.trim().to_string());
+                }
+                rest = &rest[end + 1..];
+            }
+            _ => return out,
+        }
+    }
 }
 
 /// A line that opens with a picture and continues in text/// The image this line is ENTIRELY made of/// The image this line is ENTIRELY made of — one bracket and nothing
@@ -2684,3 +2713,20 @@ mod tests {
     }
 }
 
+
+#[test]
+fn inline_formula_scan_tests() {
+    use super::*;
+    assert_eq!(
+        inline_formulas(r"積分[$ \int_0^1 x^2 dx ]と和[$ \sum_{i=1}^{n} i ]"),
+        vec![r"\int_0^1 x^2 dx", r"\sum_{i=1}^{n} i"]
+    );
+    // ネストした ] も、逆引用符で括られた「記法についての文」も、
+    // レンダラと同じ読み方をする。
+    assert_eq!(
+        inline_formulas(r"[$ [x-3]+a^2 ] と `[$ これは読まない ]`"),
+        vec![r"[x-3]+a^2"]
+    );
+    assert!(inline_formulas("数式のない行").is_empty());
+    assert!(inline_formulas(r"[リンクだけ] の行").is_empty());
+}
