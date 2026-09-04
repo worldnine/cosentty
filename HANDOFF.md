@@ -40,7 +40,7 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 ## ビルドとテスト
 
 ```bash
-cd rust && cargo test --bin view   # viewer(321 tests)
+cd rust && cargo test --bin view   # viewer(324 tests)
 cargo test                          # lib(197)含む全部
 ```
 
