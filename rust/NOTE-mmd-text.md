@@ -48,18 +48,19 @@ viewer で一番高い「何もしない仕事」だった。`R` は別で、あ
 flowchart・sequence・pie・er・gantt・gitGraph・class・journey・
 mindmap・timeline・xychart・sankey・block・packet・quadrant・
 requirement・architecture。state 系は lib が Err なら縮退。
-sequence 箱は `░` 塗りになるのは lib の味。CJK の字間開きと罫線ずれは、
-lib の `Grid(Vec<char>)` が全角の continuation cell までserializeする不具合だった
-(出力後の補正で対処している)。
+sequence 箱の `░` 塗りは lib の味。
+CJK の字間開きと罫線ずれは、lib の `Grid(Vec<char>)` が全角の continuation cell
+までserializeする不具合だった(出力後の補正で対処)。
 flowchart・sequence・state は `remove_wide_continuation_cells` で出力後に補正する。
-補正前 `開 始` / `[成═功═]` → 補正後 `開始` / `[成功]`。`classDiagram`
-などlib内panicもあるため、呼び出し境界を `catch_unwind` し、失敗時は画像へ縮退する。
+補正前 `開 始` / `[成═功═]` → 補正後 `開始` / `[成功]`。
+`classDiagram` などlib内panicもあるため、呼び出し境界を `catch_unwind` し、
+失敗時は画像へ縮退する。
 Cosense webに合わせ、Mermaidブロックは先頭空白0〜2個まで図として扱う。
 1・2段目は図全体を `text_column(level)` だけ右へ送るが、READではビュレットを
 描かない。EDITでソースへ戻した間だけ、`code:` ヘッダーにビュレットを置く
 （caretがヘッダーにあっても本体にあっても同じ）。本体のコード行には置かない。
-3段目以降は `code:` ヘッダーも本体もコードブロックとして消費せず、各行自身の
-空白数どおりの通常リストに戻す。`code_span_at` / `code_line_flags` も同じ境界を
+3段目以降は `code:` ヘッダーも本体もコードブロックとして消費せず、
+各行自身の空白数どおりの通常リストに戻す。`code_span_at` / `code_line_flags` も同じ境界を
 使う。画像縮退側の `Row::Image` も同じインデントを使い、`item: false` とする。
 また、空行の先に別の `code:` ヘッダーがある場合は、後者がより深い段でも前の
 コード本文へ吸収しない。空行なしの `code:` は従来どおり本文になり、コード内の
@@ -70,7 +71,7 @@ Cosense webに合わせ、Mermaidブロックは先頭空白0〜2個まで図と
 `mermaid-text@0.57`(と `ascii-dag`)が rustc 1.92 を要求するため。
 手順:
 
-- `rustup override set 1.92-...` (本体 `rust/`)。worktree では
+- `rustup override set 1.92-...`(本体 `rust/`)。worktree では
   `RUSTUP_TOOLCHAIN=1.92`。1.90 系と成果物を共有しないよう
   `CARGO_TARGET_DIR` は本体と分ける(worktree 既定の `rust/target` 等)
 - 本分支の `CLAUDE.md` も 1.92 に書き換え済み。merge 時に本体へ反映
@@ -98,3 +99,11 @@ merge しない。
 薄字にするのは**ラベルに出てこない字だけ**(box drawing・ブロック・矢印の
 Unicode 範囲)。`COSENSE_MERMAID=ascii` の罫線は `- | + > v` で、ラベルにも
 出る字なので二層を字で見分けられない——だから ascii では何も薄字にしない。
+
+## 編集中のライブプレビュー
+
+編集セッションがブロックの中にいる間、ソースの下に**いま打っている内容の組図**を
+出す(cosense web と同じ)。打鍵のたびに再組図する(実測 0.4ms)。違いの演出は、
+プレビューの全行に付く薄い左罫 `▏` と、先頭の薄字ラベル「プレビュー」——本文と
+読み違えさせないため。lib が組めない式・ペイン幅に入らない式は黙る(ソースが
+もう見えているので、何かを出す必要がない)。

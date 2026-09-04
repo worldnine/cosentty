@@ -185,7 +185,11 @@ fn e_on_a_drawn_diagram_switches_the_block_to_its_source() {
         text.iter().any(|t| t.contains("flowchart LR")),
         "the block makes way for its source: {text:?}"
     );
-    assert!(!text.iter().any(|t| t.contains("┌")), "no drawing while editing: {text:?}");
+    // ブロック自身の描画段は引っ込む。図が現れるのはプレビュー(罫付き)だけ。
+    assert!(
+        text.iter().filter(|t| t.contains("┌")).all(|t| t.contains("▏")),
+        "boxes only in the preview: {text:?}"
+    );
     assert!(
         text.iter().any(|t| t.contains("code::test.mmd")),
         "the header too: {text:?}"

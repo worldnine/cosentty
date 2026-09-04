@@ -2396,6 +2396,62 @@ impl App {
                             });
                         }
                     }
+                    // The live preview (cosense web does the same): while the
+                    // session is inside the block the reader is typing the
+                    // SOURCE, and the web draws the formula/diagram it makes
+                    // under it, updating as they type. Same here — the text
+                    // tier over the CURRENT source, caret buffer included
+                    // (source_texts swaps it in). A dim bar on every row says
+                    // "attached commentary, not page content"; what cannot be
+                    // set (unknown syntax, too wide) shows nothing, since the
+                    // source is already on screen.
+                    if let Some(code) = edit.and_then(|_| {
+                        let first = rows.first().map(|(s, _)| *s)?;
+                        let base =
+                            indent_of(self.lines.get(first)?.text.as_str()).chars().count();
+                        let texts = self.source_texts();
+                        let mut bodies = Vec::new();
+                        for i in first + 1..=*last_src {
+                            bodies.push(cosense::render::strip_leading_ws(texts.get(i)?, base + 1));
+                        }
+                        Some(bodies.join("\n"))
+                    }) {
+                        let w = text_w.saturating_sub(*indent + 2);
+                        let drawn = match kind {
+                            ArtifactKind::Mermaid => mmd_text::render_text(&code, w),
+                            ArtifactKind::Math => cosense::math::render_text(&code, w),
+                        };
+                        if let Some(lines) = drawn {
+                            let dim = Style::default().fg(Color::DarkGray);
+                            let pad = " ".repeat(*indent);
+                            let bar = "▏ ";
+                            content.push(Row::Line {
+                                line: Line::from(vec![
+                                    Span::raw(pad.clone()),
+                                    Span::styled(
+                                        format!("{bar}{}", t!("プレビュー", "preview")),
+                                        dim,
+                                    ),
+                                ]),
+                                src: *last_src,
+                                start: 0,
+                                hang: 0,
+                            });
+                            for text in lines {
+                                let mut spans = vec![
+                                    Span::raw(pad.clone()),
+                                    Span::styled(bar.to_string(), dim),
+                                ];
+                                spans.extend(drawn_line(&text, 0, *kind).spans);
+                                content.push(Row::Line {
+                                    line: Line::from(spans),
+                                    src: *last_src,
+                                    start: 0,
+                                    hang: 0,
+                                });
+                            }
+                        }
+                    }
                 }
                 Block::Inline { indent, item, parts } => {
                     let indent = (*indent).min(text_w.saturating_sub(4));

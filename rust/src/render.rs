@@ -589,7 +589,7 @@ fn find_gyazo(s: &str, out: &mut Vec<String>) {
 /// Strip up to `n` leading whitespace chars (tab/space/full-width space),
 /// preserving any deeper indentation. Used to dedent a code block by its base
 /// indent while keeping the code's own relative indentation intact.
-fn strip_leading_ws(raw: &str, n: usize) -> String {
+pub fn strip_leading_ws(raw: &str, n: usize) -> String {
     let mut removed = 0usize;
     let mut idx = 0usize;
     for (i, c) in raw.char_indices() {

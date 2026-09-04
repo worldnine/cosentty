@@ -232,6 +232,66 @@ fn leaving_a_tex_block_takes_deleting_the_indent() {
 }
 
 #[test]
+fn editing_a_formula_previews_it_below_the_source() {
+    // cosense web と同じ:コードモードの間、下に生プレビュー。
+    // 薄い左罫(▏)が本文との違いの印。
+    let ctx = test_ctx();
+    let mut app = math_page(
+        "code:tex",
+        &[r"\begin{pmatrix}", r"a & b \\", r"c & d \\", r"\end{pmatrix}"],
+    );
+    app.rebuild(80);
+    enter_session(&mut app, &ctx, 2, 4);
+    app.rebuild(80);
+    let text = text_rows(&app);
+    assert!(text.iter().any(|t| t.contains("code:tex")), "source: {text:?}");
+    let preview: Vec<&String> = text.iter().filter(|t| t.contains('▏')).collect();
+    assert!(
+        preview.iter().any(|t| t.contains("プレビュー")),
+        "a label says what this is: {text:?}"
+    );
+    assert!(
+        preview.iter().any(|t| t.contains("⎛") && t.contains("a")),
+        "the matrix is drawn under the source: {text:?}"
+    );
+    assert!(
+        !text.iter().take_while(|t| !t.contains('▏')).any(|t| t.contains('▏')),
+        "the bar starts only at the preview"
+    );
+}
+
+#[test]
+fn the_preview_follows_what_you_type() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", "code:mmd", " flowchart LR", "  A-->B"]);
+    app.rebuild(80);
+    let end = app.lines[3].text.len();
+    enter_session(&mut app, &ctx, 3, end);
+    type_str(&mut app, &ctx, "x");
+    app.rebuild(80);
+    let text = text_rows(&app);
+    let preview: Vec<&String> = text.iter().filter(|t| t.contains('▏')).collect();
+    assert!(
+        preview.iter().any(|t| t.contains("Bx")),
+        "the drawing followed the keystroke: {text:?}"
+    );
+}
+
+#[test]
+fn an_unsettable_formula_previews_nothing() {
+    // 組めない式は黙る。ソースがもう見えているので、
+    // 「まだ組めない」の代わりに何かを出す必要はない。
+    let ctx = test_ctx();
+    let mut app = math_page("code:tex", &[r"\begin{align}", r"x &= 1", r"\end{align}"]);
+    app.rebuild(80);
+    enter_session(&mut app, &ctx, 2, 4);
+    app.rebuild(80);
+    let text = text_rows(&app);
+    assert!(text.iter().any(|t| t.contains("code:tex")), "source stays: {text:?}");
+    assert!(!text.iter().any(|t| t.contains('▏')), "no preview: {text:?}");
+}
+
+#[test]
 fn a_formula_at_the_left_margin_still_draws() {
     let mut app = page(&["t", "code:tex", " \\frac{a}{b}"]);
     app.page_id = "PAGE".into();
