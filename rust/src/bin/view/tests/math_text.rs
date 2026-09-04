@@ -161,6 +161,30 @@ fn a_tall_inline_formula_falls_back_to_latex_in_a_narrow_pane() {
 }
 
 #[test]
+fn a_formula_is_set_in_the_body_ink() {
+    // 図と違って数式はどの字も意味を持つ。分数の罫線を薬めると
+    // 「ここは飾り」と読めてしまうので、全体を本文と同じインクで出す。
+    let mut app = math_page("code:tex", &[r"\frac{a}{b}"]);
+    app.rebuild(80);
+    let drawn: Vec<&Line> = app
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Line { line, .. } if line.spans.iter().any(|s| s.content.contains('─')) => {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!drawn.is_empty(), "the bar is on screen");
+    for line in drawn {
+        for span in &line.spans {
+            assert_eq!(span.style.fg, None, "no ink of its own: {span:?}");
+        }
+    }
+}
+
+#[test]
 fn a_formula_at_the_left_margin_still_draws() {
     let mut app = page(&["t", "code:tex", " \\frac{a}{b}"]);
     app.page_id = "PAGE".into();

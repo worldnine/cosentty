@@ -198,6 +198,47 @@ fn a_third_level_mermaid_is_ordinary_list_text() {
 }
 
 #[test]
+fn a_diagram_dims_its_rules_and_leaves_its_words_alone() {
+    // 表の罫線と同じ作法: 形を保つ線は薬め、箱の中の言葉は
+    // 本文のインクのままにする。
+    let mut app = page(&["t", "code:mmd", " flowchart LR", "  A[開始]-->B[終了]"]);
+    app.page_id = "PAGE".into();
+    app.rebuild(80);
+    let mut saw_rule = false;
+    let mut saw_word = false;
+    for row in &app.rows {
+        let Row::Line { line, .. } = row else { continue };
+        for span in &line.spans {
+            let rules = span.content.chars().any(|c| "─│┌┐└┘▸▾".contains(c));
+            let words = span.content.contains("開始") || span.content.contains("終了");
+            if rules {
+                assert_eq!(
+                    span.style.fg,
+                    Some(Color::DarkGray),
+                    "a rule is dim: {span:?}"
+                );
+                saw_rule = true;
+            }
+            if words {
+                assert_eq!(span.style.fg, None, "a label is body text: {span:?}");
+                saw_word = true;
+            }
+        }
+    }
+    assert!(saw_rule && saw_word, "both layers are on screen");
+}
+
+#[test]
+fn an_ascii_diagram_dims_nothing() {
+    // `COSENSE_MERMAID=ascii` の罫線は `- | + > v`。ラベルにも出る字なので
+    // 字では二層を見分けられない——だから何も薬めない。
+    let line = drawn_line("+--v--+ x | o", 0, ArtifactKind::Mermaid);
+    for span in &line.spans {
+        assert_eq!(span.style.fg, None, "{span:?}");
+    }
+}
+
+#[test]
 fn sequence_block_draws_lifelines() {
     let mut app = page(&[
         "t",

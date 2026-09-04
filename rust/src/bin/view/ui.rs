@@ -1689,6 +1689,55 @@ pub(crate) fn layout_inline(
     (images, texts, top.max(1))
 }
 
+/// One row of a drawn artifact, styled.
+///
+/// A diagram is read in two layers: the RULES that hold its shape, and the
+/// WORDS in its boxes. Cosense's own SVG says this with weight and colour;
+/// a terminal says it by dimming the rules — exactly what a `table:` block
+/// already does with its borders. The words keep the body's ink so the
+/// Japanese in a node reads as text, not as decoration.
+///
+/// A formula gets none of this: every glyph in it carries meaning (the bar
+/// of a fraction as much as the ∫ beside it), so it is set in one ink, the
+/// same one the sentence around it uses.
+pub(crate) fn drawn_line(text: &str, indent: usize, kind: ArtifactKind) -> Line<'static> {
+    let pad = " ".repeat(indent);
+    if kind == ArtifactKind::Math {
+        return Line::from(format!("{pad}{text}"));
+    }
+    let rule = Style::default().fg(Color::DarkGray);
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(pad)];
+    let mut run = String::new();
+    let mut run_is_rule = false;
+    for ch in text.chars() {
+        let is_rule = is_diagram_rule(ch);
+        if !run.is_empty() && is_rule != run_is_rule {
+            let done = std::mem::take(&mut run);
+            spans.push(if run_is_rule { Span::styled(done, rule) } else { Span::raw(done) });
+        }
+        run_is_rule = is_rule;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(if run_is_rule { Span::styled(run, rule) } else { Span::raw(run) });
+    }
+    Line::from(spans)
+}
+
+/// Is this character part of a diagram's SHAPE rather than its words?
+///
+/// Only characters no label would contain: the box-drawing and block
+/// ranges, plus the arrow heads and shade the renderer draws with. ASCII
+/// mode (`COSENSE_MERMAID=ascii`) draws its rules with `- | + > v`, which
+/// are also letters in labels — there the two layers cannot be told apart
+/// by the character, so nothing is dimmed and everything reads as text.
+fn is_diagram_rule(ch: char) -> bool {
+    matches!(ch, '\u{2190}'..='\u{21FF}')     // arrows
+        || matches!(ch, '\u{2500}'..='\u{257F}') // box drawing
+        || matches!(ch, '\u{2580}'..='\u{259F}') // blocks and shades
+        || matches!(ch, '\u{25A0}'..='\u{25FF}') // geometric shapes (arrow heads)
+}
+
 /// The formula rows of a part, ready for `layout_inline`.
 pub(crate) fn inline_formula(rows: &[String], baseline: usize) -> Inline {
     let w = rows.iter().map(|r| str_width(r)).max().unwrap_or(0) as u16;
@@ -2284,7 +2333,7 @@ impl App {
                         };
                         if let Some(lines) = drawn {
                             for text in lines {
-                                let line = Line::from(format!("{}{text}", " ".repeat(*indent)));
+                                let line = drawn_line(&text, *indent, *kind);
                                 for w in
                                     wrap_line_parts(&line, text_w, &hanging_prefix(&line))
                                 {
@@ -2412,14 +2461,14 @@ impl App {
                     let (w, h) = reserved(url);
                     Inline::Image { url: url.clone(), w, h }
                 }
-                InlinePart::Formula { latex, rows, baseline } => {
+                InlinePart::Formula { source, rows, baseline } => {
                     // A formula cannot be wrapped — the two-dimensional
                     // setting is the meaning — so in a pane too narrow to
                     // hold it the LaTeX goes back, which wraps like prose.
                     let f = inline_formula(rows, *baseline);
                     match &f {
                         Inline::Formula { w, .. } if *w <= body => f,
-                        _ => Inline::Text(Line::from(latex.clone())),
+                        _ => Inline::Text(source.clone()),
                     }
                 }
             })

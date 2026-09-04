@@ -86,8 +86,9 @@ pub enum InlinePart {
     /// sentence. One-row formulas never get here: they are set in the text
     /// run itself, where wrapping and selection already work.
     Formula {
-        /// What was written, for search, yank, and the narrow-pane fallback.
-        latex: String,
+        /// The LaTeX as written, styled as notation — what a pane too narrow
+        /// for the drawing shows instead.
+        source: Line<'static>,
         /// The drawn rows, all the same display width.
         rows: Vec<String>,
         /// Which row lines up with the text (see `math::Rendered`).
@@ -511,10 +512,14 @@ fn style_url(pal: &Palette) -> Style {
     Style::default().fg(pal.url).add_modifier(Modifier::UNDERLINED)
 }
 
-/// An inline formula. It borrows the code colour — what is inside the
-/// brackets is not prose but notation — without the underline, which in
-/// this viewer means "you can press Enter here".
-fn style_formula(pal: &Palette) -> Style {
+/// LaTeX shown as LaTeX (too tall for the pane, or beyond the renderer).
+/// It borrows the code colour — unrendered, it is notation, the same kind
+/// of thing as a `code:` label — without the underline, which in this
+/// viewer means "you can press Enter here".
+///
+/// A DRAWN formula gets no colour of its own: it is prose's equal, and the
+/// theme's foreground is the ink the sentence around it is written in.
+fn style_formula_source(pal: &Palette) -> Style {
     Style::default().fg(pal.code_fence)
 }
 
@@ -892,13 +897,14 @@ fn decorate_bracket(
     // decoration, no icon is read out of it.
     if let Some(latex) = inner.strip_prefix('$') {
         spans.push(match crate::math::render_inline(latex) {
-            Some(text) => Span::styled(text, style_formula(pal)),
-            // Two-row formulas (fractions, roots, sums) would change the
-            // height of a line the whole viewer measures in single rows.
-            // Until inline math gets its own multi-row treatment, the
-            // LaTeX itself is shown — it is what the writer typed, and it
-            // still reads as a formula.
-            None => Span::styled(latex.trim().to_string(), style_formula(pal)),
+            // A DRAWN formula is the thing itself, so it is set in the
+            // body's own ink — the same ink Cosense's own KaTeX uses, and
+            // the same the rest of the sentence is written in.
+            Some(text) => Span::raw(text),
+            // Nothing could be drawn (`\begin{align}` and friends). What is
+            // left is the NOTATION, which wears the notation colour — the
+            // one a `code:` label and inline code already use.
+            None => Span::styled(latex.trim().to_string(), style_formula_source(pal)),
         });
         return;
     }
@@ -1148,7 +1154,7 @@ fn has_tall_formula(body: &str) -> bool {
             }
             (_, Some(o)) => {
                 let Some(end) = matching_bracket(rest, o) else { return false };
-                if tall_formula(&rest[o + 1..end]).is_some() {
+                if tall_formula_rows(&rest[o + 1..end]).is_some() {
                     return true;
                 }
                 rest = &rest[end + 1..];
@@ -1189,7 +1195,7 @@ fn inline_parts(
         let inner = &body[open + 1..close];
         let own_part = image_in_bracket(inner)
             .map(InlinePart::Image)
-            .or_else(|| tall_formula(inner));
+            .or_else(|| tall_formula(inner, pal));
         if let Some(part) = own_part {
             if open > text_from {
                 runs.push((text_from, open));
@@ -1233,14 +1239,21 @@ fn inline_parts(
 /// A `[$ ... ]` that cannot be set inside a text run because it is drawn
 /// over more than one row. One-row formulas return `None` here and are
 /// handled by `decorate_bracket` as part of the text.
-fn tall_formula(inner: &str) -> Option<InlinePart> {
-    let latex = inner.strip_prefix('$')?;
-    let r = crate::math::render_rows(latex)?;
-    (r.rows.len() > 1).then(|| InlinePart::Formula {
-        latex: latex.trim().to_string(),
+fn tall_formula(inner: &str, pal: &Palette) -> Option<InlinePart> {
+    let (latex, r) = tall_formula_rows(inner)?;
+    Some(InlinePart::Formula {
+        source: Line::from(Span::styled(latex, style_formula_source(pal))),
         rows: r.rows,
         baseline: r.baseline,
     })
+}
+
+/// The drawing behind [`tall_formula`], without the styling — so the line
+/// scan can ask "is there one?" before any palette is involved.
+fn tall_formula_rows(inner: &str) -> Option<(String, crate::math::Rendered)> {
+    let latex = inner.strip_prefix('$')?;
+    let r = crate::math::render_rows(latex)?;
+    (r.rows.len() > 1).then(|| (latex.trim().to_string(), r))
 }
 
 /// A line that opens with a picture and continues in text/// The image this line is ENTIRELY made of/// The image this line is ENTIRELY made of — one bracket and nothing
@@ -1948,6 +1961,35 @@ mod tests {
     }
 
     #[test]
+    fn a_drawn_formula_takes_the_body_ink_and_bare_latex_the_code_ink() {
+        let pal = Palette::for_light(false);
+        let out = render_lines_with(
+            &[
+                "title".to_string(),
+                r"[$ E = mc^2 ]と[$ \begin{align} x &= 1 \end{align} ]".to_string(),
+            ],
+            None,
+            &pal,
+            &LinkTruth::default(),
+        );
+        let Block::Text(line) = &out.blocks[1] else { panic!("{:?}", out.blocks[1]) };
+        let ink = |needle: &str| {
+            line.spans
+                .iter()
+                .find(|s| s.content.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing: {line:?}"))
+                .style
+                .fg
+        };
+        assert_eq!(ink("mc²"), None, "drawn: the sentence's own ink");
+        assert_eq!(
+            ink(r"\begin{align}"),
+            Some(pal.code_fence),
+            "undrawn: notation, so the notation colour"
+        );
+    }
+
+    #[test]
     fn an_inline_formula_is_not_a_page_link() {
         // 括弧の中は Cosense の文ではなく LaTeX なので、リンクも
         // 装飾もアイコンも読み取らない。
@@ -1978,7 +2020,9 @@ mod tests {
                 InlinePart::Text(l) => {
                     l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
                 }
-                InlinePart::Formula { latex, rows, baseline } => {
+                InlinePart::Formula { source, rows, baseline } => {
+                    let latex: String =
+                        source.spans.iter().map(|s| s.content.as_ref()).collect();
                     format!("math({latex}) rows={} baseline={baseline}", rows.len())
                 }
                 InlinePart::Image(u) => format!("img({u})"),
@@ -2384,7 +2428,10 @@ mod tests {
                             .iter()
                             .map(|p| match p {
                                 InlinePart::Image(u) => format!("img({u})"),
-                                InlinePart::Formula { latex, .. } => format!("math({latex})"),
+                                InlinePart::Formula { source, .. } => format!(
+                                    "math({})",
+                                    source.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                ),
                                 InlinePart::Text(l) => format!(
                                     "txt({})",
                                     l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
