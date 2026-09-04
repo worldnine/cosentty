@@ -8,6 +8,17 @@
 
 ## 現在地
 
+- 2026-09-05: **図と数式のテキスト描画を master にマージ**
+  (6621743。`NOTE-mmd-text.md` / `NOTE-math-text.md` が正本)。webレンダラは
+  既定オフになった。worktree `tui-cosense-mmd-lib` / ブランチ `mmd-lib-spike`
+  は master と同一なので削除してよい。手書き分支 `mmd-text-render`
+  (`tui-cosense-mmd-text`)は比較用に残置
+- **上流へのバグ報告(未)**:
+  - `mermaid-text` 0.57: `Grid(Vec<char>)` が全角の continuation cell まで
+    serializeして CJK の字間が開く(現在は出力後の補正で対処)
+  - 同 lib: CJK を含む `classDiagram` で panic
+    (`byte index 4 is not a char boundary`、parser/class.rs:622。
+    側は `catch_unwind` で画像へ縮退)
 - 改善案の P0〜P3 は済。P4(表示とナビゲーション)が主戦場
 - 改善案4 の項目は**このセッションで全部消化した**:
   行またぎドラッグのクラッシュ / 語・行クリック選択 / ソースモードの降格(`s`)/
