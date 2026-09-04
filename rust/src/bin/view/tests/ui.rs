@@ -642,6 +642,46 @@ use super::support::*;
         assert_eq!(texts[0].col, 10);
     }
 
+    /// A formula is not a picture: it straddles the text line rather than
+    /// standing on it. `解は[$ \frac{-b}{2a} ]だ` puts the numerator above
+    /// the words and the denominator below them, and the words on both
+    /// sides stay on one reading line.
+    #[test]
+    fn a_fraction_in_a_line_straddles_the_words() {
+        let txt = |s: &str| Inline::Text(Line::from(s.to_string()));
+        let frac = inline_formula(
+            &[" -b ".into(), "────".into(), " 2a ".into()],
+            1,
+        );
+
+        let (_, texts, h) = layout_inline(&[txt("解は"), frac.clone(), txt("だ")], 0, 60);
+        assert_eq!(h, 3, "one row above the words and one below");
+        let row_of = |s: &str| {
+            texts
+                .iter()
+                .find(|p| {
+                    p.what.line.spans.iter().any(|sp| sp.content.contains(s))
+                })
+                .unwrap_or_else(|| panic!("{s} was not placed: {texts:?}"))
+        };
+        assert_eq!(row_of("解は").row, 1, "the words are on the middle row");
+        assert_eq!(row_of("だ").row, 1, "and so is the rest of the sentence");
+        assert_eq!(row_of("-b").row, 0, "numerator above");
+        assert_eq!(row_of("2a").row, 2, "denominator below");
+        assert_eq!(row_of("────").row, 1, "the bar is the baseline");
+        assert_eq!(row_of("-b").col, 4, "right after 解は");
+        assert_eq!(row_of("だ").col, 8, "and the tail follows the formula");
+
+        // A picture in the same line still stands ON the words, so the two
+        // rules share one box: 1 row above for the formula, 3 for the
+        // picture, 1 below for the denominator.
+        let img = Inline::Image { url: "a".into(), w: 4, h: 4 };
+        let (imgs, texts, h) = layout_inline(&[frac, img, txt("x")], 0, 60);
+        assert_eq!(h, 5, "3 above the baseline, the baseline, 1 below");
+        assert_eq!(imgs[0].row, 0, "the picture reaches up from the baseline");
+        assert_eq!(texts.iter().find(|p| p.what.line.spans[0].content == "x").unwrap().row, 3);
+    }
+
     /// An indented picture is a LIST ITEM: cosense web draws the bullet
     /// beside it, and without one the picture floats free of the item it
     /// belongs to.

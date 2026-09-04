@@ -183,7 +183,11 @@ pub(crate) fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
             }
             let is_url = inner.contains("http://") || inner.contains("https://");
             let is_icon = inner.contains(".icon");
-            if !is_deco && !is_url && !is_icon && !inner.is_empty() {
+            // `[$ ... ]` is a formula. Its inside is LaTeX, not a title —
+            // the renderer reads it that way too, and a page called
+            // `$ \frac{a}{b}` is not a place anyone can go.
+            let is_formula = inner.starts_with('$');
+            if !is_deco && !is_url && !is_icon && !is_formula && !inner.is_empty() {
                 // One reading of what a bracket points at, shared with the
                 // renderer's hits (`page_link_item`): a page here, a page
                 // over there, or a whole project.

@@ -402,3 +402,17 @@ use super::support::*;
         let pos: Vec<usize> = positioned_links_on_line("[* [a]] [b]").into_iter().map(|(p, _)| p).collect();
         assert_eq!(pos, vec![3, 8]);
     }
+
+    /// `[$ ... ]` は数式。中身は LaTeX であってページ名ではないので、
+    /// フッタの「Enter で開く」に並べてはいけない。
+    #[test]
+    fn a_formula_is_not_somewhere_to_go() {
+        let page = |t: &str| LinkItem::Page(t.to_string());
+        assert_eq!(links_on_line(r"解は[$ \frac{-b}{2a} ]だ"), vec![]);
+        assert_eq!(links_on_line(r"[$ [x-3]+a^2 ]"), vec![]);
+        assert_eq!(
+            links_on_line(r"[$ E = mc^2 ]は[相対性理論]の式"),
+            vec![page("相対性理論")],
+            "隣のリンクはそのまま残る"
+        );
+    }

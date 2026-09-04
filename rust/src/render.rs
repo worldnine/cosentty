@@ -80,6 +80,19 @@ impl ArtifactKind {
 /// One part of a mixed text-and-picture line (see [`Block::Inline`]).
 #[derive(Clone, Debug)]
 pub enum InlinePart {
+    /// A formula too tall to sit inside a text run: `[$ \frac{a}{b} ]`.
+    /// Laid out like a picture — it takes columns on the line and rows
+    /// above and below the text — so `解は[$ \frac{-b}{2a} ]だ` reads as one
+    /// sentence. One-row formulas never get here: they are set in the text
+    /// run itself, where wrapping and selection already work.
+    Formula {
+        /// What was written, for search, yank, and the narrow-pane fallback.
+        latex: String,
+        /// The drawn rows, all the same display width.
+        rows: Vec<String>,
+        /// Which row lines up with the text (see `math::Rendered`).
+        baseline: usize,
+    },
     Text(Line<'static>),
     Image(String),
 }
@@ -1117,6 +1130,34 @@ fn line_images(body: &str) -> Vec<String> {
     out
 }
 
+/// Does this line hold a formula that needs rows of its own? Same scan as
+/// [`line_images`], and for the same reason: quoted notation is text about
+/// a formula, not a formula.
+fn has_tall_formula(body: &str) -> bool {
+    let mut rest = body;
+    loop {
+        let tick = rest.find('`');
+        let open = rest.find('[');
+        match (tick, open) {
+            (Some(t), Some(o)) if t < o => {
+                let after = &rest[t + 1..];
+                match after.find('`') {
+                    Some(close) => rest = &after[close + 1..],
+                    None => return false,
+                }
+            }
+            (_, Some(o)) => {
+                let Some(end) = matching_bracket(rest, o) else { return false };
+                if tall_formula(&rest[o + 1..end]).is_some() {
+                    return true;
+                }
+                rest = &rest[end + 1..];
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Split a line into its inline parts: runs of text and the pictures
 /// between them, in the order written. Text runs keep every other piece of
 /// notation (links, decoration, code) intact.
@@ -1134,7 +1175,8 @@ fn inline_parts(
     // Ranges of plain text, collected first so the borrow checker is not
     // asked to share `images` between a closure and the loop.
     let mut runs: Vec<(usize, usize)> = Vec::new();
-    let mut order: Vec<Result<String, usize>> = Vec::new(); // Ok(url) | Err(run index)
+    // Ok(a part of its own) | Err(run index)
+    let mut order: Vec<Result<InlinePart, usize>> = Vec::new();
     while i < body.len() {
         let Some(rel) = body[i..].find('[') else { break };
         let open = i + rel;
@@ -1144,12 +1186,16 @@ fn inline_parts(
             continue;
         }
         let Some(close) = matching_bracket(body, open) else { break };
-        if let Some(url) = image_in_bracket(&body[open + 1..close]) {
+        let inner = &body[open + 1..close];
+        let own_part = image_in_bracket(inner)
+            .map(InlinePart::Image)
+            .or_else(|| tall_formula(inner));
+        if let Some(part) = own_part {
             if open > text_from {
                 runs.push((text_from, open));
                 order.push(Err(runs.len() - 1));
             }
-            order.push(Ok(url));
+            order.push(Ok(part));
             text_from = close + 1;
         }
         i = close + 1;
@@ -1163,10 +1209,11 @@ fn inline_parts(
     let mut span_base = 0usize;
     for item in order {
         match item {
-            Ok(url) => {
+            Ok(InlinePart::Image(url)) => {
                 images.push(url.clone());
                 parts.push(InlinePart::Image(url));
             }
+            Ok(part) => parts.push(part),
             Err(idx) => {
                 let (from, to) = runs[idx];
                 let mut run_hits = Vec::new();
@@ -1181,6 +1228,19 @@ fn inline_parts(
         }
     }
     parts
+}
+
+/// A `[$ ... ]` that cannot be set inside a text run because it is drawn
+/// over more than one row. One-row formulas return `None` here and are
+/// handled by `decorate_bracket` as part of the text.
+fn tall_formula(inner: &str) -> Option<InlinePart> {
+    let latex = inner.strip_prefix('$')?;
+    let r = crate::math::render_rows(latex)?;
+    (r.rows.len() > 1).then(|| InlinePart::Formula {
+        latex: latex.trim().to_string(),
+        rows: r.rows,
+        baseline: r.baseline,
+    })
 }
 
 /// A line that opens with a picture and continues in text/// The image this line is ENTIRELY made of/// The image this line is ENTIRELY made of — one bracket and nothing
@@ -1443,11 +1503,12 @@ pub fn render_lines_with(
             i += 1;
             continue;
         }
-        // A line that mixes text and pictures: one sequence, laid out like
-        // a browser lays out inline images. Asked FIRST whether there is a
-        // picture at all, because splitting the line also collects its
-        // links — doing that speculatively would count them twice.
-        if !line_images(body).is_empty() {
+        // A line that mixes text with something taller than text: pictures,
+        // and formulas that need more than one row. One sequence, laid out
+        // like a browser lays out inline images. Asked FIRST whether there
+        // is such a thing at all, because splitting the line also collects
+        // its links — doing that speculatively would count them twice.
+        if !line_images(body).is_empty() || has_tall_formula(body) {
             // The hits of a mixed text-and-picture line count the spans of
             // its text parts in order (see `Hit::span`); the viewer lays the
             // parts out itself and maps a clicked cell back to one of those
@@ -1576,6 +1637,7 @@ mod tests {
                 .iter()
                 .map(|p| match p {
                     InlinePart::Image(u) => format!("[IMAGE {u}]"),
+                    InlinePart::Formula { rows, .. } => rows.join("\n"),
                     InlinePart::Text(l) => {
                         l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
                     }
@@ -1902,12 +1964,37 @@ mod tests {
     }
 
     #[test]
-    fn a_two_row_inline_formula_shows_its_latex() {
-        // 分数・根号は行の高さを変えてしまうので、行の中には置けない。
-        // 書かれた LaTeX をそのまま見せる(括弧と `$` だけ落ちる)。
+    fn a_tall_inline_formula_becomes_a_part_of_its_own() {
+        // 分数は本文の行の上下に伸びるので、画像と同じく行の
+        // 部品として切り出す。周りの本文は前後のテキストの部品のまま。
         let lines = vec!["title".to_string(), r"解は[$ \frac{-b}{2a} ]だ".to_string()];
-        let got: Vec<String> = render_lines(&lines).blocks.iter().map(plain).collect();
-        assert_eq!(got, vec!["title", r"解は\frac{-b}{2a}だ"]);
+        let out = render_lines(&lines);
+        let Block::Inline { parts, .. } = &out.blocks[1] else {
+            panic!("expected an inline block, got {:?}", out.blocks[1])
+        };
+        let shape: Vec<String> = parts
+            .iter()
+            .map(|p| match p {
+                InlinePart::Text(l) => {
+                    l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                }
+                InlinePart::Formula { latex, rows, baseline } => {
+                    format!("math({latex}) rows={} baseline={baseline}", rows.len())
+                }
+                InlinePart::Image(u) => format!("img({u})"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec!["解は", r"math(\frac{-b}{2a}) rows=3 baseline=1", "だ"],
+            "one sentence, three parts"
+        );
+        // 組まれた行はすべて同じ幅に揃っている(列がずれない)。
+        let InlinePart::Formula { rows, .. } = &parts[1] else { unreachable!() };
+        let w = unicode_width::UnicodeWidthStr::width(rows[0].as_str());
+        for r in rows {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(r.as_str()), w, "{rows:?}");
+        }
     }
 
     #[test]
@@ -2297,6 +2384,7 @@ mod tests {
                             .iter()
                             .map(|p| match p {
                                 InlinePart::Image(u) => format!("img({u})"),
+                                InlinePart::Formula { latex, .. } => format!("math({latex})"),
                                 InlinePart::Text(l) => format!(
                                     "txt({})",
                                     l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
@@ -2465,7 +2553,7 @@ mod tests {
             .iter()
             .flat_map(|p| match p {
                 InlinePart::Text(l) => l.spans.iter().map(|s| s.content.to_string()).collect(),
-                InlinePart::Image(_) => Vec::new(),
+                InlinePart::Image(_) | InlinePart::Formula { .. } => Vec::new(),
             })
             .collect();
         let hits = &out.hits[1];

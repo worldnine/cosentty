@@ -91,28 +91,46 @@ pub fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
     Some(lines)
 }
 
-/// インライン `[$ ... ]` を1行の文字列にする。分数のように**2行以上**に
-/// 組まれる式は受けない——行の高さが変わると折り返しも選択もカーソル列も
-/// 崩れるので、周りの本文と同じ行に置けるものだけを置く。受けなかった式は
-/// 呼び手が LaTeX のまま見せる。
-pub fn render_inline(latex: &str) -> Option<String> {
+/// 組まれた式。行の中に置くには、高さだけでなく**どの行が本文と
+/// 揃う行なのか**が要る。分数なら真ん中の罫線の行。
+pub struct Rendered {
+    /// 各行。すべて同じ表示幅に揃えられている。
+    pub rows: Vec<String>,
+    /// 本文と揃える行の番号(0始まり)。
+    pub baseline: usize,
+    /// 表示幅(端末の桁数)。
+    pub width: usize,
+}
+
+/// インライン `[$ ... ]` を組む。1行にも複数行にもなる。
+pub fn render_rows(latex: &str) -> Option<Rendered> {
     if text_tier_off() || latex.trim().is_empty() {
         return None;
     }
     let src = trim_trailing_row_break(latex);
-    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        term_maths::render(&src).to_string()
+    let block = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let b = term_maths::render(&src);
+        (b.to_string(), b.baseline(), b.width())
     }))
     .ok()?;
+    let (rendered, baseline, width) = block;
     if looks_unparsed(&rendered) {
         return None;
     }
-    let mut rows = rendered.lines();
-    let only = rows.next()?;
-    if rows.next().is_some() {
+    let rows: Vec<String> = rendered.lines().map(str::to_string).collect();
+    if rows.is_empty() || rows.iter().all(|r| r.trim().is_empty()) {
         return None;
     }
-    let only = only.trim();
+    Some(Rendered { baseline: baseline.min(rows.len() - 1), width, rows })
+}
+
+/// 行の中にそのまま置ける式だけを1行の文字列で返す。
+pub fn render_inline(latex: &str) -> Option<String> {
+    let r = render_rows(latex)?;
+    if r.rows.len() != 1 {
+        return None;
+    }
+    let only = r.rows[0].trim();
     (!only.is_empty()).then(|| only.to_string())
 }
 

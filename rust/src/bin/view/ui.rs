@@ -1539,11 +1539,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     draw_toast(f, app, ctx, area);
 }
 
-/// One thing on a line: a run of text, or a picture with its cell size.
+/// One thing on a line: a run of text, a picture with its cell size, or a
+/// formula drawn over several rows.
 #[derive(Clone, Debug)]
 pub(crate) enum Inline {
     Text(Line<'static>),
     Image { url: String, w: u16, h: u16 },
+    /// Unlike a picture, a formula straddles the text line: a fraction has
+    /// its numerator ABOVE the words and its denominator BELOW them.
+    Formula { rows: Vec<String>, baseline: u16, w: u16 },
 }
 
 /// Where the layout put something.
@@ -1587,28 +1591,33 @@ pub(crate) fn layout_inline(
     // along it we are, and what has been put in it (positions are relative
     // to the box, resolved against its height when it is flushed).
     let mut top = 0u16;
-    let mut box_h = 1u16;
+    // The box grows in both directions from the row the words sit on:
+    // `above` for what rises over it (a picture, a numerator), `below` for
+    // what hangs under it (a denominator). Text itself needs neither.
+    let mut above = 0u16;
+    let mut below = 0u16;
     let mut x = 0usize;
     let mut pending_img: Vec<(u16, u16, u16, String)> = Vec::new(); // (col, w, h, url)
-    let mut pending_txt: Vec<(u16, TextPiece)> = Vec::new(); // (col, text)
+    // (col, rows off the baseline, text). Only a formula's rows are ever
+    // off it; words are always ON it.
+    let mut pending_txt: Vec<(u16, i16, TextPiece)> = Vec::new();
 
-    // Close the current box: pictures sit on the text line, so each one is
-    // placed so its LAST row is the box's last row.
+    // Close the current box: everything is placed against the row the text
+    // sits on. A picture's LAST row is that row; a formula's baseline row
+    // is that row.
     macro_rules! flush {
         () => {
+            let base = top + above;
             for (col, _, h, url) in pending_img.drain(..) {
-                let row = top + box_h - h;
-                images.push(Placed { row, col: col + indent as u16, what: url });
+                images.push(Placed { row: base + 1 - h, col: col + indent as u16, what: url });
             }
-            for (col, piece) in pending_txt.drain(..) {
-                texts.push(Placed {
-                    row: top + box_h - 1,
-                    col: col + indent as u16,
-                    what: piece,
-                });
+            for (col, off, piece) in pending_txt.drain(..) {
+                let row = (base as i32 + off as i32).max(0) as u16;
+                texts.push(Placed { row, col: col + indent as u16, what: piece });
             }
-            top += box_h;
-            box_h = 1;
+            top = base + below + 1;
+            above = 0;
+            below = 0;
             x = 0;
         };
     }
@@ -1620,8 +1629,29 @@ pub(crate) fn layout_inline(
                 if x > 0 && x + w as usize > body {
                     flush!();
                 }
-                pending_img.push((x as u16, w, (*h).max(1), url.clone()));
-                box_h = box_h.max((*h).max(1));
+                let h = (*h).max(1);
+                pending_img.push((x as u16, w, h, url.clone()));
+                above = above.max(h - 1);
+                x += w as usize;
+            }
+            Inline::Formula { rows, baseline, w } => {
+                let w = (*w).min(body as u16);
+                if x > 0 && x + w as usize > body {
+                    flush!();
+                }
+                // Its rows are text like any other: placed one per row and
+                // drawn by the same code, so a formula can be read, found
+                // and copied the way the words around it can.
+                let baseline = (*baseline).min(rows.len() as u16 - 1);
+                for (k, row) in rows.iter().enumerate() {
+                    pending_txt.push((
+                        x as u16,
+                        k as i16 - baseline as i16,
+                        TextPiece { part, start: 0, line: Line::from(row.clone()) },
+                    ));
+                }
+                above = above.max(baseline);
+                below = below.max(rows.len() as u16 - 1 - baseline);
                 x += w as usize;
             }
             Inline::Text(line) => {
@@ -1641,7 +1671,7 @@ pub(crate) fn layout_inline(
                     let used = str_width(
                         &first.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
                     );
-                    pending_txt.push((x as u16, TextPiece { part, start, line: first }));
+                    pending_txt.push((x as u16, 0, TextPiece { part, start, line: first }));
                     start += used;
                     x += used;
                     let tail: Vec<Span<'static>> =
@@ -1657,6 +1687,12 @@ pub(crate) fn layout_inline(
     }
     flush!();
     (images, texts, top.max(1))
+}
+
+/// The formula rows of a part, ready for `layout_inline`.
+pub(crate) fn inline_formula(rows: &[String], baseline: usize) -> Inline {
+    let w = rows.iter().map(|r| str_width(r)).max().unwrap_or(0) as u16;
+    Inline::Formula { rows: rows.to_vec(), baseline: baseline as u16, w }
 }
 
 /// The lead-in for an indented image placeholder/// The lead-in for an indented image placeholder/// The lead-in for an indented image placeholder: the bullet where the
@@ -2375,6 +2411,16 @@ impl App {
                 InlinePart::Image(url) => {
                     let (w, h) = reserved(url);
                     Inline::Image { url: url.clone(), w, h }
+                }
+                InlinePart::Formula { latex, rows, baseline } => {
+                    // A formula cannot be wrapped — the two-dimensional
+                    // setting is the meaning — so in a pane too narrow to
+                    // hold it the LaTeX goes back, which wraps like prose.
+                    let f = inline_formula(rows, *baseline);
+                    match &f {
+                        Inline::Formula { w, .. } if *w <= body => f,
+                        _ => Inline::Text(Line::from(latex.clone())),
+                    }
                 }
             })
             .collect();

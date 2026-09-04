@@ -109,6 +109,58 @@ fn one_step_of_indent_is_already_too_deep_for_a_formula() {
 }
 
 #[test]
+fn a_tall_inline_formula_is_drawn_around_the_words() {
+    let mut app = page(&["t", r"解は[$ \frac{-b}{2a} ]だと書いてある"]);
+    app.rebuild(80);
+    let row = app
+        .rows
+        .iter()
+        .find_map(|r| match r {
+            Row::Inline { texts, height, .. } => Some((texts.clone(), *height)),
+            _ => None,
+        })
+        .expect("an inline row");
+    let (texts, height) = row;
+    assert_eq!(height, 3, "the fraction makes the line three rows tall");
+    let at = |needle: &str| {
+        texts
+            .iter()
+            .find(|(_, _, piece)| {
+                piece.line.spans.iter().any(|s| s.content.contains(needle))
+            })
+            .unwrap_or_else(|| panic!("{needle} missing: {texts:?}"))
+    };
+    assert_eq!(at("解は").0, 1, "the words read on the middle row");
+    assert_eq!(at("だと書いてある").0, 1);
+    assert_eq!(at("-b").0, 0, "numerator above");
+    assert_eq!(at("2a").0, 2, "denominator below");
+}
+
+#[test]
+fn a_tall_inline_formula_falls_back_to_latex_in_a_narrow_pane() {
+    let mut app = page(&["t", r"解は[$ \frac{-b \pm \sqrt{b^2-4ac}}{2a} ]だ"]);
+    app.rebuild(14);
+    let joined = app
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Inline { texts, .. } => Some(
+                texts
+                    .iter()
+                    .map(|(_, _, p)| {
+                        p.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(joined.contains(r"\frac"), "LaTeX when it cannot fit: {joined:?}");
+}
+
+#[test]
 fn a_formula_at_the_left_margin_still_draws() {
     let mut app = page(&["t", "code:tex", " \\frac{a}{b}"]);
     app.page_id = "PAGE".into();
