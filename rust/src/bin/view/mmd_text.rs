@@ -46,12 +46,22 @@ pub(crate) fn text_tier_off() -> bool {
     std::env::var("COSENSE_MERMAID").unwrap_or_default() == "off"
 }
 
+/// `COSENSE_MERMAID=ascii`: 罫線なし端末・欠字フォント用。lib の
+/// ASCII 変換(`+ - | > < v ^ * o x` のみ)で出す。
+pub(crate) fn ascii_mode() -> bool {
+    std::env::var("COSENSE_MERMAID").unwrap_or_default() == "ascii"
+}
+
 /// lib に描かせる。失敗・幅超過は `None` で縮退せよ。
 pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
     if !supported(code) {
         return None;
     }
-    let out = mermaid_text::render_with_width(code, Some(width.max(1))).ok()?;
+    let out = if ascii_mode() {
+        mermaid_text::render_ascii_with_width(code, Some(width.max(1))).ok()?
+    } else {
+        mermaid_text::render_with_width(code, Some(width.max(1))).ok()?
+    };
     let lines: Vec<String> = out.lines().map(str::to_string).collect();
     if lines.is_empty() {
         return None;
@@ -99,6 +109,22 @@ mod tests {
                 assert!(str_width(l) <= 60, "too wide: {l}");
             }
         }
+    }
+
+    #[test]
+    fn ascii_mode_drops_box_glyphs() {
+        // 環境変数に触らず lib の ASCII 変換だけ確かめる(並列テストのため)。
+        // ラベル(日本語)は残り、罫線・塗り・矢頭だけ ASCII になる。
+        let out = mermaid_text::render_ascii_with_width(
+            "flowchart TB\n A[開始]-->B{判断?}",
+            Some(60),
+        )
+        .expect("ascii renders");
+        for risky in ['┌', '─', '│', '░', '▸', '═', '┆', '╔'] {
+            assert!(!out.contains(risky), "{risky} left in: {out}");
+        }
+        // lib は CJK に字間を空ける流儀なので文字単位で見る。
+        assert!(out.contains("開") && out.contains("始"), "label stays: {out}");
     }
 
     #[test]

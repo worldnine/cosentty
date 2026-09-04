@@ -19,7 +19,8 @@
 ## 縮退順(1ブロックあたり)
 
 1. 編集中(edit session がブロック内) → 素のソース(既存契約が勝つ)
-2. `COSENSE_MERMAID=off`(`App::mermaid_text`) → 既存の経路(画像 → コード行)
+2. `COSENSE_MERMAID=off`(`App::mermaid_text`) → 既存の経路(画像 → コード行)。
+   `=ascii` は罫線なし描画(欠字フォント用、段自体は残る)
 3. テキスト描画できる型 → lib 出力の `Row::Line`(選択・検索・yank 可)
 4. 画像 artifact あり → `Row::Image`(既存)
 5. どれもなし → 素のコード行(既存)
