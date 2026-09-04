@@ -19,7 +19,16 @@ pub const DEFAULT_THEME_LIGHT: &str = "Solarized (light)";
 
 fn syntaxes() -> &'static SyntaxSet {
     static S: OnceLock<SyntaxSet> = OnceLock::new();
-    S.get_or_init(two_face::syntax::extra_newlines)
+    S.get_or_init(|| {
+        // build.rs appends the current Sublime Markdown grammar to two-face's
+        // set. Keep YAML parsing out of TUI startup; this is the same compact
+        // dump-loading path two-face itself uses.
+        syntect::dumps::from_uncompressed_data(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/cosense-syntaxes.packdump"
+        )))
+        .expect("build-time syntax dump is valid")
+    })
 }
 
 fn embedded_themes() -> &'static EmbeddedLazyThemeSet {
@@ -157,6 +166,33 @@ mod tests {
         assert_eq!(style.fg, Some(Color::Rgb(139, 233, 253)));
         // A scope the theme has no rule for resolves to None.
         assert_eq!(h.scope_style("markup.table.definitely.not.a.scope"), None);
+    }
+
+    #[test]
+    fn markdown_heading_after_a_list_uses_the_heading_scope_without_a_blank() {
+        let h = Highlighter::new(None, false);
+        let source = "# テスト\n\
+- それは大変な1日でしたね。\n\
+ - それほどでもないけどね。\n\
+ - ちょっと笑っちゃったかも\n\
+## テスト\n\
+ワイワイ\n";
+        let out = h.highlight(source, "markdown.md");
+        assert_eq!(out.len(), 6);
+        assert_eq!(
+            out[4].iter().map(|(text, _)| text.as_str()).collect::<String>(),
+            "## テスト"
+        );
+        assert!(
+            out[4].iter().any(|(text, _)| text == "##"),
+            "ATX marker must tokenize separately after the list: {:?}",
+            out[4]
+        );
+        let plain = out[5][0].1;
+        assert!(
+            out[4].iter().any(|(_, style)| *style != plain),
+            "H2 must not keep the following paragraph's base style"
+        );
     }
 
     #[test]

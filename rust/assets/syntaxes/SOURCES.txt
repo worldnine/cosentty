@@ -1,0 +1,8 @@
+Markdown.sublime-syntax
+  Source: https://github.com/sublimehq/Packages/blob/4a63bfb87797/Markdown/Markdown.sublime-syntax
+  Revision: 4a63bfb87797 (2026-08-19)
+  License: SUBLIME-PACKAGES-LICENSE
+
+Vendored to replace the older Markdown grammar embedded by two-face
+0.5.2+bat-0.26.1. In particular, the newer list-block contexts correctly
+return to a root ATX heading without requiring a blank line.
