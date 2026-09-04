@@ -489,7 +489,7 @@ use super::support::*;
     #[test]
     fn a_cell_separator_is_visible_while_editing() {
         let row = " a\tb";
-        let span = cosense::render::CodeSpan { header: 0, header_indent: 0 };
+        let span = cosense::render::CodeSpan { header: 0, header_indent: 0, mermaid_header: false };
         let disp = session_display(row, Some(span));
         assert!(disp.contains(TAB_MARK), "{disp:?}");
         assert_eq!(disp.chars().count(), row.chars().count() + 1, "one column each way");

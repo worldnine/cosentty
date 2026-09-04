@@ -2114,14 +2114,14 @@ impl App {
                 display_caret(&s.input.buf, b, edit_code),
             ))
         });
-        let raw_rows =
-            |content: &mut Vec<Row>, buf: &str, src: usize, mermaid_header_bullet: bool| {
+        let raw_rows = |content: &mut Vec<Row>, buf: &str, src: usize| {
             // The indent renders as its bullet (dim) — same shape as the
             // view — while the underlying data stays whitespace. A nested
-            // Mermaid header is the one exception inside code: in EDIT only,
-            // its gutter wears a bullet while body rows remain plain code.
+            // Mermaid header is the one place inside a code block where that
+            // still holds: its indent IS the diagram's nesting level.
+            let outline = edit_code.is_none_or(|span| span.outline_header());
             let disp = session_display(buf, edit_code);
-            let prefix = if edit_code.is_some() { 0 } else { display_prefix_bytes(buf) };
+            let prefix = if outline { display_prefix_bytes(buf) } else { 0 };
             let wrapped = SessionWrap::new(&disp, text_w, session_hang(buf, edit_code));
             let mut at = 0usize; // byte offset of this segment within `disp`
             for (k, seg) in wrapped.segs.iter().cloned().enumerate() {
@@ -2133,17 +2133,6 @@ impl App {
                     // bullet — the same shape READ has always had.
                     spans.push(Span::raw(" ".repeat(wrapped.indent_of(k))));
                 }
-                // session_display deliberately keeps a code gutter as spaces.
-                // Replace that visual prefix after caret/selection offsets were
-                // computed; both forms occupy the same number of terminal cells.
-                let visual_from = if k == 0 && mermaid_header_bullet {
-                    let gutter = edit_code.map(|span| span.gutter_cols()).unwrap_or(0).min(seg.len());
-                    spans.push(Span::raw(" ".repeat(gutter.saturating_sub(2))));
-                    spans.push(Span::styled("• ".to_string(), Style::default().fg(Color::DarkGray)));
-                    gutter
-                } else {
-                    0
-                };
                 let mut push = |text: &str, selected: bool, dim: bool| {
                     if text.is_empty() {
                         return;
@@ -2177,7 +2166,6 @@ impl App {
                 for (from, to, selected) in
                     [(0, lo, false), (lo, hi, true), (hi, seg.len(), false)]
                 {
-                    let from = from.max(visual_from);
                     if from >= to {
                         continue;
                     }
@@ -2195,7 +2183,7 @@ impl App {
                 if src == eline
                     && !matches!(b, Block::Table(_) | Block::WebRender { .. })
                 {
-                    raw_rows(&mut content, ebuf, src, false);
+                    raw_rows(&mut content, ebuf, src);
                     continue;
                 }
             }
@@ -2222,7 +2210,7 @@ impl App {
                         if let Some((eline, ebuf)) = edit {
                             if row_src == eline {
                                 if !emitted_raw {
-                                    raw_rows(&mut content, ebuf, row_src, false);
+                                    raw_rows(&mut content, ebuf, row_src);
                                     emitted_raw = true;
                                 }
                                 continue;
@@ -2289,7 +2277,7 @@ impl App {
                             && header_src == Some(*rsrc);
                         if let Some((eline, ebuf)) = edit {
                             if *rsrc == eline {
-                                raw_rows(&mut content, ebuf, *rsrc, header_bullet);
+                                raw_rows(&mut content, ebuf, *rsrc);
                                 continue;
                             }
                         }

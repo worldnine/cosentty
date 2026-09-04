@@ -151,8 +151,8 @@ impl SessionWrap {
 /// gutter inside a `code:` block.
 pub(crate) fn session_hang(buf: &str, code: Option<CodeSpan>) -> usize {
     match code {
-        Some(span) => span.gutter_cols(),
-        None => {
+        Some(span) if !span.outline_header() => span.gutter_cols(),
+        _ => {
             let n = indent_of(buf).chars().count();
             if n == 0 { 0 } else { bullet_indent_width(n) + 2 }
         }
@@ -202,7 +202,7 @@ pub(crate) fn session_display(buf: &str, code: Option<CodeSpan>) -> String {
     // maps. A tab in the INDENT is a level, not a cell, and is left to the
     // indent handling below.
     let mark = |text: &str| text.replace('\t', TAB_MARK);
-    if let Some(span) = code {
+    if let Some(span) = code.filter(|span| !span.outline_header()) {
         // Wear the renderer's code gutter, not the raw indent: the block's
         // base indent comes off and the same columns go back on, so the
         // caret line sits in the same column as the code around it.
@@ -238,7 +238,7 @@ pub(crate) fn display_caret(buf: &str, caret: usize, code: Option<CodeSpan>) -> 
     // the slice below would panic on it.
     let caret = floor_boundary(buf, caret);
     let ci = buf[..caret].chars().count();
-    if let Some(span) = code {
+    if let Some(span) = code.filter(|span| !span.outline_header()) {
         let strip = leading_ws_taken(buf, span.strip_chars());
         let di = if ci < strip { ci } else { span.gutter_cols() + ci - strip };
         let disp = session_display(buf, code);
@@ -263,7 +263,7 @@ pub(crate) fn display_caret(buf: &str, caret: usize, code: Option<CodeSpan>) -> 
 pub(crate) fn raw_caret_from_display(buf: &str, disp_byte: usize, code: Option<CodeSpan>) -> usize {
     let disp = session_display(buf, code);
     let di = disp[..floor_boundary(&disp, disp_byte)].chars().count();
-    if let Some(span) = code {
+    if let Some(span) = code.filter(|span| !span.outline_header()) {
         let strip = leading_ws_taken(buf, span.strip_chars());
         let gutter = span.gutter_cols();
         let ci = if di < gutter { di.min(strip) } else { strip + di - gutter };
@@ -688,6 +688,12 @@ pub(crate) fn session_type_char(app: &mut App, ctx: &Ctx, ch: char) {
     // characters someone is typing on purpose (`[0]`, `[\n`). Helping
     // would be the one place the block leaks.
     let in_code = session_in_code(app);
+    // A space typed at the head of a Mermaid header is the other way people
+    // nest a line, so it moves the block instead of landing in the text.
+    if ch == ' ' && caret_on_mermaid_indent_or_start(app) {
+        session_indent(app, ctx, 1);
+        return;
+    }
     // A typed character replaces the selection — all of it, wherever the
     // range ends. The bracket habits below only make sense inside one
     // line; a range across lines just takes the character the plain way.
@@ -1124,11 +1130,24 @@ pub(crate) fn session_join_down(app: &mut App, ctx: &Ctx) {
 
 /// Tab / Shift+Tab: indent or outdent by one logical level (one source
 /// space, rendered as a two-cell nesting step).
-pub(crate) fn session_indent(app: &mut App, delta: i32) {
+pub(crate) fn session_indent(app: &mut App, ctx: &Ctx, delta: i32) {
     // Indenting is a whole-line act; a live selection would only end up
     // pointing at bytes that moved, so it is dropped first.
     if let Some(s) = app.session.as_mut() {
         s.sel_from = None;
+    }
+    // A Mermaid header's indent is the DIAGRAM's nesting level: what the
+    // reader sees move is the picture, not a `code:` line. So Tab there
+    // takes the body with it — otherwise the first keystroke would leave
+    // the block behind and stop being a block at all.
+    let mermaid = app
+        .session
+        .as_ref()
+        .and_then(|s| app.code_span_at_line(s.line))
+        .filter(|span| span.mermaid_header);
+    if let Some(span) = mermaid {
+        session_indent_mermaid(app, ctx, span, delta);
+        return;
     }
     // In a table a TAB is what separates one cell from the next, so that
     // is what Tab types there. (Shift+Tab takes the separator back, and
@@ -1167,6 +1186,84 @@ pub(crate) fn session_indent(app: &mut App, delta: i32) {
         }
     }
     s.want_col = None;
+    app.laid_width = 0;
+}
+
+/// Is the caret inside (or just after) the leading whitespace of a Mermaid
+/// `code:` header — the place where a space or a Backspace means "nest",
+/// not "type a character"?
+fn caret_on_mermaid_indent_or_start(app: &App) -> bool {
+    let Some(s) = app.session.as_ref() else { return false };
+    if !app.code_span_at_line(s.line).is_some_and(|span| span.mermaid_header) {
+        return false;
+    }
+    s.sel_from.is_none() && s.input.cur <= indent_of(&s.input.buf).len()
+}
+
+/// The same spot, minus the very start of the line: Backspace there has an
+/// indent in front of it to take.
+fn caret_on_mermaid_indent(app: &App) -> bool {
+    let cur = app.session.as_ref().map(|s| s.input.cur).unwrap_or(0);
+    cur > 0 && caret_on_mermaid_indent_or_start(app)
+}
+
+/// Tab / Shift+Tab on a Mermaid `code:` header: move the header AND every
+/// line of its block by one level, in one edit, so the block never spends a
+/// keystroke in a broken shape. Cosense draws at most
+/// [`cosense::render::MERMAID_MAX_INDENT`] levels of diagram, and that is
+/// where the movement stops.
+fn session_indent_mermaid(app: &mut App, ctx: &Ctx, span: CodeSpan, delta: i32) {
+    let Some(s) = app.session.as_ref() else { return };
+    let (line, cur, buf) = (s.line, s.input.cur, s.input.buf.clone());
+    let level = span.header_indent as i32 + delta;
+    if level < 0 || level > cosense::render::MERMAID_MAX_INDENT as i32 {
+        return;
+    }
+    // The block is every line that answers with THIS header — not the
+    // `code:`-flagged run, which would walk into the next block when two
+    // sit back to back.
+    let texts = app.source_texts();
+    let mut end = line + 1;
+    while end < texts.len()
+        && cosense::render::code_span_at(&texts, end).map(|s| s.header) == Some(span.header)
+    {
+        end += 1;
+    }
+    // Shifting a whitespace-only line by hand is pointless (it has nothing
+    // to hold the indent for), so those are left alone.
+    let shift = |text: &str| -> Option<String> {
+        if delta > 0 {
+            return Some(format!(" {text}"));
+        }
+        let first = text.chars().next().filter(|c| c.is_whitespace())?;
+        Some(text[first.len_utf8()..].to_string())
+    };
+    let Some(head) = shift(&buf) else { return };
+    let mut ops = vec![EditOp::Replace { id: app.lines[line].id.clone(), text: head.clone() }];
+    for i in line + 1..end {
+        let text = app.lines[i].text.clone();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Some(text) = shift(&text) else { return };
+        ops.push(EditOp::Replace { id: app.lines[i].id.clone(), text });
+    }
+    let label = if delta > 0 {
+        t!("図を字下げ", "indent diagram")
+    } else {
+        t!("図の字下げを戻す", "outdent diagram")
+    };
+    do_edit(app, ctx, &label, ops);
+    if let Some(s) = app.session.as_mut() {
+        let cur = if delta > 0 {
+            cur + 1
+        } else {
+            cur.saturating_sub(buf.len() - head.len())
+        };
+        s.input = Input { buf: head.clone(), cur: cur.min(head.len()) };
+        s.orig = head;
+        s.want_col = None;
+    }
     app.laid_width = 0;
 }
 
@@ -1324,6 +1421,12 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         {
             session_replace_selection(app, ctx, "");
         }
+        // Backspacing the indent of a Mermaid header takes the level off,
+        // block and all — the same move Shift+Tab makes. Deleting the
+        // header's lone space by itself would only orphan the body.
+        (KeyCode::Backspace, _) if caret_on_mermaid_indent(app) => {
+            session_indent(app, ctx, -1)
+        }
         (KeyCode::Backspace, _) => {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
             if at_bol {
@@ -1349,8 +1452,8 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
                 edit_input(app, Input::delete);
             }
         }
-        (KeyCode::Tab, _) => session_indent(app, 1),
-        (KeyCode::BackTab, _) => session_indent(app, -1),
+        (KeyCode::Tab, _) => session_indent(app, ctx, 1),
+        (KeyCode::BackTab, _) => session_indent(app, ctx, -1),
         (KeyCode::Char(ch), false) => session_type_char(app, ctx, ch),
         _ => {
             reset_col(app);

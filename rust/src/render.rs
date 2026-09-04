@@ -76,6 +76,10 @@ pub struct CodeSpan {
     pub header: usize,
     /// Raw whitespace width of the header's own indent.
     pub header_indent: usize,
+    /// This lookup points at a Mermaid header itself. Its level is outline
+    /// structure — Tab/Shift+Tab moves the whole block — while the body rows
+    /// stay ordinary code rows.
+    pub mermaid_header: bool,
 }
 
 impl CodeSpan {
@@ -90,6 +94,13 @@ impl CodeSpan {
     /// before drawing it.
     pub fn strip_chars(&self) -> usize {
         self.header_indent + 1
+    }
+
+    /// Does the caret line wear a bullet instead of a code gutter? Only a
+    /// NESTED Mermaid header does: that is the line whose indent the reader
+    /// sees as nesting, so EDIT shows it the way the outline shows it.
+    pub fn outline_header(&self) -> bool {
+        self.mermaid_header && self.header_indent > 0
     }
 
     /// Display columns the renderer puts back in their place: the header's
@@ -135,7 +146,12 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
             }
         }
         if i >= k && i < end {
-            return Some(CodeSpan { header: k, header_indent });
+            let mermaid_header = i == k
+                && body
+                    .strip_prefix("code:")
+                    .map(mermaid_lang)
+                    .unwrap_or(false);
+            return Some(CodeSpan { header: k, header_indent, mermaid_header });
         }
         if i < k {
             return None; // headers only come later now
@@ -206,7 +222,11 @@ pub fn table_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
             j += 1;
         }
         if i >= k && i < j {
-            return Some(CodeSpan { header: k, header_indent });
+            return Some(CodeSpan {
+                header: k,
+                header_indent,
+                mermaid_header: false,
+            });
         }
         if i < k {
             return None;
@@ -236,12 +256,16 @@ pub fn mermaid_lang(lang: &str) -> bool {
 /// At level 3 onward the `code:` header and every following line are ordinary
 /// list items, each keeping its own indentation.
 fn mermaid_too_deep(header_indent: usize, body: &str) -> bool {
-    header_indent > 2
+    header_indent > MERMAID_MAX_INDENT
         && body
             .strip_prefix("code:")
             .map(mermaid_lang)
             .unwrap_or(false)
 }
+
+/// How deep a Mermaid block may nest and still be drawn as a diagram, which is
+/// where Cosense stops too. Deeper than this the whole block reads as list text.
+pub const MERMAID_MAX_INDENT: usize = 2;
 
 /// A blank run separates two code blocks even when the next `code:` header is
 /// more deeply indented. Without this boundary a level-0 Mermaid block absorbs
