@@ -7,6 +7,19 @@
 use crate::*;
 use super::support::*;
 
+    /// The preview rows (`Row::Aside` — attached chrome, never page content).
+    fn preview_rows(app: &App) -> Vec<String> {
+        app.rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Aside { line } => Some(
+                    line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
 fn math_page(header: &str, body: &[&str]) -> App {
     let mut texts: Vec<String> = vec!["t".into(), header.into()];
     texts.extend(body.iter().map(|b| format!(" {b}")));
@@ -245,7 +258,7 @@ fn editing_a_formula_previews_it_below_the_source() {
     app.rebuild(80);
     let text = text_rows(&app);
     assert!(text.iter().any(|t| t.contains("code:tex")), "source: {text:?}");
-    let preview: Vec<&String> = text.iter().filter(|t| t.contains('▏')).collect();
+    let preview = preview_rows(&app);
     assert!(
         preview.iter().any(|t| t.contains("プレビュー")),
         "a label says what this is: {text:?}"
@@ -270,7 +283,7 @@ fn the_preview_follows_what_you_type() {
     type_str(&mut app, &ctx, "x");
     app.rebuild(80);
     let text = text_rows(&app);
-    let preview: Vec<&String> = text.iter().filter(|t| t.contains('▏')).collect();
+    let preview = preview_rows(&app);
     assert!(
         preview.iter().any(|t| t.contains("Bx")),
         "the drawing followed the keystroke: {text:?}"
@@ -289,6 +302,7 @@ fn an_unsettable_formula_previews_nothing() {
     let text = text_rows(&app);
     assert!(text.iter().any(|t| t.contains("code:tex")), "source stays: {text:?}");
     assert!(!text.iter().any(|t| t.contains('▏')), "no preview: {text:?}");
+    assert!(preview_rows(&app).is_empty(), "no preview rows either");
 }
 
 #[test]

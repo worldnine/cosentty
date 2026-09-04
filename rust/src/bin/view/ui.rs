@@ -2425,7 +2425,13 @@ impl App {
                             let dim = Style::default().fg(Color::DarkGray);
                             let pad = " ".repeat(*indent);
                             let bar = "▏ ";
-                            content.push(Row::Line {
+                            // The rows are `Aside`: chrome attached to the
+                            // block, not page content — no cursor band (the
+                            // caret's runway ends with the source), no
+                            // cursor addressing, no selection. The reader
+                            // reads the preview; the cursor never stands on
+                            // it.
+                            content.push(Row::Aside {
                                 line: Line::from(vec![
                                     Span::raw(pad.clone()),
                                     Span::styled(
@@ -2433,9 +2439,6 @@ impl App {
                                         dim,
                                     ),
                                 ]),
-                                src: *last_src,
-                                start: 0,
-                                hang: 0,
                             });
                             for text in lines {
                                 let mut spans = vec![
@@ -2443,12 +2446,7 @@ impl App {
                                     Span::styled(bar.to_string(), dim),
                                 ];
                                 spans.extend(drawn_line(&text, 0, *kind).spans);
-                                content.push(Row::Line {
-                                    line: Line::from(spans),
-                                    src: *last_src,
-                                    start: 0,
-                                    hang: 0,
-                                });
+                                content.push(Row::Aside { line: Line::from(spans) });
                             }
                         }
                     }
