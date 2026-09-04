@@ -157,6 +157,88 @@ fn tab_inside_a_mermaid_body_still_types_indent_on_that_line_only() {
 }
 
 #[test]
+fn e_on_a_drawn_diagram_switches_the_block_to_its_source() {
+    // 実ページで起きたこと:図が描かれている状態でカーソルを図の行に置いて
+    // e を押すと、セッションは末尾の空行に開くのに、図がソースに切り替わら
+    // なかった。空行の行がハイライタの lines() に落とされ、行リストから
+    // 欠けて「このブロックは編集中」の判定が外れるため。
+    let ctx = test_ctx();
+    let mut app = page(&[
+        "t",
+        "code::test.mmd",
+        " flowchart LR",
+        " TUI-- CDP -->Chrome",
+        " Chrome-- PNG -->TUI",
+        " TUI-- ワイワイ -->おじさん",
+        " ",
+    ]);
+    app.page_id = "PAGE".into();
+    app.rebuild(80);
+    let text = text_rows(&app);
+    assert!(text.iter().any(|t| t.contains("┌")), "drawn: {text:?}");
+
+    // カーソルは図の行(= 最終行の空行)にある。e で編集に入る。
+    enter_session(&mut app, &ctx, 6, 1);
+    app.rebuild(80);
+    let text = text_rows(&app);
+    assert!(
+        text.iter().any(|t| t.contains("flowchart LR")),
+        "the block makes way for its source: {text:?}"
+    );
+    assert!(!text.iter().any(|t| t.contains("┌")), "no drawing while editing: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains("code::test.mmd")),
+        "the header too: {text:?}"
+    );
+}
+
+#[test]
+fn e_on_a_browser_image_of_a_diagram_switches_the_block_too() {
+    // テキスト段が降りた(ペインが狭い等)とき、ブロックはブラウザ画像で
+    // 出る。その画像の行はブロックの最終行(空行)に帰属するので、そこで
+    // e を押したらやはりソースに切り替わらなくてはならない。
+    let ctx = test_ctx();
+    let mut app = page(&[
+        "t",
+        "code::test.mmd",
+        " flowchart LR",
+        " TUI-- CDP -->Chrome",
+        " TUI-- ワイワイ -->おじさん",
+        " ",
+    ]);
+    app.page_id = "PAGE".into();
+    app.mermaid_text = false; // テキスト段なし → 画像の器だけが残る
+    app.rebuild(80);
+    let key = app
+        .blocks
+        .iter()
+        .find_map(|b| match b {
+            Block::Artifact { kind, code, last_src, .. } => {
+                kind.web().and_then(|k| app.web_request(k, code, *last_src))
+            }
+            _ => None,
+        })
+        .map(|r| r.cache_key())
+        .expect("a browser key exists");
+    let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
+    app.images.insert(key, info);
+    app.rebuild(80);
+    assert!(
+        app.rows.iter().any(|r| matches!(r, Row::Image { .. })),
+        "the block shows its picture"
+    );
+
+    enter_session(&mut app, &ctx, 5, 1); // 画像の帰属行 = 末尾の空行
+    app.rebuild(80);
+    let text = text_rows(&app);
+    assert!(
+        text.iter().any(|t| t.contains("flowchart LR")),
+        "the picture makes way for the source: {text:?}"
+    );
+    assert!(!app.rows.iter().any(|r| matches!(r, Row::Image { .. })), "no picture while editing");
+}
+
+#[test]
 fn diagrams_nest_twice_without_bullets() {
     for (header, body, edge, indent) in [
         ("　code:mmd", "  flowchart LR", "   A-->B", 2),

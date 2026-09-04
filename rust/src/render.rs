@@ -1458,7 +1458,18 @@ pub fn render_lines_with(
             match hl {
                 Some(h) => {
                     let content = bodies.join("\n");
-                    let highlighted = h.highlight(&content, &lang);
+                    let mut highlighted = h.highlight(&content, &lang);
+                    // A block that ENDS on an empty body (a blank line the
+                    // writer typed inside) joins into a string ending in
+                    // `\n`, and the highlighter's `lines()` drops that tail.
+                    // Pad it back: every body line keeps its row and its
+                    // source attribution — the blank line the caret sits on
+                    // has to be a row, or the edit session's "this block is
+                    // being edited" check misses it and the diagram never
+                    // makes way for its source.
+                    while highlighted.len() < bodies.len() {
+                        highlighted.push(Vec::new());
+                    }
                     for (k, spans) in highlighted.into_iter().enumerate() {
                         let src = raws.get(k).copied().unwrap_or(i);
                         let mut line_spans: Vec<Span<'static>> = vec![Span::raw(format!("{indent}  "))];
@@ -2672,3 +2683,4 @@ mod tests {
         assert_eq!(out.extracted.links, vec!["crowdin"]);
     }
 }
+
