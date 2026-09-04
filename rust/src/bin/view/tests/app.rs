@@ -1959,34 +1959,37 @@ use super::support::*;
             "t",
             "see [Target] [https://example.com/a.png] then [Docs https://example.com]",
         ]);
-        // 画像は未着(24×8 のプレースホルダ)。行は8行の高さで、文字は
-        // 最下段(row 7)に画像の左右へ置かれる: `see Target ` は col 0..、
-        // ` then Docs` は col 11+24=35 から。
+        // 画像は未着(56×16 のプレースホルダ)。後ろの文字が長いので箱の
+        // 横(80-11-56=13 桁)には収まりきらず1行折り返し、行は17行の高さに
+        // なる。文字は最下段から2行目(row 15=ベースライン)の画像の左右へ:
+        // `see Target ` は col 0..、` then Docs` は col 11+56=67 から。
         app.rebuild(80);
         let Some(Row::Inline { height, texts, .. }) = app.rows.get(1) else {
             panic!("expected an inline row, got {:?}", app.rows.get(1).map(Row::height))
         };
-        assert_eq!(*height, 8);
-        assert_eq!(texts.len(), 2, "{texts:?}");
-        let last = (*height - 1) as i32;
+        assert_eq!(*height, 17);
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        // ベースラインは最下段の1つ上(row 15)。後ろの片は箱の横に
+        // " then D" までしか入らず、"ocs" 以下は下の箱(row 16)へ折り返す:
+        // リンクが2つの片に割れる配置になった。
+        let base = (*height - 2) as i32;
         // 左の片の中のリンク。
         assert_eq!(
-            app.link_at_screen_position(1 + last, 5),
+            app.link_at_screen_position(1 + base, 5),
             Some((1, LinkItem::Page("Target".into())))
         );
         // 画像の右の片の中のリンク(2つ目のテキスト部品なので Hit のスパン
-        // 番号は1つ目の分だけ先へずれている)。
-        let docs_col = 35 + " then ".len() + 1;
-        assert_eq!(
-            app.link_at_screen_position(1 + last, docs_col),
-            Some((
-                1,
-                LinkItem::Url { label: "Docs".into(), url: "https://example.com".into() }
-            ))
-        );
+        // 番号は1つ目の分だけ先へずれている)。"D" はベースラインの
+        // col 67+6=73 に、続きは折り返し先の col 1 にある。
+        let docs = Some((
+            1,
+            LinkItem::Url { label: "Docs".into(), url: "https://example.com".into() }
+        ));
+        assert_eq!(app.link_at_screen_position(1 + base, 73), docs);
+        assert_eq!(app.link_at_screen_position(1 + base + 1, 1), docs);
         // 文字の無い列・画像の上の段は何でもない。
-        assert_eq!(app.link_at_screen_position(1 + last, 1), None, "plain text");
-        assert_eq!(app.link_at_screen_position(1 + last, 20), None, "the picture");
+        assert_eq!(app.link_at_screen_position(1 + base, 1), None, "plain text");
+        assert_eq!(app.link_at_screen_position(1 + base, 20), None, "the picture");
         assert_eq!(app.link_at_screen_position(1, 5), None, "a row above the text line");
     }
 

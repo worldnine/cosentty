@@ -75,15 +75,25 @@ pub(crate) static IMAGE_SLOTS: Slots = Slots::new(IMAGE_PARALLEL);
 /// band, which is what says the space belongs to a picture on its way.
 /// A picture on a line of its own reserves nothing: it shows as its `[URL]`
 /// row until it arrives (`Row::ImageLoading`).
-pub(crate) const IMAGE_PLACEHOLDER_H: u16 = 8;
+///
+/// The size is a guess, and it is the middle of what pictures actually
+/// are: measured over ~740 cached Gyazo/scrapbox captures through
+/// `build_image`'s own caps, heights crowd 15-20 (81%) and widths 53-64.
+/// A typical arrival moves the rows below by a row or two; small captures
+/// (the other 15%) still jump, the other way. The old 24x8 stood 9+ rows
+/// off a capped screenshot, which is the jump this replaces.
+pub(crate) const IMAGE_PLACEHOLDER_H: u16 = 16;
 
 /// The tallest a picture may be drawn, in rows. Beyond this the reader is
 /// scrolling through one image instead of reading a page; the picture is
 /// scaled down (keeping its shape) so the text around it stays reachable.
 pub(crate) const MAX_IMAGE_ROWS: u16 = 20;
 
-/// …and how wide, while a mixed line is being laid out without it.
-pub(crate) const IMAGE_PLACEHOLDER_W: u16 = 24;
+/// …and how wide, while a mixed line is being laid out without it. Inside
+/// the crowded 53-64, but short of the full line: short words after the
+/// picture (`本文 [pic] 後`) still sit beside the box instead of being
+/// pushed under it for every pending picture.
+pub(crate) const IMAGE_PLACEHOLDER_W: u16 = 56;
 
 /// A finished background image load: the image already resized and encoded
 /// for the terminal (the expensive part — done on the worker so the UI

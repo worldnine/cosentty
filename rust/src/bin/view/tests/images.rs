@@ -241,7 +241,7 @@ use super::support::*;
 
     /// The other half of the same complaint: a picture written INSIDE a line
     /// of text reserved its box and painted nothing in it, so the reader
-    /// stared at an eight-row hole with no hint of what would fill it.
+    /// stared at a sixteen-row hole with no hint of what would fill it.
     #[test]
     fn a_waiting_picture_names_itself_in_the_box_it_reserved() {
         use ratatui::{backend::TestBackend, Terminal};
@@ -249,28 +249,28 @@ use super::support::*;
         let url = "https://example.com/a.png";
         let mut app = page(&["t", &format!("本文 [{url}] が続く")]);
         let ctx = test_ctx();
-        app.rebuild(40);
+        app.rebuild(80);
         assert!(
-            app.content_view(40).iter().any(|r| matches!(r, Row::Inline { .. })),
+            app.content_view(80).iter().any(|r| matches!(r, Row::Inline { .. })),
             "the line really is a mixed one"
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         app.image_anim = Instant::now() - Duration::from_secs_f32(0.6);
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
         let buf = terminal.backend().buffer();
         let row = |y: u16| -> String {
-            (0..40)
+            (0..80)
                 .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
                 .filter(|s| s != " ")
                 .collect::<String>()
         };
-        let hits: Vec<u16> = (0..14).filter(|y| row(*y).contains("[https://")).collect();
+        let hits: Vec<u16> = (0..24).filter(|y| row(*y).contains("[https://")).collect();
         assert_eq!(hits.len(), 1, "the waiting picture speaks once, on its own row: {hits:?}");
         let y = hits[0];
         assert!(row(y).contains("本文"), "on the line's own baseline, where the words ride: {}", row(y));
-        let x0 = (0..40).find(|x| buf.cell((*x, y)).unwrap().symbol() == "[").unwrap();
+        let x0 = (0..80).find(|x| buf.cell((*x, y)).unwrap().symbol() == "[").unwrap();
         let fg = buf.cell((x0 + 1, y)).unwrap().style().fg;
         assert!(matches!(fg, Some(Color::Rgb(..))), "and it wears the band: {fg:?}");
     }

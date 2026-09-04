@@ -596,6 +596,32 @@ use super::support::*;
         assert!(has_bullet, "the item lost its bullet");
     }
 
+    /// The box a not-yet-decoded picture reserves in a mixed line is a
+    /// guess at its real size: the rows below the line move by the miss
+    /// when it lands. The guess sits in the middle of what pictures
+    /// actually are (heights crowd 15-20, widths 53-64, measured over the
+    /// on-disk image cache through `build_image`'s own caps), so a typical
+    /// arrival moves nothing or a row — not the 9+ rows the old 24x8 box
+    /// cost a capped screenshot.
+    #[test]
+    fn the_waiting_box_is_sized_like_the_pictures_it_stands_in_for() {
+        assert_eq!((IMAGE_PLACEHOLDER_W, IMAGE_PLACEHOLDER_H), (56, 16));
+        let line = |w: u16, h: u16| {
+            vec![
+                Inline::Text(Line::from("本文 ".to_string())),
+                Inline::Image { url: "a".into(), w, h },
+                Inline::Text(Line::from(" が続く".to_string())),
+            ]
+        };
+        let height = |w: u16, h: u16| layout_inline(&line(w, h), 0, 80).2;
+        let waiting = height(IMAGE_PLACEHOLDER_W, IMAGE_PLACEHOLDER_H);
+        // The crowded middle, then the height-capped screenshot.
+        for (w, h, max_shift) in [(53, 15, 1), (64, 17, 1), (64, 20, 4)] {
+            let shift = height(w, h).abs_diff(waiting);
+            assert!(shift <= max_shift, "{w}x{h} moves the rows below by {shift}");
+        }
+    }
+
     /// The browser lays an inline image ON the text line: its bottom edge
     /// level with the words, so a sentence reads straight through it. The
     /// same layout answers all three shapes — text then picture, picture
