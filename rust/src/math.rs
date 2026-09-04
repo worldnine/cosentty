@@ -20,10 +20,18 @@ pub fn text_tier_off() -> bool {
     *OFF.get_or_init(|| std::env::var("COSENSE_MATH").unwrap_or_default() == "off")
 }
 
+/// 数式に空行はない。書き手が空行を打っても(ブロックの中に置けるようになった)、
+/// LaTeXとしての意味はなく、libに渡すと組図の**中**に紛れ込んで形を壊す
+/// (` a ─── \n\n\n b`)。投げる前に落とす。
 /// 行末の `\\` は「次の行がある」という記号なので、最後の行に付いていると
 /// lib は空の行をもう一段組んでしまう(`⎝  ⎠` だけの行が浮く)。
 /// pmatrix を素直に書くと必ずこうなるため、投げる前に落とす。
 fn trim_trailing_row_break(code: &str) -> String {
+    let no_blanks: Vec<&str> = code
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let code = no_blanks.join("\n");
     // 行区切りが意味を持たないのは2か所だけ: 式の末尾と、
     // `\end{...}` の直前。中途の `\\` は行を分ける本来の仕事。
     let drop = |chunk: &str| -> String {
@@ -171,6 +179,14 @@ mod tests {
         let out = render_text(src, 40).expect("draws");
         assert_eq!(out.len(), 2, "phantom row: {out:?}");
         assert!(out[0].contains('a') && out[1].contains('d'), "{out:?}");
+    }
+
+    #[test]
+    fn blank_lines_the_writer_typed_do_not_reach_the_lib() {
+        // ブロックの中に空行が打てるようになった。LaTeXに空行は意味がなく、
+        // libに渡すと組図の中に紛れ込むので、こちらで落とす。
+        let with = render_text("\\frac{a}{b}\n\n ", 40).expect("draws");
+        assert_eq!(with, render_text("\\frac{a}{b}", 40).expect("draws"));
     }
 
     #[test]

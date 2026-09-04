@@ -185,6 +185,53 @@ fn a_formula_is_set_in_the_body_ink() {
 }
 
 #[test]
+fn a_blank_line_inside_a_tex_block_keeps_the_formula_alive() {
+    // 空行は打てる(ブロックは生きる)。ただしLaTeXに空行は意味がなく、
+    // libに渡すと組図の中に紛れ込むので、描く前に落とす。
+    // ブロック自体は空行がいる間も数式で、インデントを削り切った
+    // 行が出たときに初めて終わる — mmd/codeと同じ契約。
+    let mut app = math_page("code:tex", &[r"\frac{a}{b}", "", " "]);
+    app.page_id = "PAGE".into();
+    app.rebuild(80);
+    let text = text_rows(&app);
+    assert!(text.iter().any(|t| t.contains('─')), "still a formula: {text:?}");
+    assert!(
+        !text.iter().any(|t| t.contains("frac")),
+        "not source: {text:?}"
+    );
+    // 空行の行もブロックの内側(編集すればコードとして出る)。
+    assert!(app.code_span_at_line(3).is_some(), "blank is inside");
+}
+
+#[test]
+fn a_flush_blank_line_after_a_tex_block_is_already_outside() {
+    // 出るのはインデントを削り切ったとき。フラッシュの空行は
+    // もう外なので、そこに打った文字は普通の行になる。
+    let mut app = page(&["t", "code:tex", " \\frac{a}{b}", ""]);
+    app.page_id = "PAGE".into();
+    app.rebuild(80);
+    assert!(app.code_span_at_line(3).is_none(), "flush blank is out");
+}
+
+#[test]
+fn leaving_a_tex_block_takes_deleting_the_indent() {
+    let ctx = test_ctx();
+    let mut app = math_page("code:tex", &[r"\frac{a}{b}"]);
+    app.rebuild(80);
+    let len = app.lines[2].text.len();
+    enter_session(&mut app, &ctx, 2, len);
+    handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+    let s = app.session.as_ref().unwrap();
+    assert_eq!(s.input.buf.as_str(), " ", "a blank line with the block's indent");
+    assert!(app.code_span_at_line(3).is_some(), "still inside");
+    handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+    let s = app.session.as_ref().unwrap();
+    assert_eq!(s.input.buf.as_str(), "", "indent gone");
+    assert!(!app.code_span_at_line(3).map(|sp| sp.mermaid_header).unwrap_or(false));
+    assert!(app.code_span_at_line(3).is_none(), "out — the block is behind us");
+}
+
+#[test]
 fn a_formula_at_the_left_margin_still_draws() {
     let mut app = page(&["t", "code:tex", " \\frac{a}{b}"]);
     app.page_id = "PAGE".into();

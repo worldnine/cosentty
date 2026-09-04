@@ -953,12 +953,11 @@ use super::support::*;
         assert_eq!(app.session.as_ref().unwrap().line, 4);
     }
 
-    /// One blank line is blank code, but a second blank in a row is the
-    /// writer asking out: Enter there dissolves both blanks into true
-    /// empty lines and continues flush below the block — the table's
-    /// escape, delayed one line for the blank code's sake.
+    /// Blank code lines stack freely — Enter NEVER ejects the writer.
+    /// The only way out is deleting the indent: the last one gone takes
+    /// the membership with it, and the flush line is ordinary again.
     #[test]
-    fn a_second_blank_enter_leaves_the_code_block() {
+    fn leaving_a_code_block_takes_deleting_the_indent() {
         let ctx = test_ctx();
         let mut app = page(&["title", "code:x.py", " a = 1"]);
         app.rebuild(40);
@@ -966,16 +965,38 @@ use super::support::*;
 
         handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
         handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
-        assert_eq!(app.lines[3].text, " ", "one blank stays code");
-        assert_eq!(app.lines[4].text, " ", "so does a second");
-        assert!(app.line_in_code(4));
-
         handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[3].text, " ");
+        assert_eq!(app.lines[4].text, " ");
+        assert_eq!(app.lines[5].text, " ", "a third blank is still blank code");
+        assert!(app.line_in_code(5), "Enter never ejects");
+
+        // ⌫ from the inherited position eats the indent one char at a
+        // time. The last one out takes the block with it.
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
         let s = app.session.as_ref().unwrap();
-        assert_eq!((s.line, s.input.buf.as_str()), (4, ""), "the caret stays put, flush");
-        assert_eq!(app.lines[3].text, "", "both blanks dissolved — no trailing blank code");
-        assert_eq!(app.lines[4].text, "");
-        assert!(!app.line_in_code(4), "and the block is behind us");
+        assert_eq!((s.line, s.input.buf.as_str()), (5, ""), "flush now");
+        assert!(!app.line_in_code(5), "the indent was the membership");
+        assert_eq!(app.lines[3].text, " ", "the blanks above stay code");
+        assert_eq!(app.lines[4].text, " ");
+    }
+
+    /// At column 0, ⌫ on a blank code line eats one indent character —
+    /// cosense web's way — instead of joining the line above.
+    #[test]
+    fn backspace_at_the_head_of_a_blank_code_line_eats_the_indent() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:x.py", " a = 1"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 6);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        if let Some(s) = app.session.as_mut() {
+            s.input.cur = 0;
+        }
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf.as_str(), "", "one ⌫ at BOL ate the indent");
+        assert!(!app.line_in_code(3), "and the writer is out");
     }
 
     /// Code has depths of its own past the block's base indent. Enter at

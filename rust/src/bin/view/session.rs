@@ -962,32 +962,12 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
         };
         let empty = buf.chars().all(char::is_whitespace);
         // A table ends the way a list does: Enter on a row with nothing
-        // in it leaves. In code one blank line is blank CODE, so leaving
-        // takes two: Enter on a blank line directly under another blank
-        // dissolves both into true blanks — the first ends the block, the
-        // second is where writing continues, flush.
+        // in it leaves. In code a blank line is just blank CODE: Enter
+        // stacks as many as the writer wants, each keeping its indent.
+        // Stepping out is a different gesture — deleting the indent (⌫) —
+        // and the only one. (The old bargain "a second blank means leave"
+        // fought every diagram that wants a blank line in the middle.)
         if empty && code.is_some() {
-            let prev_blank = app
-                .lines
-                .get(line.wrapping_sub(1))
-                .filter(|_| line > span.header + 1)
-                .map(|l| !l.text.is_empty() && l.text.chars().all(char::is_whitespace))
-                .unwrap_or(false);
-            if prev_blank {
-                let ops = vec![
-                    EditOp::Replace { id: app.lines[line - 1].id.clone(), text: String::new() },
-                    EditOp::Replace { id: app.lines[line].id.clone(), text: String::new() },
-                ];
-                do_edit(app, ctx, &t!("コードブロックの終了", "leave code block"), ops);
-                if let Some(s) = app.session.as_mut() {
-                    s.input = Input { buf: String::new(), cur: 0 };
-                    s.orig = String::new();
-                    s.want_col = None;
-                    s.sel_from = None;
-                }
-                app.follow = true;
-                return;
-            }
             let tail = format!("{indent}{}", buf[caret.min(buf.len())..].trim_start());
             session_open_below(app, ctx, line, indent, tail);
             return;
@@ -1187,6 +1167,16 @@ pub(crate) fn session_indent(app: &mut App, ctx: &Ctx, delta: i32) {
     }
     s.want_col = None;
     app.laid_width = 0;
+}
+
+/// Column 0 of a whitespace-only line inside a `code:` block — where ⌫
+/// means "eat one indent character", not "join the line above".
+fn caret_on_blank_code_bol(app: &App) -> bool {
+    let Some(s) = app.session.as_ref() else { return false };
+    s.input.cur == 0
+        && !s.input.buf.is_empty()
+        && s.input.buf.chars().all(char::is_whitespace)
+        && app.code_span_at_line(s.line).is_some()
 }
 
 /// Is the caret inside (or just after) the leading whitespace of a Mermaid
@@ -1426,6 +1416,18 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         // header's lone space by itself would only orphan the body.
         (KeyCode::Backspace, _) if caret_on_mermaid_indent(app) => {
             session_indent(app, ctx, -1)
+        }
+        // At the head of a blank code line, ⌫ eats one indent character —
+        // cosense web's way. The indent IS the membership: when the last
+        // of it goes, the line is flush and the block is over. That is how
+        // a writer steps out, and the only way.
+        (KeyCode::Backspace, _) if caret_on_blank_code_bol(app) => {
+            if let Some(s) = app.session.as_mut() {
+                s.input.buf.remove(0);
+                s.want_col = None;
+                s.sel_from = None;
+            }
+            app.laid_width = 0;
         }
         (KeyCode::Backspace, _) => {
             let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);

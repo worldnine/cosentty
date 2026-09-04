@@ -250,6 +250,14 @@ fn nothing_automatic_goes_looking_for_a_picture_of_a_drawn_block() {
 }
 
 #[test]
+fn blank_lines_in_a_diagram_do_not_break_the_drawing() {
+    // 空行が打てるようになったので、ブロックの中の空行は図に届く。
+    // mermaid-text は空行を素通しさせる(壊れない)ことをここで固定する。
+    let with = mmd_text::render_text("flowchart LR\n A-->B\n\n ", 60).expect("draws");
+    assert_eq!(with, mmd_text::render_text("flowchart LR\n A-->B", 60).expect("draws"));
+}
+
+#[test]
 fn an_ascii_diagram_dims_nothing() {
     // `COSENSE_MERMAID=ascii` の罫線は `- | + > v`。ラベルにも出る字なので
     // 字では二層を見分けられない——だから何も薬めない。
