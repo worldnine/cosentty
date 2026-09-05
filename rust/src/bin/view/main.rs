@@ -584,6 +584,8 @@ enum Action {
     Continue,
     Quit,
     Editor,
+    /// Drop the screen and redraw whole: recovery from a garbled terminal.
+    Repaint,
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Result<(), Box<dyn Error>> {
@@ -694,6 +696,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
                         Action::Editor => {
                             editor_roundtrip(terminal, app, ctx);
                             break; // geometry may have changed — redraw first
+                        }
+                        Action::Repaint => {
+                            terminal.clear()?;
                         }
                         Action::Continue => {}
                     }

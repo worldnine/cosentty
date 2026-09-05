@@ -1429,7 +1429,7 @@ pub(crate) fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
 
 /// One key while the session is open — the modeless core: printable keys
 /// type, arrows move the caret, Enter makes lines, Esc leaves.
-pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
+pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     // A modified arrow is cosense's outline chord. This viewer answers it
     // in READ, not here, and the arms below match arrows regardless of
     // their modifiers — so without this the chord would quietly move the
@@ -1445,7 +1445,7 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             "ブロックを動かすには Esc で編集を抜けて m（移動モード）",
             "to move a block: Esc to leave EDIT, then m (move mode)"
         ));
-        return;
+        return Action::Continue;
     }
     // ^o opens the index from inside the session too: the dirty line is
     // committed first (clicking away commits too), and the session stays
@@ -1454,7 +1454,7 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         && k.modifiers.contains(KeyModifiers::CONTROL)
     {
         open_page_index(app, ctx);
-        return;
+        return Action::Continue;
     }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -1552,6 +1552,29 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         // and this viewer has no suspend of its own to lose.
         (KeyCode::Char('z'), true) => session_history(app, ctx, true),
         (KeyCode::Char('r'), true) => session_history(app, ctx, false),
+        // Commit the dirty line NOW. Usually the commit rides along when
+        // the caret leaves the line; sometimes the writer wants the ✓
+        // before moving on — and a ws race window closes with it.
+        (KeyCode::Char('s'), true) => {
+            if app.session.as_ref().is_some_and(|s| s.input.buf != s.orig) {
+                session_commit_dirty(app, ctx);
+                app.note(t!("✓ コミットしました", "✓ committed"));
+            }
+        }
+        // A pageful at a time, caret and all: reading the context around
+        // the line being written without leaving the session. The caret
+        // moves (a viewport that moves alone would snap back on the next
+        // keystroke), and the line crossed commits first.
+        (KeyCode::PageDown, _) => session_move_line(app, ctx, app.view_h.max(1) as i32),
+        (KeyCode::PageUp, _) => session_move_line(app, ctx, -(app.view_h.max(1) as i32)),
+        // ^j breaks the line exactly like Enter — the composer's finger
+        // works here too.
+        (KeyCode::Char('j'), true) => session_split(app, ctx),
+        // Readline's backspace alias. At the head it does nothing — the
+        // join-up is ⌫'s own gesture there.
+        (KeyCode::Char('h'), true) => edit_input(app, Input::backspace),
+        // A full repaint, for a terminal that has garbled itself.
+        (KeyCode::Char('l'), true) => return Action::Repaint,
         (KeyCode::Backspace, _) | (KeyCode::Delete, _)
             if app.session.as_ref().and_then(|s| s.sel_ends()).is_some() =>
         {
@@ -1611,6 +1634,7 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             reset_col(app);
         }
     }
+    Action::Continue
 }
 
 /// A multi-line paste while the session is open: the first fragment goes

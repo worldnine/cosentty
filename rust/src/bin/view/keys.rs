@@ -270,8 +270,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
 
     // The modeless edit session owns everything next (SPEC §3).
     if app.session.is_some() {
-        handle_session_key(app, ctx, k);
-        return Action::Continue;
+        return handle_session_key(app, ctx, k);
     }
 
     // Overlays capture keys while open.
@@ -640,6 +639,8 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         (KeyCode::Char('l'), false) => {
             app.overlay = Some(Overlay::Comments { cursor: 0 });
         }
+        // A full repaint for a terminal that has garbled itself.
+        (KeyCode::Char('l'), true) => return Action::Repaint,
         // The project index (akapen's `^o files` slot): a full-width list
         // with a short excerpt from the selected page docked below. Typing
         // filters it, so the old picker's fingers still work — they now

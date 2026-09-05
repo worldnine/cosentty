@@ -1461,3 +1461,69 @@ fn a_flush_table_header_edits_as_itself_not_as_indented() {
     let span = caret_span(&app, 2);
     assert!(span.is_some(), "a table row is inside its block");
 }
+
+#[test]
+fn pagedown_moves_the_caret_a_pageful_still_editing() {
+    let ctx = test_ctx();
+    let texts: Vec<String> = std::iter::once("t".to_string())
+        .chain((0..20).map(|i| format!("line {i}")))
+        .collect();
+    let mut app = page(&texts.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    app.view_h = 5;
+    enter_session(&mut app, &ctx, 2, 0);
+    handle_session_key(&mut app, &ctx, key(KeyCode::PageDown));
+    assert_eq!(app.session.as_ref().unwrap().line, 7, "five lines down");
+    handle_session_key(&mut app, &ctx, key(KeyCode::PageUp));
+    assert_eq!(app.session.as_ref().unwrap().line, 2, "and back up");
+}
+
+#[test]
+fn ctrl_j_breaks_the_line_like_enter() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", " aaaaa|bbbbb"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 6); // on the `|`
+    handle_session_key(&mut app, &ctx, ctrl('j'));
+    assert_eq!(app.lines[1].text, " aaaaa");
+    assert_eq!(app.lines[2].text, " |bbbbb", "^j is Enter: the indent rides along");
+}
+
+#[test]
+fn ctrl_h_backspaces_one_char() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", " abc"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 4);
+    handle_session_key(&mut app, &ctx, ctrl('h'));
+    assert_eq!(app.session.as_ref().unwrap().input.buf, " ab");
+}
+
+#[test]
+fn ctrl_s_commits_the_dirty_line_and_says_so() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", " before"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 7);
+    if let Some(s) = app.session.as_mut() {
+        s.input.insert_str(" after");
+    }
+    handle_session_key(&mut app, &ctx, ctrl('s'));
+    assert_eq!(app.lines[1].text, " before after", "the dirty line went out");
+    assert!(app.note.is_some(), "the ✓ says so");
+    // a clean line: no note, no op
+    app.note = None;
+    handle_session_key(&mut app, &ctx, ctrl('s'));
+    assert!(app.note.is_none(), "nothing dirty, nothing said");
+}
+
+#[test]
+fn ctrl_l_asks_the_loop_for_a_full_repaint() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", " body"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 0);
+    assert!(matches!(
+        handle_session_key(&mut app, &ctx, ctrl('l')),
+        Action::Repaint
+    ));
+}
