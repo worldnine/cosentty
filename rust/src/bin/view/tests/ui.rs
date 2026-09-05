@@ -210,6 +210,7 @@ use super::support::*;
                 editable: true,
                 links: LinkTruth::default(),
                 palette: ctx.palette,
+                telomere_tint: None,
             },
             &ctx,
         );
@@ -247,6 +248,7 @@ use super::support::*;
                 editable: true,
                 links: LinkTruth::default(),
                 palette: ctx.palette,
+                telomere_tint: None,
             },
             &ctx,
         );
@@ -284,6 +286,7 @@ use super::support::*;
                 facts: PageFacts::default(),
                 links: LinkTruth::default(),
                 palette: ctx.palette,
+                telomere_tint: None,
             },
             &ctx,
         );
@@ -1188,13 +1191,13 @@ use super::support::*;
 #[test]
 fn the_gutter_cell_wears_the_state_colour() {
     // updated-after-load: web's stronger NOW blue, not the unread blue.
-    let (glyph, style) = gutter_cell(Some((60, cosense::theme::TelomereState::UpdatedAfterLoad)), false);
+    let (glyph, style) = gutter_cell(Some((60, cosense::theme::TelomereState::UpdatedAfterLoad)), false, None);
     assert_eq!(glyph, "█");
     assert_eq!(style.fg, Some(Color::Rgb(0x6b, 0x8c, 0xff)));
-    let (_, unread) = gutter_cell(Some((60, cosense::theme::TelomereState::Unread)), false);
+    let (_, unread) = gutter_cell(Some((60, cosense::theme::TelomereState::Unread)), false, None);
     assert_ne!(unread.fg, style.fg, "after-load is its own blue at the same age");
     // will-delete (history): the fixed red, thickness still by age.
-    let (glyph, style) = gutter_cell(Some((50_000, cosense::theme::TelomereState::WillDelete)), false);
+    let (glyph, style) = gutter_cell(Some((50_000, cosense::theme::TelomereState::WillDelete)), false, None);
     assert_eq!(glyph, "▊", "the <24h bucket");
     assert_eq!(style.fg, Some(Color::Rgb(0xfd, 0x73, 0x73)));
 }

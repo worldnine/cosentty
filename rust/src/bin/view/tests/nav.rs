@@ -20,7 +20,7 @@ use super::support::*;
         let mark = |updated: i64, unread: bool| {
             use cosense::theme::TelomereState as S;
             let state = if unread { S::Unread } else { S::Read };
-            gutter_cell(Some((related_age(updated), state)), false)
+            gutter_cell(Some((related_age(updated), state)), false, None)
         };
         let now = now_secs();
         assert_eq!(mark(now - 60, true).0, "█", "edited a minute ago: thick");

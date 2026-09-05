@@ -121,6 +121,8 @@ pub(crate) struct Loaded {
     /// `App::palette`): the re-render must not revert the links to the
     /// terminal scheme.
     pub(crate) palette: cosense::theme::Palette,
+    /// See `App::telomere_tint`.
+    pub(crate) telomere_tint: Option<cosense::theme::TelomereTint>,
     /// Whether this credential may edit the loaded project.
     pub(crate) editable: bool,
     /// Related-pages sections (see `build_related`). EMPTY on arrival: the
@@ -713,6 +715,9 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
     // not the terminal scheme's — the header already answers to the theme.
     let site_theme = ctx.project_theme(project);
     let palette = cosense::theme::tinted_page_palette(&ctx.palette, site_theme.as_deref());
+    let telomere_tint = site_theme
+        .as_deref()
+        .and_then(cosense::theme::cosense_telomere_tint);
     let rendered = render_lines_with(&texts, Some(&ctx.hl), &palette, &links);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
@@ -738,6 +743,7 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         read_at,
         open_stamp: now,
         palette,
+        telomere_tint,
         editable,
         related: Vec::new(),
         links,
@@ -953,6 +959,7 @@ impl App {
         self.read_at = l.read_at;
         self.open_stamp = l.open_stamp;
         self.palette = l.palette;
+        self.telomere_tint = l.telomere_tint;
         self.editable = l.editable;
         // Answers that were only true of the page we are leaving go now;
         // the page arriving may be the second one writing that word.

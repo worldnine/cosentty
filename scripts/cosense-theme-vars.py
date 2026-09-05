@@ -11,9 +11,15 @@ web 側が変わったら再生成して diff を取る(2026-09-06 実測が基�
 - `--navbar-bg`   → ヘッダ fg/bg(theme.rs::cosense_navbar_rgba)
 - `--page-link-color` + `--empty-page-link-color`
                   → 本文リンク色(theme.rs::cosense_link_colors)
+- `--telomere-unread` + `--telomere-updated`
+                  → テロメアの未読・ロード後更新色(theme.rs::cosense_telomere_tint)
 
 テーマが自前で定義しない変数は web では `var(--x, FALLBACK)` の基底に落ちる
-ので、それも拾って全テーマで値を持つ。
+ので、それも拾って全テーマで値を持つ。テロメアは **2世代ある**:新系
+(blue/green/orange/purple/red/paper 系)は青 `#89a3ff`/`#6b8cff`、旧系
+(hacker2/lgreen/mred/summer)は緑 `#7fca8f`/`#47ba5f` を自前で定義する。
+定義しないテーマは css のフォールバック(青系)に落ちる。既読は端末側の
+罫線グレーに任せるので、取り出さない。
 """
 
 import re
@@ -115,6 +121,19 @@ def main():
                 f"{ms[0]}, {ms[1]}, {ms[2]})),"
             )
     print("        _ => None,\n    } };")
+    base_ur = css_color(fallback(css, "--telomere-unread"))
+    base_up = css_color(fallback(css, "--telomere-updated"))
+    print("let telomere = |t: &str| Option<(u8, u8, u8, u8, u8, u8)> { match t {")
+    for n in sorted(bs):
+        ur = css_color(var_in(bs[n], "--telomere-unread")) or base_ur
+        up = css_color(var_in(bs[n], "--telomere-updated")) or base_up
+        if ur and up and ur[3] == 255 and up[3] == 255:
+            print(
+                f'        "{n}" => Some(({ur[0]}, {ur[1]}, {ur[2]}, '
+                f"{up[0]}, {up[1]}, {up[2]})),"
+            )
+    print("        _ => None,\n    } };")
+    print("// telomere css fallback:", base_ur, base_up)
 
 
 if __name__ == "__main__":

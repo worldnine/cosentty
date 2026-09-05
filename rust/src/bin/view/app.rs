@@ -315,6 +315,12 @@ pub(crate) struct App {
     /// reader just left.
     pub(crate) palette: cosense::theme::Palette,
 
+    /// This page's project's telomere colours (web's `--telomere-unread` /
+    /// `--telomere-updated`): blue on the new themes, green on the old ones
+    /// (hacker2/lgreen/mred/summer), the css fallback blue when the theme
+    /// defines neither. `None` = settings unreadable or theme unknown.
+    pub(crate) telomere_tint: Option<cosense::theme::TelomereTint>,
+
     /// Per-project member tables (userId -> display name) for line blame,
     /// fetched lazily: see `ensure_members` for when they refresh.
     pub(crate) members: HashMap<String, MembersCache>,
@@ -673,6 +679,7 @@ impl App {
             read_at: None,
             open_stamp: 0,
             palette: cosense::theme::Palette::for_light(false),
+            telomere_tint: None,
             members: HashMap::new(),
             time: None,
             present_ids: None,

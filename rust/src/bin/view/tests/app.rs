@@ -766,6 +766,7 @@ use super::support::*;
                 facts: PageFacts::default(),
                 links: LinkTruth::default(),
                 palette: ctx.palette,
+                telomere_tint: None,
             },
             &ctx,
         );
@@ -2334,6 +2335,7 @@ fn set_page_carries_the_page_palette() {
             read_at: None,
             open_stamp: 0,
             palette: tinted,
+            telomere_tint: None,
             editable: true,
             links: LinkTruth::default(),
         },

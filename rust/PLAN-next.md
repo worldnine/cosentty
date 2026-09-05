@@ -313,6 +313,24 @@ akapen/src/effects.rs の toast_effect):
   無く、web も明暗はプロジェクトの静的なテーマ選択。TUI は端末背景に
   ブレンドする既存方針を維持)
 
+### 8. テロメアの色もテーマに追従させる(新旧2世代) — **済(2026-09-06)。実施記録は末尾へ**
+
+- **現在の動作**: テロメアの未読/ロード後更新は常に青(TUI 独自の青)。web は
+  テーマごとに変わり、**旧系テーマ(Hacker より下。hacker2/lgreen/mred/summer。
+  今でも設定可能)は緑 `#7fca8f`/`#47ba5f`**。ユーザー指摘「新旧テーマが混在」
+- **期待する動作**: 未読/ロード後更新の色を web の `--telomere-unread` /
+  `--telomere-updated` に揃える。既読は端末の罫線グレーのまま(web の
+  `#e2e2e2` は暗い端末で溶ける)。テーマが読めないときはフォールバック青(現行)
+- **再現手順**: 旧系テーマのプロジェクト(mred など)で未読行を web と並べて見る
+- **完了条件**: スクリプトが `--telomere-*` も出す。テストが新系=青/旧系=緑/
+  未知=None を固定し、tint がテロメアに届くことを言う。KEYMAP に世代と
+  sid 要件を記載
+- **依存**: なし。**併せて判明**: 非公開プロジェクトの設定API(`/api/projects`)
+  は PAT で 401(sid なら 200)なので、**テーマ・ヘッダ色・リンク色・テロメア色は
+  sid 無しでは効かない**(TUI は静かにフォールバックする設計どおり)。acme
+  は theme=green(新系)を確認済み。UserCSS での上書き(acme の既読
+  `#EEEEEE` など)は今回やらない(後続)
+
 ### 小粒(隙間にやれるもの)
 
 - **済(2026-09-04)** EDIT で `Garry` を選ぶと直後の全角 `・` まで反転して `Garry・` を
@@ -503,6 +521,24 @@ akapen/src/effects.rs の toast_effect):
   よいので、その設計時に一緒に検討する(プロジェクト一覧は 2026-09-03 に済)
 
 ## 済(このセッションで消化)
+
+### 実施記録: 8. テロメアの色をテーマに追従させる(2026-09-06)
+
+- スクリプトを拡張し `--telomere-unread`/`--telomere-updated` も出す
+  (既読は端末罫線に任せるので取らない)。テーマが定義しない変数は css の
+  フォールバック(青 `#89a3ff`/`#6b8cff`)に落ちる。旧系4テーマは緑、paper 系は
+  沈んだ青を自前で持つ
+- `TelomereTint { unread, updated }` と `cosense_telomere_tint()`、
+  `telomere_with(state, age, light, tint)` を追加。既存の `telomere_in`/
+  `telomere(age, unread, light)` は tint 無しのラッパで、未設定時の色は
+  従来どおり。`App::telomere_tint`(Loaded から)、一覧は draw 時に
+  `index_project`/`app.project` のテーマから取得(設定は到着時に取得済み)
+- 実測の追加確定: acme は `theme=green`(新系)。最初に `theme: None` と
+  読んだのは **PAT が設定APIで 401 になったエラーJSON** を parse したため。
+  pages API は PAT で通るのに settings は 401 — この非対称が「テーマが
+  反映されない」の正体だった(指示どおり sid を付ければ効く)
+- KEYMAP: テロメア節に2世代と sid 要件、`--theme` 節の文言を整理
+  (端末テーマには依存しない/プロジェクトテーマには追従する)
 
 ### 実施記録: 7. プロジェクトテーマ色の web 実測反映(2026-09-06)
 

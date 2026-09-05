@@ -461,9 +461,25 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
             Row::Page(e) => {
                 // The same mark the page's own gutter wears: THICKNESS is
                 // how recently it changed, COLOUR is whether it has been
-                // seen. A project's list then reads the way its lines do.
+                // seen — in the LISTED project's own telomere colours (the
+                // settings are already read for the display name, so this
+                // is a cached lookup).
+                let listed = if ix.scope == cosense::index::Scope::Pages {
+                    &app.index_project
+                } else {
+                    &app.project
+                };
+                let tint = ctx
+                    .project_theme(listed)
+                    .as_deref()
+                    .and_then(cosense::theme::cosense_telomere_tint);
+                let state = if e.unread {
+                    cosense::theme::TelomereState::Unread
+                } else {
+                    cosense::theme::TelomereState::Read
+                };
                 let (glyph, tel) =
-                    cosense::theme::telomere(now_secs() - e.updated, e.unread, app_light);
+                    cosense::theme::telomere_with(state, now_secs() - e.updated, app_light, tint);
                 let title_style = if e.unread {
                     dim_when_away(style.fg(CHROME_CARET))
                 } else {
@@ -1185,7 +1201,8 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 let sy = screen_y + k;
                 let y = text.y as i32 + sy;
                 if y >= band_top && y <= band_bot {
-                    let (glyph, mut style) = gutter_cell(age, ctx.light);
+                    // The tint is this page's project's (web's --telomere-*).
+                    let (glyph, mut style) = gutter_cell(age, ctx.light, app.telomere_tint);
                     // EDIT の帯は本文領域だけ(上のコメント参照)なので、
                     // テロメアには帯の色を継がせない。
                     if let Some(bg) = base.bg {
@@ -2101,10 +2118,14 @@ pub(crate) fn draw_menu_panel(
 /// akapen's marker, same glyph.
 pub(crate) const COMMENT_BAR: &str = "▌";
 
-pub(crate) fn gutter_cell(age: Option<(i64, cosense::theme::TelomereState)>, light: bool) -> (&'static str, Style) {
+pub(crate) fn gutter_cell(
+    age: Option<(i64, cosense::theme::TelomereState)>,
+    light: bool,
+    tint: Option<cosense::theme::TelomereTint>,
+) -> (&'static str, Style) {
     match age {
         Some((a, state)) => {
-            let (glyph, color) = cosense::theme::telomere_in(state, a, light);
+            let (glyph, color) = cosense::theme::telomere_with(state, a, light, tint);
             (glyph, Style::default().fg(color))
         }
         None => (" ", Style::default()),
