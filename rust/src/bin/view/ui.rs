@@ -681,9 +681,19 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     //
     // Drawn here rather than through `Overlay`: the index returns early in
     // `ui`, so an overlay laid over the page would never appear above it.
-    if let Some(cursor) = app.index_sort_menu {
+    draw_sort_menu(f, area, app.index.as_ref().map(|ix| ix.sort).unwrap_or_default(), app.index_sort_menu);
+}
+
+/// The order menu, shared by the index (`s`) and the page (`S`): the same
+/// items, the same mark on the standing order.
+pub(crate) fn draw_sort_menu(
+    f: &mut Frame,
+    area: Rect,
+    current: cosense::index::SortKey,
+    cursor: Option<usize>,
+) {
+    if let Some(cursor) = cursor {
         use cosense::index::SortKey;
-        let current = app.index.as_ref().map(|ix| ix.sort).unwrap_or_default();
         // The names are the API's own words and stay in English; the mark
         // is what says which order the list is actually in.
         let items: Vec<String> = SortKey::ALL
@@ -878,6 +888,18 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     }
     let right = if badges.is_empty() { String::new() } else { format!("{} ", badges.join(" · ")) };
     let head = header_line(name, &app.title, &right, area.width);
+    // The site name — or the lone `/` when there is no room for the name —
+    // is the click target that opens the project's page list (the header's
+    // way of saying `^o`). Same arithmetic as `header_line`: the full
+    // " name / title" when it fits, else the bare " / title".
+    let home_w = if (1 + str_width(name) + 3 + str_width(&app.title)) as u16
+        <= area.width.saturating_sub(str_width(&right) as u16 + 1)
+    {
+        1 + str_width(name) + 3
+    } else {
+        2
+    };
+    app.header_home_rect = Rect::new(area.x, area.y, home_w as u16, 1);
     f.render_widget(
         Paragraph::new(head).style(
             // No bold: the header says itself by its colours (the theme's
@@ -930,6 +952,13 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         ])),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
+
+    // The order menu (S) floats over the page, exactly as the index's `s`
+    // menu floats over the list: one order everywhere, applied here to the
+    // related sections and remembered as the index's standing choice.
+    if app.index.is_none() {
+        draw_sort_menu(f, area, app.index_sort, app.index_sort_menu);
+    }
 
     // The page is boxed flush with the terminal edge. The cursor `>` rides
     // ON the left frame column, while the telomere keeps its own inside
@@ -2651,7 +2680,21 @@ impl App {
         let unread_style = Style::default().fg(CHROME_CARET);
         let read_style = Style::default();
         let mut vsrc = self.lines.len();
-        let mut rows = vec![Row::Aside { line: Line::from("") }];
+        // The one-line gap before the sections is where the standing sort
+        // says itself: the index's `s` choice reaches here too, and `S`
+        // re-orders from this side.
+        let arrow = if self.index_sort == cosense::index::SortKey::Title { "↑" } else { "↓" };
+        let mut rows = vec![Row::Aside {
+            line: Line::from(Span::styled(
+                format!(
+                    " links · {} {} · {}",
+                    self.index_sort.name(),
+                    arrow,
+                    t!("S で並べ替え", "S re-orders")
+                ),
+                dim,
+            )),
+        }];
         for sec in &self.related {
             let head = format!("── {} ", sec.heading);
             let used = str_width(&head);

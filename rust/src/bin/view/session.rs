@@ -201,9 +201,11 @@ pub(crate) fn leading_ws_taken(buf: &str, n: usize) -> usize {
 /// Nested headers, bodies and tables are untouched.
 pub(crate) fn caret_span(app: &App, line: usize) -> Option<CodeSpan> {
     let span = app.raw_span_at_line(line)?;
-    let flush_header = app
-        .code_span_at_line(line)
-        .is_some_and(|sp| line == sp.header && sp.header_indent == 0);
+    // A flush header — a `code:` OR `table:` line at the left margin —
+    // edits as itself: READ shows it flush, so the caret row must show it
+    // flush too. The block gutter would read as a nesting level the line
+    // has not got (the table header used to indent itself on entering).
+    let flush_header = line == span.header && span.header_indent == 0;
     if flush_header { None } else { Some(span) }
 }
 
@@ -1443,6 +1445,15 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
             "ブロックを動かすには Esc で編集を抜けて m（移動モード）",
             "to move a block: Esc to leave EDIT, then m (move mode)"
         ));
+        return;
+    }
+    // ^o opens the index from inside the session too: the dirty line is
+    // committed first (clicking away commits too), and the session stays
+    // open — it resumes when the index closes.
+    if k.code == KeyCode::Char('o')
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        open_page_index(app, ctx);
         return;
     }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);

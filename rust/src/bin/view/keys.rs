@@ -344,6 +344,33 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         app.status.clear();
         return Action::Continue;
     }
+    // The sort menu on the page side (`S`): the index menu's own keys.
+    // Enter re-orders the related sections AND the index's standing
+    // choice — one order everywhere.
+    if app.index_sort_menu.is_some() {
+        use cosense::index::SortKey;
+        let cursor = app.index_sort_menu.unwrap();
+        let last = SortKey::ALL.len() - 1;
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match (k.code, ctrl) {
+            (KeyCode::Char('c'), true) => return Action::Quit,
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => app.index_sort_menu = None,
+            (KeyCode::Down, _) | (KeyCode::Char('j'), false) | (KeyCode::Char('n'), true) => {
+                app.index_sort_menu = Some((cursor + 1).min(last));
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), false) | (KeyCode::Char('p'), true) => {
+                app.index_sort_menu = Some(cursor.saturating_sub(1));
+            }
+            (KeyCode::Enter, _) => {
+                app.index_sort_menu = None;
+                app.index_sort = SortKey::ALL[cursor.min(last)];
+                app.rebuild_related();
+                app.laid_width = 0; // the related rows re-order
+            }
+            _ => {}
+        }
+        return Action::Continue;
+    }
     if let Some((block, direction)) = outline_arrow(k) {
         edit_outline(app, ctx, block, direction);
         return Action::Continue;
@@ -557,6 +584,14 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             };
         }
         (KeyCode::Char('s'), false) => send_comments(app, ctx),
+        // `S` names the related sections' order — the index's `s`, reached
+        // from the page side. One standing choice everywhere.
+        (KeyCode::Char('S'), false) => {
+            let at = cosense::index::SortKey::ALL
+                .iter()
+                .position(|&k| k == app.index_sort);
+            app.index_sort_menu = Some(at.unwrap_or(0));
+        }
 
         // ---- new lines (vim's o/O; the session opens on the new line) ----
         (KeyCode::Char('o'), false) => open_line(app, ctx, false),
@@ -608,19 +643,9 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         // The project index (akapen's `^o files` slot): a full-width list
         // with a short excerpt from the selected page docked below. Typing
         // filters it, so the old picker's fingers still work — they now
-        // have a screen to work in.
-        (KeyCode::Char('o'), true) => {
-            let from = app.here();
-            let project = app.project.clone();
-            open_index(app, ctx, &project, String::new());
-            if app.index.is_some() {
-                // Opening the index is going somewhere, so it goes on the
-                // stack: `[` from here returns to the page it was opened
-                // from, and `[` from a page opened out of it returns here.
-                app.history.push(from);
-                app.forward.clear();
-            }
-        }
+        // have a screen to work in. (The header's site name clicks to the
+        // same place.)
+        (KeyCode::Char('o'), true) => open_page_index(app, ctx),
         // line detail: who edited the cursor line and when (toggle)
         (KeyCode::Char('t'), false) => {
             app.overlay = if matches!(app.overlay, Some(Overlay::LineInfo)) {

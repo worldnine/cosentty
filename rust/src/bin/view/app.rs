@@ -184,6 +184,10 @@ pub(crate) struct App {
     /// text area and the scrollbar track.
     pub(crate) text_rect: Rect,
     pub(crate) bar_rect: Rect,
+    /// The header's site-name cells (or the lone `/` when the name has no
+    /// room): the click target that opens the project's page list — the
+    /// header's way of saying `^o`.
+    pub(crate) header_home_rect: Rect,
     /// Source line where a left-button drag started (selection anchor),
     /// with the character anchor of the same press when the drag runs
     /// inside an edit session. A READ drag has no character range, so its
@@ -626,6 +630,7 @@ impl App {
             view_h: 0,
             text_rect: Rect::default(),
             bar_rect: Rect::default(),
+            header_home_rect: Rect::default(),
             drag_anchor: None,
             scrollbar_drag: None,
             scroll: 0,

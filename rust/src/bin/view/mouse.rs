@@ -220,6 +220,20 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
         }
         _ => {}
     }
+    // The header's site name — or the lone `/` when the name has no room
+    // — is the way back to the project's page list: a click there is `^o`
+    // (the index screen's header is its own and answers elsewhere). Not in
+    // history: the purple header is about the snapshot, not the project.
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left))
+        && app.time.is_none()
+        && app.header_home_rect.height == 1
+        && m.row == app.header_home_rect.y
+        && m.column >= app.header_home_rect.x
+        && m.column < app.header_home_rect.x + app.header_home_rect.width
+    {
+        open_page_index(app, ctx);
+        return;
+    }
     if app.composing.is_some() {
         return;
     }

@@ -2452,3 +2452,40 @@ fn the_projects_list_header_is_a_menu_not_a_project() {
     assert_eq!(c.fg, Color::Black);
     assert_eq!(c.bg, CHROME_ACCENT);
 }
+
+#[test]
+fn the_related_gap_names_the_standing_sort() {
+    // The one-line gap before the Links sections is where the index's
+    // standing `s` choice says itself — it reaches every page.
+    let mut app = page(&["t", "body"]);
+    // One section is all the gap line needs; the entries are irrelevant.
+    app.related = vec![crate::nav::RelSection {
+        heading: "Links (0)".into(),
+        entries: vec![],
+    }];
+    let rows = app.related_rows(60);
+    let first = match &rows[0] {
+        crate::app::Row::Aside { line } => line
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>(),
+        _ => panic!("the gap is an aside"),
+    };
+    assert!(
+        first.contains("links ·") && first.contains(app.index_sort.name()),
+        "the gap names the sort: {first:?}"
+    );
+}
+
+#[test]
+fn s_shift_opens_the_order_menu_and_enter_applies_everywhere() {
+    let ctx = test_ctx();
+    let mut app = page(&["t"]);
+    let want = cosense::index::SortKey::Title;
+    let at = cosense::index::SortKey::ALL.iter().position(|&k| k == want).unwrap();
+    app.index_sort_menu = Some(at);
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    assert!(app.index_sort_menu.is_none(), "the menu closed");
+    assert_eq!(app.index_sort, want, "one standing order everywhere");
+}

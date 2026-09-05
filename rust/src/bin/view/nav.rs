@@ -690,6 +690,24 @@ pub(crate) fn resort_index(app: &mut App, ctx: &Ctx, sort: cosense::index::SortK
     open_index_from(app, ctx, &project, filter, true);
 }
 
+/// `^o` from a page, a click on the header's site name, or `^o` inside
+/// the edit session: the project's own page list. A session (if any) is
+/// committed first — clicking away commits too — and stays open, resuming
+/// when the index closes. A list that cannot be fetched leaves everything
+/// as it was.
+pub(crate) fn open_page_index(app: &mut App, ctx: &Ctx) {
+    let from = app.here();
+    let project = app.project.clone();
+    if app.session.is_some() {
+        session_commit_dirty(app, ctx);
+    }
+    open_index(app, ctx, &project, String::new());
+    if app.index.is_some() {
+        app.history.push(from);
+        app.forward.clear();
+    }
+}
+
 /// Fetch and render one page. Images are NOT downloaded here: they are
 /// fetched on background threads (see `App::start_image_loads`) so a page
 /// with many images still appears immediately.

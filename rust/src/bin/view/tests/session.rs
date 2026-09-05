@@ -1442,3 +1442,22 @@ use super::support::*;
         assert_eq!(s.input.buf, " code:tex", "header alone moved");
         assert_eq!(app.lines[2].text, r" \frac{a}{b}", "body stayed");
     }
+
+/// A flush `table:` header edits as itself (raw), exactly like a flush
+/// `code:` header: READ shows it at the left margin, so the caret row must
+/// not grow the block gutter — it used to indent itself on entering.
+#[test]
+fn a_flush_table_header_edits_as_itself_not_as_indented() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", "table:価格表", " 定価\t税別"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 0);
+    let s = app.session.as_ref().unwrap();
+    let span = caret_span(&app, s.line);
+    assert!(span.is_none(), "flush table header shows raw");
+    assert_eq!(session_display(&s.input.buf, span), "table:価格表");
+    // a body row keeps the table's gutter (it sits inside the block)
+    enter_session(&mut app, &ctx, 2, 0);
+    let span = caret_span(&app, 2);
+    assert!(span.is_some(), "a table row is inside its block");
+}
