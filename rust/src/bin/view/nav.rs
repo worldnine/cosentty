@@ -704,7 +704,11 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
     // The related block is not in a v2 response, so nothing is known about
     // the links yet; `App::start_related_load` fills both in.
     let links = link_truth(&facts, None);
-    let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &links);
+    // Links wear the project theme's own colours (web's --page-link-color),
+    // not the terminal scheme's — the header already answers to the theme.
+    let site_theme = ctx.project_theme(project);
+    let palette = cosense::theme::tinted_page_palette(&ctx.palette, site_theme.as_deref());
+    let rendered = render_lines_with(&texts, Some(&ctx.hl), &palette, &links);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
     let now = now_secs();
@@ -714,7 +718,6 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         (a, b) => a.or(b),
     };
     let editable = ctx.can_edit_in(project);
-    let site_theme = ctx.project_theme(project);
     let (header_fg, header_bg) =
         cosense::theme::project_header_colors(site_theme.as_deref(), ctx.terminal_bg);
     Ok(Loaded {

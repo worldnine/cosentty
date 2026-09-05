@@ -684,9 +684,14 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
         None => HashSet::new(),
     };
     // A snapshot is the page as it was; which of its links exist is only
-    // known for NOW, so an old revision says nothing about it.
+    // known for NOW, so an old revision says nothing about it. Links still
+    // wear the project theme's colours (cached lookup, not a fetch).
+    let palette = cosense::theme::tinted_page_palette(
+        &ctx.palette,
+        ctx.project_theme(&app.project).as_deref(),
+    );
     let rendered =
-        render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &LinkTruth::default());
+        render_lines_with(&texts, Some(&ctx.hl), &palette, &LinkTruth::default());
     app.lines = snap.lines;
     app.blocks = rendered.blocks;
     app.srcs = rendered.srcs;

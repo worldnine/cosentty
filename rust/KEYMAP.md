@@ -428,7 +428,7 @@ Markdown を開いたときと同じ見え方になる。テーマが書式を�
 `--theme NAME` は本文全体に効く（akapen 同様）。コードブロックのハイライトに加え、見出し・リンク・
 引用・`code:` ラベルの色をテーマの **Markdown スコープ**から引く（`[**** ]`〜`[* ]` → `markup.heading.1..4`、
 リンク/`#タグ`/URL → `markup.underline.link`、引用 → `markup.quote`、`code:` → `markup.raw.inline`、
-**未作成ページへのリンク → `markup.deleted`**）。未作成リンクに `invalid` を使わないのは、埋め込みテーマを
+**未作成ページへのリンク → `markup.deleted`**）。その上で、**本文のリンクと未作成リンクの色はプロジェクトのテーマに追従する**（`--page-link-color` / `--empty-page-link-color`。web と同じ）。テーマが読めない（非公開プロジェクトで sid 無し、等）ときは端末側の配色のまま。値は同梱 `app.css` の実測から `scripts/cosense-theme-vars.py` で生成したテーブル（2026-09-06 実測。web 側が変わったら再生成して diff）。未作成リンクに `invalid` を使わないのは、埋め込みテーマを
 実測したところ `invalid` のほとんどが**背景色**の指定で（Solarized・Dracula・Nord・Monokai・OneHalfDark）、
 前景色を借りると本文と同じ色になってしまうため。`markup.deleted`（diff の削除行）はどのテーマでも
 前景の赤系で、意味も「そこには無い」で一致する。
