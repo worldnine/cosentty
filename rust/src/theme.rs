@@ -219,6 +219,73 @@ fn telomere_bucket(age_secs: i64) -> usize {
         .unwrap_or(TELOMERE_BUCKETS.len())
 }
 
+/// The telomere's colour axis. Thickness stays the age; this picks the
+/// colour. `Read`/`Unread` are the original two; the other two are Cosense
+/// web states the TUI now shares (SPEC-telomere-web-parity, measured off
+/// app.css 2026-09-06):
+///
+/// - `UpdatedAfterLoad` — the line changed while the page is open. Web
+///   paints it a stronger blue than unread (`#6b8cff` vs `#89a3ff`) that
+///   does NOT age-fade: by definition the edit is fresh. NOW only — lists
+///   and history never wear it. Light themes get a darker indigo of the
+///   same saturation step.
+/// - `WillDelete` — a history row the NEXT version deletes. Web paints it
+///   `#fd7373` red, no strikethrough. Fixed reds, slightly darkened on
+///   light so the bar still reads on white.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelomereState {
+    Read,
+    Unread,
+    UpdatedAfterLoad,
+    WillDelete,
+}
+
+/// The telomere mark for a line in a given state: THICKNESS still encodes
+/// the edit's age, COLOR says which state the line is in.
+pub fn telomere_in(state: TelomereState, age_secs: i64, light: bool) -> (&'static str, Color) {
+    let b = telomere_bucket(age_secs);
+    // 9 buckets, 8 glyphs: the oldest bucket wears the hairline with a
+    // faded tint, so thinness never runs out of steps.
+    let glyph = TELOMERE_GLYPHS[b.min(TELOMERE_GLYPHS.len() - 1)];
+    let color = match state {
+        TelomereState::Read => {
+            let oldest = b == TELOMERE_BUCKETS.len();
+            if oldest {
+                faded_border_color(light)
+            } else {
+                border_color(light)
+            }
+        }
+        TelomereState::Unread => {
+            // 0.0 = brand new … UNREAD_FADE_MAX = ancient but still
+            // unmistakably blue
+            let t = b as f32 / TELOMERE_BUCKETS.len() as f32 * UNREAD_FADE_MAX;
+            let f = if light { (0x1f, 0x6f, 0xb2) } else { (0x7f, 0xc8, 0xff) };
+            let o = match border_color(light) {
+                Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
+                _ => (0x80, 0x80, 0x80),
+            };
+            let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * t).round() as u8;
+            Color::Rgb(lerp(f.0, o.0), lerp(f.1, o.1), lerp(f.2, o.2))
+        }
+        TelomereState::UpdatedAfterLoad => {
+            if light {
+                Color::Rgb(0x3f, 0x51, 0xd9)
+            } else {
+                Color::Rgb(0x6b, 0x8c, 0xff)
+            }
+        }
+        TelomereState::WillDelete => {
+            if light {
+                Color::Rgb(0xd9, 0x4f, 0x4f)
+            } else {
+                Color::Rgb(0xfd, 0x73, 0x73)
+            }
+        }
+    };
+    (glyph, color)
+}
+
 /// The telomere mark for a line (Scrapbox's left-edge bar): THICKNESS
 /// encodes the edit's age, COLOR encodes whether YOU have seen it.
 ///
@@ -230,23 +297,11 @@ fn telomere_bucket(age_secs: i64) -> usize {
 ///
 /// Thickness and tint are driven by the SAME bucket so they never disagree.
 pub fn telomere(age_secs: i64, unread: bool, light: bool) -> (&'static str, Color) {
-    let b = telomere_bucket(age_secs);
-    // 9 buckets, 8 glyphs: the oldest bucket wears the hairline with a
-    // faded tint, so thinness never runs out of steps.
-    let glyph = TELOMERE_GLYPHS[b.min(TELOMERE_GLYPHS.len() - 1)];
-    let oldest = b == TELOMERE_BUCKETS.len();
-    if !unread {
-        return (glyph, if oldest { faded_border_color(light) } else { border_color(light) });
-    }
-    // 0.0 = brand new … UNREAD_FADE_MAX = ancient but still unmistakably blue
-    let t = b as f32 / TELOMERE_BUCKETS.len() as f32 * UNREAD_FADE_MAX;
-    let f = if light { (0x1f, 0x6f, 0xb2) } else { (0x7f, 0xc8, 0xff) };
-    let o = match border_color(light) {
-        Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
-        _ => (0x80, 0x80, 0x80),
-    };
-    let lerp = |a: i32, b: i32| (a as f32 + (b - a) as f32 * t).round() as u8;
-    (glyph, Color::Rgb(lerp(f.0, o.0), lerp(f.1, o.1), lerp(f.2, o.2)))
+    telomere_in(
+        if unread { TelomereState::Unread } else { TelomereState::Read },
+        age_secs,
+        light,
+    )
 }
 
 /// Neutral rule gray for the gutter (read telomeres) and scrollbar track —
@@ -926,6 +981,55 @@ mod tests {
             }
             let ancient_unread = telomere(94_608_000, true, light).1;
             assert_ne!(ancient_unread, newest, "still fades a step");
+        }
+    }
+
+    #[test]
+    fn the_four_telomere_states_keep_their_own_colour() {
+        // one age per bucket, as in telomere_thins_and_fades_with_age
+        let ages = [
+            60i64,
+            7_200,
+            50_000,
+            200_000,
+            400_000,
+            900_000,
+            10_000_000,
+            30_000_000,
+            200_000_000,
+        ];
+        for light in [false, true] {
+            // UpdatedAfterLoad does NOT age-fade: one constant colour per
+            // theme, distinct from both the unread blue and the gutter gray.
+            let fresh = telomere_in(TelomereState::UpdatedAfterLoad, 60, light).1;
+            for &a in &ages {
+                assert_eq!(telomere_in(TelomereState::UpdatedAfterLoad, a, light).1, fresh);
+                assert_ne!(
+                    telomere_in(TelomereState::UpdatedAfterLoad, a, light).1,
+                    telomere(a, true, light).1,
+                    "after-load is not the unread blue at {a}s"
+                );
+                assert_ne!(
+                    telomere_in(TelomereState::UpdatedAfterLoad, a, light).1,
+                    telomere(a, false, light).1,
+                    "after-load is not the gutter gray at {a}s"
+                );
+            }
+            let Color::Rgb(r, g, b) = fresh else { panic!() };
+            assert!(b > r && b > g, "after-load keeps a blue cast: {fresh:?}");
+
+            // WillDelete is one fixed red, never confused with the others.
+            let gone = telomere_in(TelomereState::WillDelete, 60, light).1;
+            for &a in &ages {
+                assert_eq!(telomere_in(TelomereState::WillDelete, a, light).1, gone);
+            }
+            let Color::Rgb(r, g, b) = gone else { panic!() };
+            assert!(r > g && r > b, "will-delete is red: {gone:?}");
+
+            // thickness still follows the age in every state
+            assert_eq!(telomere_in(TelomereState::WillDelete, 60, light).0, "█");
+            assert_eq!(telomere_in(TelomereState::WillDelete, 200_000_000, light).0, "▏");
+            assert_eq!(telomere_in(TelomereState::UpdatedAfterLoad, 7_200, light).0, "▉");
         }
     }
 
