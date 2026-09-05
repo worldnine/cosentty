@@ -308,6 +308,13 @@ pub(crate) struct App {
     /// (web: the page closing turns after-load into unread).
     pub(crate) open_stamp: i64,
 
+    /// The body palette for THIS page: the terminal scheme tinted with the
+    /// project theme's own link colours (web's `--page-link-color`). The
+    /// re-render and the index preview must use it, or an edit reverts the
+    /// links to the terminal scheme mid-page — the colour of a page the
+    /// reader just left.
+    pub(crate) palette: cosense::theme::Palette,
+
     /// Per-project member tables (userId -> display name) for line blame,
     /// fetched lazily: see `ensure_members` for when they refresh.
     pub(crate) members: HashMap<String, MembersCache>,
@@ -665,6 +672,7 @@ impl App {
             web_rx,
             read_at: None,
             open_stamp: 0,
+            palette: cosense::theme::Palette::for_light(false),
             members: HashMap::new(),
             time: None,
             present_ids: None,

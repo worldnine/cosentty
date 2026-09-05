@@ -209,6 +209,7 @@ use super::support::*;
                 open_stamp: 0,
                 editable: true,
                 links: LinkTruth::default(),
+                palette: ctx.palette,
             },
             &ctx,
         );
@@ -245,6 +246,7 @@ use super::support::*;
                 open_stamp: 0,
                 editable: true,
                 links: LinkTruth::default(),
+                palette: ctx.palette,
             },
             &ctx,
         );
@@ -281,6 +283,7 @@ use super::support::*;
                 related: Vec::new(),
                 facts: PageFacts::default(),
                 links: LinkTruth::default(),
+                palette: ctx.palette,
             },
             &ctx,
         );

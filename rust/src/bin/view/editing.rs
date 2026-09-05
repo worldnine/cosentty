@@ -229,7 +229,10 @@ pub(crate) fn rerender(app: &mut App, ctx: &Ctx) {
     // the old text must not come back and be filed under it.
     app.bump_src_epoch();
     let texts: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
-    let r = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &app.links);
+    // THE PAGE's palette (theme-tinted at load), not ctx's: the terminal
+    // scheme would repaint the links mid-page — the colour of a page the
+    // reader just left.
+    let r = render_lines_with(&texts, Some(&ctx.hl), &app.palette, &app.links);
     app.blocks = r.blocks;
     app.srcs = r.srcs;
     app.hits = r.hits;

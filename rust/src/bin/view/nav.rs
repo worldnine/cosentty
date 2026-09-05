@@ -117,6 +117,10 @@ pub(crate) struct Loaded {
     /// next visit's `read_at`). Lines edited at/after it changed while
     /// the reader is looking: web's `.updated-after-load`.
     pub(crate) open_stamp: i64,
+    /// The body palette tinted with this page's project theme (see
+    /// `App::palette`): the re-render must not revert the links to the
+    /// terminal scheme.
+    pub(crate) palette: cosense::theme::Palette,
     /// Whether this credential may edit the loaded project.
     pub(crate) editable: bool,
     /// Related-pages sections (see `build_related`). EMPTY on arrival: the
@@ -732,6 +736,7 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         hits: rendered.hits,
         read_at,
         open_stamp: now,
+        palette,
         editable,
         related: Vec::new(),
         links,
@@ -946,6 +951,7 @@ impl App {
         self.hits = l.hits;
         self.read_at = l.read_at;
         self.open_stamp = l.open_stamp;
+        self.palette = l.palette;
         self.editable = l.editable;
         // Answers that were only true of the page we are leaving go now;
         // the page arriving may be the second one writing that word.

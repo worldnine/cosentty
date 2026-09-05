@@ -765,6 +765,7 @@ use super::support::*;
                 related: Vec::new(),
                 facts: PageFacts::default(),
                 links: LinkTruth::default(),
+                palette: ctx.palette,
             },
             &ctx,
         );
@@ -2307,3 +2308,59 @@ use super::support::*;
         assert!(screen.contains("my-sandbox"), "{screen}");
         assert!(screen.contains("^o 取り直す"), "{screen}");
     }
+
+#[test]
+fn set_page_carries_the_page_palette() {
+    use cosense::theme::Palette;
+    let ctx = test_ctx();
+    let mut app = page(&["t"]);
+    // A themed project's tinted palette arrives with the page; from then
+    // on every re-render of THIS page keeps it.
+    let mut tinted = ctx.palette;
+    tinted.link = Color::Rgb(1, 2, 3);
+    app.set_page(
+        Loaded {
+            project: "proj".into(),
+            title: "t".into(),
+            page_id: "P2".into(),
+            header_colors: HeaderColors::fallback(),
+            project_display: String::new(),
+            lines: Vec::new(),
+            blocks: Vec::new(),
+            srcs: Vec::new(),
+            hits: Vec::new(),
+            related: Vec::new(),
+            facts: PageFacts::default(),
+            read_at: None,
+            open_stamp: 0,
+            palette: tinted,
+            editable: true,
+            links: LinkTruth::default(),
+        },
+        &ctx,
+    );
+    assert_eq!(app.palette.link, Color::Rgb(1, 2, 3));
+    let _ = Palette::for_light(false); // the base is only a default
+}
+
+#[test]
+fn the_rerender_keeps_the_page_palette() {
+    let ctx = test_ctx();
+    let mut app = page(&["t", "[gone]"]);
+    // The page arrived with its theme's colours; a link that is "nowhere"
+    // paints in the missing colour — and re-rendering the mutated model
+    // must not fall back to the terminal scheme mid-page.
+    app.palette.link = Color::Rgb(1, 2, 3);
+    app.palette.link_missing = Color::Rgb(4, 5, 6);
+    let mut links = LinkTruth::seed(["gone"], []);
+    links.learn("gone", false);
+    app.links = links;
+    rerender(&mut app, &ctx);
+    let painted = app.blocks.iter().any(|b| match b {
+        cosense::render::Block::Text(line) => {
+            line.spans.iter().any(|s| s.style.fg == Some(Color::Rgb(4, 5, 6)))
+        }
+        _ => false,
+    });
+    assert!(painted, "the missing-link colour survives the re-render");
+}

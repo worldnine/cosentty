@@ -753,7 +753,9 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     // its block dropped, since the heading above already says it.
     let mut texts: Vec<String> = vec![entry.title.clone()];
     texts.extend(entry.descriptions.iter().cloned());
-    let out = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &LinkTruth::default());
+    // The excerpt belongs to the page's project, so its links wear that
+    // project's colours (the page's own palette), not the bare scheme.
+    let out = render_lines_with(&texts, Some(&ctx.hl), &app.palette, &LinkTruth::default());
     for block in out.blocks.iter().skip(1) {
         match block {
             Block::Text(line) => {
