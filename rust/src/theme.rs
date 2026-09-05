@@ -181,14 +181,19 @@ impl Palette {
     }
 }
 
-/// Telomere age buckets, newest first. The scale is coarse and
-/// logarithmic-ish because edit recency matters most at short ranges —
-/// "today vs last week" is far more interesting than "one year vs two".
-const TELOMERE_BUCKETS: [i64; 5] = [
+/// Telomere age buckets, newest first — the thresholds between the 9
+/// thickness states. Cosense web thins its bar 1px per step over 14 log
+/// thresholds (`shokai/テロメア`: 0h…約1年); a terminal cell only has 8
+/// left-aligned block elements, so the web scale is compressed onto them —
+/// keeping the same-day steps and the long tail (SPEC-telomere-web-parity).
+const TELOMERE_BUCKETS: [i64; 8] = [
     3_600,      // < 1h
-    86_400,     // < 1d
+    21_600,     // < 6h
+    86_400,     // < 24h
+    259_200,    // < 3d
     604_800,    // < 1w
     2_592_000,  // < 30d
+    15_552_000, // < 180d
     31_536_000, // < 1y
 ];
 
@@ -196,16 +201,17 @@ const TELOMERE_BUCKETS: [i64; 5] = [
 /// terminal column wide, so thickness costs no layout space — and all are
 /// LEFT-aligned block elements, so the bar's left edge lines up down the
 /// whole gutter. (A box-drawing `│` sits in the cell's centre and made old
-/// lines look shifted right.) The two oldest buckets share the hairline
-/// `▏` and differ by shade only.
-const TELOMERE_GLYPHS: [&str; 6] = ["█", "▊", "▌", "▎", "▏", "▏"];
+/// lines look shifted right.) These are all 8 of the left-aligned block
+/// elements; the 9th bucket (`≥1y`) reuses the hairline `▏` and differs by
+/// shade only, so thinness never runs out of steps.
+const TELOMERE_GLYPHS: [&str; 8] = ["█", "▉", "▊", "▋", "▌", "▍", "▎", "▏"];
 
 /// How far an unread line's blue may fade with age (0 = none, 1 = all the
 /// way to gray). Capped well short of gray: "unread" must stay legible as
 /// a tint on a first visit to a page written years ago.
 const UNREAD_FADE_MAX: f32 = 0.45;
 
-/// Bucket index for an age: 0 = brand new … 5 = ancient.
+/// Bucket index for an age: 0 = brand new … 8 = ancient (`≥1y`).
 fn telomere_bucket(age_secs: i64) -> usize {
     TELOMERE_BUCKETS
         .iter()
@@ -225,13 +231,15 @@ fn telomere_bucket(age_secs: i64) -> usize {
 /// Thickness and tint are driven by the SAME bucket so they never disagree.
 pub fn telomere(age_secs: i64, unread: bool, light: bool) -> (&'static str, Color) {
     let b = telomere_bucket(age_secs);
-    let glyph = TELOMERE_GLYPHS[b];
-    let oldest = b == TELOMERE_GLYPHS.len() - 1;
+    // 9 buckets, 8 glyphs: the oldest bucket wears the hairline with a
+    // faded tint, so thinness never runs out of steps.
+    let glyph = TELOMERE_GLYPHS[b.min(TELOMERE_GLYPHS.len() - 1)];
+    let oldest = b == TELOMERE_BUCKETS.len();
     if !unread {
         return (glyph, if oldest { faded_border_color(light) } else { border_color(light) });
     }
     // 0.0 = brand new … UNREAD_FADE_MAX = ancient but still unmistakably blue
-    let t = b as f32 / (TELOMERE_GLYPHS.len() - 1) as f32 * UNREAD_FADE_MAX;
+    let t = b as f32 / TELOMERE_BUCKETS.len() as f32 * UNREAD_FADE_MAX;
     let f = if light { (0x1f, 0x6f, 0xb2) } else { (0x7f, 0xc8, 0xff) };
     let o = match border_color(light) {
         Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
@@ -884,12 +892,26 @@ mod tests {
 
     #[test]
     fn telomere_thins_and_fades_with_age() {
-        let ages = [60i64, 7_200, 172_800, 1_209_600, 15_552_000, 94_608_000];
+        // one age per bucket: <1h, <6h, <24h, <3d, <1w, <30d, <180d, <1y, ≥1y
+        let ages = [
+            60i64,
+            7_200,
+            50_000,
+            200_000,
+            400_000,
+            900_000,
+            10_000_000,
+            30_000_000,
+            200_000_000,
+        ];
         let marks: Vec<&str> = ages.iter().map(|&a| telomere(a, true, false).0).collect();
         // thinning, newest -> oldest; every glyph is a left-aligned block
         // (no centred `│`), the two oldest share the hairline
-        assert_eq!(marks, vec!["█", "▊", "▌", "▎", "▏", "▏"]);
-        assert!(marks.iter().all(|m| "█▊▌▍▎▏".contains(m)));
+        assert_eq!(
+            marks,
+            vec!["█", "▉", "▊", "▋", "▌", "▍", "▎", "▏", "▏"]
+        );
+        assert!(marks.iter().all(|m| "█▉▊▋▌▍▎▏".contains(m)));
         // unread stays BLUE at every age: a first visit to a years-old page
         // must still show the tint. It mellows a little, never to gray.
         let newest = telomere(60, true, false).1;
