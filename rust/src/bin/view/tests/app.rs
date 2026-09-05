@@ -2364,3 +2364,47 @@ fn the_rerender_keeps_the_page_palette() {
     });
     assert!(painted, "the missing-link colour survives the re-render");
 }
+
+#[test]
+fn the_index_excerpt_wears_the_listed_projects_theme() {
+    let mut ctx = test_ctx();
+    // The listed project is green; its settings are already known (an
+    // index arrival reads them for its display name). The preview must
+    // not paint with the bare terminal scheme.
+    ctx.project_settings.lock().unwrap().insert(
+        "proj".to_string(),
+        Some(cosense::api::ProjectSettings {
+            display_name: String::new(),
+            theme: Some("green".into()),
+            upload_image_to: None,
+            gyazo_teams_name: None,
+        }),
+    );
+    let mut app = page(&["t"]);
+    app.index_project = "proj".into();
+    app.index = Some(cosense::index::Index {
+        entries: vec![cosense::index::Entry {
+            title: "p".into(),
+            slug: String::new(),
+            updated: now_secs(),
+            created: 0,
+            accessed: 0,
+            linked: 0,
+            views: 0,
+            descriptions: vec!["see [linked]".into()],
+            unread: false,
+            matched: Vec::new(),
+        }],
+        scope: cosense::index::Scope::Pages,
+        ..Default::default()
+    });
+    let lines = index_preview_lines(&app, &ctx, 60);
+    let (green, _) = cosense::theme::cosense_link_colors("green").unwrap();
+    assert_ne!(green, ctx.palette.link, "a themed link is a different colour");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.style.fg == Some(green))),
+        "the excerpt's links wear the listed project's theme"
+    );
+}

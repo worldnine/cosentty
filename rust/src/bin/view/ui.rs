@@ -753,9 +753,19 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     // its block dropped, since the heading above already says it.
     let mut texts: Vec<String> = vec![entry.title.clone()];
     texts.extend(entry.descriptions.iter().cloned());
-    // The excerpt belongs to the page's project, so its links wear that
-    // project's colours (the page's own palette), not the bare scheme.
-    let out = render_lines_with(&texts, Some(&ctx.hl), &app.palette, &LinkTruth::default());
+    // The excerpt belongs to the LISTED project — acme's list should
+    // wear acme's colours before any page of it is open. The projects
+    // list (no project of its own) previews the page below, which is the
+    // current project's. Both lookups are cached: arriving at an index
+    // already reads the project settings for its display name.
+    let listed = if ix.scope == cosense::index::Scope::Pages {
+        &app.index_project
+    } else {
+        &app.project
+    };
+    let palette =
+        cosense::theme::tinted_page_palette(&ctx.palette, ctx.project_theme(listed).as_deref());
+    let out = render_lines_with(&texts, Some(&ctx.hl), &palette, &LinkTruth::default());
     for block in out.blocks.iter().skip(1) {
         match block {
             Block::Text(line) => {
