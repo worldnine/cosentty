@@ -690,7 +690,12 @@ pub(crate) fn session_type_char(app: &mut App, ctx: &Ctx, ch: char) {
     let in_code = session_in_code(app);
     // A space typed at the head of a Mermaid header is the other way people
     // nest a line, so it moves the block instead of landing in the text.
-    if ch == ' ' && caret_on_mermaid_indent_or_start(app) {
+    // Same for a plain `code:` header (a body's leading spaces are content
+    // and stay typable — only the header's indent is structure).
+    if ch == ' '
+        && (caret_on_mermaid_indent_or_start(app)
+            || caret_on_plain_code_header_start(app))
+    {
         session_indent(app, ctx, 1);
         return;
     }
@@ -947,6 +952,28 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
     drop(texts);
     if let Some(span) = code.or(table) {
         if line == span.header {
+            // Enter at the head of a `code:` header inserts a blank line
+            // ABOVE instead of opening the body below: splitting here
+            // would erase the header (`Replace` with `""`), and there
+            // must be a way to put air above a block. The header below is
+            // untouched, so the caret stays at its head.
+            if caret == 0 && code.is_some() {
+                let id = app.lines[line].id.clone();
+                let ops = vec![EditOp::Insert {
+                    anchor: id,
+                    lines: vec![(new_line_id(), String::new())],
+                }];
+                do_edit(app, ctx, &t!("改行", "new line"), ops);
+                if let Some(s) = app.session.as_mut() {
+                    s.line = line + 1;
+                    s.input.cur = 0;
+                    s.want_col = None;
+                }
+                app.cursor = line + 1;
+                app.follow = true;
+                app.laid_width = 0;
+                return;
+            }
             session_open_below(app, ctx, line, span.body_indent(), String::new());
             return;
         }
@@ -1126,7 +1153,39 @@ pub(crate) fn session_indent(app: &mut App, ctx: &Ctx, delta: i32) {
         .and_then(|s| app.code_span_at_line(s.line))
         .filter(|span| span.mermaid_header);
     if let Some(span) = mermaid {
-        session_indent_mermaid(app, ctx, span, delta);
+        session_indent_block(
+            app,
+            ctx,
+            span,
+            delta,
+            Some(cosense::render::MERMAID_MAX_INDENT as i32),
+            t!("図を字下げ", "indent diagram"),
+            t!("図の字下げを戻す", "outdent diagram"),
+        );
+        return;
+    }
+    // A plain `code:` line's indent is the BLOCK's nesting level too: a
+    // Python block stays a program only if every line moves together.
+    // Per-line Tab here only ever broke things — indenting the header
+    // orphaned the body, outdenting a body dropped it out of the block —
+    // so the whole block moves, from whichever line the caret is on.
+    // (Mermaid bodies stay per-line: there the indent is content. Math
+    // blocks stay per-line too: nesting one past level 0 would unmake
+    // the formula.)
+    let plain = app
+        .session
+        .as_ref()
+        .and_then(|s| plain_code_span(app, s.line));
+    if let Some(span) = plain {
+        session_indent_block(
+            app,
+            ctx,
+            span,
+            delta,
+            None,
+            t!("コードを字下げ", "indent code block"),
+            t!("コードの字下げを戻す", "outdent code block"),
+        );
         return;
     }
     // In a table a TAB is what separates one cell from the next, so that
@@ -1179,6 +1238,16 @@ fn caret_on_blank_code_bol(app: &App) -> bool {
         && app.code_span_at_line(s.line).is_some()
 }
 
+/// The head of a plain `code:` header: a typed space nests the whole
+/// block there too (a header's leading whitespace is structure, never content).
+fn caret_on_plain_code_header_start(app: &App) -> bool {
+    let Some(s) = app.session.as_ref() else { return false };
+    let Some(span) = plain_code_span(app, s.line) else { return false };
+    s.line == span.header
+        && s.sel_from.is_none()
+        && s.input.cur <= indent_of(&s.input.buf).len()
+}
+
 /// Is the caret inside (or just after) the leading whitespace of a Mermaid
 /// `code:` header — the place where a space or a Backspace means "nest",
 /// not "type a character"?
@@ -1190,6 +1259,13 @@ fn caret_on_mermaid_indent_or_start(app: &App) -> bool {
     s.sel_from.is_none() && s.input.cur <= indent_of(&s.input.buf).len()
 }
 
+/// The same spot on a plain `code:` header: Backspace there has an
+/// indent in front of it to take, block and all.
+fn caret_on_plain_code_header_indent(app: &App) -> bool {
+    let cur = app.session.as_ref().map(|s| s.input.cur).unwrap_or(0);
+    cur > 0 && caret_on_plain_code_header_start(app)
+}
+
 /// The same spot, minus the very start of the line: Backspace there has an
 /// indent in front of it to take.
 fn caret_on_mermaid_indent(app: &App) -> bool {
@@ -1197,16 +1273,40 @@ fn caret_on_mermaid_indent(app: &App) -> bool {
     cur > 0 && caret_on_mermaid_indent_or_start(app)
 }
 
-/// Tab / Shift+Tab on a Mermaid `code:` header: move the header AND every
-/// line of its block by one level, in one edit, so the block never spends a
-/// keystroke in a broken shape. Cosense draws at most
-/// [`cosense::render::MERMAID_MAX_INDENT`] levels of diagram, and that is
-/// where the movement stops.
-fn session_indent_mermaid(app: &mut App, ctx: &Ctx, span: CodeSpan, delta: i32) {
+/// A `code:` line whose header is neither Mermaid nor math: moving it
+/// means moving its whole block (see `session_indent`).
+fn plain_code_span(app: &App, line: usize) -> Option<CodeSpan> {
+    let span = app.code_span_at_line(line)?;
+    if span.mermaid_header {
+        return None;
+    }
+    let text = &app.lines.get(span.header)?.text;
+    let (_, _, body) = cosense::render::indent_info(text);
+    let lang = body.strip_prefix("code:")?.trim();
+    if cosense::render::mermaid_lang(lang) || cosense::render::math_lang(lang) {
+        return None;
+    }
+    Some(span)
+}
+
+/// Tab / Shift+Tab on a `code:` block: move the header AND every line of
+/// its block by one level, in one edit, so the block never spends a
+/// keystroke in a broken shape. `max_level` caps diagrams (Cosense draws
+/// at most [`cosense::render::MERMAID_MAX_INDENT`] levels of them); plain
+/// code has no ceiling.
+fn session_indent_block(
+    app: &mut App,
+    ctx: &Ctx,
+    span: CodeSpan,
+    delta: i32,
+    max_level: Option<i32>,
+    indent_label: String,
+    outdent_label: String,
+) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, cur, buf) = (s.line, s.input.cur, s.input.buf.clone());
     let level = span.header_indent as i32 + delta;
-    if level < 0 || level > cosense::render::MERMAID_MAX_INDENT as i32 {
+    if level < 0 || max_level.is_some_and(|max| level > max) {
         return;
     }
     // The block is every line that answers with THIS header — not the
@@ -1229,20 +1329,18 @@ fn session_indent_mermaid(app: &mut App, ctx: &Ctx, span: CodeSpan, delta: i32) 
         Some(text[first.len_utf8()..].to_string())
     };
     let Some(head) = shift(&buf) else { return };
-    let mut ops = vec![EditOp::Replace { id: app.lines[line].id.clone(), text: head.clone() }];
-    for i in line + 1..end {
-        let text = app.lines[i].text.clone();
+    let mut ops = vec![];
+    for i in span.header..end {
+        // The caret line's text is still uncommitted: shift the buffer,
+        // not the stale committed line.
+        let text = if i == line { buf.clone() } else { app.lines[i].text.clone() };
         if text.trim().is_empty() {
             continue;
         }
         let Some(text) = shift(&text) else { return };
         ops.push(EditOp::Replace { id: app.lines[i].id.clone(), text });
     }
-    let label = if delta > 0 {
-        t!("図を字下げ", "indent diagram")
-    } else {
-        t!("図の字下げを戻す", "outdent diagram")
-    };
+    let label = if delta > 0 { indent_label } else { outdent_label };
     do_edit(app, ctx, &label, ops);
     if let Some(s) = app.session.as_mut() {
         let cur = if delta > 0 {
@@ -1414,7 +1512,11 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) {
         // Backspacing the indent of a Mermaid header takes the level off,
         // block and all — the same move Shift+Tab makes. Deleting the
         // header's lone space by itself would only orphan the body.
-        (KeyCode::Backspace, _) if caret_on_mermaid_indent(app) => {
+        // A plain `code:` header answers the same way; body lines keep
+        // character-wise Backspace (their indent may be content).
+        (KeyCode::Backspace, _)
+            if caret_on_mermaid_indent(app) || caret_on_plain_code_header_indent(app) =>
+        {
             session_indent(app, ctx, -1)
         }
         // At the head of a blank code line, ⌫ eats one indent character —

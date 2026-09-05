@@ -1266,3 +1266,178 @@ use super::support::*;
         assert!(col >= hang, "the caret is inside the hanging body: {col}");
         assert_eq!(wrapped.offset_at(row, col), last);
     }
+
+    /// Tab on a plain `code:` header moves the WHOLE block. Per-line Tab
+    /// orphaned the body on the first keystroke: the header looked level-1
+    /// while its lines had silently fallen out of the block.
+    #[test]
+    fn tab_on_a_plain_code_header_moves_the_whole_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:text.txt", " aaaaa", "  bbbbb"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 13);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.lines[1].text, " code:text.txt");
+        assert_eq!(app.lines[2].text, "  aaaaa");
+        assert_eq!(app.lines[3].text, "   bbbbb", "relative depth kept");
+        assert!(app.line_in_code(2) && app.line_in_code(3), "still one block");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (1, 14), "caret rode along");
+    }
+
+    /// Same from a body line: the header comes along, so a Python block
+    /// stays a program.
+    #[test]
+    fn tab_on_a_plain_code_body_moves_the_whole_block_too() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:text.txt", " aaaaa", "  bbbbb"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 6);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.lines[1].text, " code:text.txt");
+        assert_eq!(app.lines[2].text, "  aaaaa");
+        assert_eq!(app.lines[3].text, "   bbbbb");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (2, 7));
+    }
+
+    /// Outdenting stops at zero, all or nothing: a header that cannot move
+    /// holds the block (moving the body alone would orphan it the other way).
+    #[test]
+    fn shift_tab_on_a_plain_code_block_stops_at_zero() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:text.txt", " aaaaa"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        handle_session_key(&mut app, &ctx, key(KeyCode::BackTab));
+        assert_eq!(app.lines[1].text, "code:text.txt", "flush header holds");
+        assert_eq!(app.lines[2].text, " aaaaa");
+
+        let mut app = page(&["title", " code:text.txt", "  aaaaa"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 0);
+        handle_session_key(&mut app, &ctx, key(KeyCode::BackTab));
+        assert_eq!(app.lines[1].text, "code:text.txt");
+        assert_eq!(app.lines[2].text, " aaaaa");
+    }
+
+    /// A space typed at the head of a plain header nests the block (a
+    /// header's leading whitespace is structure, never content). Body
+    /// lines keep typable spaces: theirs may be content.
+    #[test]
+    fn space_at_the_head_of_a_plain_code_header_nests_the_block() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:text.txt", " aaaaa"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        type_str(&mut app, &ctx, " ");
+        assert_eq!(app.lines[1].text, " code:text.txt", "no stray space in the text");
+        assert_eq!(app.lines[2].text, "  aaaaa", "the body came along");
+    }
+
+    /// Backspace on a plain header's indent takes the level off, block and
+    /// all. On a body line it stays character-wise: that indent may be content.
+    #[test]
+    fn backspace_at_the_indent_of_a_plain_code_header_moves_the_block_out() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", " code:text.txt", "  aaaaa", "   bbbbb"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 1);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        assert_eq!(app.lines[1].text, "code:text.txt");
+        assert_eq!(app.lines[2].text, " aaaaa");
+        assert_eq!(app.lines[3].text, "  bbbbb");
+
+        // …while a body line loses one character, no more.
+        let mut app = page(&["title", "code:text.txt", "  aaaaa"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 1);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, " aaaaa", "one char eaten, block untouched");
+        assert_eq!(app.lines[1].text, "code:text.txt");
+    }
+
+    /// Enter at the head of a `code:` header inserts a blank line ABOVE:
+    /// splitting there would erase the header, and opening the body below
+    /// (the caret-elsewhere behaviour) never puts air above a block. The
+    /// header below is untouched, so the caret stays at its head.
+    #[test]
+    fn enter_at_the_head_of_a_code_header_inserts_a_blank_above() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:text.txt", " aaaaa"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[1].text, "", "blank above");
+        assert_eq!(app.lines[2].text, "code:text.txt", "header intact below");
+        assert_eq!(app.lines[3].text, " aaaaa");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (2, 0), "caret at the header's head");
+        assert_eq!(s.input.buf, "code:text.txt");
+    }
+
+    /// Enter at the head of a body line keeps working as it did: the blank
+    /// stays inside the block as blank code, the text rides below.
+    #[test]
+    fn enter_at_the_head_of_a_code_body_keeps_the_blank_inside() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:text.txt", " aaaaa", " bbbbb"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 0);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+        assert_eq!(app.lines[2].text, "", "blank above the text");
+        assert_eq!(app.lines[3].text, " aaaaa");
+        assert!(app.line_in_code(2), "the blank is blank code, not an exit");
+        let s = app.session.as_ref().unwrap();
+        assert_eq!((s.line, s.input.cur), (3, 0));
+    }
+
+    /// A Mermaid header still takes its block with it (the refactor kept
+    /// it), stopping at the diagram ceiling — and it never walks into the
+    /// plain block behind it.
+    #[test]
+    fn tab_on_a_mermaid_header_still_moves_only_its_block() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        enter_session(&mut app, &ctx, 1, 9);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        assert_eq!(app.lines[1].text, " code:mmd");
+        assert_eq!(app.lines[2].text, "  flowchart LR");
+        assert_eq!(app.lines[3].text, "    A-->B");
+        assert_eq!(app.lines[4].text, "code:js", "the next block untouched");
+        assert_eq!(app.lines[5].text, " let a = 1");
+    }
+
+    /// A Mermaid body keeps per-line Tab: there the indent is content.
+    #[test]
+    fn tab_on_a_mermaid_body_stays_on_that_line() {
+        let ctx = test_ctx();
+        let mut app = mermaid_page();
+        app.rebuild(80);
+        enter_session(&mut app, &ctx, 3, 8);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        // Per-line Tab stages in the session buffer (committed on row
+        // leave, like every typed character).
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, "    A-->B", "one line moved");
+        assert_eq!(app.lines[1].text, "code:mmd", "header stayed");
+        assert_eq!(app.lines[2].text, " flowchart LR");
+    }
+
+    /// Math blocks stay per-line and out of the block move: nesting one
+    /// past level 0 would unmake the formula (deliberately out of scope).
+    #[test]
+    fn tab_on_a_math_block_stays_per_line() {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "code:tex", r" \frac{a}{b}"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 9);
+        handle_session_key(&mut app, &ctx, key(KeyCode::Tab));
+        // Staged in the buffer, like every typed character — and the body
+        // never came along.
+        let s = app.session.as_ref().unwrap();
+        assert_eq!(s.input.buf, " code:tex", "header alone moved");
+        assert_eq!(app.lines[2].text, r" \frac{a}{b}", "body stayed");
+    }

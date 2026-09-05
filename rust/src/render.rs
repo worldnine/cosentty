@@ -613,7 +613,7 @@ pub fn strip_leading_ws(raw: &str, n: usize) -> String {
 /// Indent of a line: EVERY leading whitespace char (space, tab, 　) is
 /// one level — Scrapbox counts characters, it does not collapse runs.
 /// Bullets land wherever the whitespace puts them, logical or not.
-fn indent_info(raw: &str) -> (usize, usize, &str) {
+pub fn indent_info(raw: &str) -> (usize, usize, &str) {
     let mut raw_len = 0usize;
     let mut level = 0usize;
     let mut end_byte = 0usize;
