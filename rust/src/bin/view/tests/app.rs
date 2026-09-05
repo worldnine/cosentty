@@ -2437,3 +2437,18 @@ fn the_index_header_wears_the_listed_projects_theme() {
     // The page's own colours are untouched under the list.
     assert_ne!(app.header_colors.bg, got.bg, "no permanent overwrite");
 }
+
+#[test]
+fn the_projects_list_header_is_a_menu_not_a_project() {
+    // ^o^o: the projects list is a picker. It wears the usual menu title's
+    // look — no project's theme, not even the current project's.
+    let ctx = test_ctx();
+    let mut app = page(&["t"]);
+    app.index = Some(cosense::index::Index {
+        scope: cosense::index::Scope::Projects,
+        ..Default::default()
+    });
+    let c = app.chrome_colors(&ctx);
+    assert_eq!(c.fg, Color::Black);
+    assert_eq!(c.bg, CHROME_ACCENT);
+}
