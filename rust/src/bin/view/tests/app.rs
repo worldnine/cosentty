@@ -2410,3 +2410,30 @@ fn the_index_excerpt_wears_the_listed_projects_theme() {
         "the excerpt's links wear the listed project's theme"
     );
 }
+
+#[test]
+fn the_index_header_wears_the_listed_projects_theme() {
+    let mut ctx = test_ctx();
+    ctx.project_settings.lock().unwrap().insert(
+        "proj".to_string(),
+        Some(cosense::api::ProjectSettings {
+            display_name: String::new(),
+            theme: Some("green".into()),
+            upload_image_to: None,
+            gyazo_teams_name: None,
+        }),
+    );
+    let mut app = page(&["t"]);
+    app.index_project = "proj".into();
+    app.index = Some(cosense::index::Index {
+        scope: cosense::index::Scope::Pages,
+        ..Default::default()
+    });
+    // The list answers to ITS project: green's navbar, not the page the
+    // reader came from.
+    let want = cosense::theme::project_header_colors(Some("green"), ctx.terminal_bg);
+    let got = app.chrome_colors(&ctx);
+    assert_eq!(got.bg, want.1);
+    // The page's own colours are untouched under the list.
+    assert_ne!(app.header_colors.bg, got.bg, "no permanent overwrite");
+}

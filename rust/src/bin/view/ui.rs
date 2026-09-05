@@ -53,6 +53,22 @@ impl App {
         if self.time.is_some() {
             let (fg, bg) = cosense::theme::history_header_colors(ctx.terminal_bg);
             HeaderColors { fg, bg }
+        } else if let Some(ix) = self.index.as_ref() {
+            // The list belongs to its LISTED project: the header answers to
+            // it (green for acme's list), not to the page left behind.
+            // The projects list has no project of its own — it keeps the
+            // reader's current project's colours. The lookup is cached:
+            // arriving at an index already reads the project settings for
+            // its display name.
+            let project = if ix.scope == cosense::index::Scope::Pages {
+                &self.index_project
+            } else {
+                &self.project
+            };
+            let theme = ctx.project_theme(project);
+            let (fg, bg) =
+                cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg);
+            HeaderColors { fg, bg }
         } else {
             self.header_colors
         }
