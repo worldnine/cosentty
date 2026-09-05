@@ -206,6 +206,7 @@ use super::support::*;
                 related: Vec::new(),
                 facts: PageFacts::default(),
                 read_at: None,
+                open_stamp: 0,
                 editable: true,
                 links: LinkTruth::default(),
             },
@@ -241,6 +242,7 @@ use super::support::*;
                 related: Vec::new(),
                 facts: PageFacts::default(),
                 read_at: None,
+                open_stamp: 0,
                 editable: true,
                 links: LinkTruth::default(),
             },
@@ -274,6 +276,7 @@ use super::support::*;
                 srcs: vec![],
                 hits: vec![],
                 read_at: None,
+                open_stamp: 0,
                 editable: true,
                 related: Vec::new(),
                 facts: PageFacts::default(),
@@ -1178,3 +1181,17 @@ use super::support::*;
         assert!(span.is_some(), "nested headers keep the span");
         assert_eq!(session_display(&s.input.buf, span), "  code:go");
     }
+
+#[test]
+fn the_gutter_cell_wears_the_state_colour() {
+    // updated-after-load: web's stronger NOW blue, not the unread blue.
+    let (glyph, style) = gutter_cell(Some((60, cosense::theme::TelomereState::UpdatedAfterLoad)), false);
+    assert_eq!(glyph, "█");
+    assert_eq!(style.fg, Some(Color::Rgb(0x6b, 0x8c, 0xff)));
+    let (_, unread) = gutter_cell(Some((60, cosense::theme::TelomereState::Unread)), false);
+    assert_ne!(unread.fg, style.fg, "after-load is its own blue at the same age");
+    // will-delete (history): the fixed red, thickness still by age.
+    let (glyph, style) = gutter_cell(Some((50_000, cosense::theme::TelomereState::WillDelete)), false);
+    assert_eq!(glyph, "▊", "the <24h bucket");
+    assert_eq!(style.fg, Some(Color::Rgb(0xfd, 0x73, 0x73)));
+}

@@ -1093,14 +1093,14 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             .src()
             .and_then(|s| composing_range.map(|(a, b)| a <= s && s <= b))
             .unwrap_or(false);
-        // Telomere: age + read state of this row's source line (None for
+        // Telomere: age + state of this row's source line (None for
         // synthesized rows). A row BELOW the body is a related page, and it
         // answers the same two questions about itself — how recently it
         // changed, and whether it has been seen — so it wears the same
         // mark. One encoding for the whole viewer: body lines, the index's
         // list, and the related sections.
         let age = row.src().and_then(|s| match app.lines.get(s) {
-            Some(l) => Some(((now_secs() - l.updated).max(0), app.line_unread(l))),
+            Some(l) => Some(((now_secs() - l.updated).max(0), app.line_state(l))),
             None => app.related_telomere(s),
         });
         let in_code = row.src().map(|s| code_flags.get(s) == Some(&true)).unwrap_or(false);
@@ -2070,7 +2070,7 @@ pub(crate) fn draw_menu_panel(
 }
 
 /// The telomere gutter cell for a row with a source line (`age` = seconds
-/// since the edit, plus whether the line is unread). The cursor does not
+/// since the edit, plus the line's `TelomereState`). The cursor does not
 /// compete for this cell: its `>` is painted separately on the frame column.
 ///
 /// The SAME cell serves the related-page rows below the body (their age is
@@ -2089,10 +2089,10 @@ pub(crate) fn draw_menu_panel(
 /// akapen's marker, same glyph.
 pub(crate) const COMMENT_BAR: &str = "▌";
 
-pub(crate) fn gutter_cell(age: Option<(i64, bool)>, light: bool) -> (&'static str, Style) {
+pub(crate) fn gutter_cell(age: Option<(i64, cosense::theme::TelomereState)>, light: bool) -> (&'static str, Style) {
     match age {
-        Some((a, unread)) => {
-            let (glyph, color) = cosense::theme::telomere(a, unread, light);
+        Some((a, state)) => {
+            let (glyph, color) = cosense::theme::telomere_in(state, a, light);
             (glyph, Style::default().fg(color))
         }
         None => (" ", Style::default()),

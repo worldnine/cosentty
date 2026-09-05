@@ -301,6 +301,13 @@ pub(crate) struct App {
     /// unread, as on scrapbox.io.
     pub(crate) read_at: Option<i64>,
 
+    /// When this visit began. A line edited at/after it changed while the
+    /// reader is looking: web's `.updated-after-load`. It becomes that
+    /// line's `read_at` floor on the NEXT open, which is how the state
+    /// demotes to plain unread when the reader leaves and comes back
+    /// (web: the page closing turns after-load into unread).
+    pub(crate) open_stamp: i64,
+
     /// Per-project member tables (userId -> display name) for line blame,
     /// fetched lazily: see `ensure_members` for when they refresh.
     pub(crate) members: HashMap<String, MembersCache>,
@@ -647,6 +654,7 @@ impl App {
             web_tx,
             web_rx,
             read_at: None,
+            open_stamp: 0,
             members: HashMap::new(),
             time: None,
             editable: false,

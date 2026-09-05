@@ -760,6 +760,7 @@ use super::support::*;
                 srcs: Vec::new(),
                 hits: Vec::new(),
                 read_at: None,
+                open_stamp: 0,
                 editable: true,
                 related: Vec::new(),
                 facts: PageFacts::default(),

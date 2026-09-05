@@ -18,7 +18,9 @@ use super::support::*;
         // colour only, which made the one gutter column mean two different
         // things depending on where you were looking.
         let mark = |updated: i64, unread: bool| {
-            gutter_cell(Some((related_age(updated), unread)), false)
+            use cosense::theme::TelomereState as S;
+            let state = if unread { S::Unread } else { S::Read };
+            gutter_cell(Some((related_age(updated), state)), false)
         };
         let now = now_secs();
         assert_eq!(mark(now - 60, true).0, "█", "edited a minute ago: thick");
@@ -33,6 +35,38 @@ use super::support::*;
         // no timestamp for those) must not claim to be brand new.
         assert_eq!(mark(0, false).0, "▏");
         assert_eq!(related_age(0), UNDATED_AGE);
+    }
+
+    #[test]
+    fn updated_after_load_demotes_to_unread_on_the_next_visit() {
+        use cosense::theme::TelomereState as S;
+        let now = now_secs();
+        let mut app = App::new("proj".into());
+        let line = |updated: i64| PageLine {
+            id: "L1".into(),
+            text: "a".into(),
+            user_id: String::new(),
+            created: now,
+            updated,
+        };
+        // First visit (never seen before): every line is unread, except the
+        // one that changed AT this visit — web's `.updated-after-load`.
+        app.read_at = None;
+        app.open_stamp = now;
+        assert_eq!(app.line_state(&line(now - 100)), S::Unread);
+        assert_eq!(app.line_state(&line(now)), S::UpdatedAfterLoad);
+        // The next visit catches `read_at` up to the previous one, so the
+        // line we watched change is now plain unread — and read after that.
+        app.read_at = Some(now);
+        app.open_stamp = now + 10;
+        assert_eq!(app.line_state(&line(now)), S::Unread);
+        app.read_at = Some(now + 10);
+        assert_eq!(app.line_state(&line(now)), S::Read);
+        // History shows no news at all: the past is all read.
+        app.read_at = None;
+        app.open_stamp = now;
+        in_history(&mut app);
+        assert_eq!(app.line_state(&line(now)), S::Read);
     }
 
     #[test]

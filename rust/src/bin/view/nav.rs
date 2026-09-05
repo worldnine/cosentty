@@ -113,6 +113,10 @@ pub(crate) struct Loaded {
     pub(crate) hits: Vec<Vec<cosense::render::Hit>>,
     /// See `App::read_at`.
     pub(crate) read_at: Option<i64>,
+    /// When this visit began (the same `now` that was recorded as the
+    /// next visit's `read_at`). Lines edited at/after it changed while
+    /// the reader is looking: web's `.updated-after-load`.
+    pub(crate) open_stamp: i64,
     /// Whether this credential may edit the loaded project.
     pub(crate) editable: bool,
     /// Related-pages sections (see `build_related`). EMPTY on arrival: the
@@ -703,7 +707,8 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
     let rendered = render_lines_with(&texts, Some(&ctx.hl), &ctx.palette, &links);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
-    let local_prev = record_visit(project, title, now_secs());
+    let now = now_secs();
+    let local_prev = record_visit(project, title, now);
     let read_at = match (page.last_accessed, local_prev) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -723,6 +728,7 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         srcs: rendered.srcs,
         hits: rendered.hits,
         read_at,
+        open_stamp: now,
         editable,
         related: Vec::new(),
         links,
@@ -859,15 +865,24 @@ impl App {
     }
 
     /// Read state for a cursor-addressable related row. The flattening order
-    /// is exactly the same as `virtual_items`.
-    pub(crate) fn related_telomere(&self, src: usize) -> Option<(i64, bool)> {
+    /// is exactly the same as `virtual_items`. History never wears unread
+    /// blues — the past is all read — so the row answers in states.
+    pub(crate) fn related_telomere(&self, src: usize) -> Option<(i64, cosense::theme::TelomereState)> {
+        use cosense::theme::TelomereState as S;
         let index = src.checked_sub(self.lines.len())?;
         let entry = self
             .related
             .iter()
             .flat_map(|section| section.entries.iter())
             .nth(index)?;
-        Some((related_age(entry.age), entry.unread))
+        let state = if self.time.is_some() {
+            S::Read
+        } else if entry.unread {
+            S::Unread
+        } else {
+            S::Read
+        };
+        Some((related_age(entry.age), state))
     }
 
     /// Install a freshly loaded page, resetting view state (keeps comments).
@@ -913,6 +928,7 @@ impl App {
         self.srcs = l.srcs;
         self.hits = l.hits;
         self.read_at = l.read_at;
+        self.open_stamp = l.open_stamp;
         self.editable = l.editable;
         // Answers that were only true of the page we are leaving go now;
         // the page arriving may be the second one writing that word.
@@ -1132,6 +1148,32 @@ impl App {
     /// the page was never seen). Drives the telomere tint.
     pub(crate) fn line_unread(&self, l: &PageLine) -> bool {
         unread_since(l.updated, self.read_at)
+    }
+
+    /// Which telomere state this line wears. A line edited at/after this
+    /// visit began changed while the reader is looking: web's
+    /// `.updated-after-load` — it demotes to plain unread on the next open
+    /// (`read_at` then catches up to the previous visit). History shows no
+    /// news at all: a past version is all read, web paints only
+    /// 既読/削除 there.
+    pub(crate) fn line_state(&self, l: &PageLine) -> cosense::theme::TelomereState {
+        use cosense::theme::TelomereState as S;
+        if self.time.is_some() {
+            return S::Read;
+        }
+        // `open_stamp == 0` means no visit stamp (bare test apps): fall
+        // back to the plain read/unread pair.
+        if self.open_stamp > 0 && l.updated >= self.open_stamp {
+            return S::UpdatedAfterLoad;
+        }
+        // `>=` (not `unread_since`'s `>`): a line that changed while you
+        // were LAST looking is still news — that is exactly how the
+        // after-load state demotes when you come back.
+        if self.read_at.map_or(true, |t| l.updated >= t) {
+            S::Unread
+        } else {
+            S::Read
+        }
     }
 
     /// Number of unread lines on this page. Only tests count them now: the
