@@ -880,10 +880,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let head = header_line(name, &app.title, &right, area.width);
     f.render_widget(
         Paragraph::new(head).style(
-            Style::default()
-                .fg(chrome.fg)
-                .bg(chrome.bg)
-                .add_modifier(Modifier::BOLD),
+            // No bold: the header says itself by its colours (the theme's
+            // own on NOW, purple in history). Bold would just brighten the
+            // fg on terminals that read bold as bright — and the index's
+            // header wears the same colours WITHOUT bold, so keeping it
+            // here would make the two screens disagree.
+            Style::default().fg(chrome.fg).bg(chrome.bg),
         ),
         Rect::new(area.x, area.y, area.width, 1),
     );
