@@ -690,8 +690,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         KeyCode::Char('n') if ctrl => Act::Down,
         KeyCode::Char('p') if ctrl => Act::Up,
         // The comments list is where the comments are worked on: `y`
-        // copies them all, `s` sends them (as `S` does outside), `d`
-        // deletes the one under the cursor.
+        // copies them all, `s` sends them, `d` deletes the one under the
+        // cursor. (Outside, the same `s` sends too; there is no `S`.)
         KeyCode::Char('s') if matches!(app.overlay, Some(Overlay::Comments { .. })) => {
             send_comments(app, ctx);
             if app.comments.is_empty() {
