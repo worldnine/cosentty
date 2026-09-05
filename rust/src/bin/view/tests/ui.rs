@@ -1139,3 +1139,42 @@ use super::support::*;
         let buf = term.backend().buffer();
         assert!(buf.cell((gx + 5, y)).unwrap().style().add_modifier.contains(Modifier::REVERSED), "no selection: the caret cell is painted again");
     }
+
+    /// A flush `code:` header edits as itself: READ shows it flush, so the
+    /// caret row must show it flush too — not with the code gutter, which
+    /// reads as a nesting level it has not got. The ruler agrees: raw 0
+    /// maps to display 0.
+    #[test]
+    fn a_flush_code_header_edits_as_itself_not_as_indented() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let mut app = page(&["t", "code:text.txt", " aaaaa"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 1, 0);
+        let s = app.session.as_ref().unwrap();
+        let span = caret_span(&app, s.line);
+        assert!(span.is_none(), "no gutter span for a flush header");
+        assert_eq!(session_display(&s.input.buf, span), "code:text.txt");
+        assert_eq!(display_caret(&s.input.buf, 0, span), 0);
+        assert_eq!(raw_caret_from_display(&s.input.buf, 0, span), 0);
+
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let rows: Vec<String> = (0..12)
+            .map(|y| (0..40).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect())
+            .collect();
+        assert!(
+            rows.iter().any(|r| r.contains("code:text.txt") && !r.contains("  code:text.txt")),
+            "the caret row is flush: {rows:?}"
+        );
+
+        // A nested header keeps its gutter (that indent IS structure).
+        let mut app = page(&["t", " 箇条", " code:go", "  x()"]);
+        app.rebuild(40);
+        enter_session(&mut app, &ctx, 2, 0);
+        let s = app.session.as_ref().unwrap();
+        let span = caret_span(&app, s.line);
+        assert!(span.is_some(), "nested headers keep the span");
+        assert_eq!(session_display(&s.input.buf, span), "  code:go");
+    }

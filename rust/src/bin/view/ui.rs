@@ -1261,7 +1261,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         {
                             let raw =
                                 app.lines.get(*src).map(|l| l.text.as_str()).unwrap_or("");
-                            let code = app.raw_span_at_line(*src);
+                            let code = caret_span(app, *src);
                             let text_col = session_hang(raw, code);
                             let (lo, hi) = if *src == la {
                                 (sel_boundary_col(raw, ba, code), usize::MAX)
@@ -1517,7 +1517,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if let Some(s) = &app.session {
         if let Some((first, _)) = app.src_rows(s.line) {
             let text_w = App::text_width(app.mode, app.laid_width.max(1));
-            let code = app.raw_span_at_line(s.line);
+            let code = caret_span(app, s.line);
             let disp = session_display(&s.input.buf, code);
             let dcaret = display_caret(&s.input.buf, s.input.cur, code);
             let wrapped =
@@ -2198,7 +2198,7 @@ impl App {
         // row: its leading whitespace is content and must not be drawn as
         // a bullet. Judged on the WORKING text, so typing `code:` turns
         // the bullets off as you type it, not one commit later.
-        let edit_code = edit.and_then(|(line, _)| self.raw_span_at_line(line));
+        let edit_code = edit.and_then(|(line, _)| caret_span(self, line));
         // The character selection, in DISPLAY byte offsets — the caret line
         // is drawn through `session_display`, so the span has to be mapped
         // the same way the caret is.

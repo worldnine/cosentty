@@ -194,6 +194,19 @@ pub(crate) fn leading_ws_taken(buf: &str, n: usize) -> usize {
         .count()
 }
 
+/// The span a caret line is displayed and measured with: the raw span,
+/// except a flush `code:` header, which stands without indent. Showing
+/// it with the code gutter suggests a nesting level it does not have
+/// (and READ shows it flush), so it is shown — and measured — as it is.
+/// Nested headers, bodies and tables are untouched.
+pub(crate) fn caret_span(app: &App, line: usize) -> Option<CodeSpan> {
+    let span = app.raw_span_at_line(line)?;
+    let flush_header = app
+        .code_span_at_line(line)
+        .is_some_and(|sp| line == sp.header && sp.header_indent == 0);
+    if flush_header { None } else { Some(span) }
+}
+
 pub(crate) fn session_display(buf: &str, code: Option<CodeSpan>) -> String {
     // A TAB inside the line is the cell separator of a table, and
     // invisible everywhere else: at width zero the cells on either side
@@ -860,7 +873,7 @@ pub(crate) fn session_kill(app: &mut App, ctx: &Ctx) {
 pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let Some(s) = app.session.as_ref() else { return };
     let (line, buf, cur) = (s.line, s.input.buf.clone(), s.input.cur);
-    let code = app.raw_span_at_line(line);
+    let code = caret_span(app, line);
     let width = app.session_wrap_width();
     let disp = session_display(&buf, code);
     let wrapped = SessionWrap::new(&disp, width, session_hang(&buf, code));
@@ -898,7 +911,7 @@ pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let text = app.lines[line].text.clone();
     // Land on the row nearest where the caret came from: the FIRST row of
     // the line below, the LAST row of the line above.
-    let code = app.raw_span_at_line(line);
+    let code = caret_span(app, line);
     let disp = session_display(&text, code);
     let wrapped = SessionWrap::new(&disp, width, session_hang(&text, code));
     let landing = if delta < 0 { wrapped.segs.len().saturating_sub(1) } else { 0 };

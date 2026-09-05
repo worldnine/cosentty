@@ -122,7 +122,9 @@ pub(crate) fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -
         .unwrap_or_default();
     // Map through the bullet display: what the eye clicked is the display
     // column, which the view (bullets at indent) also approximates.
-    let code = app.raw_span_at_line(line);
+    // A flush `code:` header is shown raw (see `caret_span`), so clicks
+    // there measure with the same ruler.
+    let code = caret_span(app, line);
     let disp = session_display(&text, code);
     // A wrapped line owns SEVERAL display rows. The column alone cannot say
     // where in the text the click landed — without the row, every
