@@ -315,6 +315,16 @@ pub(crate) struct App {
     /// Some while the reader is viewing a historical snapshot (←/→).
     /// The page is read-only in that state.
     pub(crate) time: Option<TimeMachine>,
+
+    /// The live page's line ids, captured when history is entered: the
+    /// NEWEST snapshot's next version is NOW, so its will-delete rows are
+    /// the ids that vanish against this set.
+    pub(crate) present_ids: Option<HashSet<String>>,
+
+    /// While in history: ids of the shown snapshot's rows that the NEXT
+    /// version deletes (web's `.will-delete-next` — a red telomere, no
+    /// strikethrough). Recomputed on every scrub; empty at NOW.
+    pub(crate) deleted_next: HashSet<String>,
     /// Whether the current credential may edit THIS project. Public pages
     /// remain readable with a PAT for another project, but must not enter
     /// EDIT unless that user is actually a member.
@@ -657,6 +667,8 @@ impl App {
             open_stamp: 0,
             members: HashMap::new(),
             time: None,
+            present_ids: None,
+            deleted_next: HashSet::new(),
             editable: false,
             session_ime: cosense::ime::SessionIme::new(cosense::ime::ImeMode::Off),
             ime_ready: false,

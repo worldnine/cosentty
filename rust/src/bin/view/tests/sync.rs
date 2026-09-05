@@ -734,3 +734,49 @@ use super::support::*;
         assert_eq!(req_rx.try_recv(), Ok(ws::WsRequest::Resync));
         assert!(!app.ws_resync_pending, "one request per gap flag");
     }
+
+#[test]
+fn the_history_marks_rows_the_next_version_deletes() {
+    use cosense::theme::TelomereState;
+    let ctx = test_ctx();
+    let mut app = page(&["残る"]);
+    let line = |id: &str, text: &str| PageLine {
+        id: id.into(),
+        text: text.into(),
+        user_id: String::new(),
+        created: 0,
+        updated: 0,
+    };
+    let snap = |ids: &[(&str, &str)]| cosense::api::Snapshot {
+        lines: ids.iter().map(|(i, t)| line(i, t)).collect(),
+        title: "t".into(),
+        created: 1,
+    };
+    let mut cache = HashMap::new();
+    cache.insert("s1".to_string(), snap(&[("a", "残る"), ("b", "消える")]));
+    cache.insert("s2".to_string(), snap(&[("a", "残る"), ("c", "増えた")]));
+    app.time = Some(TimeMachine {
+        points: vec![
+            cosense::api::SnapshotStamp { id: "s1".into(), created: 1 },
+            cosense::api::SnapshotStamp { id: "s2".into(), created: 2 },
+        ],
+        pos: 1,
+        cache,
+    });
+    // NOW: a と c が居る(b は消えた)。← で入った流儀で先に覚える。
+    app.lines = vec![line("a", "残る"), line("c", "増えた")];
+    app.capture_present();
+
+    // 最古の版: b は次の版(s2)に無い → 削除行の赤。a は生きている。
+    show_snapshot(&mut app, &ctx, 0);
+    let b = app.lines.iter().find(|l| l.id == "b").unwrap();
+    let a = app.lines.iter().find(|l| l.id == "a").unwrap();
+    assert_eq!(app.line_state(b), TelomereState::WillDelete);
+    assert_eq!(app.line_state(a), TelomereState::Read);
+
+    // 最新の版: 次の版は NOW(present_ids)。消えた行は無い。
+    show_snapshot(&mut app, &ctx, 1);
+    assert!(app.deleted_next.is_empty(), "nothing vanishes between s2 and NOW");
+    let a = app.lines.iter().find(|l| l.id == "a").unwrap();
+    assert_eq!(app.line_state(a), TelomereState::Read);
+}

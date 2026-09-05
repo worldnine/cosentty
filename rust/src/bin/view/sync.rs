@@ -573,6 +573,7 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
         match listed {
             Ok(points) if !points.is_empty() => {
                 let last = points.len() - 1;
+                app.capture_present();
                 app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
                 show_snapshot(app, ctx, last);
             }
@@ -624,6 +625,7 @@ pub(crate) fn show_revision(app: &mut App, ctx: &Ctx, id: &str) {
         return;
     };
     if app.time.is_none() {
+        app.capture_present();
         app.time = Some(TimeMachine { points, pos: idx, cache: HashMap::new() });
     }
     show_snapshot(app, ctx, idx);
@@ -653,6 +655,34 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
         },
     };
     let texts: Vec<String> = snap.lines.iter().map(|l| l.text.clone()).collect();
+    // Which rows the NEXT version deletes: web's `.will-delete-next`.
+    // The comparison version is the next-newer snapshot when it is already
+    // cached (scrubbing always arrives from it), else NOW's captured ids
+    // for the newest snapshot. A next version nobody has yet is skipped —
+    // marking deletions is not worth an extra request.
+    let next_ids: Option<HashSet<String>> = {
+        let tm = app.time.as_ref().unwrap();
+        if idx + 1 < tm.points.len() {
+            tm.cache.get(&tm.points[idx + 1].id).map(|s| {
+                s.lines
+                    .iter()
+                    .filter(|l| !l.id.is_empty())
+                    .map(|l| l.id.clone())
+                    .collect()
+            })
+        } else {
+            app.present_ids.clone()
+        }
+    };
+    app.deleted_next = match next_ids {
+        Some(next) => snap
+            .lines
+            .iter()
+            .filter(|l| !l.id.is_empty() && !next.contains(&l.id))
+            .map(|l| l.id.clone())
+            .collect(),
+        None => HashSet::new(),
+    };
     // A snapshot is the page as it was; which of its links exist is only
     // known for NOW, so an old revision says nothing about it.
     let rendered =

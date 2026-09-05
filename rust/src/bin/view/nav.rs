@@ -864,6 +864,18 @@ impl App {
         }
     }
 
+    /// Entering history: remember which ids the live page has, so the
+    /// newest snapshot can tell its deletions against NOW.
+    pub(crate) fn capture_present(&mut self) {
+        self.present_ids = Some(
+            self.lines
+                .iter()
+                .filter(|l| !l.id.is_empty())
+                .map(|l| l.id.clone())
+                .collect(),
+        );
+    }
+
     /// Read state for a cursor-addressable related row. The flattening order
     /// is exactly the same as `virtual_items`. History never wears unread
     /// blues — the past is all read — so the row answers in states.
@@ -892,6 +904,8 @@ impl App {
     pub(crate) fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
         self.bump_server_epoch();
         self.time = None; // installing a live page always exits history
+        self.present_ids = None;
+        self.deleted_next.clear();
         self.outline_prefix = false;
         self.move_mode = None;
         self.outline_refresh_needed = false;
@@ -1159,7 +1173,13 @@ impl App {
     pub(crate) fn line_state(&self, l: &PageLine) -> cosense::theme::TelomereState {
         use cosense::theme::TelomereState as S;
         if self.time.is_some() {
-            return S::Read;
+            // A row the next version deletes is web's `.will-delete-next`;
+            // everything else in the past is read — history has no news.
+            return if self.deleted_next.contains(&l.id) {
+                S::WillDelete
+            } else {
+                S::Read
+            };
         }
         // `open_stamp == 0` means no visit stamp (bare test apps): fall
         // back to the plain read/unread pair.

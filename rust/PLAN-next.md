@@ -278,7 +278,7 @@ akapen/src/effects.rs の toast_effect):
 - トースト導入(上の 4)と同時にやると、ヘッダから追い出した情報の
   行き先が揃う
 
-### 6. テロメアの web 対応(8段化・ロード後更新・履歴の削除行)
+### 6. テロメアの web 対応(8段化・ロード後更新・履歴の削除行) — **済(2026-09-06)。実施記録は末尾へ**
 
 正本は **`SPEC-telomere-web-parity.md`**(web 仕様の実測・対応表・設計決定)。
 ここには概要だけ:
@@ -486,6 +486,44 @@ akapen/src/effects.rs の toast_effect):
   よいので、その設計時に一緒に検討する(プロジェクト一覧は 2026-09-03 に済)
 
 ## 済(このセッションで消化)
+
+### 実施記録: 6. テロメアの web 対応(2026-09-06)
+
+SPEC-telomere-web-parity.md のとおり4コミットで実装した(worktree
+`tui-cosense-telomere` / ブランチ `telomere-web`)。実測の追加確定:
+
+- 本物の app.css を取得(`assets/css/app.css`)して、未読のセレクタが
+  `.unread:not(.updated-after-load)` — つまり両方のクラスを持つ行は
+  **ロード後更新の色が勝つ**こと、**削除行に打ち消し線は無い**(app.css に
+  `line-through` は皆無)まで確定した
+
+実装:
+
+1. **太さ8グリフ9状態**。左寄せブロック要素8種 `█▉▊▋▌▍▎▏` を全部使い、
+   区切りは `<1h, <6h, <24h, <3日, <1週, <30日, <180日, <1y` + 最古は色差。
+   テストは旧6段の期待値を9段に置き換えた(年齢の選び方で1回落とした:
+   2000万秒は `<180日` でなく `<1y` バケット)
+2. **4状態の色軸**。`theme.rs` に `TelomereState`(Read/Unread/
+   UpdatedAfterLoad/WillDelete)と `telomere_in()`。旧 `telomere(age, unread,
+   light)` は Read/Unread へのラッパで、一覧・関連ページの呼び出しは
+   触っていない。色は web 実測値を基準(ロード後更新 `#6b8cff`、
+   削除 `#fd7373`、ライト背景用に暗い亜種を用意)
+3. **ロード後更新**。判定は `line.updated >= この訪問の open_stamp`
+   (`Loaded` に新フィールド。`record_visit` に渡す now を使い回すだけ)。
+   ws・ポーリング・自分の編集エコーはいずれも行の `updated` を編集時刻に
+   するので追跡コードは不要だった。降格のために `line_state` の未読判定は
+   `unread_since` の厳密 `>` でなく `>=`(「前回見ていた間に変わった行は
+   まだ未読」——これが web の「閉じると未読へ」の成立条件。テストが1度
+   失敗して気づいた)。履歴では未読を出さない(web と同じ)
+4. **履歴の削除行**。隣接スナップショットとの行 id 差分。比較先は
+   キャッシュ済みの次の版(スクラブは常にそこから来る)、最新版は履歴突入時に
+   取った現版の id 集合(`present_ids`)。比較先がまだ無いときは印を付けない
+   (削除のために追加リクエストは撃たない)。消える id は `deleted_next` に
+   置き、`line_state` が `WillDelete` を返す。NOW への復帰(reload →
+   `set_page`)で消える
+
+KEYMAP はテロメア節・ws 同期節・タイムマシン節に追随。ヘルプ文言は
+テロメアに触れていないので変更なし。
 
 - 開発環境の掃除(2026-09-02): `cargo clean` 実施、HANDOFF.md をスリム化
   (旧全文は rust/NOTE-webrender-handoff.md へ移動)、プロジェクト用 CLAUDE.md を追加
