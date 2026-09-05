@@ -199,7 +199,9 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
 
 /// Which source lines belong to a `code:` block, in one pass over the
 /// page. The viewer paints those rows with a wash, so it needs the whole
-/// map per frame rather than one lookup at a time.
+/// map per frame rather than one lookup at a time. The HEADER is not
+/// flagged: cosense web leaves `• go` unpainted and starts the wash at
+/// the body, so the bullet keeps the page's own background.
 pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
     let mut flags = vec![false; lines.len()];
     let mut k = 0;
@@ -225,7 +227,7 @@ pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
                 break;
             }
         }
-        for f in flags.iter_mut().take(end).skip(k) {
+        for f in flags.iter_mut().take(end).skip(k + 1) {
             *f = true;
         }
         k = j.max(k + 1);
@@ -1422,10 +1424,15 @@ pub fn render_lines_with(
             // something to follow: `Enter` saves it. That is said with the
             // underline every followable row wears — one signal for "you
             // can press Enter here", not a glyph per kind.
-            let header = Line::from(vec![
-                Span::raw(indent.clone()),
-                Span::styled(format!("code:{lang}"), style_block_label(pal)),
-            ]);
+            // A nested block wears the list's own bullet on its header
+            // (cosense web: `• go`), while the body rows stay bare — the
+            // bullet says where the block hangs, the wash says what it is.
+            let mut header_spans = vec![Span::raw(indent.clone())];
+            if level > 0 {
+                header_spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
+            }
+            header_spans.push(Span::styled(format!("code:{lang}"), style_block_label(pal)));
+            let header = Line::from(header_spans);
             // A diagram or a formula is collected whole and drawn as one
             // artifact; everything else emits its header row right away.
             let artifact = if mermaid_lang(&lang) {
@@ -1437,7 +1444,9 @@ pub fn render_lines_with(
             };
             if artifact.is_none() {
                 hits.push(Hit { span: 0, target: HitTarget::BlockLabel });
-                emit!(Block::Text(header.clone()), 1);
+                // Past the indent and, when nested, the bullet: the hit
+                // has to land on the `code:` label itself.
+                emit!(Block::Text(header.clone()), if level > 0 { 2 } else { 1 });
             }
             // collect continuation lines (deeper indent, or blank)
             let mut j = i + 1;
@@ -2131,6 +2140,51 @@ mod tests {
         let out = render_lines(&lines);
         assert!(!out.blocks.iter().any(|b| matches!(b, Block::Artifact { .. })));
         assert!(out.blocks.iter().any(|b| plain(b).contains("code:mmd")));
+    }
+
+    #[test]
+    fn a_nested_plain_code_header_wears_the_lists_bullet_but_its_body_does_not() {
+        // cosense web: `• go` on the header row, bare code rows under it.
+        // Level 0 has no bullet (there is no list), level 1 and 2 do.
+        let lines: Vec<String> = [
+            "t",
+            "code:top",
+            " top()",
+            "区切り",
+            " 箇条",
+            " code:go",
+            "  func()",
+            "区切り2",
+            "  箇条2",
+            "  code:rs",
+            "   main()",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let got: Vec<String> = out.blocks.iter().map(plain).collect();
+        assert!(got.iter().any(|s| s == "code:top"), "level 0 is bare: {got:?}");
+        assert!(got.iter().any(|s| s == "• code:go"), "level 1 wears it: {got:?}");
+        assert!(got.iter().any(|s| s == "  • code:rs"), "level 2 wears it: {got:?}");
+        assert!(
+            got.iter().filter(|s| s.contains("func()") || s.contains("main()"))
+                .all(|s| !s.contains('•')),
+            "body rows stay bare: {got:?}"
+        );
+        // The wash starts at the body: the header row keeps the page's
+        // own background (see `code_line_flags`).
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let flags = code_line_flags(&refs);
+        // headers 1, 5, 9 unflagged; bodies flagged.
+        assert_eq!(
+            flags,
+            vec![
+                false, false, true, false, false, false, true, false, false, false,
+                true
+            ],
+            "{flags:?}"
+        );
     }
 
     #[test]

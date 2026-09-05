@@ -1045,8 +1045,11 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         .map(|_| app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor)));
     // Rows inside a `code:` block. Painted LAST, as a background-only pass:
     // the band has to run to the frame, and the telomere, the thumb and the
-    // padding columns are all drawn after the rows.
-    let mut wash_rows: Vec<u16> = Vec::new();
+    // padding columns are all drawn after the rows. Each entry carries its
+    // wash start: the block's content column, so the indent and the bullet
+    // keep the page's own background (cosense web paints its code box the
+    // same way; the header row is not flagged at all).
+    let mut wash_rows: Vec<(u16, u16)> = Vec::new();
     // Bullets for image rows. An indented picture is a LIST ITEM whose
     // content is the picture (cosense web draws the bullet there too), and
     // the image protocol paints its own area, so the marker is written
@@ -1103,13 +1106,28 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         let in_code = row.src().map(|s| code_flags.get(s) == Some(&true)).unwrap_or(false);
         let mut base = Style::default();
         // The wash goes down first: selection and the cursor band are
-        // stronger signals and paint over it.
+        // stronger signals and paint over it. It starts at the block's
+        // content column — `code_span_at` knows the header's indent, so
+        // wrapped rows and the edit session's raw rows agree with the
+        // laid-out ones. Rows without a code span (should not happen for
+        // flagged rows) wash whole, as before.
         if in_code && !in_sel && !in_edit_sel && !is_cursor {
-            base = base.bg(wash);
+            let mut start: Option<u16> = None;
             for k in 0..h {
                 let y = text.y as i32 + screen_y + k;
                 if y >= band_top && y <= band_bot {
-                    wash_rows.push(y as u16);
+                    let x = *start.get_or_insert_with(|| {
+                        let col = row
+                            .src()
+                            .and_then(|s| app.code_span_at_line(s))
+                            .map(|sp| cosense::render::text_column(sp.header_indent))
+                            .unwrap_or(0);
+                        // `text` starts three columns into `body`
+                        // (frame, telomere, blank); the column counts from
+                        // the text, not the frame.
+                        text.x.saturating_add(col as u16)
+                    });
+                    wash_rows.push((y as u16, x));
                 }
             }
         }
@@ -1476,13 +1494,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         }
     }
 
-    // The code wash, run to the frame on both sides. Only the background
+    // The code wash, run to the frame on the right. Only the background
     // is touched, so the telomere glyph, the scrollbar thumb and the text
-    // keep their own colors and simply sit on the block's surface.
+    // keep their own colors and simply sit on the block's surface. Each
+    // row starts at its block's content column: the indent and the bullet
+    // stay on the page's own background.
     let left = body.x.saturating_add(1);
     let right = body.x.saturating_add(body.width).saturating_sub(1);
-    for sy in wash_rows {
-        for x in left..right {
+    for (sy, x0) in wash_rows {
+        for x in x0.max(left)..right {
             if let Some(c) = buf.cell_mut((x, sy)) {
                 c.set_bg(wash);
             }
@@ -2389,29 +2409,15 @@ impl App {
                         continue;
                     }
                     // No artifact (yet, or ever): the plain code block, with
-                    // the session's caret row swapped to raw source. In EDIT,
-                    // nested Mermaid wears a bullet on its header only.
-                    let header_src = rows.first().map(|(src, _)| *src);
+                    // the session's caret row swapped to raw source.
                     for (rsrc, line) in rows {
-                        let header_bullet = editing_here
-                            && *indent > 0
-                            && header_src == Some(*rsrc);
                         if let Some((eline, ebuf)) = edit {
                             if *rsrc == eline {
                                 raw_rows(&mut content, ebuf, *rsrc);
                                 continue;
                             }
                         }
-                        let mut line = line.clone();
-                        if header_bullet {
-                            // Header rows are built as [indent, code label].
-                            // Insert the marker between them without disturbing
-                            // the code label's syntax/theme style.
-                            line.spans.insert(
-                                1.min(line.spans.len()),
-                                Span::styled("• ".to_string(), Style::default().fg(Color::DarkGray)),
-                            );
-                        }
+                        let line = line.clone();
                         for w in wrap_line_parts(&line, text_w, &hanging_prefix(&line)) {
                             content.push(Row::Line {
                                 line: w.line,

@@ -622,6 +622,51 @@ use super::support::*;
         }
     }
 
+    /// The code wash starts at the block's content column: the indent
+    /// and the bullet keep the page's own background (cosense web paints
+    /// its code box the same way), and the header row is not washed at all.
+    #[test]
+    fn the_code_wash_starts_at_the_content_column() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = test_ctx();
+        let wash = cosense::theme::code_wash(ctx.terminal_bg);
+        let mut app = page(&["t", " 箇条", " code:go", "  x := 1"]);
+        app.rebuild(40);
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let cells_at = |y: u16| -> Vec<String> {
+            (0..40)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        };
+        let text_at = |y: u16| -> String { cells_at(y).concat() };
+        let bg_at = |x: u16, y: u16| buf.cell((x, y)).unwrap().bg;
+        let row_with = |needle: &str| -> u16 {
+            (0..12).find(|y| text_at(*y).contains(needle)).unwrap_or_else(|| panic!("{needle} on screen"))
+        };
+        // Byte-safe: cell boundaries are char boundaries once joined.
+        let col_with = |y: u16, needle: &str| -> u16 {
+            let cells = cells_at(y);
+            (0..40)
+                .find(|x| cells[*x as usize..].concat().starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle} in row {y}")) as u16
+        };
+        // Header `• code:go`: the bullet, the label, nothing washed.
+        let hy = row_with("code:go");
+        let hx = col_with(hy, "code:go");
+        for x in hx.saturating_sub(2)..hx + 7 {
+            assert_ne!(bg_at(x, hy), wash, "header cell ({x}, {hy}) is bare");
+        }
+        // Body: two bare columns, then the wash (`text_column(1)`).
+        let by = row_with("x := 1");
+        let bx = col_with(by, "x := 1");
+        assert_ne!(bg_at(bx - 2, by), wash, "indent is bare");
+        assert_ne!(bg_at(bx - 1, by), wash, "indent is bare");
+        assert_eq!(bg_at(bx, by), wash, "the code sits on the wash");
+        assert_eq!(bg_at(bx + 5, by), wash, "…to the frame");
+    }
+
     /// The browser lays an inline image ON the text line: its bottom edge
     /// level with the words, so a sentence reads straight through it. The
     /// same layout answers all three shapes — text then picture, picture
