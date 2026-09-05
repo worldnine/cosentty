@@ -280,6 +280,7 @@ pub(crate) fn related_age(updated: i64) -> i64 {
 
 /// A line is unread if it was edited after `read_at`, or the page was never
 /// seen at all (`None`).
+#[cfg(test)]
 pub(crate) fn unread_since(updated: i64, read_at: Option<i64>) -> bool {
     read_at.map_or(true, |t| updated > t)
 }
@@ -1168,7 +1169,10 @@ impl App {
     }
 
     /// True if the line was edited after the user last saw this page (or
-    /// the page was never seen). Drives the telomere tint.
+    /// the page was never seen). Only tests count unread lines now: the
+    /// header stopped showing the number (the telomere's colour says which
+    /// lines are new).
+    #[cfg(test)]
     pub(crate) fn line_unread(&self, l: &PageLine) -> bool {
         unread_since(l.updated, self.read_at)
     }
