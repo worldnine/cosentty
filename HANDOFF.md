@@ -68,6 +68,10 @@ cargo test                          # lib(197)含む全部
   `[$ ... ]`)
 - `rust/NOTE-websocket-sync.md` / `NOTE-outline-editing.md` /
   `NOTE-edit-selection.md` — 各機能の設計メモ
+- `rust/NOTE-scrapbox-parser.md` — **本家パーサ(progfay/scrapbox-parser)の
+  規則と出典**: ブロックの子は「ヘッダより深いインデントの行」のみ、空行は
+  ブロックを終端する、等。記法の解析やレンダラ・エディタの挙動を変えるときは
+  まずこれを読む(実装は render.rs の3走査と session.rs の Enter)
 
 ## 検証用
 
