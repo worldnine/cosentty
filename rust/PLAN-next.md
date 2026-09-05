@@ -517,6 +517,13 @@ akapen/src/effects.rs の toast_effect):
 - `^e`($EDITOR 往復)直後のカーソル形状が外部エディタ設定のまま残りうる
   (PLAN-mode-ux.md に記録済み)
 - P5 系: 表示プロファイル(auto / rich / text)、数式、テーマの意味的整理
+- **UserCSS(`/api/code/<project>/settings/style.css`)の反映**(2026-09-06 調査済み、
+  着手は見送り。原理的に可能): 取得は sid で 200 実測(acme。PAT は code API
+  も 401)。変数(`--telomere-*` 等)は正規表現で取れて既存のテーマ色経路に
+  上書きできる。既知セレクタの許可リスト方式で既読 `#EEEEEE`(acme)や
+  `{ }` 吹き出し背景 `#b4d0b1` まで行けるが、吹き出しは render.rs に描画機能
+  自体が無くセット実装になる。留意: 可読性の下限(明度判定でフォールバック)、
+  5分TTL、非公開は sid 必須
 - ベクトル検索(`search/vector/titles`)の組み込み — 一覧刷新(1)と相性が
   よいので、その設計時に一緒に検討する(プロジェクト一覧は 2026-09-03 に済)
 
