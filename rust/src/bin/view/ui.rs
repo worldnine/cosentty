@@ -320,6 +320,11 @@ pub(crate) fn wrap_plain(s: &str, width: usize) -> Vec<String> {
 /// read as an intentional peek rather than an incomplete page.
 pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     use cosense::index::{Pane, Row};
+    // Before `ix` borrows `app.index`: the header answers to the LISTED
+    // project (chrome_colors derives it from `index_project` in list
+    // mode), not to the page left behind — entering a project from the
+    // projects list turns the header at once.
+    let chrome = app.chrome_colors(ctx);
     let Some(ix) = app.index.as_mut() else { return };
     use unicode_width::UnicodeWidthStr;
     let body_h = area.height.saturating_sub(2); // header + footer
@@ -436,7 +441,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let head = format!("{head}{}{order}", " ".repeat(pad));
     f.render_widget(
         Paragraph::new(head).style(
-            Style::default().fg(app.header_colors.fg).bg(app.header_colors.bg),
+            Style::default().fg(chrome.fg).bg(chrome.bg),
         ),
         Rect::new(area.x, area.y, area.width, 1),
     );
