@@ -8,6 +8,14 @@
 
 ## 現在地
 
+- 2026-09-06: **テロメアの web 対応・テーマ色の反映・パーサの web パリティを
+  master にマージ**(タスク6〜10が正本)。正本ドキュメント:
+  `SPEC-telomere-web-parity.md`(テロメア)、`NOTE-scrapbox-parser.md`
+  (本家パーサの規則)、KEYMAP のテロメア/テーマ節。テーマ色テーブルは
+  `scripts/cosense-theme-vars.py` が app.css 実測から生成(手で触らない)。
+  非公開プロジェクトでテーマ色を出すには **sid が必要**(PAT は settings/code
+  API が 401)。`cosense-tui` は release ビルドへの symlink — コードを変えたら
+  `cargo build --release` を忘れない
 - 2026-09-05: **図と数式のテキスト描画を master にマージ**
   (6621743。`NOTE-mmd-text.md` / `NOTE-math-text.md` が正本)。webレンダラは
   既定オフになった。worktree `tui-cosense-mmd-lib` / ブランチ `mmd-lib-spike`

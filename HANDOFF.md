@@ -68,6 +68,8 @@ cargo test                          # lib(197)含む全部
   `[$ ... ]`)
 - `rust/NOTE-websocket-sync.md` / `NOTE-outline-editing.md` /
   `NOTE-edit-selection.md` — 各機能の設計メモ
+- `rust/SPEC-telomere-web-parity.md` — テロメアの web 仕様(実測)と対応表。
+  `scripts/cosense-theme-vars.py` は同梱 app.css からテーマ色テーブルを生成する
 - `rust/NOTE-scrapbox-parser.md` — **本家パーサ(progfay/scrapbox-parser)の
   規則と出典**: ブロックの子は「ヘッダより深いインデントの行」のみ、空行は
   ブロックを終端する、等。記法の解析やレンダラ・エディタの挙動を変えるときは
