@@ -331,6 +331,20 @@ akapen/src/effects.rs の toast_effect):
   は theme=green(新系)を確認済み。UserCSS での上書き(acme の既読
   `#EEEEEE` など)は今回やらない(後続)
 
+### 9. コードブロックは空行で終わる(web パリティ) — **済(2026-09-06)。実施記録は末尾へ**
+
+- **現在の動作**: TUI は空行を越えてコードブロックが続いていた(後続にインデント
+  行があれば継続)。web は空行でブロックを切り、後続のインデント行は箇条書きに
+  戻る — ユーザー報告の見た目不一致(my-sandbox/文章入力遅延テスト)
+- **期待する動作**: 本家パーサ(progfay/scrapbox-parser `packRows` の
+  `isChildRowOfPack`: 子は「ヘッダより深いインデントの行」のみ。空行は
+  インデント0なので終端)に揃える。**空白のみの行(インデントあり)は空の
+  コードとして継続**(本家も indent を数えるので同じ)
+- **完了条件**: 3箇所の走査(code_span_at / code_line_flags / render 収集)が
+  同一規則。デリート/Enter の編集挙動も web と同じ結果(空行の外に出てから
+  の結合になる)になる
+- **依存**: なし
+
 ### 小粒(隙間にやれるもの)
 
 - **済(2026-09-04)** EDIT で `Garry` を選ぶと直後の全角 `・` まで反転して `Garry・` を
@@ -528,6 +542,21 @@ akapen/src/effects.rs の toast_effect):
   よいので、その設計時に一緒に検討する(プロジェクト一覧は 2026-09-03 に済)
 
 ## 済(このセッションで消化)
+
+### 実施記録: 9. コードブロックは空行で終わる(2026-09-06)
+
+- 本家パーサの実測: `isChildRowOfPack` は `row.indent > header.indent` のみ。
+  空行(indent 0)はブロックを終端する。空白のみの行は indent を持つので継続
+  (既存テスト a_blank_code_line_keeps_its_block のケースは正しかった)
+- render.rs の3走査(code_span_at / code_line_flags / render 収集)を統一し、
+  `blank_precedes_code_header` と末尾空行の pop を廃止(空行はもう吸われない)
+- セッション: コード本文行の**頭**(キャレットがインデントの内側)での Enter は
+  **インデントを継承した空コード行を上に挿入**(web と同じ。真の空行を挿入すると
+  即ブロックが切れてしまう。旧実装は空行を挿入し、旧規則の下でだけ成立して
+  いた)。空コード行の EOL での Enter(積み重ね)は従来どおり下へ
+- テスト: code_span_agrees / blank_lines_after / 新規
+  a_truly_blank_line_ends_the_code_block_like_web を web 準拠の期待値に更新
+- KEYMAP: 空行とブロック終端の規則を記載
 
 ### 実施記録: 8. テロメアの色をテーマに追従させる(2026-09-06)
 

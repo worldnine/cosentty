@@ -1001,6 +1001,30 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
             span.body_indent()
         };
         let empty = buf.chars().all(char::is_whitespace);
+        // Enter with the caret INSIDE the leading whitespace: web
+        // inherits the indent on the fresh line, so the line above stays
+        // blank CODE — a truly blank line here would end the block (the
+        // parser, and web, read indent 0 as the exit). A caret at the
+        // indent's END is the ordinary EOL case (blank code stacks below).
+        if caret < indent.len() && code.is_some() {
+            let anchor = app.lines[line].id.clone();
+            let ops = vec![EditOp::Insert {
+                anchor,
+                lines: vec![(new_line_id(), indent.clone())],
+            }];
+            do_edit(app, ctx, &t!("改行", "new line"), ops);
+            if let Some(s) = app.session.as_mut() {
+                s.line = line; // the fresh line sits above
+                s.input = Input { buf: indent.clone(), cur: indent.len() };
+                s.orig = indent.clone();
+                s.want_col = None;
+                s.sel_from = None;
+            }
+            app.cursor = line;
+            app.follow = true;
+            app.laid_width = 0;
+            return;
+        }
         // A table ends the way a list does: Enter on a row with nothing
         // in it leaves. In code a blank line is just blank CODE: Enter
         // stacks as many as the writer wants, each keeping its indent.

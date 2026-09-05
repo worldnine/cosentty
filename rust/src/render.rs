@@ -150,10 +150,11 @@ impl CodeSpan {
 
 /// Is `i` inside a `code:` block (header line included)?
 ///
-/// Mirrors the scan in [`render_lines_with`]: continuation lines are the
-/// ones indented deeper than the header, blank lines continue a block only
-/// when more code follows, and the header itself counts as being "in" its
-/// own block.
+/// Mirrors the scan in [`render_lines_with`] and the official parser
+/// (progfay/scrapbox-parser `packRows`): a block's children are the lines
+/// indented DEEPER than the header — a truly empty line has indent 0 and
+/// therefore ENDS the block (only a whitespace-only line, which carries
+/// the indent, keeps it). The header itself counts as "in" its own block.
 pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
     let mut k = 0;
     while k < lines.len() {
@@ -162,9 +163,9 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
             k += 1;
             continue;
         }
-        // Forward scan, exactly as the renderer's block collector: deeper
-        // lines and blanks continue the block, then trailing blanks are
-        // handed back to the page.
+        // Forward scan, exactly as the renderer's block collector: a
+        // deeper line continues the block; anything else — a shallower
+        // line, or a truly EMPTY one — ends it.
         let mut end = k + 1; // exclusive
         let mut j = k + 1;
         while j < lines.len() {
@@ -172,11 +173,6 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
             if raw_len > header_indent {
                 j += 1;
                 end = j; // a real code row: the block reaches at least here
-            } else if lines[j].trim().is_empty() {
-                if blank_precedes_code_header(lines, j) {
-                    break;
-                }
-                j += 1; // may turn out to be trailing — `end` stays put
             } else {
                 break;
             }
@@ -218,11 +214,6 @@ pub fn code_line_flags(lines: &[&str]) -> Vec<bool> {
             if raw_len > header_indent {
                 j += 1;
                 end = j;
-            } else if lines[j].trim().is_empty() {
-                if blank_precedes_code_header(lines, j) {
-                    break;
-                }
-                j += 1;
             } else {
                 break;
             }
@@ -337,18 +328,6 @@ pub const MATH_MAX_INDENT: usize = 0;
 /// more deeply indented. Without this boundary a level-0 Mermaid block absorbs
 /// every later level as source, and the duplicate diagram declarations make the
 /// whole combined block fail to render.
-fn blank_precedes_code_header<T: AsRef<str>>(lines: &[T], blank: usize) -> bool {
-    lines.iter().skip(blank + 1).find_map(|line| {
-        let line = line.as_ref();
-        if line.trim().is_empty() {
-            None
-        } else {
-            let (_, _, body) = indent_info(line);
-            Some(body.starts_with("code:"))
-        }
-    }) == Some(true)
-}
-
 /// Links and images discovered while rendering, for navigation and prefetch.
 #[derive(Debug, Default, Clone)]
 pub struct Extracted {
@@ -1448,7 +1427,12 @@ pub fn render_lines_with(
                 // has to land on the `code:` label itself.
                 emit!(Block::Text(header.clone()), if level > 0 { 2 } else { 1 });
             }
-            // collect continuation lines (deeper indent, or blank)
+            // collect continuation lines: deeper indent ONLY. A truly
+            // empty line has indent 0 and ends the block, exactly as the
+            // official parser packs rows (a whitespace-only line still
+            // carries the indent, so it stays — the indent is the
+            // membership, here as everywhere: deleting it is what leaves
+            // the block, which is how web ends one).
             let mut j = i + 1;
             let mut raws: Vec<usize> = Vec::new(); // source indices
             let mut bodies: Vec<String> = Vec::new();
@@ -1461,35 +1445,9 @@ pub fn render_lines_with(
                     bodies.push(stripped);
                     raws.push(j);
                     j += 1;
-                } else if lines[j].trim().is_empty() {
-                    if blank_precedes_code_header(lines, j) {
-                        break;
-                    }
-                    let stripped = strip_leading_ws(&lines[j], code_indent + 1);
-                    bodies.push(stripped);
-                    raws.push(j);
-                    j += 1;
                 } else {
                     break;
                 }
-            }
-            // Blank lines FOLLOWING the block get absorbed by the `||empty`
-            // rule; hand every trailing blank back so each renders as its
-            // own Blank row (blank lines between code lines stay inside the
-            // block). Popping just one used to fold "code + N blanks" into
-            // "code + 1 blank": the rest became empty code rows, and the
-            // highlighter's `lines()` then dropped them outright.
-            //
-            // Only a FLUSH line is handed back, though. A whitespace-only
-            // line is blank CODE — the writer parked a cursor there (Enter
-            // inside the block types one) — and popping it pushed it out of
-            // the block, where the empty-bullet rule turned it into a dot
-            // below the drawn diagram. The indent is the membership, here
-            // as everywhere: deleting it is what leaves the block.
-            while raws.last().map(|&j| lines[j].is_empty()).unwrap_or(false) {
-                bodies.pop();
-                raws.pop();
-                j -= 1;
             }
             // The code rows, styled exactly as they always were.
             let mut code_rows: Vec<(usize, Line<'static>)> = Vec::new();
@@ -2247,14 +2205,15 @@ mod tests {
             // every source line owns exactly one block, in order
             assert_eq!(out.srcs, vec![0, 1, 2, 3, 4, 5, 6]);
         }
-        // a blank INSIDE the block (more code follows) stays in the block
+        // a TRULY blank line ends the block (web parity): the blank is a
+        // page blank, and the indented line after it is a bullet again.
         let lines: Vec<String> = ["t", "code:x.py", " a = 1", "", " b = 2", "end"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let out = render_lines(&lines);
         let got: Vec<String> = out.blocks.iter().map(plain).collect();
-        assert_eq!(got, vec!["t", "code:x.py", "  a = 1", "  ", "  b = 2", "end"]);
+        assert_eq!(got, vec!["t", "code:x.py", "  a = 1", "[BLANK]", "• b = 2", "end"]);
         assert_eq!(out.srcs, vec![0, 1, 2, 3, 4, 5]);
     }
 
@@ -2315,7 +2274,7 @@ mod tests {
         let inside: Vec<usize> = (0..src.len())
             .filter(|&i| code_span_at(&refs, i).is_some())
             .collect();
-        assert_eq!(inside, vec![2, 3, 4, 5, 9, 10], "blank INSIDE stays, trailing blank leaves");
+        assert_eq!(inside, vec![2, 3, 9, 10], "a truly blank line ends the block");
 
         let top = code_span_at(&refs, 3).unwrap();
         assert_eq!(top.header, 2);
@@ -2764,6 +2723,43 @@ mod tests {
         assert_eq!(texts, vec!["a ", "crowdin", " b ", " #3117 ", " / c ", " [not a link] "]);
         assert_eq!(out.hits[1], vec![Hit { span: 1, target: HitTarget::Page("crowdin".into()) }]);
         assert_eq!(out.extracted.links, vec!["crowdin"]);
+    }
+    /// 実ページ(my-sandbox/文章入力遅延テスト)で起きたこと:ブロックの
+    /// 中の完全な空行で web はブロックを切り、後続のインデント行は箇条書きに
+    /// 戻る。本家パーサ(progfay/scrapbox-parser の packRows)も同じ:子は
+    /// 「ヘッダより深いインデントの行」だけ。旧実装は空行を越えてブロックを
+    /// 続けていたため、web と見た目が食い違っていた。
+    #[test]
+    fn a_truly_blank_line_ends_the_code_block_like_web() {
+        let lines: Vec<String> = [
+            "t",
+            "code:テスト.txt",
+            " これは",
+            "",
+            " だからそれは楽しい話なのかもしれません。",
+            " やったね",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = render_lines(&lines);
+        let got: Vec<String> = out.blocks.iter().map(plain).collect();
+        // ブロックは これは で終わり、空行はページの空行、後続は箇条書き。
+        assert_eq!(
+            got,
+            vec![
+                "t",
+                "code:テスト.txt",
+                "  これは",
+                "[BLANK]",
+                "• だからそれは楽しい話なのかもしれません。",
+                "• やったね",
+            ]
+        );
+        // フラグも同じ: 空行と後続行はコードとして洗われない。
+        let strs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let flags = code_line_flags(&strs);
+        assert_eq!(flags, [false, false, true, false, false, false]);
     }
 }
 

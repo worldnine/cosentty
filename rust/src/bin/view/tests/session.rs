@@ -1377,8 +1377,9 @@ use super::support::*;
         assert_eq!(s.input.buf, "code:text.txt");
     }
 
-    /// Enter at the head of a body line keeps working as it did: the blank
-    /// stays inside the block as blank code, the text rides below.
+    /// Enter at the head of a body line: web inherits the indent on the
+    /// fresh line, so it stays blank CODE (a truly blank line would end
+    /// the block — see the parser's web parity).
     #[test]
     fn enter_at_the_head_of_a_code_body_keeps_the_blank_inside() {
         let ctx = test_ctx();
@@ -1386,11 +1387,11 @@ use super::support::*;
         app.rebuild(40);
         enter_session(&mut app, &ctx, 2, 0);
         handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
-        assert_eq!(app.lines[2].text, "", "blank above the text");
+        assert_eq!(app.lines[2].text, " ", "the fresh line inherits the indent");
         assert_eq!(app.lines[3].text, " aaaaa");
         assert!(app.line_in_code(2), "the blank is blank code, not an exit");
         let s = app.session.as_ref().unwrap();
-        assert_eq!((s.line, s.input.cur), (3, 0));
+        assert_eq!((s.line, s.input.cur), (2, 1), "the caret rides after it");
     }
 
     /// A Mermaid header still takes its block with it (the refactor kept
