@@ -30,6 +30,14 @@ pub fn retry_backoff(retry_after: Option<&str>, attempt: u32) -> Duration {
 
 const POLITE_ATTEMPTS: u32 = 4;
 
+/// How long a TCP + TLS handshake may take before a request is given up.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long one whole request (headers and body) may take. A page or a
+/// list is a few hundred KB at most; a link that sits silently for longer
+/// than this is dead for the reader's purposes, and the viewer must get
+/// its keys back rather than wait on it forever.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl SendPolite for reqwest::blocking::RequestBuilder {
     fn send_polite(self) -> reqwest::Result<reqwest::blocking::Response> {
         let mut req = self;
@@ -550,6 +558,8 @@ impl Client {
     pub fn new(cfg: Config) -> Result<Self, Box<dyn Error>> {
         let http = reqwest::blocking::Client::builder()
             .user_agent("cosense-tui")
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
         Ok(Self { http, cfg })
     }

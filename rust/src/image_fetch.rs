@@ -43,8 +43,12 @@ impl ImageFetcher {
         gyazo_token: Option<String>,
         cred: Option<Credential>,
     ) -> Result<Self, Box<dyn Error>> {
+        // Pictures come down on background threads, but a thread parked on
+        // a silent host still holds one of the download slots.
         let http = reqwest::blocking::Client::builder()
             .user_agent("cosense-tui")
+            .connect_timeout(crate::api::CONNECT_TIMEOUT)
+            .timeout(crate::api::REQUEST_TIMEOUT)
             .build()?;
         let cache_dir = dirs_cache().join("cosense-tui").join("images");
         std::fs::create_dir_all(&cache_dir).ok();

@@ -22,6 +22,10 @@ use crate::api::ProjectSettings;
 use crate::url::percent_decode;
 use crate::config::Config;
 
+/// One Gyazo upload may take this long end to end (a photo over a slow
+/// line), independent of the shorter limit the page requests live under.
+const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// File extensions accepted as an image to upload — the same set the
 /// renderer draws, so what goes up comes back as a picture.
 pub const IMAGE_EXTS: [&str; 8] = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff"];
@@ -180,7 +184,13 @@ pub fn upload_gyazo(
     let form = reqwest::blocking::multipart::Form::new()
         .text("access_token", token.to_string())
         .part("imagedata", part);
-    let res = http.post("https://upload.gyazo.com/api/upload").multipart(form).send()?;
+    // The shared client's request timeout is sized for a page, not a
+    // picture: a large upload on a slow line gets its own, longer limit.
+    let res = http
+        .post("https://upload.gyazo.com/api/upload")
+        .timeout(UPLOAD_TIMEOUT)
+        .multipart(form)
+        .send()?;
     if !res.status().is_success() {
         return Err(format!("Gyazo: HTTP {}", res.status()).into());
     }
