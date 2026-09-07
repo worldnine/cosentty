@@ -622,7 +622,7 @@ pub(crate) fn copy_and_report(app: &mut App, payload: Option<(String, String)>) 
         return;
     };
     if copy_to_clipboard(&text) {
-        app.note(format!("✓ copied {label}"));
+        app.note(t!("✓ {label} をコピー", "✓ copied {label}"));
     } else {
         app.toast_err(t!(
             "コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました",

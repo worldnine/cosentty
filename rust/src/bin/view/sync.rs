@@ -633,7 +633,7 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
                     anchor: "_end".into(),
                     lines: vec![(new_id.clone(), buf.clone())],
                 }];
-                do_edit(app, ctx, "退避", ops);
+                do_edit(app, ctx, &t!("退避", "rescue"), ops);
                 if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
                     enter_session(app, ctx, idx, buf.len());
                 }

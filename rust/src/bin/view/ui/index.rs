@@ -248,7 +248,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 Line::from(spans)
             }
             Row::Create(name) => Line::from(Span::styled(
-                format!("  ＋ 「{name}」を作成"),
+                t!("  ＋ 「{name}」を作成", "  ＋ create \"{name}\""),
                 dim_when_away(style.fg(CHROME_ACTIVE)),
             )),
         };
@@ -509,7 +509,7 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     let meta = format!(
         " · {} ago{}",
         relative_age(entry.updated),
-        if entry.unread { " · 未読" } else { "" }
+        if entry.unread { ts!(" · 未読", " · unread") } else { "" }
     );
     let show_meta = width > str_width(&meta) + 8;
     let title_width = if show_meta {
