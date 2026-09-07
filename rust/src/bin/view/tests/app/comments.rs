@@ -1,5 +1,5 @@
-use crate::*;
 use crate::tests::support::*;
+use crate::*;
 
 /// コメントは書かれた版に固定される。NOW のコメントは過去版に出ず、
 /// 過去版で書いたコメントはその版でだけ出る(akapen の履歴モデル)。
@@ -17,14 +17,24 @@ fn a_comment_lives_on_the_revision_it_was_written_on() {
 
     // 過去版を開く(ネットワーク無し: 一覧と本文を手で置く)。
     app.time = Some(TimeMachine {
-        points: vec![SnapshotStamp { id: "snap1".into(), created: 1_700_000_000 }],
+        points: vec![SnapshotStamp {
+            id: "snap1".into(),
+            created: 1_700_000_000,
+        }],
         pos: 0,
         cache: HashMap::new(),
     });
     app.laid_width = 0;
     app.rebuild(40);
-    assert!(!app.src_has_comment(1), "a NOW comment is not shown on a snapshot");
-    assert!(!app.rows.iter().any(|r| matches!(r, Row::Card { .. }) && !matches!(r, Row::Card { line } if line.spans.is_empty())), "no card woven");
+    assert!(
+        !app.src_has_comment(1),
+        "a NOW comment is not shown on a snapshot"
+    );
+    assert!(
+        !app.rows.iter().any(|r| matches!(r, Row::Card { .. })
+            && !matches!(r, Row::Card { line } if line.spans.is_empty())),
+        "no card woven"
+    );
 
     // 過去版で書く: その版に固定され、そこでは見える。
     let old_c = app.make_comment("put it back".into()).unwrap();
@@ -32,7 +42,11 @@ fn a_comment_lives_on_the_revision_it_was_written_on() {
     assert_eq!(old_c.page_id, "pid");
     app.comments.push(old_c);
     assert!(app.src_has_comment(1));
-    assert_eq!(app.comment_for_range(), Some(1), "c again edits the snapshot's comment, not NOW's");
+    assert_eq!(
+        app.comment_for_range(),
+        Some(1),
+        "c again edits the snapshot's comment, not NOW's"
+    );
 
     // NOW に戻ると、過去版のコメントは隠れ、NOW のものが戻る。
     app.time = None;
@@ -49,13 +63,28 @@ fn the_list_travels_to_the_comments_revision_before_landing() {
     let ctx = offline_ctx();
     let mut app = page(&["title", "one", "two"]);
     app.rebuild(40);
-    let stamp = SnapshotStamp { id: "snap1".into(), created: 1_700_000_000 };
+    let stamp = SnapshotStamp {
+        id: "snap1".into(),
+        created: 1_700_000_000,
+    };
     let snap = Snapshot {
         title: "t".into(),
         created: 1_700_000_000,
         lines: vec![
-            PageLine { id: "l0".into(), text: "title".into(), user_id: String::new(), created: 0, updated: 0 },
-            PageLine { id: "l1".into(), text: "old one".into(), user_id: String::new(), created: 0, updated: 0 },
+            PageLine {
+                id: "l0".into(),
+                text: "title".into(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            },
+            PageLine {
+                id: "l1".into(),
+                text: "old one".into(),
+                user_id: String::new(),
+                created: 0,
+                updated: 0,
+            },
         ],
     };
     // 過去版のコメントを1件持った状態で NOW にいる。一覧は Enter で
@@ -65,7 +94,10 @@ fn the_list_travels_to_the_comments_revision_before_landing() {
         project: "proj".into(),
         title: "t".into(),
         page_id: "pid".into(),
-        revision: Some(cosense::comment::Revision { snapshot_id: "snap1".into(), created: 1_700_000_000 }),
+        revision: Some(cosense::comment::Revision {
+            snapshot_id: "snap1".into(),
+            created: 1_700_000_000,
+        }),
         start: 1,
         end: 1,
         line_texts: vec!["old one".into()],
@@ -76,7 +108,11 @@ fn the_list_travels_to_the_comments_revision_before_landing() {
     cache.insert("snap1".to_string(), snap);
     // The machine is seeded by hand (its cache holds the body, so no
     // fetch is needed) and the snapshot installed as ← would.
-    app.time = Some(TimeMachine { points: vec![stamp.clone()], pos: 0, cache });
+    app.time = Some(TimeMachine {
+        points: vec![stamp.clone()],
+        pos: 0,
+        cache,
+    });
     show_snapshot(&mut app, &ctx, 0);
     assert_eq!(app.lines[1].text, "old one");
     // Asking for the revision on screen is a no-op, not a refetch.
@@ -87,6 +123,11 @@ fn the_list_travels_to_the_comments_revision_before_landing() {
     handle_key(&mut app, &ctx, key(KeyCode::Enter));
     assert!(app.overlay.is_none());
     assert_eq!(app.cursor, 1);
-    assert!(app.time.as_ref().is_some_and(|tm| tm.points[tm.pos].id == "snap1"), "stays on the comment's revision");
+    assert!(
+        app.time
+            .as_ref()
+            .is_some_and(|tm| tm.points[tm.pos].id == "snap1"),
+        "stays on the comment's revision"
+    );
     assert!(app.src_has_comment(1), "and the card is there");
 }

@@ -1,5 +1,5 @@
-use crate::*;
 use crate::tests::support::*;
+use crate::*;
 
 #[test]
 fn set_page_carries_the_page_palette() {
@@ -50,9 +50,10 @@ fn the_rerender_keeps_the_page_palette() {
     app.links = links;
     rerender(&mut app, &ctx);
     let painted = app.blocks.iter().any(|b| match b {
-        cosense::render::Block::Text(line) => {
-            line.spans.iter().any(|s| s.style.fg == Some(Color::Rgb(4, 5, 6)))
-        }
+        cosense::render::Block::Text(line) => line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(Color::Rgb(4, 5, 6))),
         _ => false,
     });
     assert!(painted, "the missing-link colour survives the re-render");
@@ -93,7 +94,10 @@ fn the_index_excerpt_wears_the_listed_projects_theme() {
     });
     let lines = index_preview_lines(&app, &ctx, 60);
     let (green, _) = cosense::theme::cosense_link_colors("green").unwrap();
-    assert_ne!(green, ctx.palette.link, "a themed link is a different colour");
+    assert_ne!(
+        green, ctx.palette.link,
+        "a themed link is a different colour"
+    );
     assert!(
         lines
             .iter()

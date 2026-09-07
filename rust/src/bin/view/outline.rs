@@ -132,8 +132,14 @@ pub(crate) fn restore_outline_snapshot(app: &mut App, snapshot: &OutlineSnapshot
 
 pub(crate) fn outline_error(app: &mut App, error: PlanError) {
     app.toast_err(match error {
-        PlanError::InvalidTarget => t!("カーソルの下にソース行がありません", "no source line under the cursor"),
-        PlanError::TitleProtected => t!("タイトル行はアウトライン操作できません", "the title line is protected"),
+        PlanError::InvalidTarget => t!(
+            "カーソルの下にソース行がありません",
+            "no source line under the cursor"
+        ),
+        PlanError::TitleProtected => t!(
+            "タイトル行はアウトライン操作できません",
+            "the title line is protected"
+        ),
         PlanError::CannotOutdent => t!(
             "字下げを戻せません — 対象の全行に字下げが必要です",
             "cannot outdent — every target line must be indented"
@@ -164,7 +170,10 @@ pub(crate) fn outline_action_allowed(app: &mut App) -> bool {
         return false;
     }
     if app.time.is_some() {
-        app.toast_err(t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)"));
+        app.toast_err(t!(
+            "履歴を表示中 — 読み取り専用（Esc で最新へ）",
+            "viewing history — read-only (Esc → NOW)"
+        ));
         return false;
     }
     if !ensure_editable(app) {
@@ -188,7 +197,13 @@ pub(crate) fn outline_action_allowed(app: &mut App) -> bool {
 /// and the rollback every outline action shares: the snapshot is the page
 /// as it stands NOW, so a job the worker never took leaves no screen-only
 /// fact behind.
-pub(crate) fn queue_outline_action(app: &mut App, ctx: &Ctx, label: &str, done: String, ops: Vec<EditOp>) {
+pub(crate) fn queue_outline_action(
+    app: &mut App,
+    ctx: &Ctx,
+    label: &str,
+    done: String,
+    ops: Vec<EditOp>,
+) {
     let snapshot = outline_snapshot(app);
     if let Some(job) = do_edit(app, ctx, label, ops) {
         app.outline_pending = Some(OutlinePending { job, snapshot });
@@ -220,7 +235,10 @@ pub(crate) fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: Out
     let scope = if block {
         OutlineScope::Block(app.cursor)
     } else {
-        let (start, end) = app.selection.map(|selection| selection.range()).unwrap_or((app.cursor, app.cursor));
+        let (start, end) = app
+            .selection
+            .map(|selection| selection.range())
+            .unwrap_or((app.cursor, app.cursor));
         OutlineScope::Lines(LineRange::new(start, end))
     };
     let source: Vec<String> = app.lines.iter().map(|line| line.text.clone()).collect();
@@ -236,7 +254,10 @@ pub(crate) fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: Out
         OutlinePlan::Replace { range, texts } => {
             let ops = (range.start..=range.end)
                 .zip(texts)
-                .map(|(line, text)| EditOp::Replace { id: app.lines[line].id.clone(), text })
+                .map(|(line, text)| EditOp::Replace {
+                    id: app.lines[line].id.clone(),
+                    text,
+                })
                 .collect();
             (
                 t!("アウトラインの字下げ", "outline indent"),
@@ -244,7 +265,11 @@ pub(crate) fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: Out
                 ops,
             )
         }
-        OutlinePlan::Move { range, destination, destination_start: _ } => {
+        OutlinePlan::Move {
+            range,
+            destination,
+            destination_start: _,
+        } => {
             let anchor = match destination {
                 Destination::Before(line) => app.lines[line].id.clone(),
                 Destination::End => "_end".to_string(),
@@ -255,9 +280,14 @@ pub(crate) fn edit_outline(app: &mut App, ctx: &Ctx, block: bool, direction: Out
                 .collect();
             let mut ops: Vec<EditOp> = app.lines[range.start..=range.end]
                 .iter()
-                .map(|line| EditOp::Delete { id: line.id.clone() })
+                .map(|line| EditOp::Delete {
+                    id: line.id.clone(),
+                })
                 .collect();
-            ops.push(EditOp::Insert { anchor, lines: inserted });
+            ops.push(EditOp::Insert {
+                anchor,
+                lines: inserted,
+            });
             (
                 t!("アウトラインの移動", "outline move"),
                 t!("…移動を保存中", "…saving move"),
@@ -326,14 +356,21 @@ pub(crate) fn enter_move_mode(app: &mut App, ctx: &Ctx) {
 /// reordered or re-indented, so every id — and every permalink, telomere
 /// and comment hanging off it — stays exactly where it was. Nothing goes
 /// to the server, nothing goes onto the undo stack.
-pub(crate) fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirection, whole_sibling: bool) {
+pub(crate) fn move_mode_step(
+    app: &mut App,
+    ctx: &Ctx,
+    direction: OutlineDirection,
+    whole_sibling: bool,
+) {
     let Some((start, end)) = move_block_range(app) else {
         // The grabbed lines are gone. Nothing in the mode can do that, and
         // remote application is held while it is up, so this is the
         // unexpected case — which is exactly why it must not keep the
         // half-dragged arrangement. The page goes back to what it was when
         // the block was picked up, and the disagreement is recorded.
-        let Some(mode) = app.move_mode.take() else { return };
+        let Some(mode) = app.move_mode.take() else {
+            return;
+        };
         app.lines = mode.before;
         app.cursor = mode.cursor.min(app.lines.len().saturating_sub(1));
         app.selection = mode.selection;
@@ -358,12 +395,12 @@ pub(crate) fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirecti
     // coming back in — so the rule cost keystrokes without protecting any
     // arrangement.
     let range = LineRange::new(start, end);
-    let scope = if whole_sibling && matches!(direction, OutlineDirection::Up | OutlineDirection::Down)
-    {
-        OutlineScope::Grabbed(range)
-    } else {
-        OutlineScope::Lines(range)
-    };
+    let scope =
+        if whole_sibling && matches!(direction, OutlineDirection::Up | OutlineDirection::Down) {
+            OutlineScope::Grabbed(range)
+        } else {
+            OutlineScope::Lines(range)
+        };
     let plan = match cosense::outline::plan(&source, scope, direction) {
         Ok(plan) => plan,
         Err(error) => {
@@ -386,7 +423,11 @@ pub(crate) fn move_mode_step(app: &mut App, ctx: &Ctx, direction: OutlineDirecti
                 app.lines[line].text = text;
             }
         }
-        OutlinePlan::Move { range, destination: _, destination_start } => {
+        OutlinePlan::Move {
+            range,
+            destination: _,
+            destination_start,
+        } => {
             let block: Vec<PageLine> = app.lines.drain(range.start..=range.end).collect();
             let at = destination_start.min(app.lines.len());
             app.lines.splice(at..at, block);
@@ -426,7 +467,10 @@ pub(crate) fn move_mode_edit(
             .iter()
             .zip(after)
             .filter(|(was, now)| was.text != now.text)
-            .map(|(_, now)| EditOp::Replace { id: now.id.clone(), text: now.text.clone() })
+            .map(|(_, now)| EditOp::Replace {
+                id: now.id.clone(),
+                text: now.text.clone(),
+            })
             .collect();
         return (!ops.is_empty()).then(|| {
             (
@@ -445,8 +489,10 @@ pub(crate) fn move_mode_edit(
         .get(start + block.len())
         .map(|line| line.id.clone())
         .unwrap_or_else(|| "_end".to_string());
-    let mut ops: Vec<EditOp> =
-        block.iter().map(|id| EditOp::Delete { id: id.clone() }).collect();
+    let mut ops: Vec<EditOp> = block
+        .iter()
+        .map(|id| EditOp::Delete { id: id.clone() })
+        .collect();
     ops.push(EditOp::Insert {
         anchor,
         lines: final_block
@@ -467,7 +513,9 @@ pub(crate) fn move_mode_edit(
 /// the same write path every other edit uses, which is also what makes it
 /// one undo step and what puts the cursor back on the moved block.
 pub(crate) fn leave_move_mode(app: &mut App, ctx: &Ctx) {
-    let Some(mode) = app.move_mode.take() else { return };
+    let Some(mode) = app.move_mode.take() else {
+        return;
+    };
     let after = std::mem::replace(&mut app.lines, mode.before);
     app.cursor = mode.cursor;
     app.selection = mode.selection;
@@ -498,7 +546,12 @@ pub(crate) struct MoveRebase {
 /// Replace-only indentation history deliberately does not pass this gate.
 pub(crate) fn move_shape(app: &App, ops: &[EditOp]) -> Option<MoveShape> {
     let (last, deletes) = ops.split_last()?;
-    let EditOp::Insert { lines: inserted, .. } = last else { return None };
+    let EditOp::Insert {
+        lines: inserted, ..
+    } = last
+    else {
+        return None;
+    };
     if deletes.is_empty() || deletes.len() != inserted.len() {
         return None;
     }
@@ -511,12 +564,20 @@ pub(crate) fn move_shape(app: &App, ops: &[EditOp]) -> Option<MoveShape> {
         .collect::<Option<_>>()?;
     let start = app.lines.iter().position(|line| line.id == deleted[0])?;
     let source = app.lines.get(start..start + deleted.len())?;
-    if source.iter().map(|line| line.id.as_str()).ne(deleted.iter().copied())
-        || inserted.iter().any(|(id, _)| app.lines.iter().any(|line| line.id == *id))
+    if source
+        .iter()
+        .map(|line| line.id.as_str())
+        .ne(deleted.iter().copied())
+        || inserted
+            .iter()
+            .any(|(id, _)| app.lines.iter().any(|line| line.id == *id))
     {
         return None;
     }
-    Some(MoveShape { start, len: deleted.len() })
+    Some(MoveShape {
+        start,
+        len: deleted.len(),
+    })
 }
 
 /// If these ops are a source move, remember offsets inside the logical
@@ -527,19 +588,36 @@ pub(crate) fn prepare_move_rebase(app: &App, ops: &[EditOp]) -> Option<MoveRebas
     let cursor = app.cursor.checked_sub(shape.start)?.min(shape.len - 1);
     let selection = app.selection.and_then(|selection| {
         let (a, b) = selection.range();
-        (a == shape.start && b + 1 == shape.start + shape.len)
-            .then(|| (selection.anchor - shape.start, selection.cursor - shape.start))
+        (a == shape.start && b + 1 == shape.start + shape.len).then(|| {
+            (
+                selection.anchor - shape.start,
+                selection.cursor - shape.start,
+            )
+        })
     });
     Some(MoveRebase { cursor, selection })
 }
 
 pub(crate) fn apply_move_rebase(app: &mut App, ops: &[EditOp], rebase: MoveRebase) -> bool {
-    let Some(EditOp::Insert { lines: inserted, .. }) = ops.last() else { return false };
-    let locate = |offset: usize| app.lines.iter().position(|line| line.id == inserted[offset].0);
-    let Some(cursor) = locate(rebase.cursor) else { return false };
+    let Some(EditOp::Insert {
+        lines: inserted, ..
+    }) = ops.last()
+    else {
+        return false;
+    };
+    let locate = |offset: usize| {
+        app.lines
+            .iter()
+            .position(|line| line.id == inserted[offset].0)
+    };
+    let Some(cursor) = locate(rebase.cursor) else {
+        return false;
+    };
     app.cursor = cursor;
     app.selection = rebase.selection.and_then(|(anchor, cursor)| {
-        locate(anchor).zip(locate(cursor)).map(|(anchor, cursor)| Selection { anchor, cursor })
+        locate(anchor)
+            .zip(locate(cursor))
+            .map(|(anchor, cursor)| Selection { anchor, cursor })
     });
     app.follow = true;
     true
@@ -549,7 +627,12 @@ pub(crate) fn apply_move_rebase(app: &mut App, ops: &[EditOp], rebase: MoveRebas
 /// queued against it, and replace it with server truth. The pre-action
 /// snapshot is restored first, so even a failed reload cannot leave the
 /// outline move as a screen-only success.
-pub(crate) fn recover_outline_action(app: &mut App, ctx: &Ctx, pending: OutlineSnapshot, reason: String) {
+pub(crate) fn recover_outline_action(
+    app: &mut App,
+    ctx: &Ctx,
+    pending: OutlineSnapshot,
+    reason: String,
+) {
     recover_outline_action_with(app, ctx, pending, reason, reload_page);
 }
 
@@ -572,7 +655,10 @@ pub(crate) fn recover_outline_action_with(
         return;
     }
 
-    let cursor_id = pending.lines.get(pending.cursor).map(|line| line.id.clone());
+    let cursor_id = pending
+        .lines
+        .get(pending.cursor)
+        .map(|line| line.id.clone());
     let selection_ids = pending.selection.and_then(|selection| {
         pending
             .lines

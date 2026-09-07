@@ -1,5 +1,5 @@
-use crate::*;
 use crate::tests::support::*;
+use crate::*;
 
 /// Cosense has no official shortcut for heading levels — the community
 /// UserScript uses `Ctrl+8`, which a terminal delivers as Backspace —
@@ -29,7 +29,11 @@ fn ctrl_t_cycles_the_heading_level() {
     handle_session_key(&mut app, &ctx, ctrl('t'));
     let s = app.session.as_ref().unwrap();
     assert_eq!(s.input.buf, "[* abcdef]");
-    assert_eq!(&s.input.buf[s.input.cur..s.input.cur + 1], "d", "still before d");
+    assert_eq!(
+        &s.input.buf[s.input.cur..s.input.cur + 1],
+        "d",
+        "still before d"
+    );
 
     // A heading with other notation inside keeps it.
     let mut app = page(&["title", "[改善案] を見る"]);
@@ -52,12 +56,23 @@ fn a_read_double_click_only_places_the_caret() {
     app.bar_rect = Rect::new(41, 1, 1, 10);
     app.view_h = 10;
     let click = |app: &mut App, col: u16| {
-        handle_mouse_content(app, &ctx, mouse(MouseEventKind::Down(MouseButton::Left), col, 3));
-        handle_mouse_content(app, &ctx, mouse(MouseEventKind::Up(MouseButton::Left), col, 3));
+        handle_mouse_content(
+            app,
+            &ctx,
+            mouse(MouseEventKind::Down(MouseButton::Left), col, 3),
+        );
+        handle_mouse_content(
+            app,
+            &ctx,
+            mouse(MouseEventKind::Up(MouseButton::Left), col, 3),
+        );
     };
 
     click(&mut app, 7);
-    assert!(app.session.is_none(), "a single click only moves the cursor");
+    assert!(
+        app.session.is_none(),
+        "a single click only moves the cursor"
+    );
     assert_eq!(app.cursor, 1);
     click(&mut app, 7);
     let s = app.session.as_ref().unwrap();
@@ -102,14 +117,22 @@ fn arrows_walk_display_rows_inside_a_wrapped_line() {
     handle_session_key(&mut app, &ctx, key(KeyCode::Down));
     let s = app.session.as_ref().unwrap();
     assert_eq!(s.line, 2);
-    assert_eq!(s.input.cur, "after".len().min(3), "the sticky column, clamped");
+    assert_eq!(
+        s.input.cur,
+        "after".len().min(3),
+        "the sticky column, clamped"
+    );
 
     // Up from there lands on the LAST row of the wrapped line, not its
     // first — the row that is visually just above.
     handle_session_key(&mut app, &ctx, key(KeyCode::Up));
     let s = app.session.as_ref().unwrap();
     assert_eq!(s.line, 1);
-    assert!(s.input.cur >= width, "landed on the last row: {}", s.input.cur);
+    assert!(
+        s.input.cur >= width,
+        "landed on the last row: {}",
+        s.input.cur
+    );
 
     // And up again walks back inside the line.
     handle_session_key(&mut app, &ctx, key(KeyCode::Up));
@@ -149,16 +172,28 @@ fn clicking_a_wrapped_row_lands_where_the_eye_is() {
     handle_mouse_content(
         &mut app,
         &ctx,
-        mouse(MouseEventKind::Down(MouseButton::Left), 1 + 2, 2 + first as u16),
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            1 + 2,
+            2 + first as u16,
+        ),
     );
     handle_mouse_content(
         &mut app,
         &ctx,
-        mouse(MouseEventKind::Drag(MouseButton::Left), 1 + 2, 2 + first as u16 + 1),
+        mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            1 + 2,
+            2 + first as u16 + 1,
+        ),
     );
     let (a, b) = app.session.as_ref().unwrap().sel_span().expect("a span");
     assert_eq!((a, b), (head, next), "the run between the two clicks");
-    assert_eq!(&long[a..b], &long[2..row_w + 2], "…which is what the eye dragged over");
+    assert_eq!(
+        &long[a..b],
+        &long[2..row_w + 2],
+        "…which is what the eye dragged over"
+    );
 }
 
 /// A selection you cannot see is not a selection. The caret line is
@@ -188,7 +223,10 @@ fn a_character_selection_is_visible_on_the_caret_line() {
         .filter(|sp| sp.style.add_modifier.contains(Modifier::REVERSED))
         .map(|sp| sp.content.as_ref())
         .collect();
-    assert_eq!(picked, "hello", "the selected run is the one that stands out");
+    assert_eq!(
+        picked, "hello",
+        "the selected run is the one that stands out"
+    );
     let rest: String = line
         .spans
         .iter()
@@ -239,12 +277,23 @@ fn x_no_longer_deletes_and_says_where_deletion_lives() {
     handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
     assert_eq!(app.lines.len(), 3, "nothing was deleted");
     assert!(drain_jobs(&mut app).is_empty(), "and nothing was committed");
-    assert!(app.toast_text().contains("^k"), "status: {}", app.toast_text());
-    assert!(app.toast_text().contains("⌫"), "status: {}", app.toast_text());
+    assert!(
+        app.toast_text().contains("^k"),
+        "status: {}",
+        app.toast_text()
+    );
+    assert!(
+        app.toast_text().contains("⌫"),
+        "status: {}",
+        app.toast_text()
+    );
 
     // Not even with a selection: that range belongs to `c` (comment)
     // in READ, and to ⌫ in EDIT.
-    app.selection = Some(Selection { anchor: 1, cursor: 2 });
+    app.selection = Some(Selection {
+        anchor: 1,
+        cursor: 2,
+    });
     handle_key(&mut app, &ctx, key(KeyCode::Char('x')));
     assert_eq!(app.lines.len(), 3);
 }

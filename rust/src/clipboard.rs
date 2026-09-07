@@ -63,7 +63,10 @@ fn macos(out: &Path) -> Result<PathBuf, Reason> {
             return Err(Reason::HelperBuilding);
         }
     };
-    let res = Command::new(&bin).arg(out).output().map_err(|e| Reason::Other(e.to_string()))?;
+    let res = Command::new(&bin)
+        .arg(out)
+        .output()
+        .map_err(|e| Reason::Other(e.to_string()))?;
     match res.status.code() {
         Some(0) => {
             let path = String::from_utf8_lossy(&res.stdout).trim().to_string();
@@ -73,27 +76,47 @@ fn macos(out: &Path) -> Result<PathBuf, Reason> {
             Ok(PathBuf::from(path))
         }
         Some(1) => Err(Reason::NoImage),
-        _ => Err(Reason::Other(String::from_utf8_lossy(&res.stderr).trim().to_string())),
+        _ => Err(Reason::Other(
+            String::from_utf8_lossy(&res.stderr).trim().to_string(),
+        )),
     }
 }
 
 fn linux(out: &Path) -> Result<PathBuf, Reason> {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
     let attempts: &[(&str, &[&str])] = if wayland {
-        &[("wl-paste", &["--no-newline", "--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])]
+        &[
+            ("wl-paste", &["--no-newline", "--type", "image/png"]),
+            (
+                "xclip",
+                &["-selection", "clipboard", "-t", "image/png", "-o"],
+            ),
+        ]
     } else {
-        &[("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]), ("wl-paste", &["--no-newline", "--type", "image/png"])]
+        &[
+            (
+                "xclip",
+                &["-selection", "clipboard", "-t", "image/png", "-o"],
+            ),
+            ("wl-paste", &["--no-newline", "--type", "image/png"]),
+        ]
     };
     let mut any_tool = false;
     for (tool, args) in attempts {
-        let Ok(res) = Command::new(tool).args(*args).output() else { continue };
+        let Ok(res) = Command::new(tool).args(*args).output() else {
+            continue;
+        };
         any_tool = true;
         if res.status.success() && is_png(&res.stdout) {
             std::fs::write(out, &res.stdout).map_err(|e| Reason::Other(e.to_string()))?;
             return Ok(out.to_path_buf());
         }
     }
-    Err(if any_tool { Reason::NoImage } else { Reason::NoTool })
+    Err(if any_tool {
+        Reason::NoImage
+    } else {
+        Reason::NoTool
+    })
 }
 
 /// PNG signature — what the Linux tools must hand back for the clipboard
@@ -104,7 +127,9 @@ pub fn is_png(bytes: &[u8]) -> bool {
 
 fn which(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(cmd)).find(|p| p.is_file())
+    std::env::split_paths(&path)
+        .map(|d| d.join(cmd))
+        .find(|p| p.is_file())
 }
 
 // ---- the helper's build, mirroring `ime` ---------------------------------
@@ -115,7 +140,10 @@ fn helper_dir() -> PathBuf {
 }
 
 fn helper_bin_name() -> String {
-    format!("pbimage-{:08x}", (crate::ime::fnv1a(PBIMAGE_SWIFT.as_bytes()) & 0xffff_ffff) as u32)
+    format!(
+        "pbimage-{:08x}",
+        (crate::ime::fnv1a(PBIMAGE_SWIFT.as_bytes()) & 0xffff_ffff) as u32
+    )
 }
 
 fn bin_path() -> Option<PathBuf> {
@@ -128,7 +156,10 @@ static BUILD_STARTED: AtomicBool = AtomicBool::new(false);
 /// Compile the helper in the background, once per process, so the first
 /// `^v` does not sit on swiftc. A no-op off macOS and when it exists.
 pub fn start_background_build() {
-    if !cfg!(target_os = "macos") || bin_path().is_some() || BUILD_STARTED.swap(true, Ordering::SeqCst) {
+    if !cfg!(target_os = "macos")
+        || bin_path().is_some()
+        || BUILD_STARTED.swap(true, Ordering::SeqCst)
+    {
         return;
     }
     std::thread::spawn(|| {
@@ -145,7 +176,10 @@ fn ensure_binary() -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     let src = dir.join("pbimage.swift");
     std::fs::write(&src, PBIMAGE_SWIFT).ok()?;
-    let status = Command::new("swiftc").args(["-O", src.to_str()?, "-o", bin.to_str()?]).status().ok()?;
+    let status = Command::new("swiftc")
+        .args(["-O", src.to_str()?, "-o", bin.to_str()?])
+        .status()
+        .ok()?;
     (status.success() && bin.exists()).then_some(bin)
 }
 

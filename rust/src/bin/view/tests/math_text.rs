@@ -4,21 +4,24 @@
 //! ブロックが数式として描かれること、編集中はソースに戻ること、
 //! lib が読めない式はコードブロックのまま残ること。
 
-use crate::*;
 use super::support::*;
+use crate::*;
 
-    /// The preview rows (`Row::Aside` — attached chrome, never page content).
-    fn preview_rows(app: &App) -> Vec<String> {
-        app.rows
-            .iter()
-            .filter_map(|r| match r {
-                Row::Aside { line } => Some(
-                    line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
-                ),
-                _ => None,
-            })
-            .collect()
-    }
+/// The preview rows (`Row::Aside` — attached chrome, never page content).
+fn preview_rows(app: &App) -> Vec<String> {
+    app.rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Aside { line } => Some(
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
 
 fn math_page(header: &str, body: &[&str]) -> App {
     let mut texts: Vec<String> = vec!["t".into(), header.into()];
@@ -56,7 +59,10 @@ fn a_formula_never_asks_the_browser() {
     // 見当違いの場所を撮るくらいなら、テキストとソースで止める。
     let mut app = math_page("code:tex", &[r"\frac{a}{b}"]);
     app.rebuild(80);
-    assert!(!app.start_web_renders(capability::Trigger::Auto), "no job queued");
+    assert!(
+        !app.start_web_renders(capability::Trigger::Auto),
+        "no job queued"
+    );
     assert!(diagram_keys(&app).is_empty(), "no cache key for math");
 }
 
@@ -72,8 +78,14 @@ fn editing_a_formula_shows_its_source() {
     });
     app.rebuild(80);
     let text = text_rows(&app);
-    assert!(text.iter().any(|t| t.contains("frac")), "raw source: {text:?}");
-    assert!(text.iter().any(|t| t.contains("code:tex")), "header too: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains("frac")),
+        "raw source: {text:?}"
+    );
+    assert!(
+        text.iter().any(|t| t.contains("code:tex")),
+        "header too: {text:?}"
+    );
 }
 
 #[test]
@@ -82,7 +94,10 @@ fn latex_the_lib_cannot_read_stays_a_code_block() {
     let mut app = math_page("code:tex", &["\\begin{align}", "x &= 1", "\\end{align}"]);
     app.rebuild(80);
     let text = text_rows(&app);
-    assert!(text.iter().any(|t| t.contains("code:tex")), "header stays: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains("code:tex")),
+        "header stays: {text:?}"
+    );
     assert!(
         text.iter().any(|t| t.contains(r"\begin{align}")),
         "source stays: {text:?}"
@@ -94,11 +109,17 @@ fn a_formula_too_wide_for_the_pane_falls_back_to_source() {
     let mut app = math_page("code:tex", &[r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}"]);
     app.rebuild(20);
     let text = text_rows(&app);
-    assert!(text.iter().any(|t| t.contains("frac")), "source at 20 cols: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains("frac")),
+        "source at 20 cols: {text:?}"
+    );
     app.laid_width = 0;
     app.rebuild(80);
     let text = text_rows(&app);
-    assert!(!text.iter().any(|t| t.contains("frac")), "drawn at 80 cols: {text:?}");
+    assert!(
+        !text.iter().any(|t| t.contains("frac")),
+        "drawn at 80 cols: {text:?}"
+    );
 }
 
 #[test]
@@ -138,9 +159,7 @@ fn a_tall_inline_formula_is_drawn_around_the_words() {
     let at = |needle: &str| {
         texts
             .iter()
-            .find(|(_, _, piece)| {
-                piece.line.spans.iter().any(|s| s.content.contains(needle))
-            })
+            .find(|(_, _, piece)| piece.line.spans.iter().any(|s| s.content.contains(needle)))
             .unwrap_or_else(|| panic!("{needle} missing: {texts:?}"))
     };
     assert_eq!(at("解は").0, 1, "the words read on the middle row");
@@ -161,7 +180,11 @@ fn a_tall_inline_formula_falls_back_to_latex_in_a_narrow_pane() {
                 texts
                     .iter()
                     .map(|(_, _, p)| {
-                        p.line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                        p.line
+                            .spans
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect::<String>()
                     })
                     .collect::<Vec<_>>()
                     .join(""),
@@ -170,7 +193,10 @@ fn a_tall_inline_formula_falls_back_to_latex_in_a_narrow_pane() {
         })
         .collect::<Vec<_>>()
         .join("");
-    assert!(joined.contains(r"\frac"), "LaTeX when it cannot fit: {joined:?}");
+    assert!(
+        joined.contains(r"\frac"),
+        "LaTeX when it cannot fit: {joined:?}"
+    );
 }
 
 #[test]
@@ -207,7 +233,10 @@ fn a_blank_line_inside_a_tex_block_keeps_the_formula_alive() {
     app.page_id = "PAGE".into();
     app.rebuild(80);
     let text = text_rows(&app);
-    assert!(text.iter().any(|t| t.contains('─')), "still a formula: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains('─')),
+        "still a formula: {text:?}"
+    );
     assert!(
         !text.iter().any(|t| t.contains("frac")),
         "not source: {text:?}"
@@ -235,13 +264,23 @@ fn leaving_a_tex_block_takes_deleting_the_indent() {
     enter_session(&mut app, &ctx, 2, len);
     handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
     let s = app.session.as_ref().unwrap();
-    assert_eq!(s.input.buf.as_str(), " ", "a blank line with the block's indent");
+    assert_eq!(
+        s.input.buf.as_str(),
+        " ",
+        "a blank line with the block's indent"
+    );
     assert!(app.code_span_at_line(3).is_some(), "still inside");
     handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
     let s = app.session.as_ref().unwrap();
     assert_eq!(s.input.buf.as_str(), "", "indent gone");
-    assert!(!app.code_span_at_line(3).map(|sp| sp.mermaid_header).unwrap_or(false));
-    assert!(app.code_span_at_line(3).is_none(), "out — the block is behind us");
+    assert!(!app
+        .code_span_at_line(3)
+        .map(|sp| sp.mermaid_header)
+        .unwrap_or(false));
+    assert!(
+        app.code_span_at_line(3).is_none(),
+        "out — the block is behind us"
+    );
 }
 
 #[test]
@@ -251,13 +290,21 @@ fn editing_a_formula_previews_it_below_the_source() {
     let ctx = test_ctx();
     let mut app = math_page(
         "code:tex",
-        &[r"\begin{pmatrix}", r"a & b \\", r"c & d \\", r"\end{pmatrix}"],
+        &[
+            r"\begin{pmatrix}",
+            r"a & b \\",
+            r"c & d \\",
+            r"\end{pmatrix}",
+        ],
     );
     app.rebuild(80);
     enter_session(&mut app, &ctx, 2, 4);
     app.rebuild(80);
     let text = text_rows(&app);
-    assert!(text.iter().any(|t| t.contains("code:tex")), "source: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains("code:tex")),
+        "source: {text:?}"
+    );
     let preview = preview_rows(&app);
     assert!(
         preview.iter().any(|t| t.contains("プレビュー")),
@@ -268,7 +315,10 @@ fn editing_a_formula_previews_it_below_the_source() {
         "the matrix is drawn under the source: {text:?}"
     );
     assert!(
-        !text.iter().take_while(|t| !t.contains('▏')).any(|t| t.contains('▏')),
+        !text
+            .iter()
+            .take_while(|t| !t.contains('▏'))
+            .any(|t| t.contains('▏')),
         "the bar starts only at the preview"
     );
 }
@@ -300,8 +350,14 @@ fn an_unsettable_formula_previews_nothing() {
     enter_session(&mut app, &ctx, 2, 4);
     app.rebuild(80);
     let text = text_rows(&app);
-    assert!(text.iter().any(|t| t.contains("code:tex")), "source stays: {text:?}");
-    assert!(!text.iter().any(|t| t.contains('▏')), "no preview: {text:?}");
+    assert!(
+        text.iter().any(|t| t.contains("code:tex")),
+        "source stays: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|t| t.contains('▏')),
+        "no preview: {text:?}"
+    );
     assert!(preview_rows(&app).is_empty(), "no preview rows either");
 }
 
@@ -319,14 +375,19 @@ fn editing_a_line_with_inline_formulas_previews_them_beside_it() {
     enter_session(&mut app, &ctx, 1, 6);
     app.rebuild(80);
     let preview = preview_rows(&app);
-    assert!(preview.iter().any(|t| t.contains("プレビュー")), "{preview:?}");
+    assert!(
+        preview.iter().any(|t| t.contains("プレビュー")),
+        "{preview:?}"
+    );
     assert!(
         preview.iter().any(|t| t.contains("x² dx")),
         "the integral is drawn: {preview:?}"
     );
     // 横に並ぶ:積分と和が同じ行に載っている。
     assert!(
-        preview.iter().any(|t| t.contains("x² dx") && t.contains("∑")),
+        preview
+            .iter()
+            .any(|t| t.contains("x² dx") && t.contains("∑")),
         "side by side: {preview:?}"
     );
 }

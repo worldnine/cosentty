@@ -27,10 +27,7 @@ pub fn text_tier_off() -> bool {
 /// lib は空の行をもう一段組んでしまう(`⎝  ⎠` だけの行が浮く)。
 /// pmatrix を素直に書くと必ずこうなるため、投げる前に落とす。
 fn trim_trailing_row_break(code: &str) -> String {
-    let no_blanks: Vec<&str> = code
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
+    let no_blanks: Vec<&str> = code.lines().filter(|l| !l.trim().is_empty()).collect();
     let code = no_blanks.join("\n");
     // 行区切りが意味を持たないのは2か所だけ: 式の末尾と、
     // `\end{...}` の直前。中途の `\\` は行を分ける本来の仕事。
@@ -130,7 +127,11 @@ pub fn render_rows(latex: &str) -> Option<Rendered> {
     if rows.is_empty() || rows.iter().all(|r| r.trim().is_empty()) {
         return None;
     }
-    Some(Rendered { baseline: baseline.min(rows.len() - 1), width, rows })
+    Some(Rendered {
+        baseline: baseline.min(rows.len() - 1),
+        width,
+        rows,
+    })
 }
 
 /// 行の中にそのまま置ける式だけを1行の文字列で返す。
@@ -166,14 +167,17 @@ pub fn join_beside(blocks: &[Rendered]) -> Option<Rendered> {
         rows.push(line.trim_end().to_string());
     }
     let width = rows.iter().map(|r| str_width(r)).max()?;
-    (!rows.is_empty()).then(|| Rendered { rows, baseline: above, width })
+    (!rows.is_empty()).then(|| Rendered {
+        rows,
+        baseline: above,
+        width,
+    })
 }
 
 /// 1行に書かれたインライン数式を全部組んで、横に並べた1枚にする。
 /// 一つも組めなければ None。
 pub fn preview_line(latexes: &[String]) -> Option<Rendered> {
-    let blocks: Vec<Rendered> =
-        latexes.iter().filter_map(|l| render_rows(l)).collect();
+    let blocks: Vec<Rendered> = latexes.iter().filter_map(|l| render_rows(l)).collect();
     join_beside(&blocks)
 }
 
@@ -191,7 +195,10 @@ mod tests {
         assert_eq!(joined.rows.len(), 3, "{joined:?}");
         assert_eq!(joined.baseline, 1);
         assert!(joined.rows[1].contains("x = 1"), "{joined:?}");
-        assert!(joined.rows[0].contains('a') && joined.rows[2].contains('b'), "{joined:?}");
+        assert!(
+            joined.rows[0].contains('a') && joined.rows[2].contains('b'),
+            "{joined:?}"
+        );
         // 各行の行末の空白は削られている。
         for r in &joined.rows {
             assert_eq!(r.trim_end(), r, "{joined:?}");
@@ -256,7 +263,10 @@ mod tests {
     fn unsupported_latex_declines_instead_of_printing_commands() {
         // align は lib が知らない。`\begin{align}` の字面を数式のふりで
         // 出さず、コードブロックのまま見せる。
-        assert_eq!(render_text("\\begin{align}\nx &= 1\n\\end{align}", 80), None);
+        assert_eq!(
+            render_text("\\begin{align}\nx &= 1\n\\end{align}", 80),
+            None
+        );
         assert_eq!(render_text(r"\qquad", 80), None);
         assert_eq!(render_text("", 80), None);
         assert_eq!(render_text("\n \n", 80), None);

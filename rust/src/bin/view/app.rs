@@ -10,13 +10,26 @@ pub(crate) enum Row {
     /// front of that. A row that is nobody's continuation has both zero.
     /// This is what turns a click back into a position in the source
     /// line's rendering — see `App::link_at_screen_position`.
-    Line { line: Line<'static>, src: usize, start: usize, hang: usize },
-    Blank { src: usize },
+    Line {
+        line: Line<'static>,
+        src: usize,
+        start: usize,
+        hang: usize,
+    },
+    Blank {
+        src: usize,
+    },
     /// A picture on a line of its own. `indent`: the display column it
     /// starts at, so it lines up with the text of its level. `item`: the
     /// picture IS the list item (it wears the bullet) rather than hanging
     /// under a line of text.
-    Image { url: String, height: u16, src: usize, indent: usize, item: bool },
+    Image {
+        url: String,
+        height: u16,
+        src: usize,
+        indent: usize,
+        item: bool,
+    },
     /// A line of text and pictures laid out together (see `layout_inline`):
     /// every part carries its own row and column inside the block.
     Inline {
@@ -40,18 +53,35 @@ pub(crate) enum Row {
     /// notation as written, `[URL]`, with the same brightness band a
     /// rendering diagram wears (see `ui::shimmer_across`). The picture
     /// replaces it when it lands, as a diagram replaces its code.
-    ImageLoading { src: usize, indent: usize, item: bool, url: String },
-    ImageError { msg: String, src: usize, indent: usize, item: bool },
-    Card { line: Line<'static> },
+    ImageLoading {
+        src: usize,
+        indent: usize,
+        item: bool,
+        url: String,
+    },
+    ImageError {
+        msg: String,
+        src: usize,
+        indent: usize,
+        item: bool,
+    },
+    Card {
+        line: Line<'static>,
+    },
     /// A heading or spacer of the related-pages sections below the frame:
     /// plain chrome, drawn as is (no band — that is the comment card's).
-    Aside { line: Line<'static> },
+    Aside {
+        line: Line<'static>,
+    },
     /// One row of the comment composer, woven in under the commented
     /// range like a card (akapen: the bar opens where the comment will
     /// sit). `caret`: the display column of the insertion point when this
     /// row holds it — the hardware cursor goes there, so the IME's
     /// composition window opens in the bar.
-    Composer { line: Line<'static>, caret: Option<u16> },
+    Composer {
+        line: Line<'static>,
+        caret: Option<u16>,
+    },
     FrameEnd,
 }
 
@@ -90,8 +120,14 @@ pub(crate) enum Mode {
 /// — no refetch and no jump back to the first row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Place {
-    Page { project: String, title: String },
-    Index { project: String, state: Box<cosense::index::Index> },
+    Page {
+        project: String,
+        title: String,
+    },
+    Index {
+        project: String,
+        state: Box<cosense::index::Index>,
+    },
 }
 
 pub(crate) struct App {
@@ -587,8 +623,7 @@ pub(crate) enum Overlay {
     Help,
 }
 
-impl Overlay {
-}
+impl Overlay {}
 
 /// Current wall-clock time in epoch seconds.
 pub(crate) fn now_secs() -> i64 {
@@ -796,7 +831,10 @@ impl App {
     pub(crate) fn shown_revision(&self) -> Option<cosense::comment::Revision> {
         let tm = self.time.as_ref()?;
         let p = tm.points.get(tm.pos)?;
-        Some(cosense::comment::Revision { snapshot_id: p.id.clone(), created: p.created })
+        Some(cosense::comment::Revision {
+            snapshot_id: p.id.clone(),
+            created: p.created,
+        })
     }
 
     /// Whether a comment belongs on the screen: this page, and the
@@ -806,7 +844,12 @@ impl App {
     pub(crate) fn comment_is_shown(&self, c: &Comment) -> bool {
         c.project == self.project
             && c.title == self.title
-            && c.snapshot_id() == self.time.as_ref().and_then(|tm| tm.points.get(tm.pos)).map(|p| p.id.as_str())
+            && c.snapshot_id()
+                == self
+                    .time
+                    .as_ref()
+                    .and_then(|tm| tm.points.get(tm.pos))
+                    .map(|p| p.id.as_str())
     }
 
     /// The comment whose range is exactly the current selection (or the
@@ -817,7 +860,9 @@ impl App {
             Some(sel) => sel.range(),
             None => (self.cursor, self.cursor),
         };
-        self.comments.iter().position(|c| self.comment_is_shown(c) && c.start == a && c.end == b)
+        self.comments
+            .iter()
+            .position(|c| self.comment_is_shown(c) && c.start == a && c.end == b)
     }
 
     /// True if a source line is covered by any saved comment.
@@ -865,7 +910,8 @@ impl App {
     /// so the caret line is drawn without a bullet and the caret arithmetic
     /// hangs from the block's own gutter.
     pub(crate) fn raw_span_at_line(&self, line: usize) -> Option<CodeSpan> {
-        self.code_span_at_line(line).or_else(|| self.table_span_at_line(line))
+        self.code_span_at_line(line)
+            .or_else(|| self.table_span_at_line(line))
     }
 
     /// Convenience for the places that only care whether it is code.
@@ -929,7 +975,9 @@ impl App {
         if delta == 0 {
             return;
         }
-        let Some((first, last)) = self.cursor_rows() else { return };
+        let Some((first, last)) = self.cursor_rows() else {
+            return;
+        };
         let n = self.rows.len() as isize;
         let cur = if delta > 0 { last } else { first } as isize;
         let target = (cur + delta).clamp(0, n - 1) as usize;
@@ -1000,7 +1048,9 @@ impl App {
     /// Scroll that pins the PAGE frame's bottom rule to the viewport bottom.
     /// Unlike max_scroll, this intentionally ignores related rows.
     pub(crate) fn frame_end_scroll(&self, band_h: u16) -> u16 {
-        self.frame_end_top().saturating_add(2).saturating_sub(band_h)
+        self.frame_end_top()
+            .saturating_add(2)
+            .saturating_sub(band_h)
     }
 
     /// Y offset of the cursor line's first display row, if it has any.
@@ -1017,7 +1067,9 @@ impl App {
     /// scroll (G does the same). akapen's `keep_cursor_visible`.
     pub(crate) fn follow_cursor(&mut self, body_h: u16) {
         let body_h = body_h.max(2); // cursor row + at least one rule row
-        let Some((first, last)) = self.cursor_rows() else { return };
+        let Some((first, last)) = self.cursor_rows() else {
+            return;
+        };
         let top = self.row_top(first);
         let bottom = self.row_top(last) + self.rows[last].height();
         if top < self.scroll {
@@ -1041,7 +1093,9 @@ impl App {
     /// 0 at scroll 0. A cursor line taller than the band cannot be moved
     /// clear and is left alone; so is a cursor already scrolled off-screen.
     pub(crate) fn keep_cursor_above(&mut self, text_y: u16, avoid_y: u16, band_h: u16) {
-        let Some((_, last)) = self.cursor_rows() else { return };
+        let Some((_, last)) = self.cursor_rows() else {
+            return;
+        };
         let bottom = self.row_top(last) + self.rows[last].height(); // exclusive
         if bottom <= self.scroll {
             return; // above the viewport: not under anything
@@ -1051,7 +1105,10 @@ impl App {
             return;
         }
         let need = (last_y - avoid_y as i32 + 1) as u16;
-        self.scroll = self.scroll.saturating_add(need).min(self.max_scroll(band_h));
+        self.scroll = self
+            .scroll
+            .saturating_add(need)
+            .min(self.max_scroll(band_h));
     }
 
     /// While composing, keep the whole composer bar on screen: it sits
@@ -1059,10 +1116,18 @@ impl App {
     /// below the fold when the range ends near the bottom (akapen's
     /// `keep_composer_visible_view`).
     pub(crate) fn keep_composer_visible(&mut self, body_h: u16) {
-        let Some(last) = self.rows.iter().rposition(|r| matches!(r, Row::Composer { .. })) else {
+        let Some(last) = self
+            .rows
+            .iter()
+            .rposition(|r| matches!(r, Row::Composer { .. }))
+        else {
             return;
         };
-        let first = self.rows.iter().position(|r| matches!(r, Row::Composer { .. })).unwrap_or(last);
+        let first = self
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Composer { .. }))
+            .unwrap_or(last);
         let top = self.row_top(first);
         let bottom = self.row_top(last) + 1;
         if bottom > self.scroll + body_h {
@@ -1074,7 +1139,11 @@ impl App {
         // Taller than the pane even so (a very small window): the caret's
         // row is the one that must be seen.
         if bottom - top > body_h {
-            if let Some(ci) = self.rows.iter().position(|r| matches!(r, Row::Composer { caret: Some(_), .. })) {
+            if let Some(ci) = self
+                .rows
+                .iter()
+                .position(|r| matches!(r, Row::Composer { caret: Some(_), .. }))
+            {
                 let cy = self.row_top(ci);
                 if cy < self.scroll {
                     self.scroll = cy;
@@ -1083,7 +1152,9 @@ impl App {
                 }
             }
         }
-        self.scroll = self.scroll.min(self.max_scroll(body_h).max(bottom.saturating_sub(body_h)));
+        self.scroll = self
+            .scroll
+            .min(self.max_scroll(body_h).max(bottom.saturating_sub(body_h)));
     }
 
     /// Wheel scroll: move the viewport by `delta` height units and leave
@@ -1130,7 +1201,10 @@ impl App {
         if self.lines.is_empty() {
             return None;
         }
-        let (a, b) = self.selection.map(|s| s.range()).unwrap_or((self.cursor, self.cursor));
+        let (a, b) = self
+            .selection
+            .map(|s| s.range())
+            .unwrap_or((self.cursor, self.cursor));
         let last = self.lines.len() - 1;
         // A related row (virtual line below the body) cannot anchor a
         // comment; a drag that merely overshoots into that area clamps.

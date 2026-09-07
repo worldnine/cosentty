@@ -118,14 +118,20 @@ pub struct IndexLayout {
 /// both parts can remain useful: below three list rows + a blank separator +
 /// two excerpt rows, the list wins and takes the body alone.
 pub fn layout(mode: PreviewMode, width: u16, height: u16) -> IndexLayout {
-    if !mode.shows_preview(width)
-        || height < LIST_MIN_ROWS + 1 + PREVIEW_MIN_ROWS
-    {
-        return IndexLayout { list: height, gap: 0, preview: None };
+    if !mode.shows_preview(width) || height < LIST_MIN_ROWS + 1 + PREVIEW_MIN_ROWS {
+        return IndexLayout {
+            list: height,
+            gap: 0,
+            preview: None,
+        };
     }
     let gap = 1;
     let preview = PREVIEW_ROWS.min(height - gap - LIST_MIN_ROWS);
-    IndexLayout { list: height - gap - preview, gap, preview: Some(preview) }
+    IndexLayout {
+        list: height - gap - preview,
+        gap,
+        preview: Some(preview),
+    }
 }
 
 /// How the list is ordered. All six are the page API's own `sort` values
@@ -406,7 +412,14 @@ pub enum Row<'a> {
 
 impl Index {
     pub fn new(entries: Vec<Entry>, total: usize, sort: SortKey) -> Self {
-        Self { entries, total, sort, focus: Pane::List, follow: true, ..Self::default() }
+        Self {
+            entries,
+            total,
+            sort,
+            focus: Pane::List,
+            follow: true,
+            ..Self::default()
+        }
     }
 
     /// Put `entries` in `sort` order.
@@ -421,9 +434,9 @@ impl Index {
         match sort {
             // The only ascending order, and the only one that is not a
             // number. Case-insensitive, as the site's own A→Z is.
-            SortKey::Title => entries.sort_by(|a, b| {
-                a.title.to_lowercase().cmp(&b.title.to_lowercase())
-            }),
+            SortKey::Title => {
+                entries.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            }
             SortKey::Linked => entries.sort_by(|a, b| b.linked.cmp(&a.linked)),
             SortKey::Views => entries.sort_by(|a, b| b.views.cmp(&a.views)),
             _ => entries.sort_by(|a, b| sort.stamp(b).cmp(&sort.stamp(a))),
@@ -477,7 +490,10 @@ impl Index {
         }
         let typed = self.filter.trim();
         !typed.is_empty()
-            && !self.entries.iter().any(|e| e.title.eq_ignore_ascii_case(typed))
+            && !self
+                .entries
+                .iter()
+                .any(|e| e.title.eq_ignore_ascii_case(typed))
     }
 
     /// The entry under the cursor, if the cursor is on a page (rather than
@@ -566,9 +582,12 @@ impl Index {
             return Vec::new();
         }
         let typed = self.filter.trim();
-        if typed.is_empty() { Vec::new() } else { vec![typed] }
+        if typed.is_empty() {
+            Vec::new()
+        } else {
+            vec![typed]
+        }
     }
-
 
     pub fn push_filter(&mut self, c: char) {
         let mut f = self.filter.clone();
@@ -638,7 +657,6 @@ impl Index {
     }
 }
 
-
 /// Byte ranges of `terms` inside `text`, merged and in order.
 ///
 /// Case-insensitive, by the SAME rule `rows()` filters with
@@ -657,7 +675,11 @@ pub fn match_ranges(text: &str, terms: &[&str]) -> Vec<(usize, usize)> {
     let hay: &str = if aligned { &lower } else { text };
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for term in terms {
-        let needle = if aligned { term.to_lowercase() } else { (*term).to_string() };
+        let needle = if aligned {
+            term.to_lowercase()
+        } else {
+            (*term).to_string()
+        };
         if needle.is_empty() {
             continue;
         }
@@ -687,7 +709,11 @@ pub fn match_ranges(text: &str, terms: &[&str]) -> Vec<(usize, usize)> {
 pub fn split_on_terms<'a>(text: &'a str, terms: &[&str]) -> Vec<(&'a str, bool)> {
     let ranges = match_ranges(text, terms);
     if ranges.is_empty() {
-        return if text.is_empty() { Vec::new() } else { vec![(text, false)] };
+        return if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![(text, false)]
+        };
     }
     let mut out: Vec<(&str, bool)> = Vec::new();
     let mut at = 0;
@@ -719,7 +745,11 @@ mod tests {
 
     fn index(titles: &[&str]) -> Index {
         let mut ix = Index::new(
-            titles.iter().enumerate().map(|(i, t)| entry(t, 100 - i as i64)).collect(),
+            titles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| entry(t, 100 - i as i64))
+                .collect(),
             titles.len(),
             SortKey::Updated,
         );
@@ -740,11 +770,18 @@ mod tests {
                 Row::Create(_) => None,
             })
             .collect();
-        assert_eq!(titles, vec!["画像表示テスト", "テスト"], "order is the list's, not the match's");
+        assert_eq!(
+            titles,
+            vec!["画像表示テスト", "テスト"],
+            "order is the list's, not the match's"
+        );
         // Filtering puts the cursor on the first match: that is what
         // typing is for.
         assert_eq!(ix.cursor, 0);
-        assert_eq!(ix.selected().map(|e| e.title.as_str()), Some("画像表示テスト"));
+        assert_eq!(
+            ix.selected().map(|e| e.title.as_str()),
+            Some("画像表示テスト")
+        );
     }
 
     #[test]
@@ -772,7 +809,11 @@ mod tests {
         assert!(ix.move_cursor(2));
         assert_eq!(ix.follow(3), 0, "still visible: the window does not move");
         assert!(ix.move_cursor(1));
-        assert_eq!(ix.follow(3), 1, "walked off the bottom: the window follows by one");
+        assert_eq!(
+            ix.follow(3),
+            1,
+            "walked off the bottom: the window follows by one"
+        );
         assert!(ix.move_cursor(99));
         assert_eq!(ix.cursor, 5, "and stops at the end");
         assert_eq!(ix.follow(3), 3);
@@ -808,7 +849,10 @@ mod tests {
         let mut ix = index(&["a", "b"]);
         ix.preview_scroll = 12;
         assert!(ix.move_cursor(1));
-        assert_eq!(ix.preview_scroll, 0, "a different page is read from its start");
+        assert_eq!(
+            ix.preview_scroll, 0,
+            "a different page is read from its start"
+        );
         ix.preview_scroll = 5;
         assert!(!ix.move_cursor(1), "at the end");
         assert_eq!(ix.preview_scroll, 5, "…so the reader keeps their place");
@@ -819,21 +863,40 @@ mod tests {
         let auto = PreviewMode::Auto;
         assert_eq!(
             layout(auto, 79, 20),
-            IndexLayout { list: 20, gap: 0, preview: None },
+            IndexLayout {
+                list: 20,
+                gap: 0,
+                preview: None
+            },
             "auto keeps the established 80-column threshold"
         );
         let normal = layout(auto, 80, 22);
-        assert_eq!(normal, IndexLayout { list: 15, gap: 1, preview: Some(6) });
+        assert_eq!(
+            normal,
+            IndexLayout {
+                list: 15,
+                gap: 1,
+                preview: Some(6)
+            }
+        );
         assert_eq!(normal.list + normal.gap + normal.preview.unwrap(), 22);
 
         // A short screen shrinks the excerpt before sacrificing the list.
         assert_eq!(
             layout(auto, 80, 7),
-            IndexLayout { list: 3, gap: 1, preview: Some(3) }
+            IndexLayout {
+                list: 3,
+                gap: 1,
+                preview: Some(3)
+            }
         );
         assert_eq!(
             layout(auto, 80, 5),
-            IndexLayout { list: 5, gap: 0, preview: None },
+            IndexLayout {
+                list: 5,
+                gap: 0,
+                preview: None
+            },
             "if both cannot be useful, the list wins"
         );
 
@@ -841,11 +904,19 @@ mod tests {
         // geometry.
         assert_eq!(
             layout(PreviewMode::Off, 200, 20),
-            IndexLayout { list: 20, gap: 0, preview: None }
+            IndexLayout {
+                list: 20,
+                gap: 0,
+                preview: None
+            }
         );
         assert_eq!(
             layout(PreviewMode::On, 40, 20),
-            IndexLayout { list: 13, gap: 1, preview: Some(6) }
+            IndexLayout {
+                list: 13,
+                gap: 1,
+                preview: Some(6)
+            }
         );
         assert_eq!(PreviewMode::parse("on"), Some(PreviewMode::On));
         assert_eq!(PreviewMode::parse("sometimes"), None);
@@ -900,7 +971,10 @@ mod tests {
     #[test]
     fn what_gets_marked_is_the_reason_the_row_is_listed() {
         let mut ix = index(&["改善案", "テスト"]);
-        assert!(ix.terms_for(&ix.entries[0]).is_empty(), "素の一覧は何も指さない");
+        assert!(
+            ix.terms_for(&ix.entries[0]).is_empty(),
+            "素の一覧は何も指さない"
+        );
 
         ix.set_filter("改善".into());
         assert_eq!(ix.terms_for(&ix.entries[0]), vec!["改善"]);
@@ -913,15 +987,25 @@ mod tests {
         );
 
         // ヒットは自分が一致した語を持ってくる。
-        let hit = Entry { matched: vec!["画像".into()], ..ix.entries[0].clone() };
-        assert_eq!(ix.terms_for(&hit), vec!["画像"], "ヒットは絞り込みの状態に関わらず自前");
+        let hit = Entry {
+            matched: vec!["画像".into()],
+            ..ix.entries[0].clone()
+        };
+        assert_eq!(
+            ix.terms_for(&hit),
+            vec!["画像"],
+            "ヒットは絞り込みの状態に関わらず自前"
+        );
     }
 
     #[test]
     fn a_read_only_project_never_offers_to_create() {
         let mut ix = index(&["改善案", "テスト"]);
         ix.set_filter("まだ無いページ".into());
-        assert!(ix.offers_create(), "writable: the offer is the point of typing");
+        assert!(
+            ix.offers_create(),
+            "writable: the offer is the point of typing"
+        );
         assert_eq!(ix.len(), 1);
 
         ix.can_create = false;
@@ -936,13 +1020,21 @@ mod tests {
         let mut ix = index(&["改善案", "画像表示テスト", "テスト"]);
         ix.begin_filter();
         ix.push_filter('図');
-        assert_eq!(ix.len(), 1, "no title has 図: the create offer is all that is left");
+        assert_eq!(
+            ix.len(),
+            1,
+            "no title has 図: the create offer is all that is left"
+        );
         assert!(ix.offers_create());
 
         ix.toggle_filter_mode();
         assert_eq!(ix.filter_mode, FilterMode::FullText);
         assert_eq!(ix.filter, "図", "the typed word carries over");
-        assert_eq!(ix.len(), 3, "the list stays as it is until the server answers");
+        assert_eq!(
+            ix.len(),
+            3,
+            "the list stays as it is until the server answers"
+        );
         assert!(!ix.offers_create(), "that word is a query, not a page name");
 
         // Back again, and it is a title filter once more.
@@ -999,7 +1091,10 @@ mod tests {
         assert_eq!(SortKey::Linked.column(&e), "1.2k");
         assert_eq!(SortKey::Views.column(&e), "17k");
         // The time orders read as an age, and each reads its OWN stamp.
-        assert!(SortKey::Updated.column(&e).ends_with('y'), "an age, not a count");
+        assert!(
+            SortKey::Updated.column(&e).ends_with('y'),
+            "an age, not a count"
+        );
         assert_eq!(SortKey::Created.stamp(&e), 1);
         assert_eq!(SortKey::Accessed.stamp(&e), 1);
         // `title` is not a number and not a time: the column keeps the
@@ -1028,7 +1123,10 @@ mod tests {
             linked: 0,
         };
         assert!(Entry::from_summary(p(100), None).unread, "never opened");
-        assert!(Entry::from_summary(p(100), Some(99)).unread, "edited since the visit");
+        assert!(
+            Entry::from_summary(p(100), Some(99)).unread,
+            "edited since the visit"
+        );
         assert!(!Entry::from_summary(p(100), Some(100)).unread);
         assert!(!Entry::from_summary(p(100), Some(101)).unread);
     }

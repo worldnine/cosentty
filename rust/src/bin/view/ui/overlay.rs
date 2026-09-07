@@ -11,28 +11,50 @@ use super::*;
 pub(crate) fn help_keys(app: &App) -> Vec<String> {
     let mut keys: Vec<String> = vec![
         t!("── READ ──", "── READ ──"),
-        t!("移動        j/k · g/G · ^u/^d · PgUp/PgDn · [ 戻る · ] 進む",
-           "move        j/k · g/G · ^u/^d · PgUp/PgDn · [ back · ] forward"),
-        t!("選択        Shift+↑↓ · J/K で広げる",
-           "select      Shift+↑↓ · J/K extend"),
-        t!("リンク      Enter/f で開く: ページ · 📎 ファイル → 保存先 · ↗ URL → ブラウザ",
-           "link        Enter/f open: page · 📎 file → download dir · ↗ URL → browser"),
-        t!("            Tab/S-Tab 次/前のリンク行へ",
-           "            Tab/S-Tab next/previous link line"),
-        t!("マウス      クリックでリンク/行移動 · ドラッグで選択 · ホイールでスクロール",
-           "mouse       click link/open · click row/move · drag/select · wheel/scroll"),
-        t!("表示        z ソース · w ブラウザ · t 行の詳細",
-           "view        z source · w browser · t line detail"),
-        t!("履歴        ← 古い版 · → 新しい版 · Esc 最新へ（履歴中は読むだけ）",
-           "history     ← older · → newer · Esc NOW (read-only back there)"),
-        t!("図          code:mmd は罫線・表で描く（テキスト優先）· R で未生成分を描く",
-           "diagram     code:mmd draws as text first · R renders the missing ones"),
-        t!("出力        y カーソル行/選択をコピー · Y ページ全体",
-           "output      y copy line/selection · Y whole page"),
-        t!("取り消し    u · ^z 取り消し · ^r やり直し（どのコミットも戻せます）",
-           "undo        u · ^z undo · ^r redo (every commit is reversible)"),
-        t!("終了        q 二度押し · ^c 即終了",
-           "quit        q twice · ^c at once"),
+        t!(
+            "移動        j/k · g/G · ^u/^d · PgUp/PgDn · [ 戻る · ] 進む",
+            "move        j/k · g/G · ^u/^d · PgUp/PgDn · [ back · ] forward"
+        ),
+        t!(
+            "選択        Shift+↑↓ · J/K で広げる",
+            "select      Shift+↑↓ · J/K extend"
+        ),
+        t!(
+            "リンク      Enter/f で開く: ページ · 📎 ファイル → 保存先 · ↗ URL → ブラウザ",
+            "link        Enter/f open: page · 📎 file → download dir · ↗ URL → browser"
+        ),
+        t!(
+            "            Tab/S-Tab 次/前のリンク行へ",
+            "            Tab/S-Tab next/previous link line"
+        ),
+        t!(
+            "マウス      クリックでリンク/行移動 · ドラッグで選択 · ホイールでスクロール",
+            "mouse       click link/open · click row/move · drag/select · wheel/scroll"
+        ),
+        t!(
+            "表示        z ソース · w ブラウザ · t 行の詳細",
+            "view        z source · w browser · t line detail"
+        ),
+        t!(
+            "履歴        ← 古い版 · → 新しい版 · Esc 最新へ（履歴中は読むだけ）",
+            "history     ← older · → newer · Esc NOW (read-only back there)"
+        ),
+        t!(
+            "図          code:mmd は罫線・表で描く（テキスト優先）· R で未生成分を描く",
+            "diagram     code:mmd draws as text first · R renders the missing ones"
+        ),
+        t!(
+            "出力        y カーソル行/選択をコピー · Y ページ全体",
+            "output      y copy line/selection · Y whole page"
+        ),
+        t!(
+            "取り消し    u · ^z 取り消し · ^r やり直し（どのコミットも戻せます）",
+            "undo        u · ^z undo · ^r redo (every commit is reversible)"
+        ),
+        t!(
+            "終了        q 二度押し · ^c 即終了",
+            "quit        q twice · ^c at once"
+        ),
         t!("── EDIT ──", "── EDIT ──"),
     ];
     if app.editable {
@@ -124,7 +146,10 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
                         ),
                     ]
                 }
-                None => vec![t!("カーソルの下に行がありません", "no line under the cursor")],
+                None => vec![t!(
+                    "カーソルの下に行がありません",
+                    "no line under the cursor"
+                )],
             };
             (t!("行の詳細", "line detail"), items, usize::MAX)
         }
@@ -201,4 +226,3 @@ pub(crate) fn draw_menu_panel(
         panel,
     );
 }
-

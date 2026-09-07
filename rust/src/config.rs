@@ -69,7 +69,9 @@ impl Config {
     /// Read the file. `Ok(Config::default())` when there is none;
     /// `Err` only for a file that is there and does not parse.
     pub fn load() -> Result<Config, String> {
-        let Some(path) = Self::path() else { return Ok(Config::default()) };
+        let Some(path) = Self::path() else {
+            return Ok(Config::default());
+        };
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text).map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -87,8 +89,12 @@ impl Config {
         let all = &self.upload.all;
         let own = self.upload.project.get(project);
         UploadChoice {
-            images: own.and_then(|c| c.images.clone()).or_else(|| all.images.clone()),
-            gyazo_team: own.and_then(|c| c.gyazo_team.clone()).or_else(|| all.gyazo_team.clone()),
+            images: own
+                .and_then(|c| c.images.clone())
+                .or_else(|| all.images.clone()),
+            gyazo_team: own
+                .and_then(|c| c.gyazo_team.clone())
+                .or_else(|| all.gyazo_team.clone()),
         }
     }
 }
@@ -100,7 +106,10 @@ mod tests {
     #[test]
     fn empty_file_is_the_default() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
-        assert_eq!(Config::default().upload_choice("x"), UploadChoice::default());
+        assert_eq!(
+            Config::default().upload_choice("x"),
+            UploadChoice::default()
+        );
     }
 
     #[test]
@@ -121,15 +130,31 @@ gyazo_team = "other-org"
         )
         .unwrap();
         assert_eq!(c.upload_choice("acme").images.as_deref(), Some("gyazo"));
-        assert_eq!(c.upload_choice("acme").gyazo_team.as_deref(), Some("acme-inc"));
-        assert_eq!(c.upload_choice("other").images.as_deref(), Some("gcs"), "falls back to [upload]");
-        assert_eq!(c.upload_choice("other").gyazo_team.as_deref(), Some("other-org"));
-        assert_eq!(c.upload_choice("nobody").gyazo_team.as_deref(), Some("everyone"));
+        assert_eq!(
+            c.upload_choice("acme").gyazo_team.as_deref(),
+            Some("acme-inc")
+        );
+        assert_eq!(
+            c.upload_choice("other").images.as_deref(),
+            Some("gcs"),
+            "falls back to [upload]"
+        );
+        assert_eq!(
+            c.upload_choice("other").gyazo_team.as_deref(),
+            Some("other-org")
+        );
+        assert_eq!(
+            c.upload_choice("nobody").gyazo_team.as_deref(),
+            Some("everyone")
+        );
     }
 
     #[test]
     fn a_typo_is_an_error_not_a_default() {
-        assert!(Config::parse("[upload]\nimage = \"gcs\"\n").is_err(), "unknown key");
+        assert!(
+            Config::parse("[upload]\nimage = \"gcs\"\n").is_err(),
+            "unknown key"
+        );
         assert!(Config::parse("[upload\n").is_err(), "not TOML");
     }
 }

@@ -25,9 +25,7 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -
     // ^o opens the index from inside the session too: the dirty line is
     // committed first (clicking away commits too), and the session stays
     // open — it resumes when the index closes.
-    if k.code == KeyCode::Char('o')
-        && k.modifiers.contains(KeyModifiers::CONTROL)
-    {
+    if k.code == KeyCode::Char('o') && k.modifiers.contains(KeyModifiers::CONTROL) {
         open_page_index(app, ctx);
         return Action::Continue;
     }
@@ -178,7 +176,11 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -
             app.laid_width = 0;
         }
         (KeyCode::Backspace, _) => {
-            let at_bol = app.session.as_ref().map(|s| s.input.cur == 0).unwrap_or(false);
+            let at_bol = app
+                .session
+                .as_ref()
+                .map(|s| s.input.cur == 0)
+                .unwrap_or(false);
             if at_bol {
                 session_join_up(app, ctx);
             } else if empty_pair_at_caret(app) && !session_in_code(app) {

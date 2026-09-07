@@ -64,11 +64,17 @@ pub(crate) fn send_comments(app: &mut App, ctx: &Ctx) {
         Ok(target) => {
             app.comments.clear();
             app.laid_width = 0; // the cards go with them
-            app.note(t!("✓ コメント {count} 件を {target} へ送りました", "✓ sent {count} comment(s) to {target}"));
+            app.note(t!(
+                "✓ コメント {count} 件を {target} へ送りました",
+                "✓ sent {count} comment(s) to {target}"
+            ));
         }
         Err(e) => {
             let kept = if copied {
-                t!("コメントは残しています（クリップボードにはコピー済み）", "comments kept (copied to the clipboard)")
+                t!(
+                    "コメントは残しています（クリップボードにはコピー済み）",
+                    "comments kept (copied to the clipboard)"
+                )
             } else {
                 t!("コメントは残しています", "comments kept")
             };
@@ -85,7 +91,12 @@ fn send_command(cmd: &str, text: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| t!("送信コマンドを起動できません: {e}", "cannot start the send command: {e}"))?;
+        .map_err(|e| {
+            t!(
+                "送信コマンドを起動できません: {e}",
+                "cannot start the send command: {e}"
+            )
+        })?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes());
     }
@@ -94,7 +105,10 @@ fn send_command(cmd: &str, text: &str) -> Result<(), String> {
         Ok(())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(t!("送信コマンドが失敗しました: {err}", "the send command failed: {err}"))
+        Err(t!(
+            "送信コマンドが失敗しました: {err}",
+            "the send command failed: {err}"
+        ))
     }
 }
 
@@ -107,18 +121,30 @@ fn resolve_agent_pane() -> Result<String, String> {
         .map_err(|e| t!("herdr を起動できません: {e}", "cannot run herdr: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(t!("herdr agent list が失敗しました: {err}", "herdr agent list failed: {err}"));
+        return Err(t!(
+            "herdr agent list が失敗しました: {err}",
+            "herdr agent list failed: {err}"
+        ));
     }
     let agents = parse_agents(&String::from_utf8_lossy(&out.stdout))?;
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    pick_agent(&agents, env("HERDR_TAB_ID").as_deref(), env("HERDR_WORKSPACE_ID").as_deref(), env("HERDR_PANE_ID").as_deref())
+    pick_agent(
+        &agents,
+        env("HERDR_TAB_ID").as_deref(),
+        env("HERDR_WORKSPACE_ID").as_deref(),
+        env("HERDR_PANE_ID").as_deref(),
+    )
 }
 
 /// The agents array from `herdr agent list`: a bare array, `result.agents`,
 /// or `agents` (the envelope is not pinned; akapen accepts all three).
 fn parse_agents(json: &str) -> Result<Vec<serde_json::Value>, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| t!("エージェント一覧を読めません: {e}", "cannot read the agent list: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+        t!(
+            "エージェント一覧を読めません: {e}",
+            "cannot read the agent list: {e}"
+        )
+    })?;
     if let Some(array) = value.as_array() {
         return Ok(array.clone());
     }
@@ -128,7 +154,12 @@ fn parse_agents(json: &str) -> Result<Vec<serde_json::Value>, String> {
         .or_else(|| value.get("agents"))
         .and_then(serde_json::Value::as_array)
         .cloned()
-        .ok_or_else(|| t!("エージェント一覧に agents がありません", "the agent list has no agents array"))
+        .ok_or_else(|| {
+            t!(
+                "エージェント一覧に agents がありません",
+                "the agent list has no agents array"
+            )
+        })
 }
 
 /// The sole agent in `tab`, else the sole agent in `ws`, never our own
@@ -141,12 +172,28 @@ pub(crate) fn pick_agent(
 ) -> Result<String, String> {
     let in_tab = candidates(agents, "tab_id", tab, me);
     if let [agent] = in_tab.as_slice() {
-        return pane_id(agent).ok_or_else(|| t!("エージェントに pane_id がありません", "agent entry has no pane_id"));
+        return pane_id(agent).ok_or_else(|| {
+            t!(
+                "エージェントに pane_id がありません",
+                "agent entry has no pane_id"
+            )
+        });
     }
     match candidates(agents, "workspace_id", ws, me).as_slice() {
-        [agent] => pane_id(agent).ok_or_else(|| t!("エージェントに pane_id がありません", "agent entry has no pane_id")),
-        [] if in_tab.is_empty() => Err(t!("このタブにもワークスペースにもエージェントがいません", "no agent in this tab or workspace")),
-        _ => Err(t!("エージェントが複数います — --send-cmd で1つを名指しして", "several agents here — name one with --send-cmd")),
+        [agent] => pane_id(agent).ok_or_else(|| {
+            t!(
+                "エージェントに pane_id がありません",
+                "agent entry has no pane_id"
+            )
+        }),
+        [] if in_tab.is_empty() => Err(t!(
+            "このタブにもワークスペースにもエージェントがいません",
+            "no agent in this tab or workspace"
+        )),
+        _ => Err(t!(
+            "エージェントが複数います — --send-cmd で1つを名指しして",
+            "several agents here — name one with --send-cmd"
+        )),
     }
 }
 
@@ -169,7 +216,10 @@ fn candidates<'a>(
 }
 
 fn pane_id(agent: &serde_json::Value) -> Option<String> {
-    agent.get("pane_id").and_then(serde_json::Value::as_str).map(String::from)
+    agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
 }
 
 /// `herdr agent prompt <pane> <text>`: the text is one argument, so
@@ -183,7 +233,10 @@ fn send_to_agent(pane: &str, text: &str) -> Result<(), String> {
         Ok(())
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(t!("herdr agent prompt が失敗しました: {err}", "herdr agent prompt failed: {err}"))
+        Err(t!(
+            "herdr agent prompt が失敗しました: {err}",
+            "herdr agent prompt failed: {err}"
+        ))
     }
 }
 
@@ -202,17 +255,36 @@ mod tests {
             json!({"pane_id": "p3", "tab_id": "t1", "workspace_id": "w"}), // a plain shell
             json!({"pane_id": "me", "tab_id": "t1", "workspace_id": "w", "agent": "claude"}),
         ];
-        assert_eq!(pick_agent(&agents, Some("t1"), Some("w"), Some("me")), Ok("p1".into()));
-        assert_eq!(pick_agent(&agents, Some("t9"), Some("w"), Some("me")).ok(), None, "two in the workspace");
+        assert_eq!(
+            pick_agent(&agents, Some("t1"), Some("w"), Some("me")),
+            Ok("p1".into())
+        );
+        assert_eq!(
+            pick_agent(&agents, Some("t9"), Some("w"), Some("me")).ok(),
+            None,
+            "two in the workspace"
+        );
         let one = &agents[1..2];
-        assert_eq!(pick_agent(one, Some("t9"), Some("w"), None), Ok("p2".into()), "falls back to the workspace");
-        assert!(pick_agent(one, Some("t9"), Some("x"), None).is_err(), "no agent anywhere");
+        assert_eq!(
+            pick_agent(one, Some("t9"), Some("w"), None),
+            Ok("p2".into()),
+            "falls back to the workspace"
+        );
+        assert!(
+            pick_agent(one, Some("t9"), Some("x"), None).is_err(),
+            "no agent anywhere"
+        );
     }
 
     #[test]
     fn the_agent_list_envelope_is_not_pinned() {
         assert_eq!(parse_agents(r#"[{"pane_id":"p"}]"#).unwrap().len(), 1);
-        assert_eq!(parse_agents(r#"{"result":{"agents":[{"pane_id":"p"}]}}"#).unwrap().len(), 1);
+        assert_eq!(
+            parse_agents(r#"{"result":{"agents":[{"pane_id":"p"}]}}"#)
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(parse_agents(r#"{"agents":[]}"#).unwrap().len(), 0);
         assert!(parse_agents(r#"{"nope":1}"#).is_err());
     }
@@ -222,8 +294,14 @@ mod tests {
     fn the_send_target_is_the_flag_then_herdr_then_nothing() {
         let herdr = |k: &str| (k == "HERDR_PANE_ID").then(|| "w:p1".to_string());
         let bare = |_: &str| None;
-        assert_eq!(SendTarget::detect(Some("cat".into()), &herdr), SendTarget::Command("cat".into()));
+        assert_eq!(
+            SendTarget::detect(Some("cat".into()), &herdr),
+            SendTarget::Command("cat".into())
+        );
         assert_eq!(SendTarget::detect(None, &herdr), SendTarget::HerdrAgent);
-        assert_eq!(SendTarget::detect(Some("  ".into()), &bare), SendTarget::None);
+        assert_eq!(
+            SendTarget::detect(Some("  ".into()), &bare),
+            SendTarget::None
+        );
     }
 }

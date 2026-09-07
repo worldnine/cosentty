@@ -32,12 +32,14 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     CommitOutcome::Failed { msg, .. } => app.toast_err(t!(
                         "移動前のページ /{}/{} の保存に失敗しました: {msg}",
                         "save failed for previous page /{}/{}: {msg}",
-                        origin.project, origin.title
+                        origin.project,
+                        origin.title
                     )),
                     CommitOutcome::Conflict { .. } => app.toast_err(t!(
                         "移動前のページ /{}/{} の保存が競合しました",
                         "save conflicted for previous page /{}/{}",
-                        origin.project, origin.title
+                        origin.project,
+                        origin.title
                     )),
                     _ => {}
                 }
@@ -46,7 +48,12 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
         }
     }
     match outcome {
-        CommitOutcome::Done { job: _, label, title, commit_id } => {
+        CommitOutcome::Done {
+            job: _,
+            label,
+            title,
+            commit_id,
+        } => {
             // Navigation may still happen while the gate is up. In that case
             // this result belongs wholly to the old page: clearing the gate
             // is the only current-app state it may touch.
@@ -118,10 +125,16 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     app,
                     ctx,
                     pending,
-                    t!("送信失敗: {label} — {msg}", "commit failed: {label} — {msg}"),
+                    t!(
+                        "送信失敗: {label} — {msg}",
+                        "commit failed: {label} — {msg}"
+                    ),
                 );
             } else {
-                app.toast_err(t!("コミットに失敗しました: {label} — {msg}", "commit failed: {label} — {msg}"));
+                app.toast_err(t!(
+                    "コミットに失敗しました: {label} — {msg}",
+                    "commit failed: {label} — {msg}"
+                ));
                 app.mark_desynced();
                 if app.create_state == CreateState::Sent && page_is_uncreated(app) {
                     // The page was never made. Let the next edit try again
@@ -161,11 +174,17 @@ pub(crate) fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::
         return; // a provisional id is not a page (see `live_page_id`)
     }
     let cursor_id = app.lines.get(app.cursor).map(|l| l.id.clone());
-    let session_id =
-        app.session.as_ref().and_then(|s| app.lines.get(s.line)).map(|l| l.id.clone());
+    let session_id = app
+        .session
+        .as_ref()
+        .and_then(|s| app.lines.get(s.line))
+        .map(|l| l.id.clone());
     let local: Vec<String> = app.lines.iter().map(|l| l.text.clone()).collect();
-    let server: Vec<(String, String)> =
-        page.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let server: Vec<(String, String)> = page
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     app.page_id = page.id.clone();
     app.lines = page.lines.clone();
     app.create_state = CreateState::Idle;
@@ -254,7 +273,11 @@ pub(crate) fn install_remote_lines(
 /// Re-anchor the cursor and a clean session onto their line ids after the
 /// page model changed (full install or remote diff); a vanished session
 /// line closes the session.
-pub(crate) fn reanchor_cursor_session(app: &mut App, cursor_id: Option<String>, session_id: Option<String>) {
+pub(crate) fn reanchor_cursor_session(
+    app: &mut App,
+    cursor_id: Option<String>,
+    session_id: Option<String>,
+) {
     // Keep the cursor on ITS line (by id), not its number.
     if let Some(id) = cursor_id {
         if let Some(i) = app.lines.iter().position(|l| l.id == id) {
@@ -269,8 +292,14 @@ pub(crate) fn reanchor_cursor_session(app: &mut App, cursor_id: Option<String>, 
                 if let Some(s) = app.session.as_mut() {
                     s.line = i;
                     let cur = s.input.cur.min(text.len());
-                    let cur = (0..=cur).rev().find(|&b| text.is_char_boundary(b)).unwrap_or(0);
-                    s.input = Input { buf: text.clone(), cur };
+                    let cur = (0..=cur)
+                        .rev()
+                        .find(|&b| text.is_char_boundary(b))
+                        .unwrap_or(0);
+                    s.input = Input {
+                        buf: text.clone(),
+                        cur,
+                    };
                     s.orig = text;
                     s.want_col = None;
                 }
@@ -332,7 +361,12 @@ pub(crate) fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
         }
         return;
     }
-    install_remote_lines(app, ctx, &polled.page, Some(&t!("⟳ web側の編集を反映", "⟳ applying a web edit")));
+    install_remote_lines(
+        app,
+        ctx,
+        &polled.page,
+        Some(&t!("⟳ web側の編集を反映", "⟳ applying a web edit")),
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -345,7 +379,11 @@ pub(crate) fn handle_ws_event(app: &mut App, ctx: &Ctx, ev: WsEvent) {
         // A state for the room the reader has already left says nothing
         // about the one they are on — and a late `Live` from the old room
         // would hold the NEW page on the 60 s poll.
-        WsEvent::State { project, title, state } => {
+        WsEvent::State {
+            project,
+            title,
+            state,
+        } => {
             if project == app.project && title == app.title {
                 app.set_sync_state(state);
             }
@@ -400,7 +438,9 @@ fn resync_note(app: &App, page: &cosense::api::Page) -> Option<String> {
 /// down. Buffered commits that PRECEDED it are superseded by the page and
 /// dropped; commits after it stay buffered and apply against the new state.
 pub(crate) fn ws_apply_held_resync(app: &mut App, ctx: &Ctx) {
-    let Some((res, pre)) = app.ws_held_resync.take() else { return };
+    let Some((res, pre)) = app.ws_held_resync.take() else {
+        return;
+    };
     if !remote_gate_clear(app) {
         app.ws_held_resync = Some((res, pre)); // still gated — keep holding
         return;
@@ -491,14 +531,20 @@ pub(crate) fn ws_apply_one(app: &mut App, ctx: &Ctx, c: RemoteCommit) -> bool {
         rerender(app, ctx);
         reanchor_cursor_session(app, cursor_id, session_id);
         app.follow = true;
-        app.note(t!("⟳ websocket で更新を反映", "⟳ applying a websocket update"));
+        app.note(t!(
+            "⟳ websocket で更新を反映",
+            "⟳ applying a websocket update"
+        ));
         return true;
     }
     // Chain broke (reconnect gap, join replay): the event is NOT applied
     // and NOT silently dropped — a background full-page resync is
     // requested, and the fetched page will carry this commit's effect.
     app.ws_resync_pending = true;
-    app.note(t!("⟳ websocket 差分に欠落 — 再同期します", "⟳ a websocket diff was missing — resyncing"));
+    app.note(t!(
+        "⟳ websocket 差分に欠落 — 再同期します",
+        "⟳ a websocket diff was missing — resyncing"
+    ));
     true
 }
 
@@ -544,7 +590,14 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
     // would screenshot the server's text and file it under ours.
     app.mark_desynced();
     let stash = app.session.as_ref().map(|s| {
-        (app.lines.get(s.line).map(|l| l.id.clone()).unwrap_or_default(), s.input.buf.clone(), s.input.cur)
+        (
+            app.lines
+                .get(s.line)
+                .map(|l| l.id.clone())
+                .unwrap_or_default(),
+            s.input.buf.clone(),
+            s.input.cur,
+        )
     });
     if !reload_page(app, ctx) {
         // `reload_page` already said why on the status line; saying anything
@@ -555,15 +608,24 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
     // set_page cleared session + undo lineage and marked us synced again.
     match stash {
         None => {
-            app.toast(t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded"));
+            app.toast(t!(
+                "他の人がページを更新しました — 読み直しました",
+                "page changed by someone else — reloaded"
+            ));
         }
         Some((id, buf, caret)) => {
             if let Some(idx) = app.lines.iter().position(|l| l.id == id) {
                 enter_session(app, ctx, idx, 0);
                 if let Some(s) = app.session.as_mut() {
-                    s.input = Input { buf: buf.clone(), cur: caret.min(buf.len()) };
+                    s.input = Input {
+                        buf: buf.clone(),
+                        cur: caret.min(buf.len()),
+                    };
                 }
-                app.toast(t!("他の人がページを更新しました — 読み直し、編集中の行はそのままです", "page changed by someone else — reloaded, your line kept"));
+                app.toast(t!(
+                    "他の人がページを更新しました — 読み直し、編集中の行はそのままです",
+                    "page changed by someone else — reloaded, your line kept"
+                ));
             } else if !buf.trim().is_empty() {
                 // The line is gone: rescue the text as a fresh last line.
                 let new_id = new_line_id();
@@ -575,9 +637,15 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
                 if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
                     enter_session(app, ctx, idx, buf.len());
                 }
-                app.toast(t!("編集中の行が他の人に削除されました — 内容はページ末尾に退避しました", "your line was deleted by someone else — text rescued at the end"));
+                app.toast(t!(
+                    "編集中の行が他の人に削除されました — 内容はページ末尾に退避しました",
+                    "your line was deleted by someone else — text rescued at the end"
+                ));
             } else {
-                app.toast(t!("他の人がページを更新しました — 読み直しました", "page changed by someone else — reloaded"));
+                app.toast(t!(
+                    "他の人がページを更新しました — 読み直しました",
+                    "page changed by someone else — reloaded"
+                ));
             }
         }
     }
@@ -603,11 +671,21 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
             Ok(points) if !points.is_empty() => {
                 let last = points.len() - 1;
                 app.capture_present();
-                app.time = Some(TimeMachine { points, pos: last, cache: HashMap::new() });
+                app.time = Some(TimeMachine {
+                    points,
+                    pos: last,
+                    cache: HashMap::new(),
+                });
                 show_snapshot(app, ctx, last);
             }
-            Ok(_) => app.toast(t!("このページに履歴はありません", "no snapshots for this page")),
-            Err(e) => app.toast_err(t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}")),
+            Ok(_) => app.toast(t!(
+                "このページに履歴はありません",
+                "no snapshots for this page"
+            )),
+            Err(e) => app.toast_err(t!(
+                "履歴一覧を取得できません: {e}",
+                "snapshot list failed: {e}"
+            )),
         }
         return;
     }
@@ -636,26 +714,45 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
 /// timeline comes from the page's own list when known, else the server;
 /// a snapshot no longer listed leaves the page as it is and says so.
 pub(crate) fn show_revision(app: &mut App, ctx: &Ctx, id: &str) {
-    if app.time.as_ref().is_some_and(|tm| tm.points.get(tm.pos).is_some_and(|p| p.id == id)) {
+    if app
+        .time
+        .as_ref()
+        .is_some_and(|tm| tm.points.get(tm.pos).is_some_and(|p| p.id == id))
+    {
         return; // already showing it
     }
-    let points = match app.time.as_ref().map(|tm| tm.points.clone()).or_else(|| app.snapshots.clone()) {
+    let points = match app
+        .time
+        .as_ref()
+        .map(|tm| tm.points.clone())
+        .or_else(|| app.snapshots.clone())
+    {
         Some(p) => p,
         None => match ctx.client.list_snapshots(&app.project, &app.page_id) {
             Ok(p) => p,
             Err(e) => {
-                app.toast_err(t!("履歴一覧を取得できません: {e}", "snapshot list failed: {e}"));
+                app.toast_err(t!(
+                    "履歴一覧を取得できません: {e}",
+                    "snapshot list failed: {e}"
+                ));
                 return;
             }
         },
     };
     let Some(idx) = points.iter().position(|p| p.id == id) else {
-        app.toast_err(t!("その版は履歴に見つかりません", "that revision is not in the page's history"));
+        app.toast_err(t!(
+            "その版は履歴に見つかりません",
+            "that revision is not in the page's history"
+        ));
         return;
     };
     if app.time.is_none() {
         app.capture_present();
-        app.time = Some(TimeMachine { points, pos: idx, cache: HashMap::new() });
+        app.time = Some(TimeMachine {
+            points,
+            pos: idx,
+            cache: HashMap::new(),
+        });
     }
     show_snapshot(app, ctx, idx);
 }
@@ -667,18 +764,29 @@ pub(crate) fn show_revision(app: &mut App, ctx: &Ctx, id: &str) {
 pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     let (ts_id, created, len) = {
         let tm = app.time.as_ref().unwrap();
-        (tm.points[idx].id.clone(), tm.points[idx].created, tm.points.len())
+        (
+            tm.points[idx].id.clone(),
+            tm.points[idx].created,
+            tm.points.len(),
+        )
     };
     let cached = app.time.as_ref().unwrap().cache.get(&ts_id).cloned();
     let snap = match cached {
         Some(s) => s,
         None => match ctx.client.get_snapshot(&app.project, &app.page_id, &ts_id) {
             Ok(s) => {
-                app.time.as_mut().unwrap().cache.insert(ts_id.clone(), s.clone());
+                app.time
+                    .as_mut()
+                    .unwrap()
+                    .cache
+                    .insert(ts_id.clone(), s.clone());
                 s
             }
             Err(e) => {
-                app.toast_err(t!("履歴を取得できません: {e}", "snapshot fetch failed: {e}"));
+                app.toast_err(t!(
+                    "履歴を取得できません: {e}",
+                    "snapshot fetch failed: {e}"
+                ));
                 return;
             }
         },
@@ -719,8 +827,7 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
         &ctx.palette,
         ctx.project_theme(&app.project).as_deref(),
     );
-    let rendered =
-        render_lines_with(&texts, Some(&ctx.hl), &palette, &LinkTruth::default());
+    let rendered = render_lines_with(&texts, Some(&ctx.hl), &palette, &LinkTruth::default());
     app.lines = snap.lines;
     app.blocks = rendered.blocks;
     app.srcs = rendered.srcs;
@@ -738,7 +845,9 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.start_image_loads(ctx);
     app.time.as_mut().unwrap().pos = idx;
     // NOW is the last position, as on the header: three snapshots make 4.
-    app.status = t!("履歴 {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新", "history {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
+    app.status = t!(
+        "履歴 {}/{} · {}（{}前）· ← 古い · → 新しい · Esc 最新",
+        "history {}/{} · {} ({} ago) · ← older · → newer · Esc NOW",
         idx + 1,
         len + 1,
         cosense::theme::format_local(created),
@@ -794,9 +903,15 @@ impl App {
         else {
             return;
         };
-        let Some(rest) = self.status.get(at + tag.len()..) else { return };
-        let end = rest.find(' ').map(|i| at + tag.len() + i).unwrap_or(self.status.len());
-        self.status.replace_range(at + tag.len()..end, self.sync_label());
+        let Some(rest) = self.status.get(at + tag.len()..) else {
+            return;
+        };
+        let end = rest
+            .find(' ')
+            .map(|i| at + tag.len() + i)
+            .unwrap_or(self.status.len());
+        self.status
+            .replace_range(at + tag.len()..end, self.sync_label());
     }
 
     /// What to call the live-update channel. A session with no sid is not
@@ -831,13 +946,24 @@ impl App {
             let why = if self.move_mode.is_some() {
                 // A drag holds the whole page's order, so remote edits wait
                 // for it exactly as they wait for an unsaved line.
-                ts!("つかんでいるブロックを待っています", "waiting on the grabbed block")
+                ts!(
+                    "つかんでいるブロックを待っています",
+                    "waiting on the grabbed block"
+                )
             } else if dirty {
-                ts!("編集中の行を待っています", "waiting on the line being edited")
+                ts!(
+                    "編集中の行を待っています",
+                    "waiting on the line being edited"
+                )
             } else {
                 ts!("適用待ち", "waiting to apply")
             };
-            return Some(t!("⟳ {} 件{}", "⟳ {} update(s) — {}", self.ws_pending.len(), why));
+            return Some(t!(
+                "⟳ {} 件{}",
+                "⟳ {} update(s) — {}",
+                self.ws_pending.len(),
+                why
+            ));
         }
         match self.sync_state {
             capability::SyncState::Live => None,
@@ -864,7 +990,8 @@ impl App {
     /// The page source has changed: any render queued before this moment
     /// would be filed under a hash it no longer matches.
     pub(crate) fn bump_src_epoch(&self) {
-        self.src_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.src_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn src_epoch_now(&self) -> u64 {
@@ -874,7 +1001,8 @@ impl App {
     /// The server's state has moved on: any poll response fetched before
     /// this moment is stale.
     pub(crate) fn bump_server_epoch(&self) {
-        self.server_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.server_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(crate) fn server_epoch_now(&self) -> u64 {

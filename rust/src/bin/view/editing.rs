@@ -40,7 +40,9 @@ impl Input {
     }
     /// End of the caret's logical line (just before the next `\n`).
     pub(crate) fn line_end(&self) -> usize {
-        self.buf[self.cur..].find('\n').map_or(self.buf.len(), |i| self.cur + i)
+        self.buf[self.cur..]
+            .find('\n')
+            .map_or(self.buf.len(), |i| self.cur + i)
     }
     /// ^a / Home: to the start of the caret's line (a comment may span
     /// lines — see `up` / `down`).
@@ -70,11 +72,16 @@ impl Input {
         }
         let col = self.buf[self.line_start()..self.cur].chars().count();
         let next_start = end + 1;
-        let next_end = self.buf[next_start..].find('\n').map_or(self.buf.len(), |i| next_start + i);
+        let next_end = self.buf[next_start..]
+            .find('\n')
+            .map_or(self.buf.len(), |i| next_start + i);
         self.cur = Self::col_to_byte(&self.buf, next_start, next_end, col);
     }
     fn col_to_byte(buf: &str, start: usize, end: usize, col: usize) -> usize {
-        buf[start..end].char_indices().nth(col).map_or(end, |(i, _)| start + i)
+        buf[start..end]
+            .char_indices()
+            .nth(col)
+            .map_or(end, |(i, _)| start + i)
     }
     pub(crate) fn backspace(&mut self) {
         if let Some(ch) = self.buf[..self.cur].chars().next_back() {
@@ -142,10 +149,23 @@ pub(crate) enum CommitOutcome {
     /// `commit_id` is the id the server gave this commit — the name our
     /// own edit will come back under on the websocket (see
     /// `App::own_commits`).
-    Done { job: CommitJobId, label: String, title: String, commit_id: String },
-    Conflict { job: CommitJobId },
-    Skipped { job: CommitJobId },
-    Failed { job: CommitJobId, label: String, msg: String },
+    Done {
+        job: CommitJobId,
+        label: String,
+        title: String,
+        commit_id: String,
+    },
+    Conflict {
+        job: CommitJobId,
+    },
+    Skipped {
+        job: CommitJobId,
+    },
+    Failed {
+        job: CommitJobId,
+        label: String,
+        msg: String,
+    },
 }
 
 impl CommitOutcome {
@@ -186,7 +206,11 @@ pub(crate) fn spawn_commit_worker(
                     commit_id: c.commit_id,
                 },
                 Err(EditError::NotFastForward) => CommitOutcome::Conflict { job: id },
-                Err(e) => CommitOutcome::Failed { job: id, label: job.label, msg: e.to_string() },
+                Err(e) => CommitOutcome::Failed {
+                    job: id,
+                    label: job.label,
+                    msg: e.to_string(),
+                },
             };
             let _ = out.send(outcome);
         }
@@ -215,13 +239,20 @@ pub(crate) fn finish_composer(app: &mut App, input: Input) {
             }
             None => {
                 app.comments.push(c);
-                app.note(t!("コメントを保存しました（全 {} 件）", "comment saved ({} total)", app.comments.len()));
+                app.note(t!(
+                    "コメントを保存しました（全 {} 件）",
+                    "comment saved ({} total)",
+                    app.comments.len()
+                ));
             }
         }
         app.selection = None;
         app.laid_width = 0; // force rebuild to weave the card
     } else {
-        app.toast_err(t!("コメントを行に結び付けられません", "could not anchor comment"));
+        app.toast_err(t!(
+            "コメントを行に結び付けられません",
+            "could not anchor comment"
+        ));
     }
 }
 
@@ -291,7 +322,10 @@ pub(crate) fn ensure_editable(app: &mut App) -> bool {
     if app.editable {
         true
     } else {
-        app.toast_err(t!("このプロジェクトでは編集権限がありません", "no edit permission in this project"));
+        app.toast_err(t!(
+            "このプロジェクトでは編集権限がありません",
+            "no edit permission in this project"
+        ));
         false
     }
 }
@@ -300,7 +334,12 @@ pub(crate) fn ensure_editable(app: &mut App) -> bool {
 /// the background commit. The single write path for every edit.
 /// Returns the commit job the edit was queued under, when it reached the
 /// worker at all (an uncreated page commits nothing yet; see below).
-pub(crate) fn do_edit(app: &mut App, ctx: &Ctx, label: &str, ops: Vec<EditOp>) -> Option<CommitJobId> {
+pub(crate) fn do_edit(
+    app: &mut App,
+    ctx: &Ctx,
+    label: &str,
+    ops: Vec<EditOp>,
+) -> Option<CommitJobId> {
     if outline_mutation_blocked(app) || !ensure_editable(app) || ops.is_empty() {
         return None;
     }
@@ -371,7 +410,11 @@ pub(crate) fn edit_focus(
     before: &[(String, String)],
 ) -> Option<(String, usize)> {
     let old_text = |id: &str| -> &str {
-        before.iter().find(|(i, _)| i == id).map(|(_, t)| t.as_str()).unwrap_or("")
+        before
+            .iter()
+            .find(|(i, _)| i == id)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("")
     };
     // A line that still exists is the better place to stand.
     for op in ops {
@@ -458,9 +501,19 @@ pub(crate) fn dispatch_create(app: &mut App) {
         return;
     }
     app.create_state = CreateState::Sent;
-    let lines: Vec<(String, String)> =
-        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
-    queue_commit(app, &t!("ページの作成", "create page"), vec![EditOp::Insert { anchor: "_end".into(), lines }]);
+    let lines: Vec<(String, String)> = app
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
+    queue_commit(
+        app,
+        &t!("ページの作成", "create page"),
+        vec![EditOp::Insert {
+            anchor: "_end".into(),
+            lines,
+        }],
+    );
     app.status = t!("ページを作成しています…", "creating the page…");
 }
 
@@ -480,16 +533,22 @@ pub(crate) fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) -> Opti
         ops,
     };
     if app.commit_tx.send(job).is_ok() {
-        app.commit_origins.insert(id, CommitOrigin {
-            project: app.project.clone(),
-            page_id: app.page_id.clone(),
-            title: app.title.clone(),
-            install_gen: app.gen_now(),
-        });
+        app.commit_origins.insert(
+            id,
+            CommitOrigin {
+                project: app.project.clone(),
+                page_id: app.page_id.clone(),
+                title: app.title.clone(),
+                install_gen: app.gen_now(),
+            },
+        );
         app.inflight += 1;
         Some(id)
     } else {
-        app.status = t!("コミット処理が停止しました — 編集はこの画面にしか残りません", "commit worker gone — edits are LOCAL ONLY");
+        app.status = t!(
+            "コミット処理が停止しました — 編集はこの画面にしか残りません",
+            "commit worker gone — edits are LOCAL ONLY"
+        );
         // The edit never left the machine: local lines and the server have
         // parted ways, and every diagram on the page must stay as source.
         app.mark_desynced();
@@ -504,7 +563,10 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.undo_stack.last() else {
-        app.toast(empty_history_reason(app, t!("取り消せる編集がありません", "nothing to undo")));
+        app.toast(empty_history_reason(
+            app,
+            t!("取り消せる編集がありません", "nothing to undo"),
+        ));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -515,8 +577,11 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
 
     let (label, ops) = app.undo_stack.pop().expect("history was checked above");
     let redo = invert_ops(&app.lines, &ops);
-    let before: Vec<(String, String)> =
-        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let before: Vec<(String, String)> = app
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     let move_rebase = prepare_move_rebase(app, &ops);
     let replace_selection = app.selection.filter(|_| {
         move_rebase.is_none() && ops.iter().all(|op| matches!(op, EditOp::Replace { .. }))
@@ -551,7 +616,11 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
             .map(|rebase| apply_move_rebase(app, &ops, rebase))
             .unwrap_or_else(|| app.focus_edit(focus))
     };
-    app.note(t!("{label} を取り消しました（あと {} 件）", "undid {label} ({} more)", app.undo_stack.len()));
+    app.note(t!(
+        "{label} を取り消しました（あと {} 件）",
+        "undid {label} ({} more)",
+        app.undo_stack.len()
+    ));
     seated
 }
 
@@ -562,7 +631,10 @@ pub(crate) fn empty_history_reason(app: &App, empty: String) -> String {
     if app.history_dropped {
         // Which of the two stacks is empty does not matter here: the web
         // edit dropped both, and that is the whole answer.
-        t!("履歴は web 側の更新で失効しました", "history was dropped by a web edit")
+        t!(
+            "履歴は web 側の更新で失効しました",
+            "history was dropped by a web edit"
+        )
     } else {
         empty
     }
@@ -574,7 +646,10 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     let Some((_, next_ops)) = app.redo_stack.last() else {
-        app.toast(empty_history_reason(app, t!("やり直せる編集がありません", "nothing to redo")));
+        app.toast(empty_history_reason(
+            app,
+            t!("やり直せる編集がありません", "nothing to redo"),
+        ));
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
@@ -583,8 +658,11 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
 
     let (label, ops) = app.redo_stack.pop().expect("history was checked above");
     let undo_ops = invert_ops(&app.lines, &ops);
-    let before: Vec<(String, String)> =
-        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let before: Vec<(String, String)> = app
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     let move_rebase = prepare_move_rebase(app, &ops);
     let replace_selection = app.selection.filter(|_| {
         move_rebase.is_none() && ops.iter().all(|op| matches!(op, EditOp::Replace { .. }))

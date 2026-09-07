@@ -52,12 +52,14 @@ impl Highlighter {
     /// Build from an optional theme name; unknown names fall back to the
     /// light/dark default.
     pub fn new(theme_name: Option<&str>, light: bool) -> Self {
-        let theme = theme_name
-            .and_then(theme_by_name)
-            .unwrap_or_else(|| {
-                let name = if light { DEFAULT_THEME_LIGHT } else { DEFAULT_THEME };
-                theme_by_name(name).expect("default theme is embedded")
-            });
+        let theme = theme_name.and_then(theme_by_name).unwrap_or_else(|| {
+            let name = if light {
+                DEFAULT_THEME_LIGHT
+            } else {
+                DEFAULT_THEME
+            };
+            theme_by_name(name).expect("default theme is embedded")
+        });
         Self { theme }
     }
 
@@ -162,7 +164,9 @@ mod tests {
     fn scope_style_resolves_theme_colors() {
         // Dracula styles markdown headings with its cyan.
         let h = Highlighter::new(Some("Dracula"), false);
-        let style = h.scope_style("markup.heading.2.markdown").expect("dracula colors headings");
+        let style = h
+            .scope_style("markup.heading.2.markdown")
+            .expect("dracula colors headings");
         assert_eq!(style.fg, Some(Color::Rgb(139, 233, 253)));
         // A scope the theme has no rule for resolves to None.
         assert_eq!(h.scope_style("markup.table.definitely.not.a.scope"), None);
@@ -180,7 +184,10 @@ mod tests {
         let out = h.highlight(source, "markdown.md");
         assert_eq!(out.len(), 6);
         assert_eq!(
-            out[4].iter().map(|(text, _)| text.as_str()).collect::<String>(),
+            out[4]
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
             "## テスト"
         );
         assert!(

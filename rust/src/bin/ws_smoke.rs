@@ -20,26 +20,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("ws_smoke needs COSENSE_SID (websocket auth is the sid cookie only)".into());
     };
     let auth = AuthStore::load(Some(sid.clone()));
-    let cfg = Config { project: project.clone(), auth: auth.clone(), api_domain: "scrapbox.io".into() };
+    let cfg = Config {
+        project: project.clone(),
+        auth: auth.clone(),
+        api_domain: "scrapbox.io".into(),
+    };
     let client = Client::new(cfg)?;
 
     let page = client.get_page_in(&project, &title)?;
     let project_id = client.get_project_id(&project)?;
-    println!("page: {} ({} lines, id {}) projectId {}", page.title, page.lines.len(), page.id, project_id);
+    println!(
+        "page: {} ({} lines, id {}) projectId {}",
+        page.title,
+        page.lines.len(),
+        page.id,
+        project_id
+    );
 
-    let mut link = ws::RoomLink::connect("scrapbox.io", &sid).map_err(|e| format!("connect: {e}"))?;
-    link.join(&project_id, &page.id).map_err(|e| format!("join: {e}"))?;
+    let mut link =
+        ws::RoomLink::connect("scrapbox.io", &sid).map_err(|e| format!("connect: {e}"))?;
+    link.join(&project_id, &page.id)
+        .map_err(|e| format!("join: {e}"))?;
     println!("joined room");
 
     let marker = format!(
         "ws_smoke {} (safe to delete)",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
     );
 
     // 1. insert the marker through the REST edit API and wait for the push
     let p1 = client.preview_edit(&project, &page.id, &[EditOp::insert("_end", &marker)])?;
     let c1 = client.submit_edit(&project, &p1.preview_id)?;
-    println!("committed insert ({}) — waiting for the push…", c1.commit_id);
+    println!(
+        "committed insert ({}) — waiting for the push…",
+        c1.commit_id
+    );
 
     let (insert_seen, done) = wait_for_commit(
         &mut link,
@@ -60,9 +77,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .find(|l| l.text == marker)
         .ok_or("marker line not found after insert")?;
-    let p2 = client.preview_edit(&project, &page.id, &[EditOp::Delete { id: line.id.clone() }])?;
+    let p2 = client.preview_edit(
+        &project,
+        &page.id,
+        &[EditOp::Delete {
+            id: line.id.clone(),
+        }],
+    )?;
     let c2 = client.submit_edit(&project, &p2.preview_id)?;
-    println!("committed delete ({}) — waiting for the push…", c2.commit_id);
+    println!(
+        "committed delete ({}) — waiting for the push…",
+        c2.commit_id
+    );
 
     let (delete_seen, _) = wait_for_commit(
         &mut link,
@@ -106,7 +132,11 @@ fn wait_for_commit(
                         "  event: commit {} (parent {}) user {}: {}",
                         c.commit_id,
                         c.parent_id,
-                        if c.user_id.is_empty() { "<none>" } else { &c.user_id },
+                        if c.user_id.is_empty() {
+                            "<none>"
+                        } else {
+                            &c.user_id
+                        },
                         summary
                     );
                     if c.commit_id == commit_id {

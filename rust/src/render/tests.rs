@@ -9,9 +9,11 @@ fn plain(b: &Block) -> String {
             .map(|p| match p {
                 InlinePart::Image(u) => format!("[IMAGE {u}]"),
                 InlinePart::Formula { rows, .. } => rows.join("\n"),
-                InlinePart::Text(l) => {
-                    l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
-                }
+                InlinePart::Text(l) => l
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
             })
             .collect::<Vec<_>>()
             .join(""),
@@ -19,7 +21,12 @@ fn plain(b: &Block) -> String {
         Block::Table(_) => "[TABLE]".into(),
         Block::Artifact { rows, .. } => rows
             .iter()
-            .map(|(_, l)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|(_, l)| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     }
@@ -63,7 +70,10 @@ fn non_gyazo_image_urls_are_detected() {
     assert_eq!(standalone_image("ただの本文"), None);
     // …and a line that carries more than the picture is not "standalone",
     // though the picture is still found by `line_images`.
-    assert_eq!(standalone_image("[https://example.com/a.png] こんな感じ"), None);
+    assert_eq!(
+        standalone_image("[https://example.com/a.png] こんな感じ"),
+        None
+    );
     assert_eq!(
         line_images("[https://example.com/a.png] こんな感じ"),
         vec!["https://example.com/a.png".to_string()],
@@ -79,7 +89,9 @@ fn standalone_gyazo_becomes_image_block() {
     ];
     let out = render_lines(&lines);
     match &out.blocks[1] {
-        Block::Image { url, .. } => assert_eq!(url, &format!("https://acme-inc.gyazo.com/{id}")),
+        Block::Image { url, .. } => {
+            assert_eq!(url, &format!("https://acme-inc.gyazo.com/{id}"))
+        }
         other => panic!("expected image block, got {other:?}"),
     }
 }
@@ -87,26 +99,48 @@ fn standalone_gyazo_becomes_image_block() {
 #[test]
 fn headings_take_the_palettes_level_style_by_star_count() {
     let pal = Palette::for_light(false);
-    let lines: Vec<String> = ["title", "[* one]", "[** two]", "[*** three]", "[**** four]", "[***** five]"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let lines: Vec<String> = [
+        "title",
+        "[* one]",
+        "[** two]",
+        "[*** three]",
+        "[**** four]",
+        "[***** five]",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let out = render_lines(&lines);
     let got: Vec<String> = out.blocks.iter().map(plain).collect();
-    assert_eq!(&got[1..], ["one", "two", "three", "four", "five"], "no lead-in marks");
+    assert_eq!(
+        &got[1..],
+        ["one", "two", "three", "four", "five"],
+        "no lead-in marks"
+    );
     let style_of = |b: &Block| match b {
         Block::Text(l) => l.spans[0].style,
         _ => unreachable!(),
     };
-    assert_eq!(style_of(&out.blocks[0]), pal.heading_style_for(4), "title = top level");
+    assert_eq!(
+        style_of(&out.blocks[0]),
+        pal.heading_style_for(4),
+        "title = top level"
+    );
     // The star forms carry the level AND bold (see `star_style`).
     assert_eq!(style_of(&out.blocks[1]), star_style(1, &pal));
     assert_eq!(style_of(&out.blocks[2]), star_style(2, &pal));
     assert_eq!(style_of(&out.blocks[3]), star_style(3, &pal));
     assert_eq!(style_of(&out.blocks[4]), star_style(4, &pal));
-    assert_eq!(style_of(&out.blocks[5]), star_style(4, &pal), "four+ stars share the top level");
+    assert_eq!(
+        style_of(&out.blocks[5]),
+        star_style(4, &pal),
+        "four+ stars share the top level"
+    );
     for b in &out.blocks[1..] {
-        assert!(style_of(b).add_modifier.contains(Modifier::BOLD), "emphasis is the floor");
+        assert!(
+            style_of(b).add_modifier.contains(Modifier::BOLD),
+            "emphasis is the floor"
+        );
     }
     assert_ne!(style_of(&out.blocks[1]), style_of(&out.blocks[4]));
 }
@@ -124,7 +158,9 @@ fn indented_headings_keep_both_bullet_and_theme_heading_styles() {
     assert_eq!(plain(&out.blocks[2]), "    • three");
 
     for (block, stars) in [(&out.blocks[1], 1), (&out.blocks[2], 3)] {
-        let Block::Text(line) = block else { panic!("expected text") };
+        let Block::Text(line) = block else {
+            panic!("expected text")
+        };
         assert_eq!(line.spans[1].content, "• ");
         assert_eq!(line.spans[1].style.fg, Some(pal.bullet));
         assert_eq!(line.spans[2].style, star_style(stars, &pal));
@@ -138,9 +174,15 @@ fn uploaded_files_are_links_not_images() {
     assert!(is_scrapbox_file_url(pdf));
     assert_eq!(file_name_of_url(pdf), "6a8e7e5d714feb3f195319dd.pdf");
     // extension-less and image-extension uploads stay images
-    assert!(looks_like_image_url("https://scrapbox.io/files/6a8e7e5d714feb3f195319dd"));
-    assert!(looks_like_image_url("https://scrapbox.io/files/6a8e7e5d714feb3f195319dd.png"));
-    assert!(!is_scrapbox_file_url("https://scrapbox.io/files/6a8e7e5d714feb3f195319dd.png"));
+    assert!(looks_like_image_url(
+        "https://scrapbox.io/files/6a8e7e5d714feb3f195319dd"
+    ));
+    assert!(looks_like_image_url(
+        "https://scrapbox.io/files/6a8e7e5d714feb3f195319dd.png"
+    ));
+    assert!(!is_scrapbox_file_url(
+        "https://scrapbox.io/files/6a8e7e5d714feb3f195319dd.png"
+    ));
     // a titled file link renders as a paper-clip label, never an image block
     let out = render_lines(&["t".into(), format!("[260826ニセコ.pdf {pdf}]")]);
     assert_eq!(plain(&out.blocks[1]), "260826ニセコ.pdf");
@@ -153,10 +195,27 @@ fn uploaded_files_are_links_not_images() {
 #[test]
 fn mermaid_is_recognised_by_language_and_by_filename() {
     // The three forms scrapbox.io/help-jp/Mermaid documents.
-    for yes in ["mmd", "mermaid", "MMD", " Mermaid ", "flow.mmd", "図.mermaid", "a.b.mmd"] {
+    for yes in [
+        "mmd",
+        "mermaid",
+        "MMD",
+        " Mermaid ",
+        "flow.mmd",
+        "図.mermaid",
+        "a.b.mmd",
+    ] {
         assert!(mermaid_lang(yes), "{yes} should be a mermaid block");
     }
-    for no in ["", "js", "python", "mmdx", "mermaidjs", "readme.md", "mmd.txt", "diagram"] {
+    for no in [
+        "",
+        "js",
+        "python",
+        "mmdx",
+        "mermaidjs",
+        "readme.md",
+        "mmd.txt",
+        "diagram",
+    ] {
         assert!(!mermaid_lang(no), "{no} should stay a plain code block");
     }
 }
@@ -179,7 +238,12 @@ fn a_mermaid_block_becomes_one_web_render_keyed_on_its_last_line() {
         .blocks
         .iter()
         .filter_map(|b| match b {
-            Block::Artifact { code, rows, last_src, .. } => Some((code, rows, *last_src)),
+            Block::Artifact {
+                code,
+                rows,
+                last_src,
+                ..
+            } => Some((code, rows, *last_src)),
             _ => None,
         })
         .collect();
@@ -193,7 +257,10 @@ fn a_mermaid_block_becomes_one_web_render_keyed_on_its_last_line() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].0, 1);
     assert!(plain(&Block::Text(rows[0].1.clone())).contains("code:mmd"));
-    assert_eq!(rows.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        rows.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
     // The trailing blank still belongs to the page, not the block.
     assert!(matches!(out.blocks.last(), Some(Block::Text(_))));
 }
@@ -286,8 +353,12 @@ fn mermaid_nests_twice_without_bullets_then_becomes_plain_list_rows() {
     let plain_rows: Vec<String> = out.blocks.iter().map(plain).collect();
     assert!(plain_rows.iter().any(|s| s.contains("• code::test.mmd")));
     assert!(plain_rows.iter().any(|s| s.contains("• flowchart LR")));
-    assert!(plain_rows.iter().any(|s| s.contains("• TUI-- CDP -->Chrome")));
-    assert!(plain_rows.iter().any(|s| s.contains("• Chrome-- PNG -->TUI")));
+    assert!(plain_rows
+        .iter()
+        .any(|s| s.contains("• TUI-- CDP -->Chrome")));
+    assert!(plain_rows
+        .iter()
+        .any(|s| s.contains("• Chrome-- PNG -->TUI")));
 
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
     assert!((25..=29).all(|i| code_span_at(&refs, i).is_none()));
@@ -330,7 +401,9 @@ fn a_drawn_formula_takes_the_body_ink_and_bare_latex_the_code_ink() {
         &pal,
         &LinkTruth::default(),
     );
-    let Block::Text(line) = &out.blocks[1] else { panic!("{:?}", out.blocks[1]) };
+    let Block::Text(line) = &out.blocks[1] else {
+        panic!("{:?}", out.blocks[1])
+    };
     let ink = |needle: &str| {
         line.spans
             .iter()
@@ -351,14 +424,23 @@ fn a_drawn_formula_takes_the_body_ink_and_bare_latex_the_code_ink() {
 fn an_inline_formula_is_not_a_page_link() {
     // 括弧の中は Cosense の文ではなく LaTeX なので、リンクも
     // 装飾もアイコンも読み取らない。
-    let lines =
-        vec!["title".to_string(), r"[$ E = mc^2 ]".to_string(), "[普通のリンク]".to_string()];
+    let lines = vec![
+        "title".to_string(),
+        r"[$ E = mc^2 ]".to_string(),
+        "[普通のリンク]".to_string(),
+    ];
     let out = render_lines(&lines);
-    assert_eq!(out.extracted.links, vec!["普通のリンク"], "{:?}", out.extracted.links);
+    assert_eq!(
+        out.extracted.links,
+        vec!["普通のリンク"],
+        "{:?}",
+        out.extracted.links
+    );
     assert!(
-        out.hits.iter().flatten().all(|h| {
-            !matches!(&h.target, HitTarget::Page(p) if p.contains('$'))
-        }),
+        out.hits
+            .iter()
+            .flatten()
+            .all(|h| { !matches!(&h.target, HitTarget::Page(p) if p.contains('$')) }),
         "no followable target on a formula"
     );
 }
@@ -375,12 +457,17 @@ fn a_tall_inline_formula_becomes_a_part_of_its_own() {
     let shape: Vec<String> = parts
         .iter()
         .map(|p| match p {
-            InlinePart::Text(l) => {
-                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
-            }
-            InlinePart::Formula { source, rows, baseline } => {
-                let latex: String =
-                    source.spans.iter().map(|s| s.content.as_ref()).collect();
+            InlinePart::Text(l) => l
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>(),
+            InlinePart::Formula {
+                source,
+                rows,
+                baseline,
+            } => {
+                let latex: String = source.spans.iter().map(|s| s.content.as_ref()).collect();
                 format!("math({latex}) rows={} baseline={baseline}", rows.len())
             }
             InlinePart::Image(u) => format!("img({u})"),
@@ -392,10 +479,16 @@ fn a_tall_inline_formula_becomes_a_part_of_its_own() {
         "one sentence, three parts"
     );
     // 組まれた行はすべて同じ幅に揃っている(列がずれない)。
-    let InlinePart::Formula { rows, .. } = &parts[1] else { unreachable!() };
+    let InlinePart::Formula { rows, .. } = &parts[1] else {
+        unreachable!()
+    };
     let w = unicode_width::UnicodeWidthStr::width(rows[0].as_str());
     for r in rows {
-        assert_eq!(unicode_width::UnicodeWidthStr::width(r.as_str()), w, "{rows:?}");
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(r.as_str()),
+            w,
+            "{rows:?}"
+        );
     }
 }
 
@@ -425,8 +518,14 @@ fn a_formula_only_survives_at_the_left_margin() {
     assert_eq!(indents, vec![0], "only the flush block is a formula");
 
     let plain_rows: Vec<String> = out.blocks.iter().map(plain).collect();
-    assert!(plain_rows.iter().any(|s| s.contains("• code:tex")), "{plain_rows:?}");
-    assert!(plain_rows.iter().any(|s| s.contains(r"• \frac{c}{d}")), "{plain_rows:?}");
+    assert!(
+        plain_rows.iter().any(|s| s.contains("• code:tex")),
+        "{plain_rows:?}"
+    );
+    assert!(
+        plain_rows.iter().any(|s| s.contains(r"• \frac{c}{d}")),
+        "{plain_rows:?}"
+    );
 
     // コードブロックではないので、編集側も普通の行として扱う。
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -438,9 +537,15 @@ fn a_formula_only_survives_at_the_left_margin() {
 #[test]
 fn an_empty_mermaid_block_stays_a_plain_code_header() {
     // No content line means no line id to hang a preview off.
-    let lines: Vec<String> = ["title", "code:mmd"].iter().map(|s| s.to_string()).collect();
+    let lines: Vec<String> = ["title", "code:mmd"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let out = render_lines(&lines);
-    assert!(!out.blocks.iter().any(|b| matches!(b, Block::Artifact { .. })));
+    assert!(!out
+        .blocks
+        .iter()
+        .any(|b| matches!(b, Block::Artifact { .. })));
     assert!(out.blocks.iter().any(|b| plain(b).contains("code:mmd")));
 }
 
@@ -466,11 +571,21 @@ fn a_nested_plain_code_header_wears_the_lists_bullet_but_its_body_does_not() {
     .collect();
     let out = render_lines(&lines);
     let got: Vec<String> = out.blocks.iter().map(plain).collect();
-    assert!(got.iter().any(|s| s == "code:top"), "level 0 is bare: {got:?}");
-    assert!(got.iter().any(|s| s == "• code:go"), "level 1 wears it: {got:?}");
-    assert!(got.iter().any(|s| s == "  • code:rs"), "level 2 wears it: {got:?}");
     assert!(
-        got.iter().filter(|s| s.contains("func()") || s.contains("main()"))
+        got.iter().any(|s| s == "code:top"),
+        "level 0 is bare: {got:?}"
+    );
+    assert!(
+        got.iter().any(|s| s == "• code:go"),
+        "level 1 wears it: {got:?}"
+    );
+    assert!(
+        got.iter().any(|s| s == "  • code:rs"),
+        "level 2 wears it: {got:?}"
+    );
+    assert!(
+        got.iter()
+            .filter(|s| s.contains("func()") || s.contains("main()"))
             .all(|s| !s.contains('•')),
         "body rows stay bare: {got:?}"
     );
@@ -481,10 +596,7 @@ fn a_nested_plain_code_header_wears_the_lists_bullet_but_its_body_does_not() {
     // headers 1, 5, 9 unflagged; bodies flagged.
     assert_eq!(
         flags,
-        vec![
-            false, false, true, false, false, false, true, false, false, false,
-            true
-        ],
+        vec![false, false, true, false, false, false, true, false, false, false, true],
         "{flags:?}"
     );
 }
@@ -542,7 +654,15 @@ fn blank_lines_after_a_code_block_are_all_kept() {
         let got: Vec<String> = out.blocks.iter().map(plain).collect();
         assert_eq!(
             got,
-            vec!["t", "code:x.py", "  print(1)", "[BLANK]", "[BLANK]", "[BLANK]", "after"],
+            vec![
+                "t",
+                "code:x.py",
+                "  print(1)",
+                "[BLANK]",
+                "[BLANK]",
+                "[BLANK]",
+                "after"
+            ],
             "highlighted={}",
             hl.is_some()
         );
@@ -557,7 +677,10 @@ fn blank_lines_after_a_code_block_are_all_kept() {
         .collect();
     let out = render_lines(&lines);
     let got: Vec<String> = out.blocks.iter().map(plain).collect();
-    assert_eq!(got, vec!["t", "code:x.py", "  a = 1", "[BLANK]", "• b = 2", "end"]);
+    assert_eq!(
+        got,
+        vec!["t", "code:x.py", "  a = 1", "[BLANK]", "• b = 2", "end"]
+    );
     assert_eq!(out.srcs, vec![0, 1, 2, 3, 4, 5]);
 }
 
@@ -618,11 +741,19 @@ fn code_span_agrees_with_what_the_renderer_collected() {
     let inside: Vec<usize> = (0..src.len())
         .filter(|&i| code_span_at(&refs, i).is_some())
         .collect();
-    assert_eq!(inside, vec![2, 3, 9, 10], "a truly blank line ends the block");
+    assert_eq!(
+        inside,
+        vec![2, 3, 9, 10],
+        "a truly blank line ends the block"
+    );
 
     let top = code_span_at(&refs, 3).unwrap();
     assert_eq!(top.header, 2);
-    assert_eq!(top.body_indent(), " ", "one step deeper than a flush header");
+    assert_eq!(
+        top.body_indent(),
+        " ",
+        "one step deeper than a flush header"
+    );
 
     let nested = code_span_at(&refs, 10).unwrap();
     assert_eq!(nested.header, 9);
@@ -706,7 +837,10 @@ fn every_followable_thing_says_which_span_it_is() {
         render("> 引用の中の [リンク]"),
         vec![("リンク".into(), HitTarget::Page("リンク".into()))]
     );
-    assert_eq!(render(" code:hello.py"), vec![("code:hello.py".into(), HitTarget::BlockLabel)]);
+    assert_eq!(
+        render(" code:hello.py"),
+        vec![("code:hello.py".into(), HitTarget::BlockLabel)]
+    );
     // Notation that leads nowhere reports nothing.
     assert_eq!(render("[* ただの太字] and [] text"), vec![]);
 }
@@ -721,8 +855,7 @@ fn only_links_the_page_vouched_for_can_be_marked_missing() {
     let pal = Palette::for_light(false);
     // The page links to three titles; the server listed one of them
     // as an existing neighbour.
-    let known =
-        LinkTruth::seed(["あるページ", "ないページ", "tag"], ["あるページ"]);
+    let known = LinkTruth::seed(["あるページ", "ないページ", "tag"], ["あるページ"]);
     let styles = |src: &str, known: &LinkTruth| -> Vec<(String, Style)> {
         render_lines_with(&["t".to_string(), src.to_string()], None, &pal, known)
             .blocks
@@ -746,7 +879,10 @@ fn only_links_the_page_vouched_for_can_be_marked_missing() {
             .unwrap_or_else(|| panic!("{text:?} not rendered from {src:?}"))
             .1
     };
-    assert_eq!(style_of("[あるページ]", "あるページ", &known).fg, Some(pal.link));
+    assert_eq!(
+        style_of("[あるページ]", "あるページ", &known).fg,
+        Some(pal.link)
+    );
     assert_eq!(
         style_of("[ないページ]", "ないページ", &known).fg,
         Some(pal.link_missing)
@@ -779,9 +915,15 @@ fn link_truth_matches_titles_the_way_cosense_does() {
     assert_eq!(title_lc("AI supported coding"), "ai_supported_coding");
     assert_eq!(title_lc("選択した文字 URL"), "選択した文字_url");
     let m = LinkTruth::seed(["Scrapbox Golf"], ["scrapbox_golf"]);
-    assert!(!m.missing("Scrapbox Golf"), "the same page under another spelling");
+    assert!(
+        !m.missing("Scrapbox Golf"),
+        "the same page under another spelling"
+    );
     let m = LinkTruth::seed(["Scrapbox Golf"], ["別のページ"]);
-    assert!(m.missing("scrapbox_golf"), "and the link is found under either spelling");
+    assert!(
+        m.missing("scrapbox_golf"),
+        "and the link is found under either spelling"
+    );
 }
 
 /// `[]` is not notation — an empty link has nothing to link to — so
@@ -801,9 +943,12 @@ fn empty_brackets_are_text_and_double_brackets_are_bold() {
         out.blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Text(l) => {
-                    Some(l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-                }
+                Block::Text(l) => Some(
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>(),
+                ),
                 _ => None,
             })
             .nth(1)
@@ -831,17 +976,21 @@ fn empty_brackets_are_text_and_double_brackets_are_bold() {
             &pal,
             &LinkTruth::default(),
         )
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Text(l) => Some(l.spans.iter().map(|s| s.style).collect::<Vec<_>>()),
-                _ => None,
-            })
-            .nth(1)
-            .unwrap_or_default()
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text(l) => Some(l.spans.iter().map(|s| s.style).collect::<Vec<_>>()),
+            _ => None,
+        })
+        .nth(1)
+        .unwrap_or_default()
     };
     assert_eq!(styles("[[太字]]"), styles("[* 太字]"));
-    assert_ne!(styles("[[太字]]"), styles("太字"), "and it is not plain text");
+    assert_ne!(
+        styles("[[太字]]"),
+        styles("太字"),
+        "and it is not plain text"
+    );
 }
 
 /// The memo's three image complaints, as one test: a bare URL is not a
@@ -864,25 +1013,46 @@ fn a_line_keeps_its_text_and_every_picture_on_it() {
                 Block::Image { url, indent, item } => {
                     format!("image:{indent}{}:{url}", if *item { "*" } else { "" })
                 }
-                Block::Inline { indent, item, parts } => {
+                Block::Inline {
+                    indent,
+                    item,
+                    parts,
+                } => {
                     let shape: Vec<String> = parts
                         .iter()
                         .map(|p| match p {
                             InlinePart::Image(u) => format!("img({u})"),
                             InlinePart::Formula { source, .. } => format!(
                                 "math({})",
-                                source.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                source
+                                    .spans
+                                    .iter()
+                                    .map(|s| s.content.as_ref())
+                                    .collect::<String>()
                             ),
                             InlinePart::Text(l) => format!(
                                 "txt({})",
-                                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+                                l.spans
+                                    .iter()
+                                    .map(|s| s.content.as_ref())
+                                    .collect::<String>()
                             ),
                         })
                         .collect();
-                    format!("inline:{indent}{}:{}", if *item { "*" } else { "" }, shape.join("|"))
+                    format!(
+                        "inline:{indent}{}:{}",
+                        if *item { "*" } else { "" },
+                        shape.join("|")
+                    )
                 }
                 Block::Text(l) => {
-                    format!("text:{}", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                    format!(
+                        "text:{}",
+                        l.spans
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect::<String>()
+                    )
                 }
                 _ => "other".into(),
             })
@@ -914,7 +1084,10 @@ fn a_line_keeps_its_text_and_every_picture_on_it() {
     // Text BEFORE a picture is the same block, in the other order —
     // and the order is what the reading follows.
     let before = shape("先に本文 [https://example.com/a.png]");
-    assert_eq!(before, vec!["inline:0:txt(先に本文 )|img(https://example.com/a.png)"]);
+    assert_eq!(
+        before,
+        vec!["inline:0:txt(先に本文 )|img(https://example.com/a.png)"]
+    );
 
     // Cosense hangs pictures off bullets: an indented image line
     // belongs to the item above it, so it starts where that item's
@@ -993,13 +1166,21 @@ fn inline_decorations_carry_the_heading_level_and_keep_links() {
     assert_eq!(*three.last().unwrap(), star_style(3, &pal));
     // Bold is the floor: `[* x]` is how Cosense bolds a word, whatever
     // the theme does with the level on top of it.
-    for st in [one.last().unwrap(), two.last().unwrap(), three.last().unwrap()] {
+    for st in [
+        one.last().unwrap(),
+        two.last().unwrap(),
+        three.last().unwrap(),
+    ] {
         assert!(st.add_modifier.contains(Modifier::BOLD), "{st:?}");
     }
 
     // Italic comes from the `/` flag and NOWHERE else: borrowing the
     // theme's italic markdown heading made `[* x]` look like `[/ x]`.
-    for st in [one.last().unwrap(), two.last().unwrap(), three.last().unwrap()] {
+    for st in [
+        one.last().unwrap(),
+        two.last().unwrap(),
+        three.last().unwrap(),
+    ] {
         assert!(!st.add_modifier.contains(Modifier::ITALIC), "{st:?}");
     }
     let slash = *styles("→ [*/ 斜体]").last().unwrap();
@@ -1016,10 +1197,22 @@ fn inline_decorations_carry_the_heading_level_and_keep_links() {
     // A link inside a decoration is REGISTERED as a link (so Enter can
     // follow it) and keeps the link colour.
     let out = render("[[[改善案]]]");
-    assert_eq!(out.extracted.links, vec!["改善案".to_string()], "followable");
+    assert_eq!(
+        out.extracted.links,
+        vec!["改善案".to_string()],
+        "followable"
+    );
     let deco = styles("[[[改善案]]]");
-    assert_eq!(deco.last().unwrap().fg, Some(pal.link), "still reads as a link");
-    assert!(deco.last().unwrap().add_modifier.contains(Modifier::UNDERLINED));
+    assert_eq!(
+        deco.last().unwrap().fg,
+        Some(pal.link),
+        "still reads as a link"
+    );
+    assert!(deco
+        .last()
+        .unwrap()
+        .add_modifier
+        .contains(Modifier::UNDERLINED));
 
     // Same for the single-bracket decoration form.
     let out = render("[* [改善案]]");
@@ -1036,7 +1229,9 @@ fn a_mixed_text_and_picture_line_keeps_its_hits_across_its_text_parts() {
         "title".into(),
         "本文 [Target] [https://example.com/a.png] 後 [Docs https://example.com]".into(),
     ]);
-    let Block::Inline { parts, .. } = &out.blocks[1] else { panic!("expected an inline block") };
+    let Block::Inline { parts, .. } = &out.blocks[1] else {
+        panic!("expected an inline block")
+    };
     let spans: Vec<String> = parts
         .iter()
         .flat_map(|p| match p {
@@ -1048,10 +1243,16 @@ fn a_mixed_text_and_picture_line_keeps_its_hits_across_its_text_parts() {
     assert_eq!(hits.len(), 2, "{hits:?}");
     assert_eq!(spans[hits[0].span], "Target");
     assert_eq!(hits[0].target, HitTarget::Page("Target".into()));
-    assert_eq!(spans[hits[1].span], "Docs", "the second part's hit is shifted past the first part's spans");
+    assert_eq!(
+        spans[hits[1].span], "Docs",
+        "the second part's hit is shifted past the first part's spans"
+    );
     assert_eq!(
         hits[1].target,
-        HitTarget::Url { label: "Docs".into(), url: "https://example.com".into() }
+        HitTarget::Url {
+            label: "Docs".into(),
+            url: "https://example.com".into()
+        }
     );
 }
 
@@ -1061,11 +1262,25 @@ fn a_mixed_text_and_picture_line_keeps_its_hits_across_its_text_parts() {
 /// 逆に、コード片の中の `[括弧]` はコードのまま。
 #[test]
 fn a_link_before_inline_code_on_the_same_line_is_still_a_link() {
-    let out = render_lines(&["title".into(), "a [crowdin] b `#3117` / c `[not a link]`".into()]);
-    let Block::Text(l) = &out.blocks[1] else { panic!() };
+    let out = render_lines(&[
+        "title".into(),
+        "a [crowdin] b `#3117` / c `[not a link]`".into(),
+    ]);
+    let Block::Text(l) = &out.blocks[1] else {
+        panic!()
+    };
     let texts: Vec<&str> = l.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(texts, vec!["a ", "crowdin", " b ", " #3117 ", " / c ", " [not a link] "]);
-    assert_eq!(out.hits[1], vec![Hit { span: 1, target: HitTarget::Page("crowdin".into()) }]);
+    assert_eq!(
+        texts,
+        vec!["a ", "crowdin", " b ", " #3117 ", " / c ", " [not a link] "]
+    );
+    assert_eq!(
+        out.hits[1],
+        vec![Hit {
+            span: 1,
+            target: HitTarget::Page("crowdin".into())
+        }]
+    );
     assert_eq!(out.extracted.links, vec!["crowdin"]);
 }
 /// 実ページ(my-sandbox/文章入力遅延テスト)で起きたこと:ブロックの

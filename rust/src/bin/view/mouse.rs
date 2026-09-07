@@ -35,8 +35,12 @@ pub(crate) fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     }
     if app.overlay.is_some() {
         match m.kind {
-            MouseEventKind::ScrollDown => handle_overlay_key(app, ctx, KeyCode::Down, KeyModifiers::NONE),
-            MouseEventKind::ScrollUp => handle_overlay_key(app, ctx, KeyCode::Up, KeyModifiers::NONE),
+            MouseEventKind::ScrollDown => {
+                handle_overlay_key(app, ctx, KeyCode::Down, KeyModifiers::NONE)
+            }
+            MouseEventKind::ScrollUp => {
+                handle_overlay_key(app, ctx, KeyCode::Up, KeyModifiers::NONE)
+            }
             _ => {}
         }
         return;
@@ -56,10 +60,7 @@ pub(crate) fn handle_mouse_index(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     let list = app.index_list_rect;
     let preview = app.index_preview_rect;
     let inside = |r: Rect| {
-        m.column >= r.x
-            && m.column < r.x + r.width
-            && m.row >= r.y
-            && m.row < r.y + r.height
+        m.column >= r.x && m.column < r.x + r.width && m.row >= r.y && m.row < r.y + r.height
     };
     let over_list = inside(list);
     let over_preview = inside(preview);
@@ -136,7 +137,9 @@ pub(crate) fn click_caret(app: &App, line: usize, col: usize, screen_row: i32) -
         .src_rows(line)
         .map(|(first, _)| {
             let clicked = (app.scroll as i32 + screen_row).max(0) as usize;
-            clicked.saturating_sub(first).min(wrapped.segs.len().saturating_sub(1))
+            clicked
+                .saturating_sub(first)
+                .min(wrapped.segs.len().saturating_sub(1))
         })
         .unwrap_or(0);
     raw_caret_from_display(&text, wrapped.offset_at(seg_index, col), code)
@@ -252,8 +255,7 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     let in_track = m.row >= bar.y && m.row < bar.y + bar.height;
     let track_row = m.row.saturating_sub(bar.y);
     // The pointer may leave the scrollbar while dragging: clamp it back.
-    let clamped_track_row =
-        m.row.clamp(bar.y, (bar.y + bar.height).saturating_sub(1)) - bar.y;
+    let clamped_track_row = m.row.clamp(bar.y, (bar.y + bar.height).saturating_sub(1)) - bar.y;
     // The scrollable extent includes the external top rule; FrameEnd is
     // already part of the rows. The track deliberately starts below the
     // frame's top rule, so the top-position thumb cannot overwrite it.
@@ -262,13 +264,8 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     let track_len = bar.height as usize;
     let on_track = m.column == bar.x
         && in_track
-        && cosense::theme::scroll_thumb_in_track(
-            total,
-            viewport,
-            track_len,
-            app.scroll as usize,
-        )
-        .is_some();
+        && cosense::theme::scroll_thumb_in_track(total, viewport, track_len, app.scroll as usize)
+            .is_some();
 
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) if on_track => {
@@ -366,8 +363,7 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                     // A link activates on button-up over the same target.
                     // Waiting for release preserves click-drag selection.
                     if in_text_col {
-                        if let Some((link_src, item)) =
-                            app.link_at_screen_position(screen_row, col)
+                        if let Some((link_src, item)) = app.link_at_screen_position(screen_row, col)
                         {
                             app.selection = None;
                             app.drag_anchor = Some((link_src, None));
@@ -410,8 +406,12 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                     app.wheel_scroll(1, app.view_h);
                 }
             }
-            let Some((anchor, anchor_caret)) = app.drag_anchor else { return };
-            let Some(end) = app.src_at_screen_row(clamped_row) else { return };
+            let Some((anchor, anchor_caret)) = app.drag_anchor else {
+                return;
+            };
+            let Some(end) = app.src_at_screen_row(clamped_row) else {
+                return;
+            };
             if app.session.is_some() {
                 let col = m.column.saturating_sub(text.x) as usize;
                 if end < app.lines.len() {
@@ -444,7 +444,10 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 app.follow = true;
                 return;
             }
-            app.selection = Some(Selection { anchor, cursor: end });
+            app.selection = Some(Selection {
+                anchor,
+                cursor: end,
+            });
             app.goto_src(end);
         }
         MouseEventKind::Up(MouseButton::Left) => {
@@ -477,4 +480,3 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
         _ => {}
     }
 }
-

@@ -93,7 +93,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "SPIKE  protocol={:?}  font={}x{}  img={}x{}px -> {}x{} cells",
         protocol_type, font.width, font.height, px_w, px_h, cells_w, cells_h
     )));
-    blocks.push(Block::Text("scroll: j/k or arrows   g: top   q: quit".into()));
+    blocks.push(Block::Text(
+        "scroll: j/k or arrows   g: top   q: quit".into(),
+    ));
     blocks.push(Block::Text("".into()));
     blocks.push(Block::Text("--- text above the image ---".into()));
     for i in 1..=4 {
@@ -121,10 +123,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     res
 }
 
-fn run(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut App,
-) -> Result<(), Box<dyn Error>> {
+fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<(), Box<dyn Error>> {
     loop {
         terminal.draw(|f| ui(f, app))?;
 
@@ -139,13 +138,9 @@ fn run(
                     KeyCode::Char('j') | KeyCode::Down => {
                         app.scroll = (app.scroll + 1).min(max_scroll)
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        app.scroll = app.scroll.saturating_sub(1)
-                    }
+                    KeyCode::Char('k') | KeyCode::Up => app.scroll = app.scroll.saturating_sub(1),
                     KeyCode::Char('g') => app.scroll = 0,
-                    KeyCode::Char(' ') => {
-                        app.scroll = (app.scroll + 10).min(max_scroll)
-                    }
+                    KeyCode::Char(' ') => app.scroll = (app.scroll + 10).min(max_scroll),
                     _ => {}
                 }
             }
@@ -195,7 +190,8 @@ fn ui(f: &mut Frame, app: &mut App) {
                 // Only render the image when it is FULLY visible. This is the
                 // spike's key check: when partially scrolled, we intentionally
                 // hide it and verify no ghost remains (Clear above handles it).
-                let fully_visible = screen_y >= 0 && (screen_y + *cells_h as i32) <= area.height as i32;
+                let fully_visible =
+                    screen_y >= 0 && (screen_y + *cells_h as i32) <= area.height as i32;
                 if fully_visible {
                     let rect = Rect::new(
                         area.x,

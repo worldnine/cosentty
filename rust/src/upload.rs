@@ -19,8 +19,8 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::api::ProjectSettings;
-use crate::url::percent_decode;
 use crate::config::Config;
+use crate::url::percent_decode;
 
 /// One Gyazo upload may take this long end to end (a photo over a slow
 /// line), independent of the shorter limit the page requests live under.
@@ -28,7 +28,9 @@ const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// File extensions accepted as an image to upload — the same set the
 /// renderer draws, so what goes up comes back as a picture.
-pub const IMAGE_EXTS: [&str; 8] = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff"];
+pub const IMAGE_EXTS: [&str; 8] = [
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff",
+];
 
 /// Cosense's per-file cap (the API answers 413 above it; better said here).
 pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
@@ -50,7 +52,9 @@ pub fn image_path_from_paste(pasted: &str) -> Option<PathBuf> {
     if let Some(rest) = s.strip_prefix("file://") {
         s = percent_decode(rest);
     }
-    if (s.starts_with('\'') && s.ends_with('\'') || s.starts_with('"') && s.ends_with('"')) && s.len() >= 2 {
+    if (s.starts_with('\'') && s.ends_with('\'') || s.starts_with('"') && s.ends_with('"'))
+        && s.len() >= 2
+    {
         s = s[1..s.len() - 1].to_string();
     }
     let s = s.replace("\\ ", " ");
@@ -76,7 +80,12 @@ pub fn has_image_ext(name: &str) -> bool {
 /// MIME type from the extension. Only the image set above ever reaches
 /// here; the fallback is for form's sake.
 pub fn content_type_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -124,9 +133,16 @@ impl Destination {
     /// even `gyazoTeamsName` but not this field (measured on acme-edu),
     /// and a team name alone does not mean Gyazo — `別のプロジェクト` has one
     /// and uploads to gcs.
-    pub fn resolve_with(config: &Config, project: &str, settings: Option<&ProjectSettings>) -> (Destination, Decided) {
+    pub fn resolve_with(
+        config: &Config,
+        project: &str,
+        settings: Option<&ProjectSettings>,
+    ) -> (Destination, Decided) {
         let choice = config.upload_choice(project);
-        let (kind, decided) = match (choice.images.clone(), settings.and_then(|s| s.upload_image_to.clone())) {
+        let (kind, decided) = match (
+            choice.images.clone(),
+            settings.and_then(|s| s.upload_image_to.clone()),
+        ) {
             (Some(k), _) => (k, Decided::File),
             (None, Some(k)) => (k, Decided::Project),
             (None, None) => ("gcs".to_string(), Decided::Default),
@@ -150,7 +166,11 @@ impl Destination {
     /// the file overrides it for whoever wants otherwise; and with neither
     /// (`/api/projects/<name>` refuses a PAT, so the setting is often out of
     /// reach) the picture stays inside the project.
-    pub fn resolve(config: &Config, project: &str, settings: Option<&ProjectSettings>) -> Destination {
+    pub fn resolve(
+        config: &Config,
+        project: &str,
+        settings: Option<&ProjectSettings>,
+    ) -> Destination {
         Self::resolve_with(config, project, settings).0
     }
 
@@ -201,7 +221,11 @@ pub fn upload_gyazo(
 
 /// The permalink the page should carry. Teams: rebuilt from the id, since
 /// the API's own `permalink_url` points at gyazo.com and does not resolve.
-pub fn gyazo_permalink(team: Option<&str>, image_id: Option<&str>, permalink_url: Option<&str>) -> Option<String> {
+pub fn gyazo_permalink(
+    team: Option<&str>,
+    image_id: Option<&str>,
+    permalink_url: Option<&str>,
+) -> Option<String> {
     match (team, image_id) {
         (Some(org), Some(id)) => Some(format!("https://{org}.gyazo.com/{id}")),
         (None, _) if permalink_url.is_some() => permalink_url.map(str::to_string),
@@ -221,14 +245,46 @@ mod tests {
         std::fs::write(&png, b"x").unwrap();
         let p = png.to_string_lossy().into_owned();
         assert_eq!(image_path_from_paste(&p), Some(png.clone()));
-        assert_eq!(image_path_from_paste(&format!("{p} \n")), Some(png.clone()), "terminal's trailing space");
-        assert_eq!(image_path_from_paste(&p.replace(' ', "\\ ")), Some(png.clone()), "shell escape");
-        assert_eq!(image_path_from_paste(&format!("'{p}'")), Some(png.clone()), "quoted");
-        assert_eq!(image_path_from_paste(&format!("file://{}", p.replace(' ', "%20"))), Some(png.clone()), "file URL");
-        assert_eq!(image_path_from_paste(&format!("{p}\n{p}")), None, "two lines are text");
-        assert_eq!(image_path_from_paste(&p.replace(".PNG", ".txt")), None, "not an image");
-        assert_eq!(image_path_from_paste(&p.replace("shot", "gone")), None, "not a file");
-        assert_eq!(image_path_from_paste("https://example.com/a.png"), None, "a URL is not a path");
+        assert_eq!(
+            image_path_from_paste(&format!("{p} \n")),
+            Some(png.clone()),
+            "terminal's trailing space"
+        );
+        assert_eq!(
+            image_path_from_paste(&p.replace(' ', "\\ ")),
+            Some(png.clone()),
+            "shell escape"
+        );
+        assert_eq!(
+            image_path_from_paste(&format!("'{p}'")),
+            Some(png.clone()),
+            "quoted"
+        );
+        assert_eq!(
+            image_path_from_paste(&format!("file://{}", p.replace(' ', "%20"))),
+            Some(png.clone()),
+            "file URL"
+        );
+        assert_eq!(
+            image_path_from_paste(&format!("{p}\n{p}")),
+            None,
+            "two lines are text"
+        );
+        assert_eq!(
+            image_path_from_paste(&p.replace(".PNG", ".txt")),
+            None,
+            "not an image"
+        );
+        assert_eq!(
+            image_path_from_paste(&p.replace("shot", "gone")),
+            None,
+            "not a file"
+        );
+        assert_eq!(
+            image_path_from_paste("https://example.com/a.png"),
+            None,
+            "a URL is not a path"
+        );
     }
 
     #[test]
@@ -245,28 +301,55 @@ mod tests {
             ..Default::default()
         };
         let none = Config::default();
-        assert_eq!(Destination::resolve(&none, "p", None), Destination::Gcs, "knowing nothing stays inside");
+        assert_eq!(
+            Destination::resolve(&none, "p", None),
+            Destination::Gcs,
+            "knowing nothing stays inside"
+        );
         assert_eq!(
             Destination::resolve(&none, "p", Some(&settings)),
-            Destination::Gyazo { team: Some("acme-inc".into()) },
+            Destination::Gyazo {
+                team: Some("acme-inc".into())
+            },
             "the project's Upload tab is followed"
         );
         let file = Config::parse("[upload.project.p]\nimages = \"gcs\"\n").unwrap();
-        assert_eq!(Destination::resolve(&file, "p", Some(&settings)), Destination::Gcs, "the file wins");
+        assert_eq!(
+            Destination::resolve(&file, "p", Some(&settings)),
+            Destination::Gcs,
+            "the file wins"
+        );
         let file = Config::parse("[upload]\nimages = \"gyazo\"\n").unwrap();
         assert_eq!(
             Destination::resolve(&file, "q", None),
             Destination::Gyazo { team: None },
             "gyazo with no team is personal gyazo.com"
         );
-        assert_eq!(Destination::Gyazo { team: Some("x".into()) }.label(), "x.gyazo.com");
+        assert_eq!(
+            Destination::Gyazo {
+                team: Some("x".into())
+            }
+            .label(),
+            "x.gyazo.com"
+        );
 
         // Who decided is reported; a public view with the field missing
         // is "nobody", even with a team name on it.
-        assert_eq!(Destination::resolve_with(&none, "p", Some(&settings)).1, Decided::Project);
+        assert_eq!(
+            Destination::resolve_with(&none, "p", Some(&settings)).1,
+            Decided::Project
+        );
         assert_eq!(Destination::resolve_with(&file, "q", None).1, Decided::File);
-        let public_view = ProjectSettings { theme: Some("x".into()), upload_image_to: None, gyazo_teams_name: Some("org".into()), ..Default::default() };
-        assert_eq!(Destination::resolve_with(&none, "p", Some(&public_view)), (Destination::Gcs, Decided::Default));
+        let public_view = ProjectSettings {
+            theme: Some("x".into()),
+            upload_image_to: None,
+            gyazo_teams_name: Some("org".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            Destination::resolve_with(&none, "p", Some(&public_view)),
+            (Destination::Gcs, Decided::Default)
+        );
     }
 
     #[test]

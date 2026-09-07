@@ -48,12 +48,20 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // with ← changes the date in place (and adds the position), while the
     // chrome turns purple — that is the whole transition.
     let chrome = app.chrome_colors(ctx);
-    let name = if app.project_display.is_empty() { app.project.as_str() } else { app.project_display.as_str() };
+    let name = if app.project_display.is_empty() {
+        app.project.as_str()
+    } else {
+        app.project_display.as_str()
+    };
     let mut badges: Vec<String> = Vec::new();
     // The position counts NOW as the newest entry: `4/4` while reading the
     // live page with three snapshots, and ← walks the number down.
     let stamp = app.shown_updated();
-    let date = if stamp > 0 { cosense::theme::format_local(stamp) } else { String::new() };
+    let date = if stamp > 0 {
+        cosense::theme::format_local(stamp)
+    } else {
+        String::new()
+    };
     match (app.history_position(), date.is_empty()) {
         (Some((pos, total)), false) => badges.push(format!("{pos}/{total} · {date}")),
         (Some((pos, total)), true) => badges.push(format!("{pos}/{total}")),
@@ -66,7 +74,11 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     if !app.editable {
         badges.push(ts!("読み取り専用", "read-only").to_string());
     }
-    let right = if badges.is_empty() { String::new() } else { format!("{} ", badges.join(" · ")) };
+    let right = if badges.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", badges.join(" · "))
+    };
     let head = header_line(name, &app.title, &right, area.width);
     // The site name — or the lone `/` when there is no room for the name —
     // is the click target that opens the project's page list (the header's
@@ -108,12 +120,24 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         "L-/-".to_string()
     } else if app.cursor >= app.lines.len() && !app.virtual_items.is_empty() {
         // Cursor is on a related row below the body.
-        format!("link {}/{}", app.cursor - app.lines.len() + 1, app.virtual_items.len())
+        format!(
+            "link {}/{}",
+            app.cursor - app.lines.len() + 1,
+            app.virtual_items.len()
+        )
     } else {
-        let cur = app.cursor_src().map(|s| s + 1).unwrap_or(1).min(app.lines.len());
+        let cur = app
+            .cursor_src()
+            .map(|s| s + 1)
+            .unwrap_or(1)
+            .min(app.lines.len());
         format!("L{}/{}", cur, app.lines.len())
     };
-    let cur_links = if app.session.is_some() { Vec::new() } else { app.cursor_line_links() };
+    let cur_links = if app.session.is_some() {
+        Vec::new()
+    } else {
+        app.cursor_line_links()
+    };
     let hint = app.hint_text(&cur_links);
     // EDIT のタグはヘッダと同じ配色の反転バッジで示す: 枠色・キャレットと
     // 並ぶ三つ目のモードサイン。READ は従来どおり控えめに。
@@ -128,7 +152,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!(" {} ", mode_tag), mode_style),
-            Span::styled(format!("{} · {}", pos, hint), Style::default().fg(CHROME_DIM)),
+            Span::styled(
+                format!("{} · {}", pos, hint),
+                Style::default().fg(CHROME_DIM),
+            ),
         ])),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
@@ -179,9 +206,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     let band_top = body.y as i32;
     let band_bot = (area.y + area.height - 2) as i32; // one above status
     let band_h = (band_bot - band_top + 1).max(1) as u16; // visible rows
-    // EDIT の下敷き: 本文領域の全幅に、キャレット行の帯より暗い背景を
-    // 敷く。読む画面と書く画面で「紙の色」が変わるのが持続的なモード
-    // サイン。行の帯(CURSOR_BG)はこの上に明るく浮く。
+                                                          // EDIT の下敷き: 本文領域の全幅に、キャレット行の帯より暗い背景を
+                                                          // 敷く。読む画面と書く画面で「紙の色」が変わるのが持続的なモード
+                                                          // サイン。行の帯(CURSOR_BG)はこの上に明るく浮く。
     if app.session.is_some() {
         let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg);
         let buf = f.buffer_mut();
@@ -291,8 +318,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // 正確な範囲は文字反転(sess_sel と reverse_cols)が語り、行の帯は
     // 下の in_edit_sel が「選択が通っている行」— 反転する文字を持たない
     // 空行も含めて — をカーソル行と同じグレーで示す。
-    let sel_range =
-        move_block_range(app).or_else(|| app.selection.map(|s| s.range()));
+    let sel_range = move_block_range(app).or_else(|| app.selection.map(|s| s.range()));
     // Telomeres and frame-column carets are painted after the rows.
     let mut gutter: Vec<(u16, &'static str, Style)> = Vec::new();
     let mut carets: Vec<(u16, Style)> = Vec::new();
@@ -301,10 +327,11 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // akapen's `▌` marker. Painted last, so it wins over the `>` caret —
     // the caret is one row, the bar says which lines the comment covers.
     let mut comment_bars: Vec<(u16, Style)> = Vec::new();
-    let composing_range = app
-        .composing
-        .as_ref()
-        .map(|_| app.selection.map(|s| s.range()).unwrap_or((app.cursor, app.cursor)));
+    let composing_range = app.composing.as_ref().map(|_| {
+        app.selection
+            .map(|s| s.range())
+            .unwrap_or((app.cursor, app.cursor))
+    });
     // Rows inside a `code:` block. Painted LAST, as a background-only pass:
     // the band has to run to the frame, and the telomere, the thumb and the
     // padding columns are all drawn after the rows. Each entry carries its
@@ -365,7 +392,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             Some(l) => Some(((now_secs() - l.updated).max(0), app.line_state(l))),
             None => app.related_telomere(s),
         });
-        let in_code = row.src().map(|s| code_flags.get(s) == Some(&true)).unwrap_or(false);
+        let in_code = row
+            .src()
+            .map(|s| code_flags.get(s) == Some(&true))
+            .unwrap_or(false);
         let mut base = Style::default();
         // The wash goes down first: selection and the cursor band are
         // stronger signals and paint over it. It starts at the block's
@@ -449,15 +479,20 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     // ではキャレット(点滅バー+反転セル)が居場所を語る
                     // ので、二重に指さない。
                     if is_cursor && app.session.is_none() {
-                        let mut caret_style =
-                            Style::default().fg(CHROME_CARET).add_modifier(Modifier::BOLD);
+                        let mut caret_style = Style::default()
+                            .fg(CHROME_CARET)
+                            .add_modifier(Modifier::BOLD);
                         if let Some(bg) = base.bg {
                             caret_style = caret_style.bg(bg);
                         }
                         carets.push((y as u16, caret_style));
                     }
                     if in_composing || has_comment {
-                        let color = if in_composing { CHROME_ACCENT } else { Color::Yellow };
+                        let color = if in_composing {
+                            CHROME_ACCENT
+                        } else {
+                            Color::Yellow
+                        };
                         let mut bar = Style::default().fg(color).add_modifier(Modifier::BOLD);
                         if let Some(bg) = base.bg {
                             bar = bar.bg(bg);
@@ -504,7 +539,12 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         };
 
         match row {
-            Row::Line { line, src, start, hang } => {
+            Row::Line {
+                line,
+                src,
+                start,
+                hang,
+            } => {
                 if let Some(r) = one_row(screen_y) {
                     // A diagram being rendered dims its code and lets a band
                     // of brightness run down it: the reader sees the work
@@ -522,8 +562,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         (Some(((la, ba), (lb, bb))), Some(sess))
                             if *src != sess.line && *src >= la && *src <= lb =>
                         {
-                            let raw =
-                                app.lines.get(*src).map(|l| l.text.as_str()).unwrap_or("");
+                            let raw = app.lines.get(*src).map(|l| l.text.as_str()).unwrap_or("");
                             let code = caret_span(app, *src);
                             let text_col = session_hang(raw, code);
                             let (lo, hi) = if *src == la {
@@ -580,7 +619,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new("").style(base), r);
                 }
             }
-            Row::ImageError { msg, indent, item, .. } => {
+            Row::ImageError {
+                msg, indent, item, ..
+            } => {
                 if let Some(r) = one_row(screen_y) {
                     let pad = bullet_pad(*indent, *item);
                     f.render_widget(
@@ -589,7 +630,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     );
                 }
             }
-            Row::ImageLoading { indent, item, url, .. } => {
+            Row::ImageLoading {
+                indent, item, url, ..
+            } => {
                 if let Some(r) = one_row(screen_y) {
                     // The line as the author wrote it, provisional and
                     // working: the band running along it says a picture is
@@ -600,7 +643,13 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     f.render_widget(Paragraph::new(shimmer_across(&line, app, ctx)), r);
                 }
             }
-            Row::Inline { images, texts, indent, item, .. } => {
+            Row::Inline {
+                images,
+                texts,
+                indent,
+                item,
+                ..
+            } => {
                 // The bullet belongs at the item's TOP-left: the line
                 // starts there, however tall the pictures on it are.
                 if *item && *indent >= 2 {
@@ -631,7 +680,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                         // the picture hangs off — wearing the band a waiting
                         // `[URL]` has always worn.
                         let baseline = *row_off as i32 + *h as i32 - 1;
-                        let Some(r) = one_row(screen_y + baseline) else { continue };
+                        let Some(r) = one_row(screen_y + baseline) else {
+                            continue;
+                        };
                         let room = (*w).min(r.width.saturating_sub(*col));
                         if room == 0 {
                             continue;
@@ -659,7 +710,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                     );
                 }
             }
-            Row::Image { url, indent, item, .. } => {
+            Row::Image {
+                url, indent, item, ..
+            } => {
                 if *item && *indent >= 2 {
                     let y = text.y as i32 + screen_y;
                     if y >= band_top && y <= band_bot {
@@ -783,8 +836,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
             let code = caret_span(app, s.line);
             let disp = session_display(&s.input.buf, code);
             let dcaret = display_caret(&s.input.buf, s.input.cur, code);
-            let wrapped =
-                SessionWrap::new(&disp, text_w, session_hang(&s.input.buf, code));
+            let wrapped = SessionWrap::new(&disp, text_w, session_hang(&s.input.buf, code));
             let (crow, ccol) = wrapped.row_col(dcaret);
             let y = text.y as i32 + (app.row_top(first) as i32 + crow as i32) - app.scroll as i32;
             let x = text.x as i32 + (ccol as i32).min(text.width.saturating_sub(1) as i32);
@@ -800,7 +852,8 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 // 反転して `Garry・` に見えた)。選択の端がキャレットの位置
                 // そのものだし、点滅バーもそこにある。
                 let selecting = s.sel_ends().is_some();
-                if let (false, Some(c)) = (selecting, f.buffer_mut().cell_mut((x as u16, y as u16))) {
+                if let (false, Some(c)) = (selecting, f.buffer_mut().cell_mut((x as u16, y as u16)))
+                {
                     let st = c.style();
                     let st = if st.add_modifier.contains(Modifier::REVERSED) {
                         st.remove_modifier(Modifier::REVERSED)

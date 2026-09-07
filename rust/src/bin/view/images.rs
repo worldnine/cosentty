@@ -42,7 +42,11 @@ pub(crate) struct Slot<'a>(&'a Slots);
 
 impl Slots {
     pub(crate) const fn new(cap: usize) -> Self {
-        Slots { used: std::sync::Mutex::new(0), freed: std::sync::Condvar::new(), cap }
+        Slots {
+            used: std::sync::Mutex::new(0),
+            freed: std::sync::Condvar::new(),
+            cap,
+        }
     }
     pub(crate) fn acquire(&self) -> Slot<'_> {
         let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
@@ -106,7 +110,11 @@ pub(crate) type FileMsg = (String, Result<std::path::PathBuf, String>);
 
 /// PNG bytes -> terminal image. Only image decoding happens here: no SVG or
 /// HTML from the browser is ever interpreted in this process.
-pub(crate) fn decode_web_png(picker: &Picker, png: &[u8], max_cols: u16) -> Result<ImageInfo, String> {
+pub(crate) fn decode_web_png(
+    picker: &Picker,
+    png: &[u8],
+    max_cols: u16,
+) -> Result<ImageInfo, String> {
     let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
     build_image(picker, img, max_cols)
 }
@@ -189,7 +197,10 @@ pub(crate) fn build_image(
     // rows are the scarce direction.
     let (cw, ch) = if ch > MAX_IMAGE_ROWS as u32 {
         let scale = MAX_IMAGE_ROWS as f32 / ch as f32;
-        (((cw as f32) * scale).floor().max(1.0) as u32, MAX_IMAGE_ROWS as u32)
+        (
+            ((cw as f32) * scale).floor().max(1.0) as u32,
+            MAX_IMAGE_ROWS as u32,
+        )
     } else {
         (cw, ch)
     };
@@ -277,8 +288,10 @@ impl App {
                     self.images.insert(url, info);
                 }
                 Err(e) => {
-                    self.image_errors
-                        .insert(url.clone(), format!("[image failed: {} — {e}]", short(&url)));
+                    self.image_errors.insert(
+                        url.clone(),
+                        format!("[image failed: {} — {e}]", short(&url)),
+                    );
                 }
             }
             changed = true;

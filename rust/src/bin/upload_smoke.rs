@@ -15,17 +15,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("usage: upload_smoke <project> <image> [gyazo [team]]".into()),
     };
     let dest = match (args.get(2).map(String::as_str), args.get(3)) {
-        (Some("gyazo"), team) => Destination::Gyazo { team: team.cloned() },
+        (Some("gyazo"), team) => Destination::Gyazo {
+            team: team.cloned(),
+        },
         _ => Destination::Gcs,
     };
     let sid = std::env::var("COSENSE_SID").ok().filter(|s| !s.is_empty());
-    let cfg = Config { project: project.clone(), auth: AuthStore::load(sid), api_domain: "scrapbox.io".into() };
+    let cfg = Config {
+        project: project.clone(),
+        auth: AuthStore::load(sid),
+        api_domain: "scrapbox.io".into(),
+    };
     let client = Client::new(cfg)?;
     let bytes = std::fs::read(&path)?;
     let name = path.file_name().unwrap().to_string_lossy().into_owned();
     let ct = content_type_for(&path);
-    println!("project settings: {:?}", client.get_project_settings(&project).ok());
-    println!("→ {} ({} bytes, {ct}) to {}", name, bytes.len(), dest.label());
+    println!(
+        "project settings: {:?}",
+        client.get_project_settings(&project).ok()
+    );
+    println!(
+        "→ {} ({} bytes, {ct}) to {}",
+        name,
+        bytes.len(),
+        dest.label()
+    );
     let url = match &dest {
         Destination::Gcs => client.upload_gcs(&project, &bytes, &name, ct)?,
         Destination::Gyazo { team } => {

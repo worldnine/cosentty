@@ -42,10 +42,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (new_id(2), "create_smoke body 1".into()),
         (new_id(3), "create_smoke body 2".into()),
     ];
-    let ops = vec![EditOp::Insert { anchor: "_end".into(), lines: lines.clone() }];
+    let ops = vec![EditOp::Insert {
+        anchor: "_end".into(),
+        lines: lines.clone(),
+    }];
 
     let preview = client.preview_edit(&project, "", &ops)?;
-    println!("preview: {} (expires {})", preview.preview_id, preview.expire_at);
+    println!(
+        "preview: {} (expires {})",
+        preview.preview_id, preview.expire_at
+    );
     println!("preview title: {:?}", preview.title);
     for l in &preview.lines {
         println!("  preview line: {:?}", l);
@@ -72,5 +78,10 @@ fn new_id(n: u8) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:016x}{:06x}{:02x}", now as u64, std::process::id() & 0xff_ffff, n)
+    format!(
+        "{:016x}{:06x}{:02x}",
+        now as u64,
+        std::process::id() & 0xff_ffff,
+        n
+    )
 }

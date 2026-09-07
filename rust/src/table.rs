@@ -55,7 +55,10 @@ impl Table {
             // serves it as CSV and `Enter` saves it — which the underline
             // in `name_style` says, the same way it says it on a link.
             out.push((
-                Line::from(Span::styled(format!("table:{}", self.name), self.name_style)),
+                Line::from(Span::styled(
+                    format!("table:{}", self.name),
+                    self.name_style,
+                )),
                 self.name_src,
             ));
         }
@@ -144,7 +147,9 @@ fn proportional(natural: &[usize], floors: &[usize], budget: usize) -> Vec<usize
 }
 
 fn cell_width(cell: &[Span]) -> usize {
-    cell.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum()
+    cell.iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
 }
 
 /// Longest unsplittable token: a run of narrow non-space chars is one token;
@@ -247,58 +252,64 @@ fn wrap_cell(spans: &[Span<'static>], width: usize, header: bool) -> Vec<Vec<Spa
     let mut word_w = 0usize;
     let mut pending_space: Option<(char, Style)> = None;
 
-    let commit_word =
-        |cur: &mut Vec<(char, Style)>,
-         cur_w: &mut usize,
-         word: &mut Vec<(char, Style)>,
-         word_w: &mut usize,
-         pending_space: &mut Option<(char, Style)>,
-         lines: &mut Vec<Vec<(char, Style)>>| {
-            if word.is_empty() {
-                return;
-            }
-            let w = std::mem::take(word);
-            let ww = std::mem::take(word_w);
-            let sp = pending_space.take();
-            if cur.is_empty() {
-                if ww <= width {
-                    *cur = w;
-                    *cur_w = ww;
-                } else {
-                    for (ch, st) in w {
-                        put(cur, cur_w, lines, width, ch, st);
-                    }
-                }
-                return;
-            }
-            let sp_w = usize::from(sp.is_some());
-            if *cur_w + sp_w + ww <= width {
-                if let Some(s) = sp {
-                    cur.push(s);
-                    *cur_w += 1;
-                }
-                cur.extend(w);
-                *cur_w += ww;
-            } else if ww <= width {
-                lines.push(std::mem::take(cur));
-                *cur_w = 0;
+    let commit_word = |cur: &mut Vec<(char, Style)>,
+                       cur_w: &mut usize,
+                       word: &mut Vec<(char, Style)>,
+                       word_w: &mut usize,
+                       pending_space: &mut Option<(char, Style)>,
+                       lines: &mut Vec<Vec<(char, Style)>>| {
+        if word.is_empty() {
+            return;
+        }
+        let w = std::mem::take(word);
+        let ww = std::mem::take(word_w);
+        let sp = pending_space.take();
+        if cur.is_empty() {
+            if ww <= width {
                 *cur = w;
                 *cur_w = ww;
             } else {
-                lines.push(std::mem::take(cur));
-                *cur_w = 0;
                 for (ch, st) in w {
                     put(cur, cur_w, lines, width, ch, st);
                 }
             }
-        };
+            return;
+        }
+        let sp_w = usize::from(sp.is_some());
+        if *cur_w + sp_w + ww <= width {
+            if let Some(s) = sp {
+                cur.push(s);
+                *cur_w += 1;
+            }
+            cur.extend(w);
+            *cur_w += ww;
+        } else if ww <= width {
+            lines.push(std::mem::take(cur));
+            *cur_w = 0;
+            *cur = w;
+            *cur_w = ww;
+        } else {
+            lines.push(std::mem::take(cur));
+            *cur_w = 0;
+            for (ch, st) in w {
+                put(cur, cur_w, lines, width, ch, st);
+            }
+        }
+    };
 
     let mut i = 0;
     while i < chars.len() {
         let (ch, st) = chars[i];
         let w = ch.width().unwrap_or(0);
         if ch.is_whitespace() {
-            commit_word(&mut cur, &mut cur_w, &mut word, &mut word_w, &mut pending_space, &mut lines);
+            commit_word(
+                &mut cur,
+                &mut cur_w,
+                &mut word,
+                &mut word_w,
+                &mut pending_space,
+                &mut lines,
+            );
             pending_space = Some((ch, st));
             while i < chars.len() && chars[i].0.is_whitespace() {
                 i += 1;
@@ -306,10 +317,24 @@ fn wrap_cell(spans: &[Span<'static>], width: usize, header: bool) -> Vec<Vec<Spa
             continue;
         }
         if w >= 2 {
-            commit_word(&mut cur, &mut cur_w, &mut word, &mut word_w, &mut pending_space, &mut lines);
+            commit_word(
+                &mut cur,
+                &mut cur_w,
+                &mut word,
+                &mut word_w,
+                &mut pending_space,
+                &mut lines,
+            );
             word.push((ch, st));
             word_w = w;
-            commit_word(&mut cur, &mut cur_w, &mut word, &mut word_w, &mut pending_space, &mut lines);
+            commit_word(
+                &mut cur,
+                &mut cur_w,
+                &mut word,
+                &mut word_w,
+                &mut pending_space,
+                &mut lines,
+            );
             i += 1;
             continue;
         }
@@ -317,7 +342,14 @@ fn wrap_cell(spans: &[Span<'static>], width: usize, header: bool) -> Vec<Vec<Spa
         word_w += w;
         i += 1;
     }
-    commit_word(&mut cur, &mut cur_w, &mut word, &mut word_w, &mut pending_space, &mut lines);
+    commit_word(
+        &mut cur,
+        &mut cur_w,
+        &mut word,
+        &mut word_w,
+        &mut pending_space,
+        &mut lines,
+    );
     if !cur.is_empty() {
         lines.push(cur);
     }
@@ -425,7 +457,9 @@ mod tests {
         let lines: Vec<String> = t.layout(200).iter().map(line_str).collect();
         // every rendered line has equal display width
         let w0 = UnicodeWidthStr::width(lines[0].as_str());
-        assert!(lines.iter().all(|l| UnicodeWidthStr::width(l.as_str()) == w0));
+        assert!(lines
+            .iter()
+            .all(|l| UnicodeWidthStr::width(l.as_str()) == w0));
     }
 
     #[test]
@@ -441,7 +475,9 @@ mod tests {
         };
         let lines: Vec<String> = t.layout(20).iter().map(line_str).collect();
         // no rendered line exceeds the available width
-        assert!(lines.iter().all(|l| UnicodeWidthStr::width(l.as_str()) <= 20));
+        assert!(lines
+            .iter()
+            .all(|l| UnicodeWidthStr::width(l.as_str()) <= 20));
         // content is preserved somewhere in the output
         let joined: String = lines.join("");
         assert!(joined.contains("日本語"));

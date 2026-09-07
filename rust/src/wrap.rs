@@ -34,7 +34,11 @@ const MIN_HANGING_BODY: usize = 8;
 /// `hang` is usually [`hanging_indent`] of the line. When the body would
 /// be narrower than [`MIN_HANGING_BODY`], the indent is dropped.
 pub fn wrap_line_hanging(line: &Line<'static>, width: usize, hang: usize) -> Vec<Line<'static>> {
-    let prefix = if hang > 0 { vec![Span::raw(" ".repeat(hang))] } else { Vec::new() };
+    let prefix = if hang > 0 {
+        vec![Span::raw(" ".repeat(hang))]
+    } else {
+        Vec::new()
+    };
     wrap_line_continued(line, width, &prefix)
 }
 
@@ -69,7 +73,10 @@ pub fn wrap_line_continued(
     width: usize,
     prefix: &[Span<'static>],
 ) -> Vec<Line<'static>> {
-    wrap_line_parts(line, width, prefix).into_iter().map(|w| w.line).collect()
+    wrap_line_parts(line, width, prefix)
+        .into_iter()
+        .map(|w| w.line)
+        .collect()
 }
 
 /// `wrap_line_continued`, keeping each row's place in the original line.
@@ -79,8 +86,15 @@ pub fn wrap_line_parts(
     prefix: &[Span<'static>],
 ) -> Vec<Wrapped> {
     let width = width.max(1);
-    let hang: usize = prefix.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
-    let hang = if hang > 0 && width.saturating_sub(hang) >= MIN_HANGING_BODY { hang } else { 0 };
+    let hang: usize = prefix
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let hang = if hang > 0 && width.saturating_sub(hang) >= MIN_HANGING_BODY {
+        hang
+    } else {
+        0
+    };
     // Flatten to (char, style), remembering nothing else — we re-merge by
     // consecutive equal style at the end.
     let mut chars: Vec<(char, Style)> = Vec::new();
@@ -90,7 +104,11 @@ pub fn wrap_line_parts(
         }
     }
     if chars.is_empty() {
-        return vec![Wrapped { line: Line::from(""), start: 0, hang: 0 }];
+        return vec![Wrapped {
+            line: Line::from(""),
+            start: 0,
+            hang: 0,
+        }];
     }
 
     let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
@@ -152,7 +170,11 @@ pub fn wrap_line_parts(
             }
             let at = start;
             start += row_width;
-            Wrapped { line, start: at, hang: hang_here }
+            Wrapped {
+                line,
+                start: at,
+                hang: hang_here,
+            }
         })
         .collect()
 }
@@ -163,12 +185,62 @@ pub fn wrap_line_parts(
 fn no_line_start(c: char) -> bool {
     matches!(
         c,
-        '。' | '、' | '．' | '，' | '・' | '：' | '；' | '？' | '！'
-            | 'ー' | '〜' | '々' | 'ゝ' | 'ゞ' | 'ヽ' | 'ヾ'
-            | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ'
-            | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ'
-            | '）' | '］' | '｝' | '」' | '』' | '】' | '〉' | '》' | '〕' | '〙' | '〗'
-            | ')' | ']' | '}' | '>' | ',' | '.' | ':' | ';' | '?' | '!'
+        '。' | '、'
+            | '．'
+            | '，'
+            | '・'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | 'ー'
+            | '〜'
+            | '々'
+            | 'ゝ'
+            | 'ゞ'
+            | 'ヽ'
+            | 'ヾ'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ゎ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | 'ヮ'
+            | '）'
+            | '］'
+            | '｝'
+            | '」'
+            | '』'
+            | '】'
+            | '〉'
+            | '》'
+            | '〕'
+            | '〙'
+            | '〗'
+            | ')'
+            | ']'
+            | '}'
+            | '>'
+            | ','
+            | '.'
+            | ':'
+            | ';'
+            | '?'
+            | '!'
     )
 }
 
@@ -177,8 +249,20 @@ fn no_line_start(c: char) -> bool {
 fn no_line_end(c: char) -> bool {
     matches!(
         c,
-        '（' | '［' | '｛' | '「' | '『' | '【' | '〈' | '《' | '〔' | '〘' | '〖'
-            | '(' | '[' | '{' | '<'
+        '（' | '［'
+            | '｛'
+            | '「'
+            | '『'
+            | '【'
+            | '〈'
+            | '《'
+            | '〔'
+            | '〘'
+            | '〖'
+            | '('
+            | '['
+            | '{'
+            | '<'
     )
 }
 
@@ -276,7 +360,9 @@ mod tests {
         let rows = wrap_line(&line("あいうえお"), 4);
         let joined: String = rows.iter().map(|r| text(r)).collect();
         assert_eq!(joined, "あいうえお");
-        assert!(rows.iter().all(|r| UnicodeWidthStr::width(text(r).as_str()) <= 4));
+        assert!(rows
+            .iter()
+            .all(|r| UnicodeWidthStr::width(text(r).as_str()) <= 4));
     }
 
     #[test]
@@ -284,7 +370,9 @@ mod tests {
         let rows = wrap_line(&line("ab日本語cd"), 6);
         let joined: String = rows.iter().map(|r| text(r)).collect();
         assert_eq!(joined, "ab日本語cd");
-        assert!(rows.iter().all(|r| UnicodeWidthStr::width(text(r).as_str()) <= 6));
+        assert!(rows
+            .iter()
+            .all(|r| UnicodeWidthStr::width(text(r).as_str()) <= 6));
     }
 
     #[test]
@@ -300,7 +388,11 @@ mod tests {
         assert_eq!(hanging_indent(&line("• top-level bullet")), 2);
         assert_eq!(hanging_indent(&line("    • nested bullet")), 6);
         assert_eq!(hanging_indent(&line("┃ quoted")), 2);
-        assert_eq!(hanging_indent(&line("    code row")), 4, "code hangs by its indent");
+        assert_eq!(
+            hanging_indent(&line("    code row")),
+            4,
+            "code hangs by its indent"
+        );
         assert_eq!(hanging_indent(&line("•no space is not a bullet")), 0);
         // the marker may sit in its own styled span, as render emits it
         let l = Line::from(vec![Span::raw("  "), Span::raw("• "), Span::raw("x")]);
@@ -318,7 +410,9 @@ mod tests {
         let rows = wrap_line_hanging(&line("• あいうえおかきくけこ"), 10, 2);
         let texts: Vec<String> = rows.iter().map(text).collect();
         assert_eq!(texts, vec!["• あいうえ", "  おかきく", "  けこ"]);
-        assert!(rows.iter().all(|r| UnicodeWidthStr::width(text(r).as_str()) <= 10));
+        assert!(rows
+            .iter()
+            .all(|r| UnicodeWidthStr::width(text(r).as_str()) <= 10));
         // the joined body is unchanged apart from the inserted indent
         let body: String = texts.iter().map(|t| t.trim_start()).collect();
         assert_eq!(body, "• あいうえおかきくけこ");
@@ -346,11 +440,25 @@ mod tests {
             assert!(t.starts_with("  ┃ "), "row {i}: {t:?}");
             assert!(UnicodeWidthStr::width(t.as_str()) <= 20);
             // the repeated bar keeps the quote-bar style
-            assert_eq!(r.spans.iter().find(|s| s.content.contains('┃')).unwrap().style, bar);
+            assert_eq!(
+                r.spans
+                    .iter()
+                    .find(|s| s.content.contains('┃'))
+                    .unwrap()
+                    .style,
+                bar
+            );
         }
         // a bullet's prefix is blank space of the same width instead
-        let b = Line::from(vec![Span::raw("  "), Span::styled("• ", bar), Span::raw("x")]);
-        let bp: String = hanging_prefix(&b).iter().map(|s| s.content.as_ref()).collect();
+        let b = Line::from(vec![
+            Span::raw("  "),
+            Span::styled("• ", bar),
+            Span::raw("x"),
+        ]);
+        let bp: String = hanging_prefix(&b)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_eq!(bp, "    ");
         // a plain paragraph has no prefix at all
         assert!(hanging_prefix(&line("plain")).is_empty());
@@ -365,7 +473,10 @@ mod tests {
         // hang 0 is exactly wrap_line
         let l = line("abcdefgh");
         assert_eq!(
-            wrap_line_hanging(&l, 4, 0).iter().map(text).collect::<Vec<_>>(),
+            wrap_line_hanging(&l, 4, 0)
+                .iter()
+                .map(text)
+                .collect::<Vec<_>>(),
             wrap_line(&l, 4).iter().map(text).collect::<Vec<_>>()
         );
     }
@@ -382,9 +493,9 @@ mod tests {
         let joined: String = rows.iter().map(|r| text(r)).collect();
         assert_eq!(joined, "aabbbb");
         // the red style survives on the fragments
-        let red_found = rows.iter().any(|r| {
-            r.spans.iter().any(|s| s.style.fg == Some(Color::Red))
-        });
+        let red_found = rows
+            .iter()
+            .any(|r| r.spans.iter().any(|s| s.style.fg == Some(Color::Red)));
         assert!(red_found);
     }
 
@@ -397,13 +508,22 @@ mod tests {
         let rows = |text: &str, w: usize| -> Vec<String> {
             wrap_line(&Line::from(text.to_string()), w)
                 .iter()
-                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
                 .collect()
         };
 
         // Without the rule this breaks as "あいうえお" / "かきくけこ" / "。"
         let got = rows("あいうえおかきくけこ。", 10);
-        assert_eq!(got, vec!["あいうえお", "かきくけ", "こ。"], "the stop takes its character with it");
+        assert_eq!(
+            got,
+            vec!["あいうえお", "かきくけ", "こ。"],
+            "the stop takes its character with it"
+        );
 
         // Closing brackets and small kana follow the same rule.
         assert_eq!(rows("あいうえおかきくけこ」", 10).last().unwrap(), "こ」");

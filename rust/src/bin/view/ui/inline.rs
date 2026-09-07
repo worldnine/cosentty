@@ -7,10 +7,18 @@ use super::*;
 #[derive(Clone, Debug)]
 pub(crate) enum Inline {
     Text(Line<'static>),
-    Image { url: String, w: u16, h: u16 },
+    Image {
+        url: String,
+        w: u16,
+        h: u16,
+    },
     /// Unlike a picture, a formula straddles the text line: a fraction has
     /// its numerator ABOVE the words and its denominator BELOW them.
-    Formula { rows: Vec<String>, baseline: u16, w: u16 },
+    Formula {
+        rows: Vec<String>,
+        baseline: u16,
+        w: u16,
+    },
 }
 
 /// Where the layout put something.
@@ -61,8 +69,8 @@ pub(crate) fn layout_inline(
     let mut below = 0u16;
     let mut x = 0usize;
     let mut pending_img: Vec<(u16, u16, u16, String)> = Vec::new(); // (col, w, h, url)
-    // (col, rows off the baseline, text). Only a formula's rows are ever
-    // off it; words are always ON it.
+                                                                    // (col, rows off the baseline, text). Only a formula's rows are ever
+                                                                    // off it; words are always ON it.
     let mut pending_txt: Vec<(u16, i16, TextPiece)> = Vec::new();
 
     // Close the current box: everything is placed against the row the text
@@ -72,11 +80,19 @@ pub(crate) fn layout_inline(
         () => {
             let base = top + above;
             for (col, _, h, url) in pending_img.drain(..) {
-                images.push(Placed { row: base + 1 - h, col: col + indent as u16, what: url });
+                images.push(Placed {
+                    row: base + 1 - h,
+                    col: col + indent as u16,
+                    what: url,
+                });
             }
             for (col, off, piece) in pending_txt.drain(..) {
                 let row = (base as i32 + off as i32).max(0) as u16;
-                texts.push(Placed { row, col: col + indent as u16, what: piece });
+                texts.push(Placed {
+                    row,
+                    col: col + indent as u16,
+                    what: piece,
+                });
             }
             top = base + below + 1;
             above = 0;
@@ -110,7 +126,11 @@ pub(crate) fn layout_inline(
                     pending_txt.push((
                         x as u16,
                         k as i16 - baseline as i16,
-                        TextPiece { part, start: 0, line: Line::from(row.clone()) },
+                        TextPiece {
+                            part,
+                            start: 0,
+                            line: Line::from(row.clone()),
+                        },
                     ));
                 }
                 above = above.max(baseline);
@@ -132,9 +152,21 @@ pub(crate) fn layout_inline(
                     let mut pieces = wrap_line(&rest, room.max(1)).into_iter();
                     let Some(first) = pieces.next() else { break };
                     let used = str_width(
-                        &first.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+                        &first
+                            .spans
+                            .iter()
+                            .map(|s| s.content.as_ref())
+                            .collect::<String>(),
                     );
-                    pending_txt.push((x as u16, 0, TextPiece { part, start, line: first }));
+                    pending_txt.push((
+                        x as u16,
+                        0,
+                        TextPiece {
+                            part,
+                            start,
+                            line: first,
+                        },
+                    ));
                     start += used;
                     x += used;
                     let tail: Vec<Span<'static>> =
@@ -176,13 +208,21 @@ pub(crate) fn drawn_line(text: &str, indent: usize, kind: ArtifactKind) -> Line<
         let is_rule = is_diagram_rule(ch);
         if !run.is_empty() && is_rule != run_is_rule {
             let done = std::mem::take(&mut run);
-            spans.push(if run_is_rule { Span::styled(done, rule) } else { Span::raw(done) });
+            spans.push(if run_is_rule {
+                Span::styled(done, rule)
+            } else {
+                Span::raw(done)
+            });
         }
         run_is_rule = is_rule;
         run.push(ch);
     }
     if !run.is_empty() {
-        spans.push(if run_is_rule { Span::styled(run, rule) } else { Span::raw(run) });
+        spans.push(if run_is_rule {
+            Span::styled(run, rule)
+        } else {
+            Span::raw(run)
+        });
     }
     Line::from(spans)
 }
@@ -204,7 +244,11 @@ fn is_diagram_rule(ch: char) -> bool {
 /// The formula rows of a part, ready for `layout_inline`.
 pub(crate) fn inline_formula(rows: &[String], baseline: usize) -> Inline {
     let w = rows.iter().map(|r| str_width(r)).max().unwrap_or(0) as u16;
-    Inline::Formula { rows: rows.to_vec(), baseline: baseline as u16, w }
+    Inline::Formula {
+        rows: rows.to_vec(),
+        baseline: baseline as u16,
+        w,
+    }
 }
 
 /// The lead-in for an indented image placeholder/// The lead-in for an indented image placeholder/// The lead-in for an indented image placeholder: the bullet where the
@@ -269,7 +313,13 @@ pub(crate) fn reverse_cols(line: Line<'static>, from: usize, to: usize) -> Line<
     line
 }
 
-pub(crate) fn shimmer(line: &Line<'static>, pos: u16, len: u16, app: &App, ctx: &Ctx) -> Line<'static> {
+pub(crate) fn shimmer(
+    line: &Line<'static>,
+    pos: u16,
+    len: u16,
+    app: &App,
+    ctx: &Ctx,
+) -> Line<'static> {
     let level = cosense::theme::shimmer_level(pos, len, app.web_anim.elapsed().as_secs_f32());
     let spans: Vec<Span<'static>> = line
         .spans
@@ -311,4 +361,3 @@ pub(crate) fn shimmer_across(line: &Line<'static>, app: &App, ctx: &Ctx) -> Line
     }
     Line::from(spans)
 }
-

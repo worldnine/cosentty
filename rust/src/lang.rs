@@ -55,7 +55,11 @@ impl Lang {
         }
         let lower = s.to_ascii_lowercase();
         // `ja`, `ja_JP.UTF-8`, `japanese`
-        if lower == "ja" || lower.starts_with("ja_") || lower.starts_with("ja-") || lower.starts_with("japanese") {
+        if lower == "ja"
+            || lower.starts_with("ja_")
+            || lower.starts_with("ja-")
+            || lower.starts_with("japanese")
+        {
             return Some(Lang::Ja);
         }
         // `C` and `POSIX` are "no preference stated", not "English wanted",
@@ -123,7 +127,11 @@ macro_rules! t {
 #[macro_export]
 macro_rules! ts {
     ($ja:literal, $en:literal) => {
-        if $crate::lang::is_ja() { $ja } else { $en }
+        if $crate::lang::is_ja() {
+            $ja
+        } else {
+            $en
+        }
     };
 }
 
@@ -137,9 +145,17 @@ mod tests {
         assert_eq!(Lang::from_locale("ja"), Some(Lang::Ja));
         assert_eq!(Lang::from_locale("Japanese_Japan.932"), Some(Lang::Ja));
         assert_eq!(Lang::from_locale("en_US.UTF-8"), Some(Lang::En));
-        assert_eq!(Lang::from_locale("fr_FR"), Some(Lang::En), "not Japanese → English");
+        assert_eq!(
+            Lang::from_locale("fr_FR"),
+            Some(Lang::En),
+            "not Japanese → English"
+        );
         assert_eq!(Lang::from_locale("C"), Some(Lang::En));
-        assert_eq!(Lang::from_locale("  "), None, "an empty variable is not an answer");
+        assert_eq!(
+            Lang::from_locale("  "),
+            None,
+            "an empty variable is not an answer"
+        );
         // `java`-like prefixes must not be mistaken for `ja`
         assert_eq!(Lang::from_locale("java"), Some(Lang::En));
     }
@@ -161,7 +177,11 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(other, "deleted 3 line(s)");
-        assert_eq!(crate::t!("{n} 行削除", "deleted {n} line(s)"), "3 行削除", "unchanged here");
+        assert_eq!(
+            crate::t!("{n} 行削除", "deleted {n} line(s)"),
+            "3 行削除",
+            "unchanged here"
+        );
     }
 
     #[test]
@@ -171,9 +191,17 @@ mod tests {
             _ => None,
         };
         assert_eq!(Lang::detect(Some("en"), &env), Lang::En, "the flag wins");
-        assert_eq!(Lang::detect(Some(""), &env), Lang::Ja, "an empty flag is not a choice");
+        assert_eq!(
+            Lang::detect(Some(""), &env),
+            Lang::Ja,
+            "an empty flag is not a choice"
+        );
         assert_eq!(Lang::detect(None, &env), Lang::Ja);
-        assert_eq!(Lang::detect(None, &|_| None), Lang::En, "nothing said → English");
+        assert_eq!(
+            Lang::detect(None, &|_| None),
+            Lang::En,
+            "nothing said → English"
+        );
 
         // The specific variables outrank the general one, as in POSIX.
         let env = |k: &str| match k {

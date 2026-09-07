@@ -31,7 +31,9 @@ pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
     // Multi-line: a live selection goes first — the paste replaces it,
     // as any typed character's would — then the fragments land plain.
     session_replace_selection(app, ctx, "");
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
     let mut parts = clean.split('\n');
     let first = parts.next().unwrap_or("");
@@ -41,7 +43,11 @@ pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
     let last_part = rest.last().copied().unwrap_or("");
     let mut inserted: Vec<(String, String)> = Vec::new();
     for (i, p) in rest.iter().enumerate() {
-        let text = if i + 1 == rest.len() { format!("{p}{tail_of_line}") } else { (*p).to_string() };
+        let text = if i + 1 == rest.len() {
+            format!("{p}{tail_of_line}")
+        } else {
+            (*p).to_string()
+        };
         inserted.push((new_line_id(), text));
     }
     let last_id = inserted.last().map(|(id, _)| id.clone());
@@ -51,15 +57,24 @@ pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
         .map(|l| l.id.clone())
         .unwrap_or_else(|| "_end".into());
     let ops = vec![
-        EditOp::Replace { id: app.lines[line].id.clone(), text: head },
-        EditOp::Insert { anchor, lines: inserted },
+        EditOp::Replace {
+            id: app.lines[line].id.clone(),
+            text: head,
+        },
+        EditOp::Insert {
+            anchor,
+            lines: inserted,
+        },
     ];
     do_edit(app, ctx, &t!("貼り付け", "paste"), ops);
     if let (Some(s), Some(last_id)) = (app.session.as_mut(), last_id) {
         if let Some(idx) = app.lines.iter().position(|l| l.id == last_id) {
             s.line = idx;
             let text = app.lines[idx].text.clone();
-            s.input = Input { buf: text.clone(), cur: last_part.len().min(text.len()) };
+            s.input = Input {
+                buf: text.clone(),
+                cur: last_part.len().min(text.len()),
+            };
             s.orig = text;
             s.want_col = None;
             app.cursor = idx;
@@ -74,13 +89,14 @@ pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
 /// environment — multi-line editing, their keybindings, their IME
 /// settings — which makes this the most natural way to write a lot.
 pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) {
-    let original: String =
-        app.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
-    let path = std::env::temp_dir().join(format!(
-        "cosense-{}-{}.txt",
-        std::process::id(),
-        now_secs()
-    ));
+    let original: String = app
+        .lines
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let path =
+        std::env::temp_dir().join(format!("cosense-{}-{}.txt", std::process::id(), now_secs()));
     if let Err(e) = std::fs::write(&path, format!("{original}\n")) {
         app.toast_err(t!("一時ファイルを作れません: {e}", "temp file failed: {e}"));
         return;
@@ -90,7 +106,11 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
         .unwrap_or_else(|_| "vi".into());
 
     // Suspend the TUI for the editor, restore it after — whatever happens.
-    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     let status = Command::new("sh")
         .arg("-c")
@@ -104,7 +124,10 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
     let edited = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     if !ok {
-        app.toast_err(t!("エディタが中断しました（{editor}）— 何も書き込んでいません", "editor aborted ({editor}) — nothing written"));
+        app.toast_err(t!(
+            "エディタが中断しました（{editor}）— 何も書き込んでいません",
+            "editor aborted ({editor}) — nothing written"
+        ));
         return;
     }
     let edited = edited.strip_suffix('\n').unwrap_or(&edited).to_string();
@@ -114,17 +137,26 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
     }
     let new_lines: Vec<String> = edited.split('\n').map(str::to_string).collect();
     if new_lines.iter().all(|l| l.trim().is_empty()) {
-        app.toast_err(t!("ページが空になるため中止しました（ページの削除はブラウザで）", "page emptied — refusing (delete pages in the browser)"));
+        app.toast_err(t!(
+            "ページが空になるため中止しました（ページの削除はブラウザで）",
+            "page emptied — refusing (delete pages in the browser)"
+        ));
         return;
     }
-    let old: Vec<(String, String)> =
-        app.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let old: Vec<(String, String)> = app
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     let ops = diff_to_ops(&old, &new_lines);
     if ops.is_empty() {
         app.toast(t!("変更はありません", "no changes"));
     } else {
         let n = ops.len();
         do_edit(app, ctx, &t!("エディタ", "editor"), ops);
-        app.note(t!("✓ エディタの変更を {n} 件コミットしました · u で戻せます", "✓ editor: {n} op(s) committed · u to undo"));
+        app.note(t!(
+            "✓ エディタの変更を {n} 件コミットしました · u で戻せます",
+            "✓ editor: {n} op(s) committed · u to undo"
+        ));
     }
 }

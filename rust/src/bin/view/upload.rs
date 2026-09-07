@@ -26,8 +26,16 @@ pub(crate) fn splice_image(text: &str, offset: usize, url: &str) -> (String, usi
     }
     let before = &text[..at];
     let after = &text[at..];
-    let lead = if before.is_empty() || before.ends_with(char::is_whitespace) { "" } else { " " };
-    let trail = if after.is_empty() || after.starts_with(char::is_whitespace) { "" } else { " " };
+    let lead = if before.is_empty() || before.ends_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    let trail = if after.is_empty() || after.starts_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
     let piece = format!("{lead}[{url}]{trail}");
     let len = piece.len();
     (format!("{before}{piece}{after}"), len)
@@ -46,11 +54,17 @@ impl App {
     /// can say no is a sentence on the status line, never silence.
     pub(crate) fn paste_clipboard_image(&mut self, ctx: &Ctx) {
         if self.session.is_none() {
-            self.toast_err(t!("画像は編集中に貼ってください — e / i / o で入ってから", "paste images while editing — enter with e / i / o first"));
+            self.toast_err(t!(
+                "画像は編集中に貼ってください — e / i / o で入ってから",
+                "paste images while editing — enter with e / i / o first"
+            ));
             return;
         }
         if !self.editable {
-            self.toast_err(t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image"));
+            self.toast_err(t!(
+                "読み取り専用なので画像を上げられません",
+                "read-only: cannot upload an image"
+            ));
             return;
         }
         if !self.uploads_on {
@@ -92,11 +106,17 @@ impl App {
     /// for a Gyazo destination.
     pub(crate) fn start_upload(&mut self, ctx: &Ctx, path: &std::path::Path) {
         let Some(s) = self.session.as_ref() else {
-            self.toast_err(t!("画像は編集中に貼ってください", "paste images while editing"));
+            self.toast_err(t!(
+                "画像は編集中に貼ってください",
+                "paste images while editing"
+            ));
             return;
         };
         if !self.editable {
-            self.toast_err(t!("読み取り専用なので画像を上げられません", "read-only: cannot upload an image"));
+            self.toast_err(t!(
+                "読み取り専用なので画像を上げられません",
+                "read-only: cannot upload an image"
+            ));
             return;
         }
         let (line_id, offset) = (self.lines[s.line].id.clone(), s.input.cur);
@@ -109,8 +129,11 @@ impl App {
             self.toast_err(t!("{name} は 100MB を超えています", "{name} is over 100MB"));
             return;
         }
-        let (dest, decided) =
-            Destination::resolve_with(&ctx.config, &self.project, ctx.project_settings(&self.project).as_ref());
+        let (dest, decided) = Destination::resolve_with(
+            &ctx.config,
+            &self.project,
+            ctx.project_settings(&self.project).as_ref(),
+        );
         // The token must match the destination (see `Ctx::gyazo_teams_token`);
         // the wrong one would put the picture where the page will not
         // point. So no falling back to the other token: refuse, and name
@@ -124,7 +147,11 @@ impl App {
                 match token.clone() {
                     Some(t) => Some(t),
                     None => {
-                        self.toast_err(t!("{} へ上げるには {var} が要ります", "uploading to {} needs {var}", dest.label()));
+                        self.toast_err(t!(
+                            "{} へ上げるには {var} が要ります",
+                            "uploading to {} needs {var}",
+                            dest.label()
+                        ));
                         return;
                     }
                 }
@@ -172,7 +199,15 @@ impl App {
                 }
                 .map_err(|e| e.to_string())
             });
-            let _ = tx.send(UploadMsg { project, title, line_id, offset, name, dest, result });
+            let _ = tx.send(UploadMsg {
+                project,
+                title,
+                line_id,
+                offset,
+                name,
+                dest,
+                result,
+            });
         });
     }
 
@@ -198,9 +233,17 @@ impl App {
                 Ok(url) => url,
                 Err(e) => {
                     self.toast_err(if e.contains("402") {
-                        t!("{}: プロジェクトの容量上限を超えています", "{}: project storage limit reached", msg.name)
+                        t!(
+                            "{}: プロジェクトの容量上限を超えています",
+                            "{}: project storage limit reached",
+                            msg.name
+                        )
                     } else {
-                        t!("{} を上げられませんでした — {e}", "could not upload {} — {e}", msg.name)
+                        t!(
+                            "{} を上げられませんでした — {e}",
+                            "could not upload {} — {e}",
+                            msg.name
+                        )
                     });
                     changed = true;
                     continue;
@@ -221,9 +264,21 @@ impl App {
                         s.want_col = None;
                     } else {
                         let (text, _) = splice_image(&self.lines[idx].text, msg.offset, &url);
-                        do_edit(self, ctx, &t!("画像", "image"), vec![EditOp::Replace { id: msg.line_id, text }]);
+                        do_edit(
+                            self,
+                            ctx,
+                            &t!("画像", "image"),
+                            vec![EditOp::Replace {
+                                id: msg.line_id,
+                                text,
+                            }],
+                        );
                     }
-                    self.note(t!("{} を貼りました ({where_})", "pasted {} ({where_})", msg.name));
+                    self.note(t!(
+                        "{} を貼りました ({where_})",
+                        "pasted {} ({where_})",
+                        msg.name
+                    ));
                 }
                 None => {
                     let ops = vec![EditOp::insert("_end", &format!("[{url}]"))];

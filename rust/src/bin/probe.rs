@@ -13,11 +13,24 @@ fn block_to_plain(b: &Block) -> String {
         Block::Blank => "[BLANK]".to_string(),
         Block::Image { url, .. } => format!("[IMAGE {url}]"),
         Block::Inline { .. } => "[INLINE]".to_string(),
-        Block::Text(line) => line.spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
-        Block::Artifact { kind, rows, last_src, .. } => format!(
+        Block::Text(line) => line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>(),
+        Block::Artifact {
+            kind,
+            rows,
+            last_src,
+            ..
+        } => format!(
             "[WEB {kind:?} last_src={last_src}]\n{}",
             rows.iter()
-                .map(|(_, l)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|(_, l)| l
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
@@ -25,7 +38,12 @@ fn block_to_plain(b: &Block) -> String {
             // lay out at a generous width for probing
             t.layout(100)
                 .iter()
-                .map(|(l, _)| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .map(|(l, _)| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -38,7 +56,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page_title = args.get(1).cloned();
     let sid = std::env::var("COSENSE_SID").ok().filter(|s| !s.is_empty());
 
-    let cfg = Config { project: project.clone(), auth: AuthStore::load(sid), api_domain: "scrapbox.io".into() };
+    let cfg = Config {
+        project: project.clone(),
+        auth: AuthStore::load(sid),
+        api_domain: "scrapbox.io".into(),
+    };
     let client = Client::new(cfg)?;
 
     println!("=== project: {project} ===");
@@ -61,12 +83,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== RENDER: {title} ===");
     let page = client.get_page(&title)?;
-    let out = render_lines(&page.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>());
+    let out = render_lines(
+        &page
+            .lines
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>(),
+    );
     for b in &out.blocks {
         println!("{}", block_to_plain(b));
     }
     println!("\n--- links ({}) ---", out.extracted.links.len());
-    println!("{:?}", out.extracted.links.iter().take(20).collect::<Vec<_>>());
+    println!(
+        "{:?}",
+        out.extracted.links.iter().take(20).collect::<Vec<_>>()
+    );
     println!("--- images ({}) ---", out.extracted.images.len());
     for u in out.extracted.images.iter().take(10) {
         println!("  {u}");

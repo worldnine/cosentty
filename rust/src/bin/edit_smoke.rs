@@ -22,7 +22,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new(cfg)?;
 
     let page = client.get_page_in(&project, &title)?;
-    println!("page: {} ({} lines, id {})", page.title, page.lines.len(), page.id);
+    println!(
+        "page: {} ({} lines, id {})",
+        page.title,
+        page.lines.len(),
+        page.id
+    );
 
     let marker = format!(
         "edit_smoke {} (safe to delete)",
@@ -32,11 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 1. append the marker
-    let p1 = client.preview_edit(
-        &project,
-        &page.id,
-        &[EditOp::insert("_end", &marker)],
-    )?;
+    let p1 = client.preview_edit(&project, &page.id, &[EditOp::insert("_end", &marker)])?;
     println!("preview 1: {} (expires {})", p1.preview_id, p1.expire_at);
     let c1 = client.submit_edit(&project, &p1.preview_id)?;
     println!("commit 1:  {} (insert)", c1.commit_id);
@@ -51,7 +52,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("verified:  line {} = {:?}", line.id, line.text);
 
     // 3. delete it again
-    let p2 = client.preview_edit(&project, &page.id, &[EditOp::Delete { id: line.id.clone() }])?;
+    let p2 = client.preview_edit(
+        &project,
+        &page.id,
+        &[EditOp::Delete {
+            id: line.id.clone(),
+        }],
+    )?;
     let c2 = client.submit_edit(&project, &p2.preview_id)?;
     println!("commit 2:  {} (delete)", c2.commit_id);
 
@@ -70,8 +77,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simulate an edit that REPLACES the last line, INSERTS two lines, then
     // diff back to the original; the page ends exactly as it started.
     let base = client.get_page_in(&project, &title)?;
-    let old: Vec<(String, String)> =
-        base.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let old: Vec<(String, String)> = base
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     let original_texts: Vec<String> = base.lines.iter().map(|l| l.text.clone()).collect();
     let mut edited = original_texts.clone();
     let last = edited.len() - 1;
@@ -95,8 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("verified:  edited state matches; replaced line kept id: {kept}");
 
     // diff back to the original and submit
-    let old2: Vec<(String, String)> =
-        mid.lines.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let old2: Vec<(String, String)> = mid
+        .lines
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     let ops_back = diff_to_ops(&old2, &original_texts);
     let p4 = client.preview_edit(&project, &mid.id, &ops_back)?;
     let c4 = client.submit_edit(&project, &p4.preview_id)?;
@@ -121,7 +134,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 lines: vec![(new_id.clone(), "session smoke".into())],
             }],
         ),
-        ("replace", vec![EditOp::Replace { id: new_id.clone(), text: "session smoke (edited)".into() }]),
+        (
+            "replace",
+            vec![EditOp::Replace {
+                id: new_id.clone(),
+                text: "session smoke (edited)".into(),
+            }],
+        ),
         ("delete", vec![EditOp::Delete { id: new_id.clone() }]),
     ];
     for (label, ops) in steps {
@@ -132,7 +151,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The test page may be edited CONCURRENTLY (it is a live page), so
     // assert our own traces are gone rather than byte equality.
     let fin3 = client.get_page_in(&project, &title)?;
-    if fin3.lines.iter().any(|l| l.text.contains("session smoke") || l.id == new_id) {
+    if fin3
+        .lines
+        .iter()
+        .any(|l| l.text.contains("session smoke") || l.id == new_id)
+    {
         return Err("phase 3: smoke line still present after delete".into());
     }
     println!("verified:  client-generated id worked across three sequential commits");

@@ -65,7 +65,11 @@ pub(crate) struct Toast {
 
 impl Toast {
     fn life(&self) -> Duration {
-        if self.error { TOAST_ERR_SECS } else { TOAST_SECS }
+        if self.error {
+            TOAST_ERR_SECS
+        } else {
+            TOAST_SECS
+        }
     }
 }
 
@@ -74,7 +78,11 @@ impl App {
     /// slot back after a few seconds. Never touches `status` or the toast.
     pub(crate) fn note(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
-        self.note = if msg.is_empty() { None } else { Some((msg, Instant::now() + NOTE_SECS)) };
+        self.note = if msg.is_empty() {
+            None
+        } else {
+            Some((msg, Instant::now() + NOTE_SECS))
+        };
     }
 
     /// The note's text, or "" — for tests; the footer reads the slot itself.
@@ -86,7 +94,9 @@ impl App {
     /// Drop the note once it has had its seconds, so the key hints come
     /// back. Returns whether anything changed.
     pub(crate) fn expire_note(&mut self) -> bool {
-        let Some((_, until)) = self.note.as_ref() else { return false };
+        let Some((_, until)) = self.note.as_ref() else {
+            return false;
+        };
         if Instant::now() < *until {
             return false;
         }
@@ -109,7 +119,13 @@ impl App {
             self.toast = None;
             return;
         }
-        self.toast = Some(Toast { text, error, shown: None, last_frame: None, fx: None });
+        self.toast = Some(Toast {
+            text,
+            error,
+            shown: None,
+            last_frame: None,
+            fx: None,
+        });
     }
 
     /// The toast's text, or "" — for tests and for the places that need
@@ -131,19 +147,33 @@ impl App {
     /// dialog — TUIs (vim's `:q!`, lazygit's confirmOnQuit) settle on a
     /// question in the message line, never a modal. `^c` skips this.
     pub(crate) fn confirm_quit(&mut self) -> bool {
-        if self.quit_armed.is_some_and(|at| at.elapsed() <= QUIT_ARM_SECS) {
+        if self
+            .quit_armed
+            .is_some_and(|at| at.elapsed() <= QUIT_ARM_SECS)
+        {
             return true;
         }
         self.quit_armed = Some(Instant::now());
         // Say what would be lost, when something would.
         let mut stake = String::new();
         if self.inflight > 0 {
-            stake.push_str(&t!("未送信の編集 {} 件 · ", "{} unsent edit(s) · ", self.inflight));
+            stake.push_str(&t!(
+                "未送信の編集 {} 件 · ",
+                "{} unsent edit(s) · ",
+                self.inflight
+            ));
         }
         if !self.comments.is_empty() {
-            stake.push_str(&t!("未送信のコメント {} 件 · ", "{} unsent comment(s) · ", self.comments.len()));
+            stake.push_str(&t!(
+                "未送信のコメント {} 件 · ",
+                "{} unsent comment(s) · ",
+                self.comments.len()
+            ));
         }
-        self.toast(t!("{stake}もう一度 q で終了 · Esc で戻る", "{stake}q again to quit · Esc to stay"));
+        self.toast(t!(
+            "{stake}もう一度 q で終了 · Esc で戻る",
+            "{stake}q again to quit · Esc to stay"
+        ));
         false
     }
 
@@ -228,7 +258,9 @@ pub(crate) fn draw_toast(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     if now.duration_since(shown) > t.life() {
         return; // expire_toast drops it on the next pass
     }
-    let Some(rect) = toast_rect(area, &t.text) else { return };
+    let Some(rect) = toast_rect(area, &t.text) else {
+        return;
+    };
     let bg = cosense::theme::toast_bg(ctx.terminal_bg);
     let fg = if t.error { Color::Red } else { Color::Yellow };
     let text = clip_to_width(&t.text, rect.width.saturating_sub(2) as usize);
@@ -240,7 +272,10 @@ pub(crate) fn draw_toast(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         ))),
         rect,
     );
-    let dt = t.last_frame.map(|p| now.duration_since(p)).unwrap_or(Duration::ZERO);
+    let dt = t
+        .last_frame
+        .map(|p| now.duration_since(p))
+        .unwrap_or(Duration::ZERO);
     t.last_frame = Some(now);
     let life = t.life();
     let fx = t.fx.get_or_insert_with(|| toast_effect(bg, life));

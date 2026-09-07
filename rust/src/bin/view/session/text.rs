@@ -43,7 +43,9 @@ pub(crate) fn session_cut_span_in(s: &mut EditSession) {
 /// (the line is simply dirty afterwards), like any other typing: the line
 /// commits when the caret leaves it.
 pub(crate) fn session_cut_span(app: &mut App) -> bool {
-    let Some(s) = app.session.as_mut() else { return false };
+    let Some(s) = app.session.as_mut() else {
+        return false;
+    };
     if s.sel_span().is_none() {
         return false;
     }
@@ -64,14 +66,16 @@ pub(crate) fn session_cut_span(app: &mut App) -> bool {
 /// same; here a page's lines ARE the units, so "merge" is the honest
 /// spelling of "replace".) Returns whether a selection was consumed.
 pub(crate) fn session_replace_selection(app: &mut App, ctx: &Ctx, text: &str) -> bool {
-    let Some(((tl, tb), (bl, bb))) =
-        app.session.as_ref().and_then(|s| s.sel_ends())
-    else {
+    let Some(((tl, tb), (bl, bb))) = app.session.as_ref().and_then(|s| s.sel_ends()) else {
         return false;
     };
     if tl == bl {
-        let Some(s) = app.session.as_mut() else { return false };
-        let Some((a, b)) = s.sel_span() else { return false };
+        let Some(s) = app.session.as_mut() else {
+            return false;
+        };
+        let Some((a, b)) = s.sel_span() else {
+            return false;
+        };
         s.input.buf.replace_range(a..b, text);
         s.input.cur = a + text.len();
         s.sel_from = None;
@@ -93,10 +97,7 @@ pub(crate) fn session_replace_selection(app: &mut App, ctx: &Ctx, text: &str) ->
         return false;
     }
     session_commit_dirty(app, ctx);
-    let (top_text, bot_text) = (
-        app.lines[tl].text.clone(),
-        app.lines[bl].text.clone(),
-    );
+    let (top_text, bot_text) = (app.lines[tl].text.clone(), app.lines[bl].text.clone());
     let prefix = top_text[..floor_boundary(&top_text, tb)].to_string();
     let suffix = bot_text[floor_boundary(&bot_text, bb)..].to_string();
     let merged = format!("{prefix}{text}{suffix}");
@@ -104,11 +105,16 @@ pub(crate) fn session_replace_selection(app: &mut App, ctx: &Ctx, text: &str) ->
         id: app.lines[tl].id.clone(),
         text: merged.clone(),
     }];
-    ops.extend((tl + 1..=bl).map(|i| EditOp::Delete { id: app.lines[i].id.clone() }));
+    ops.extend((tl + 1..=bl).map(|i| EditOp::Delete {
+        id: app.lines[i].id.clone(),
+    }));
     do_edit(app, ctx, &t!("選択範囲の置換", "replace selection"), ops);
     if let Some(s) = app.session.as_mut() {
         s.line = tl;
-        s.input = Input { buf: merged.clone(), cur: prefix.len() + text.len() };
+        s.input = Input {
+            buf: merged.clone(),
+            cur: prefix.len() + text.len(),
+        };
         s.orig = merged;
         s.want_col = None;
         s.sel_from = None;
@@ -125,9 +131,7 @@ pub(crate) fn session_replace_selection(app: &mut App, ctx: &Ctx, text: &str) ->
 /// the junction is the very same edit, and `session_split` does that on
 /// its way through.)
 pub(crate) fn session_enter_selection(app: &mut App, ctx: &Ctx) -> bool {
-    let Some(((tl, tb), (bl, bb))) =
-        app.session.as_ref().and_then(|s| s.sel_ends())
-    else {
+    let Some(((tl, tb), (bl, bb))) = app.session.as_ref().and_then(|s| s.sel_ends()) else {
         return false;
     };
     if tl == bl {
@@ -143,24 +147,32 @@ pub(crate) fn session_enter_selection(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     }
     session_commit_dirty(app, ctx);
-    let (top_text, bot_text) = (
-        app.lines[tl].text.clone(),
-        app.lines[bl].text.clone(),
-    );
+    let (top_text, bot_text) = (app.lines[tl].text.clone(), app.lines[bl].text.clone());
     let prefix = top_text[..floor_boundary(&top_text, tb)].to_string();
     let suffix = bot_text[floor_boundary(&bot_text, bb)..].to_string();
     let mut ops = vec![
-        EditOp::Replace { id: app.lines[tl].id.clone(), text: prefix },
-        EditOp::Replace { id: app.lines[bl].id.clone(), text: suffix.clone() },
+        EditOp::Replace {
+            id: app.lines[tl].id.clone(),
+            text: prefix,
+        },
+        EditOp::Replace {
+            id: app.lines[bl].id.clone(),
+            text: suffix.clone(),
+        },
     ];
-    ops.extend((tl + 1..bl).map(|i| EditOp::Delete { id: app.lines[i].id.clone() }));
+    ops.extend((tl + 1..bl).map(|i| EditOp::Delete {
+        id: app.lines[i].id.clone(),
+    }));
     do_edit(app, ctx, &t!("改行", "new line"), ops);
     // The middle lines are gone: the far line now sits one below the
     // anchor, and it is where the caret goes on.
     let seat = tl + 1;
     if let Some(s) = app.session.as_mut() {
         s.line = seat;
-        s.input = Input { buf: suffix.clone(), cur: 0 };
+        s.input = Input {
+            buf: suffix.clone(),
+            cur: 0,
+        };
         s.orig = suffix;
         s.want_col = None;
         s.sel_from = None;
@@ -179,7 +191,11 @@ pub(crate) fn read_select_line(app: &mut App, down: bool) {
     }
     app.move_cursor(down);
     if let Some((a, b)) = app.selection.map(|s| s.range()) {
-        app.status = t!("{} 行を選択 · y コピー · c コメント · Esc 解除", "selected {} line(s) · y copy · c comment · Esc clear", b - a + 1);
+        app.status = t!(
+            "{} 行を選択 · y コピー · c コメント · Esc 解除",
+            "selected {} line(s) · y copy · c comment · Esc clear",
+            b - a + 1
+        );
     }
 }
 
@@ -193,7 +209,9 @@ pub(crate) fn read_select_line(app: &mut App, down: bool) {
 /// matches how the levels are used in practice: keep pressing until it
 /// looks right.
 pub(crate) fn session_cycle_heading(app: &mut App, ctx: &Ctx) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (buf, cur) = (s.input.buf.clone(), s.input.cur);
     let indent = indent_of(&buf).to_string();
     let body = &buf[indent.len()..];
@@ -218,7 +236,10 @@ pub(crate) fn session_cycle_heading(app: &mut App, ctx: &Ctx) {
     let within = cur.saturating_sub(old_text_at).min(text.len());
     let new_cur = new_text_at + within;
     if let Some(s) = app.session.as_mut() {
-        s.input = Input { buf: format!("{indent}{new_body}"), cur: new_cur };
+        s.input = Input {
+            buf: format!("{indent}{new_body}"),
+            cur: new_cur,
+        };
         s.want_col = None;
         s.sel_from = None;
     }
@@ -226,8 +247,14 @@ pub(crate) fn session_cycle_heading(app: &mut App, ctx: &Ctx) {
     app.follow = true;
     let _ = ctx;
     app.note(match next {
-        Some(n) => t!("見出し レベル{n}（^t でさらに）", "heading level {n} (^t for more)"),
-        None => t!("見出しを解除（^t で再び）", "heading cleared (^t to start again)"),
+        Some(n) => t!(
+            "見出し レベル{n}（^t でさらに）",
+            "heading level {n} (^t for more)"
+        ),
+        None => t!(
+            "見出しを解除（^t で再び）",
+            "heading cleared (^t to start again)"
+        ),
     });
 }
 
@@ -278,9 +305,7 @@ pub(crate) fn session_type_char(app: &mut App, ctx: &Ctx, ch: char) {
     // nest a line, so it moves the block instead of landing in the text.
     // Same for a plain `code:` header (a body's leading spaces are content
     // and stay typable — only the header's indent is structure).
-    if ch == ' '
-        && (caret_on_mermaid_indent_or_start(app)
-            || caret_on_plain_code_header_start(app))
+    if ch == ' ' && (caret_on_mermaid_indent_or_start(app) || caret_on_plain_code_header_start(app))
     {
         session_indent(app, ctx, 1);
         return;
@@ -372,7 +397,9 @@ pub(crate) fn session_select_char(app: &mut App, right: bool) {
 /// line commits on the way, exactly as a plain ↑/↓ does — selecting must
 /// never be the thing that loses a keystroke.
 pub(crate) fn session_select_line(app: &mut App, ctx: &Ctx, delta: i32) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let anchor = s.sel_from.unwrap_or((s.line, s.input.cur));
     session_move_line(app, ctx, delta);
     let Some(head) = app.session.as_ref().map(|s| (s.line, s.input.cur)) else {
@@ -389,7 +416,11 @@ pub(crate) fn session_select_line(app: &mut App, ctx: &Ctx, delta: i32) {
     }
     app.selection = None;
     let n = anchor.0.abs_diff(head.0) + 1;
-    app.status = t!("{} 行を選択 · ⌫ 削除 · Esc 解除", "selected {} line(s) · ⌫ delete · Esc clear", n);
+    app.status = t!(
+        "{} 行を選択 · ⌫ 削除 · Esc 解除",
+        "selected {} line(s) · ⌫ delete · Esc clear",
+        n
+    );
 }
 
 /// `^k` inside the session — the emacs contract, one line at a time:
@@ -402,7 +433,9 @@ pub(crate) fn session_select_line(app: &mut App, ctx: &Ctx, delta: i32) {
 /// The dirty text commits first: undo has to give back the line you were
 /// looking at, not the last version the server happened to hold.
 pub(crate) fn session_kill(app: &mut App, ctx: &Ctx) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, at_eol) = (s.line, s.input.cur == s.input.buf.len());
     if !at_eol {
         if let Some(s) = app.session.as_mut() {
@@ -418,12 +451,20 @@ pub(crate) fn session_kill(app: &mut App, ctx: &Ctx) {
     // `x` refuses). Emptying it is still allowed — that is a rename you
     // typed on purpose.
     if line == 0 {
-        app.toast_err(t!("タイトル行は削除できません", "the title line cannot be deleted"));
+        app.toast_err(t!(
+            "タイトル行は削除できません",
+            "the title line cannot be deleted"
+        ));
         return;
     }
     session_commit_dirty(app, ctx);
     let id = app.lines[line].id.clone();
-    do_edit(app, ctx, &t!("行の削除", "delete line"), vec![EditOp::Delete { id }]);
+    do_edit(
+        app,
+        ctx,
+        &t!("行の削除", "delete line"),
+        vec![EditOp::Delete { id }],
+    );
     // The caret takes the place the line left behind: the line that slid
     // up into this index, or the one above when we killed the last line.
     let seat = line.min(app.lines.len().saturating_sub(1));
@@ -431,20 +472,28 @@ pub(crate) fn session_kill(app: &mut App, ctx: &Ctx) {
     let caret = if seat < line { text.len() } else { 0 };
     if let Some(s) = app.session.as_mut() {
         s.line = seat;
-        s.input = Input { buf: text.clone(), cur: caret };
+        s.input = Input {
+            buf: text.clone(),
+            cur: caret,
+        };
         s.orig = text;
         s.want_col = None;
     }
     app.cursor = seat;
     app.follow = true;
     app.laid_width = 0;
-    app.note(t!("✓ 1行削除 · ^z で戻せます", "✓ deleted line · ^z to undo"));
+    app.note(t!(
+        "✓ 1行削除 · ^z で戻せます",
+        "✓ deleted line · ^z to undo"
+    ));
 }
 
 /// ↑/↓ inside the session: commit the dirty line, carry the caret to the
 /// next/previous BODY line, keeping the display column (sticky).
 pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, buf, cur) = (s.line, s.input.buf.clone(), s.input.cur);
     let code = caret_span(app, line);
     let width = app.session_wrap_width();
@@ -477,7 +526,14 @@ pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let last = app.lines.len().saturating_sub(1) as i32;
     let target = (cur_line + delta).clamp(0, last);
     if target == cur_line {
-        app.toast(if delta < 0 { t!("ページの先頭です", "top of page") } else { t!("ページの末尾です — Enter で行を足せます", "end of page — Enter adds a line") });
+        app.toast(if delta < 0 {
+            t!("ページの先頭です", "top of page")
+        } else {
+            t!(
+                "ページの末尾です — Enter で行を足せます",
+                "end of page — Enter adds a line"
+            )
+        });
         return;
     }
     let line = target as usize;
@@ -487,11 +543,18 @@ pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     let code = caret_span(app, line);
     let disp = session_display(&text, code);
     let wrapped = SessionWrap::new(&disp, width, session_hang(&text, code));
-    let landing = if delta < 0 { wrapped.segs.len().saturating_sub(1) } else { 0 };
+    let landing = if delta < 0 {
+        wrapped.segs.len().saturating_sub(1)
+    } else {
+        0
+    };
     let caret = raw_caret_from_display(&text, wrapped.offset_at(landing, want), code);
     if let Some(s) = app.session.as_mut() {
         s.line = line;
-        s.input = Input { buf: text.clone(), cur: caret };
+        s.input = Input {
+            buf: text.clone(),
+            cur: caret,
+        };
         s.orig = text;
         s.want_col = Some(want);
         s.sel_from = None;

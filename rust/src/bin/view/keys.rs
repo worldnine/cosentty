@@ -56,7 +56,9 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         }
         return Action::Continue;
     }
-    let Some(ix) = app.index.as_mut() else { return Action::Continue };
+    let Some(ix) = app.index.as_mut() else {
+        return Action::Continue;
+    };
     // ---- the filter line, while it is open ----------------------------
     //
     // Everything printable is text here. Only the keys that cannot be
@@ -100,7 +102,11 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     match (k.code, ctrl) {
         // ---- quit ---- (as on the page: `q` asks once, and `^c` just goes)
         (KeyCode::Char('q'), false) => {
-            return if app.confirm_quit() { Action::Quit } else { Action::Continue };
+            return if app.confirm_quit() {
+                Action::Quit
+            } else {
+                Action::Continue
+            };
         }
         (KeyCode::Char('c'), true) => return Action::Quit,
         (KeyCode::Char('/'), false) => ix.begin_filter(),
@@ -132,7 +138,9 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
                     "hits are in relevance order (^u for the list)"
                 ));
             } else {
-                let at = cosense::index::SortKey::ALL.iter().position(|&k| k == ix.sort);
+                let at = cosense::index::SortKey::ALL
+                    .iter()
+                    .position(|&k| k == ix.sort);
                 app.index_sort_menu = Some(at.unwrap_or(0));
             }
         }
@@ -231,7 +239,8 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             // startup), Alt+Enter (ESC CR, which classic terminals send),
             // or ^j (akapen's key, works everywhere). Enter alone saves.
             (KeyCode::Enter, _)
-                if k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+                if k.modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
                 if let Some(c) = app.composing.as_mut() {
                     c.insert_char('\n');
@@ -334,7 +343,10 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         if let Some((block, direction)) = outline_prefix_command(k) {
             edit_outline(app, ctx, block, direction);
         } else {
-            app.note(t!("アウトライン操作を取り消しました", "outline action cancelled"));
+            app.note(t!(
+                "アウトライン操作を取り消しました",
+                "outline action cancelled"
+            ));
         }
         return Action::Continue;
     }
@@ -380,7 +392,11 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         // ---- quit ---- (akapen default: q quits, Esc only cancels; here
         //      the first q asks and the second answers — toast.rs)
         (KeyCode::Char('q'), false) => {
-            return if app.confirm_quit() { Action::Quit } else { Action::Continue };
+            return if app.confirm_quit() {
+                Action::Quit
+            } else {
+                Action::Continue
+            };
         }
         // `^c` too. In raw mode the terminal hands it over as a key rather
         // than a signal, so without this arm the interrupt habit is a dead
@@ -455,7 +471,12 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             match links.len() {
                 0 => app.toast(t!("この行にリンクはありません", "no link on this line")),
                 1 => activate_link(app, ctx, links.remove(0)),
-                _ => app.overlay = Some(Overlay::Links { items: links, cursor: 0 }),
+                _ => {
+                    app.overlay = Some(Overlay::Links {
+                        items: links,
+                        cursor: 0,
+                    })
+                }
             }
         }
         (KeyCode::Char('['), false) => go_history(app, ctx, true),
@@ -528,9 +549,15 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             } else if app.note.is_none() {
                 app.note_web_failure(match app.render_policy {
                     capability::RenderPolicy::Off => {
-                        t!("diagram: レンダラは off です (COSENSE_WEB_RENDER)", "diagram: renderer is off (COSENSE_WEB_RENDER)")
+                        t!(
+                            "diagram: レンダラは off です (COSENSE_WEB_RENDER)",
+                            "diagram: renderer is off (COSENSE_WEB_RENDER)"
+                        )
                     }
-                    _ => t!("diagram: 描画するものはありません", "diagram: nothing to draw"),
+                    _ => t!(
+                        "diagram: 描画するものはありません",
+                        "diagram: nothing to draw"
+                    ),
                 });
             }
         }
@@ -563,7 +590,10 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         // delete, `^n`/`^p` jump) say where their job went — a key that
         // silently stops working is worse than one that explains itself.
         (KeyCode::Char('v'), false) => {
-            app.toast(t!("選択は Shift+↑↓ か J/K で（v は廃止）", "select with Shift+↑↓ or J/K (v is gone)"));
+            app.toast(t!(
+                "選択は Shift+↑↓ か J/K で（v は廃止）",
+                "select with Shift+↑↓ or J/K (v is gone)"
+            ));
         }
         (KeyCode::Char('c'), false) => {
             // In history too: the comment is pinned to the snapshot on
@@ -571,15 +601,23 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             // only there, and exported with the command that reads it.
             // The same range again means "edit that comment": the
             // composer opens on its text and Enter replaces it.
-            let existing = app.comment_for_range().map(|i| app.comments[i].text.clone());
+            let existing = app
+                .comment_for_range()
+                .map(|i| app.comments[i].text.clone());
             let editing = existing.is_some();
             app.composing = Some(Input::new(existing.unwrap_or_default()));
             app.laid_width = 0; // the bar opens under the range
             app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
             app.status = if editing {
-                t!("コメントを編集 · Enter 置き換え · S-Enter/^j 改行 · Esc 取消", "edit comment · Enter replace · S-Enter/^j newline · Esc cancel")
+                t!(
+                    "コメントを編集 · Enter 置き換え · S-Enter/^j 改行 · Esc 取消",
+                    "edit comment · Enter replace · S-Enter/^j newline · Esc cancel"
+                )
             } else {
-                t!("コメントを入力 · Enter 保存 · S-Enter/^j 改行 · Esc 取消", "type comment · Enter save · S-Enter/^j newline · Esc cancel")
+                t!(
+                    "コメントを入力 · Enter 保存 · S-Enter/^j 改行 · Esc 取消",
+                    "type comment · Enter save · S-Enter/^j newline · Esc cancel"
+                )
             };
         }
         (KeyCode::Char('s'), false) => send_comments(app, ctx),
@@ -602,7 +640,10 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 return Action::Continue;
             }
             if app.time.is_some() {
-                app.toast_err(t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)"));
+                app.toast_err(t!(
+                    "履歴を表示中 — 読み取り専用（Esc で最新へ）",
+                    "viewing history — read-only (Esc → NOW)"
+                ));
                 return Action::Continue;
             }
             return Action::Editor;
@@ -613,13 +654,22 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         // key is kept only to say so — a key that silently stops working
         // is worse than one that explains itself.
         (KeyCode::Char('x'), false) => {
-            app.toast(t!("削除は編集中に — e で入って ^k（行）/ Shift+↑↓ と ⌫（範囲）", "delete while editing — e, then ^k (line) or Shift+↑↓ and ⌫ (range)"));
+            app.toast(t!(
+                "削除は編集中に — e で入って ^k（行）/ Shift+↑↓ と ⌫（範囲）",
+                "delete while editing — e, then ^k (line) or Shift+↑↓ and ⌫ (range)"
+            ));
         }
         (KeyCode::Char('d'), false) => {
-            app.toast(t!("コメントの削除は l の一覧で d", "delete a comment in the l list with d"));
+            app.toast(t!(
+                "コメントの削除は l の一覧で d",
+                "delete a comment in the l list with d"
+            ));
         }
         (KeyCode::Char('n'), true) | (KeyCode::Char('p'), true) => {
-            app.toast(t!("コメントへは l の一覧から Enter で", "reach a comment from the l list with Enter"));
+            app.toast(t!(
+                "コメントへは l の一覧から Enter で",
+                "reach a comment from the l list with Enter"
+            ));
         }
 
         // ---- output ----
@@ -653,7 +703,10 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                 None
             } else {
                 // resolve the updater's name for THIS project before showing
-                let want = app.cursor_src().and_then(|s| app.lines.get(s)).map(|l| l.user_id.clone());
+                let want = app
+                    .cursor_src()
+                    .and_then(|s| app.lines.get(s))
+                    .map(|l| l.user_id.clone());
                 app.ensure_members(ctx, want.as_deref());
                 Some(Overlay::LineInfo)
             };
@@ -672,14 +725,22 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
                     // edit session, which turns the IME on by itself.)
                     let fixed = app.session_ime.force_ascii();
                     if fixed {
-                        app.toast(t!("英数に戻しました（日本語は e / i で編集に入ってから）", "switched back to ASCII (Japanese needs an edit session: e / i)"));
+                        app.toast(t!(
+                            "英数に戻しました（日本語は e / i で編集に入ってから）",
+                            "switched back to ASCII (Japanese needs an edit session: e / i)"
+                        ));
                     } else {
                         app.toast(t!("IMEがONのようです — 英数に切り替えてください（編集中は自動で日本語になります）", "the IME looks ON — switch to ASCII (an edit session turns it on for you)"));
                     }
                     return Action::Continue;
                 }
             }
-            app.toast(t!("割り当てのないキー: {:?} {:?}", "unbound key: {:?} {:?}", k.code, k.modifiers));
+            app.toast(t!(
+                "割り当てのないキー: {:?} {:?}",
+                "unbound key: {:?} {:?}",
+                k.code,
+                k.modifiers
+            ));
         }
     }
     Action::Continue
@@ -744,7 +805,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
             if app.comments.is_empty() {
                 app.toast(t!("コピーするコメントがありません", "no comments to copy"));
             } else if copy_to_clipboard(&text) {
-                app.note(t!("✓ コメント {} 件をコピーしました", "✓ copied {} comment(s)", app.comments.len()));
+                app.note(t!(
+                    "✓ コメント {} 件をコピーしました",
+                    "✓ copied {} comment(s)",
+                    app.comments.len()
+                ));
             } else {
                 app.toast_err(t!("コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました", "copy failed — no clipboard tool and the terminal refused OSC 52"));
             }
@@ -765,9 +830,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
     match act {
         Act::Close => app.overlay = None,
         Act::Down => {
-            if let Some(
-                Overlay::Comments { cursor } | Overlay::Links { cursor, .. },
-            ) = app.overlay.as_mut()
+            if let Some(Overlay::Comments { cursor } | Overlay::Links { cursor, .. }) =
+                app.overlay.as_mut()
             {
                 if len > 0 {
                     *cursor = (*cursor + 1).min(len - 1);
@@ -775,9 +839,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
             }
         }
         Act::Up => {
-            if let Some(
-                Overlay::Comments { cursor } | Overlay::Links { cursor, .. },
-            ) = app.overlay.as_mut()
+            if let Some(Overlay::Comments { cursor } | Overlay::Links { cursor, .. }) =
+                app.overlay.as_mut()
             {
                 *cursor = cursor.saturating_sub(1);
             }
@@ -801,9 +864,10 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
                 _ => None,
             };
             let revision = match &app.overlay {
-                Some(Overlay::Comments { cursor }) => {
-                    app.comments.get(*cursor).and_then(|c| c.snapshot_id().map(str::to_string))
-                }
+                Some(Overlay::Comments { cursor }) => app
+                    .comments
+                    .get(*cursor)
+                    .and_then(|c| c.snapshot_id().map(str::to_string)),
                 _ => None,
             };
             app.overlay = None;

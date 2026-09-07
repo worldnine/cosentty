@@ -24,7 +24,9 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
             session_cut_span_in(s);
         }
     }
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, caret, buf) = (s.line, s.input.cur, s.input.buf.clone());
     // In a `code:` block the indent is content, not list structure. Enter
     // on the HEADER opens the block's first body line (without this there
@@ -89,7 +91,10 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
             do_edit(app, ctx, &t!("改行", "new line"), ops);
             if let Some(s) = app.session.as_mut() {
                 s.line = line; // the fresh line sits above
-                s.input = Input { buf: indent.clone(), cur: indent.len() };
+                s.input = Input {
+                    buf: indent.clone(),
+                    cur: indent.len(),
+                };
                 s.orig = indent.clone();
                 s.want_col = None;
                 s.sel_from = None;
@@ -126,13 +131,22 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
             .map(|l| l.id.clone())
             .unwrap_or_else(|| "_end".into());
         let ops = vec![
-            EditOp::Replace { id, text: String::new() },
-            EditOp::Insert { anchor, lines: vec![(new_line_id(), String::new())] },
+            EditOp::Replace {
+                id,
+                text: String::new(),
+            },
+            EditOp::Insert {
+                anchor,
+                lines: vec![(new_line_id(), String::new())],
+            },
         ];
         do_edit(app, ctx, &t!("改行", "new line"), ops);
         if let Some(s) = app.session.as_mut() {
             s.line = line + 1;
-            s.input = Input { buf: String::new(), cur: 0 };
+            s.input = Input {
+                buf: String::new(),
+                cur: 0,
+            };
             s.orig = String::new();
             s.want_col = None;
             s.sel_from = None;
@@ -143,7 +157,11 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
     }
     let head = buf[..caret].to_string();
     let indent = indent_of(&buf);
-    let indent = if caret < indent.len() { &buf[..caret] } else { indent };
+    let indent = if caret < indent.len() {
+        &buf[..caret]
+    } else {
+        indent
+    };
     let tail = format!("{indent}{}", &buf[caret..]);
     let caret_new = indent.len();
     let id = app.lines[line].id.clone();
@@ -154,12 +172,18 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
         .unwrap_or_else(|| "_end".into());
     let ops = vec![
         EditOp::Replace { id, text: head },
-        EditOp::Insert { anchor, lines: vec![(new_line_id(), tail.clone())] },
+        EditOp::Insert {
+            anchor,
+            lines: vec![(new_line_id(), tail.clone())],
+        },
     ];
     do_edit(app, ctx, &t!("改行", "new line"), ops);
     if let Some(s) = app.session.as_mut() {
         s.line = line + 1;
-        s.input = Input { buf: tail.clone(), cur: caret_new };
+        s.input = Input {
+            buf: tail.clone(),
+            cur: caret_new,
+        };
         s.orig = tail;
         s.want_col = None;
     }
@@ -170,8 +194,18 @@ pub(crate) fn session_split(app: &mut App, ctx: &Ctx) {
 /// Add a line right below `line`, seat the session on it with the caret
 /// after `indent`, and leave the current line as it was. Used where Enter
 /// must place a line at a specific indent rather than split the text.
-pub(crate) fn session_open_below(app: &mut App, ctx: &Ctx, line: usize, indent: String, text: String) {
-    let text = if text.is_empty() { indent.clone() } else { text };
+pub(crate) fn session_open_below(
+    app: &mut App,
+    ctx: &Ctx,
+    line: usize,
+    indent: String,
+    text: String,
+) {
+    let text = if text.is_empty() {
+        indent.clone()
+    } else {
+        text
+    };
     let anchor = app
         .lines
         .get(line + 1)
@@ -182,14 +216,23 @@ pub(crate) fn session_open_below(app: &mut App, ctx: &Ctx, line: usize, indent: 
     // `code:py`); commit it with the same edit that opens the body line.
     if let Some(s) = app.session.as_ref() {
         if s.input.buf != s.orig {
-            ops.push(EditOp::Replace { id: app.lines[line].id.clone(), text: s.input.buf.clone() });
+            ops.push(EditOp::Replace {
+                id: app.lines[line].id.clone(),
+                text: s.input.buf.clone(),
+            });
         }
     }
-    ops.push(EditOp::Insert { anchor, lines: vec![(new_line_id(), text.clone())] });
+    ops.push(EditOp::Insert {
+        anchor,
+        lines: vec![(new_line_id(), text.clone())],
+    });
     do_edit(app, ctx, &t!("改行", "new line"), ops);
     if let Some(s) = app.session.as_mut() {
         s.line = line + 1;
-        s.input = Input { buf: text.clone(), cur: indent.len().min(text.len()) };
+        s.input = Input {
+            buf: text.clone(),
+            cur: indent.len().min(text.len()),
+        };
         s.orig = text;
         s.want_col = None;
     }
@@ -201,7 +244,9 @@ pub(crate) fn session_open_below(app: &mut App, ctx: &Ctx, line: usize, indent: 
 /// Backspace at BOL: join this line into the previous one; the caret
 /// lands on the junction. Joining line 1 into line 0 edits the title.
 pub(crate) fn session_join_up(app: &mut App, ctx: &Ctx) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line == 0 {
         app.toast(t!("ページの先頭です", "top of page"));
@@ -210,13 +255,21 @@ pub(crate) fn session_join_up(app: &mut App, ctx: &Ctx) {
     let prev_text = app.lines[line - 1].text.clone();
     let merged = format!("{prev_text}{buf}");
     let ops = vec![
-        EditOp::Replace { id: app.lines[line - 1].id.clone(), text: merged.clone() },
-        EditOp::Delete { id: app.lines[line].id.clone() },
+        EditOp::Replace {
+            id: app.lines[line - 1].id.clone(),
+            text: merged.clone(),
+        },
+        EditOp::Delete {
+            id: app.lines[line].id.clone(),
+        },
     ];
     do_edit(app, ctx, &t!("行の結合", "join"), ops);
     if let Some(s) = app.session.as_mut() {
         s.line = line - 1;
-        s.input = Input { buf: merged.clone(), cur: prev_text.len() };
+        s.input = Input {
+            buf: merged.clone(),
+            cur: prev_text.len(),
+        };
         s.orig = merged;
         s.want_col = None;
     }
@@ -226,7 +279,9 @@ pub(crate) fn session_join_up(app: &mut App, ctx: &Ctx) {
 
 /// Delete at EOL: join the NEXT line into this one (forward join).
 pub(crate) fn session_join_down(app: &mut App, ctx: &Ctx) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, buf) = (s.line, s.input.buf.clone());
     if line + 1 >= app.lines.len() {
         app.toast(t!("ページの末尾です", "end of page"));
@@ -235,12 +290,20 @@ pub(crate) fn session_join_down(app: &mut App, ctx: &Ctx) {
     let next_text = app.lines[line + 1].text.clone();
     let merged = format!("{buf}{next_text}");
     let ops = vec![
-        EditOp::Replace { id: app.lines[line].id.clone(), text: merged.clone() },
-        EditOp::Delete { id: app.lines[line + 1].id.clone() },
+        EditOp::Replace {
+            id: app.lines[line].id.clone(),
+            text: merged.clone(),
+        },
+        EditOp::Delete {
+            id: app.lines[line + 1].id.clone(),
+        },
     ];
     do_edit(app, ctx, &t!("行の結合", "join"), ops);
     if let Some(s) = app.session.as_mut() {
-        s.input = Input { buf: merged.clone(), cur: buf.len() };
+        s.input = Input {
+            buf: merged.clone(),
+            cur: buf.len(),
+        };
         s.orig = merged;
         s.want_col = None;
     }
@@ -303,9 +366,16 @@ pub(crate) fn session_indent(app: &mut App, ctx: &Ctx, delta: i32) {
     // is what Tab types there. (Shift+Tab takes the separator back, and
     // once there is none left it outdents — which is how a row leaves the
     // table, the same way a line leaves a code block.)
-    let table = app.session.as_ref().and_then(|s| app.table_span_at_line(s.line));
+    let table = app
+        .session
+        .as_ref()
+        .and_then(|s| app.table_span_at_line(s.line));
     if let Some(span) = table {
-        let in_body = app.session.as_ref().map(|s| s.line > span.header).unwrap_or(false);
+        let in_body = app
+            .session
+            .as_ref()
+            .map(|s| s.line > span.header)
+            .unwrap_or(false);
         if in_body {
             if let Some(s) = app.session.as_mut() {
                 if delta > 0 {
@@ -324,7 +394,9 @@ pub(crate) fn session_indent(app: &mut App, ctx: &Ctx, delta: i32) {
             }
         }
     }
-    let Some(s) = app.session.as_mut() else { return };
+    let Some(s) = app.session.as_mut() else {
+        return;
+    };
     if delta > 0 {
         s.input.buf.insert(0, ' ');
         s.input.cur += 1;
@@ -342,7 +414,9 @@ pub(crate) fn session_indent(app: &mut App, ctx: &Ctx, delta: i32) {
 /// Column 0 of a whitespace-only line inside a `code:` block — where ⌫
 /// means "eat one indent character", not "join the line above".
 pub(super) fn caret_on_blank_code_bol(app: &App) -> bool {
-    let Some(s) = app.session.as_ref() else { return false };
+    let Some(s) = app.session.as_ref() else {
+        return false;
+    };
     s.input.cur == 0
         && !s.input.buf.is_empty()
         && s.input.buf.chars().all(char::is_whitespace)
@@ -352,19 +426,26 @@ pub(super) fn caret_on_blank_code_bol(app: &App) -> bool {
 /// The head of a plain `code:` header: a typed space nests the whole
 /// block there too (a header's leading whitespace is structure, never content).
 pub(super) fn caret_on_plain_code_header_start(app: &App) -> bool {
-    let Some(s) = app.session.as_ref() else { return false };
-    let Some(span) = plain_code_span(app, s.line) else { return false };
-    s.line == span.header
-        && s.sel_from.is_none()
-        && s.input.cur <= indent_of(&s.input.buf).len()
+    let Some(s) = app.session.as_ref() else {
+        return false;
+    };
+    let Some(span) = plain_code_span(app, s.line) else {
+        return false;
+    };
+    s.line == span.header && s.sel_from.is_none() && s.input.cur <= indent_of(&s.input.buf).len()
 }
 
 /// Is the caret inside (or just after) the leading whitespace of a Mermaid
 /// `code:` header — the place where a space or a Backspace means "nest",
 /// not "type a character"?
 pub(super) fn caret_on_mermaid_indent_or_start(app: &App) -> bool {
-    let Some(s) = app.session.as_ref() else { return false };
-    if !app.code_span_at_line(s.line).is_some_and(|span| span.mermaid_header) {
+    let Some(s) = app.session.as_ref() else {
+        return false;
+    };
+    if !app
+        .code_span_at_line(s.line)
+        .is_some_and(|span| span.mermaid_header)
+    {
         return false;
     }
     s.sel_from.is_none() && s.input.cur <= indent_of(&s.input.buf).len()
@@ -414,7 +495,9 @@ pub(super) fn session_indent_block(
     indent_label: String,
     outdent_label: String,
 ) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let (line, cur, buf) = (s.line, s.input.cur, s.input.buf.clone());
     let level = span.header_indent as i32 + delta;
     if level < 0 || max_level.is_some_and(|max| level > max) {
@@ -444,14 +527,25 @@ pub(super) fn session_indent_block(
     for i in span.header..end {
         // The caret line's text is still uncommitted: shift the buffer,
         // not the stale committed line.
-        let text = if i == line { buf.clone() } else { app.lines[i].text.clone() };
+        let text = if i == line {
+            buf.clone()
+        } else {
+            app.lines[i].text.clone()
+        };
         if text.trim().is_empty() {
             continue;
         }
         let Some(text) = shift(&text) else { return };
-        ops.push(EditOp::Replace { id: app.lines[i].id.clone(), text });
+        ops.push(EditOp::Replace {
+            id: app.lines[i].id.clone(),
+            text,
+        });
     }
-    let label = if delta > 0 { indent_label } else { outdent_label };
+    let label = if delta > 0 {
+        indent_label
+    } else {
+        outdent_label
+    };
     do_edit(app, ctx, &label, ops);
     if let Some(s) = app.session.as_mut() {
         let cur = if delta > 0 {
@@ -459,7 +553,10 @@ pub(super) fn session_indent_block(
         } else {
             cur.saturating_sub(buf.len() - head.len())
         };
-        s.input = Input { buf: head.clone(), cur: cur.min(head.len()) };
+        s.input = Input {
+            buf: head.clone(),
+            cur: cur.min(head.len()),
+        };
         s.orig = head;
         s.want_col = None;
     }
@@ -474,7 +571,10 @@ pub(crate) fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
         return;
     }
     if app.time.is_some() {
-        app.toast_err(t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)"));
+        app.toast_err(t!(
+            "履歴を表示中 — 読み取り専用（Esc で最新へ）",
+            "viewing history — read-only (Esc → NOW)"
+        ));
         return;
     }
     let cur = app.cursor_src();
@@ -492,7 +592,10 @@ pub(crate) fn open_line(app: &mut App, ctx: &Ctx, above: bool) {
         (None, _) => "_end".into(),
     };
     let new_id = new_line_id();
-    let ops = vec![EditOp::Insert { anchor, lines: vec![(new_id.clone(), indent.clone())] }];
+    let ops = vec![EditOp::Insert {
+        anchor,
+        lines: vec![(new_id.clone(), indent.clone())],
+    }];
     do_edit(app, ctx, &t!("改行", "new line"), ops);
     if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
         enter_session(app, ctx, idx, indent.len());

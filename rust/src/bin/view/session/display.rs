@@ -41,7 +41,11 @@ impl SessionWrap {
         let width = width.max(1);
         // A continuation narrower than this is worse than no hanging at
         // all (`wrap.rs` draws the same line).
-        let hang = if hang > 0 && width.saturating_sub(hang) >= 8 { hang } else { 0 };
+        let hang = if hang > 0 && width.saturating_sub(hang) >= 8 {
+            hang
+        } else {
+            0
+        };
         let mut segs: Vec<String> = Vec::new();
         let mut cur = String::new();
         let mut used = 0usize;
@@ -61,7 +65,11 @@ impl SessionWrap {
 
     /// The indent drawn before row `i`.
     pub(crate) fn indent_of(&self, row: usize) -> usize {
-        if row == 0 { 0 } else { self.hang }
+        if row == 0 {
+            0
+        } else {
+            self.hang
+        }
     }
 
     /// (row, column ON SCREEN) of a display byte offset.
@@ -97,7 +105,11 @@ pub(crate) fn session_hang(buf: &str, code: Option<CodeSpan>) -> usize {
         Some(span) if !span.outline_header() => span.gutter_cols(),
         _ => {
             let n = indent_of(buf).chars().count();
-            if n == 0 { 0 } else { bullet_indent_width(n) + 2 }
+            if n == 0 {
+                0
+            } else {
+                bullet_indent_width(n) + 2
+            }
         }
     }
 }
@@ -149,7 +161,11 @@ pub(crate) fn caret_span(app: &App, line: usize) -> Option<CodeSpan> {
     // flush too. The block gutter would read as a nesting level the line
     // has not got (the table header used to indent itself on entering).
     let flush_header = line == span.header && span.header_indent == 0;
-    if flush_header { None } else { Some(span) }
+    if flush_header {
+        None
+    } else {
+        Some(span)
+    }
 }
 
 pub(crate) fn session_display(buf: &str, code: Option<CodeSpan>) -> String {
@@ -185,7 +201,11 @@ pub(crate) fn session_display(buf: &str, code: Option<CodeSpan>) -> String {
 /// line has no indent).
 pub(crate) fn display_prefix_bytes(buf: &str) -> usize {
     let n = indent_of(buf).chars().count();
-    if n == 0 { 0 } else { bullet_indent_width(n) + '•'.len_utf8() + 1 }
+    if n == 0 {
+        0
+    } else {
+        bullet_indent_width(n) + '•'.len_utf8() + 1
+    }
 }
 
 /// Byte offset in `session_display(buf, in_code)` for byte offset `caret`.
@@ -198,9 +218,17 @@ pub(crate) fn display_caret(buf: &str, caret: usize, code: Option<CodeSpan>) -> 
     let ci = buf[..caret].chars().count();
     if let Some(span) = code.filter(|span| !span.outline_header()) {
         let strip = leading_ws_taken(buf, span.strip_chars());
-        let di = if ci < strip { ci } else { span.gutter_cols() + ci - strip };
+        let di = if ci < strip {
+            ci
+        } else {
+            span.gutter_cols() + ci - strip
+        };
         let disp = session_display(buf, code);
-        return disp.char_indices().nth(di).map(|(b, _)| b).unwrap_or_else(|| disp.len());
+        return disp
+            .char_indices()
+            .nth(di)
+            .map(|(b, _)| b)
+            .unwrap_or_else(|| disp.len());
     }
     let n = indent_of(buf).chars().count();
     let di = if n == 0 {
@@ -212,7 +240,10 @@ pub(crate) fn display_caret(buf: &str, caret: usize, code: Option<CodeSpan>) -> 
         ci + n
     };
     let disp = session_display(buf, None);
-    disp.char_indices().nth(di).map(|(b, _)| b).unwrap_or_else(|| disp.len())
+    disp.char_indices()
+        .nth(di)
+        .map(|(b, _)| b)
+        .unwrap_or_else(|| disp.len())
 }
 
 /// Inverse: a byte offset in `session_display(buf)` back to `buf`. A click
@@ -224,8 +255,16 @@ pub(crate) fn raw_caret_from_display(buf: &str, disp_byte: usize, code: Option<C
     if let Some(span) = code.filter(|span| !span.outline_header()) {
         let strip = leading_ws_taken(buf, span.strip_chars());
         let gutter = span.gutter_cols();
-        let ci = if di < gutter { di.min(strip) } else { strip + di - gutter };
-        return buf.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(buf.len());
+        let ci = if di < gutter {
+            di.min(strip)
+        } else {
+            strip + di - gutter
+        };
+        return buf
+            .char_indices()
+            .nth(ci)
+            .map(|(b, _)| b)
+            .unwrap_or(buf.len());
     }
     let n = indent_of(buf).chars().count();
     let ci = if n == 0 {
@@ -235,5 +274,8 @@ pub(crate) fn raw_caret_from_display(buf: &str, disp_byte: usize, code: Option<C
     } else {
         di - n
     };
-    buf.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(buf.len())
+    buf.char_indices()
+        .nth(ci)
+        .map(|(b, _)| b)
+        .unwrap_or(buf.len())
 }

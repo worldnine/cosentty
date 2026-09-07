@@ -18,7 +18,10 @@ pub struct Selection {
 
 impl Selection {
     pub fn new(anchor: usize) -> Self {
-        Self { anchor, cursor: anchor }
+        Self {
+            anchor,
+            cursor: anchor,
+        }
     }
     /// Inclusive 0-based range, normalized so start <= end.
     pub fn range(&self) -> (usize, usize) {
@@ -100,7 +103,9 @@ impl Comment {
     /// The revision's time as shown on cards and in the list, `None` for
     /// NOW.
     pub fn revision_label(&self) -> Option<String> {
-        self.revision.as_ref().map(|r| crate::theme::format_local(r.created))
+        self.revision
+            .as_ref()
+            .map(|r| crate::theme::format_local(r.created))
     }
 }
 
@@ -161,10 +166,12 @@ fn format_comment_numbered(c: &Comment, number: Option<usize>) -> String {
         .line_texts
         .iter()
         .enumerate()
-        .map(|(i, t)| match c.line_ids.get(i).filter(|id| !id.is_empty()) {
-            Some(id) => format!("> {t}  # {id}"),
-            None => format!("> {t}"),
-        })
+        .map(
+            |(i, t)| match c.line_ids.get(i).filter(|id| !id.is_empty()) {
+                Some(id) => format!("> {t}  # {id}"),
+                None => format!("> {t}"),
+            },
+        )
         .collect();
     if quote.is_empty() {
         quote.push("> ".into());
@@ -254,7 +261,10 @@ mod tests {
 
     #[test]
     fn selection_normalizes_and_contains() {
-        let s = Selection { anchor: 5, cursor: 2 };
+        let s = Selection {
+            anchor: 5,
+            cursor: 2,
+        };
         assert_eq!(s.range(), (2, 5));
         assert!(s.contains(3));
         assert!(!s.contains(6));
@@ -283,7 +293,10 @@ mod tests {
     #[test]
     fn titles_are_written_as_cosense_readable_links() {
         assert_eq!(encode_title_for_url("Team Tips"), "Team_Tips");
-        assert_eq!(encode_title_for_url("改善案 #4 / 50%?"), "改善案_%234_%2F_50%25%3F");
+        assert_eq!(
+            encode_title_for_url("改善案 #4 / 50%?"),
+            "改善案_%234_%2F_50%25%3F"
+        );
     }
 
     /// 引用とコメントを混ぜた、チャットの返信の形。場所は1行、引用は
@@ -308,7 +321,9 @@ mod tests {
         );
         // A line the API gave no id (an uncreated page) is quoted bare.
         let bare = comment(0, 0, &["x"], &[], "n");
-        assert!(format_comment(&bare).starts_with("https://scrapbox.io/acme/Team_Tips L1\n> x\n\nn"));
+        assert!(
+            format_comment(&bare).starts_with("https://scrapbox.io/acme/Team_Tips L1\n> x\n\nn")
+        );
     }
 
     /// 複数は番号付きの箇条書きになる(順に対応すべき別々の指摘だと
@@ -339,11 +354,20 @@ mod tests {
     #[test]
     fn a_comment_on_a_past_revision_names_the_snapshot_and_how_to_read_it() {
         let mut c = comment(0, 0, &["古い行"], &["i1"], "この版に戻して");
-        c.revision = Some(Revision { snapshot_id: "6a98c8230000000000fed958".into(), created: 0 });
+        c.revision = Some(Revision {
+            snapshot_id: "6a98c8230000000000fed958".into(),
+            created: 0,
+        });
         let out = format_comment(&c);
         let lines: Vec<&str> = out.lines().collect();
-        assert!(lines[0].starts_with("https://scrapbox.io/acme/Team_Tips#i1 L1"), "{out}");
-        assert!(lines[1].starts_with("Snapshot: 6a98c8230000000000fed958 ("), "{out}");
+        assert!(
+            lines[0].starts_with("https://scrapbox.io/acme/Team_Tips#i1 L1"),
+            "{out}"
+        );
+        assert!(
+            lines[1].starts_with("Snapshot: 6a98c8230000000000fed958 ("),
+            "{out}"
+        );
         assert!(lines[1].ends_with(") — cosense readPageSnapshot https://scrapbox.io/acme 5803c53900000000000000a1 6a98c8230000000000fed958"), "{out}");
         assert_eq!(lines[2], "> 古い行  # i1");
         // 番号付きでは Snapshot 行も項目の中にインデントされる。

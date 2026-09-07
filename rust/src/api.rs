@@ -43,12 +43,19 @@ impl SendPolite for reqwest::blocking::RequestBuilder {
         let mut req = self;
         for attempt in 1..=POLITE_ATTEMPTS {
             // A body that cannot be cloned (a stream) can only be sent once.
-            let Some(again) = req.try_clone() else { return req.send() };
+            let Some(again) = req.try_clone() else {
+                return req.send();
+            };
             let res = req.send()?;
-            if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == POLITE_ATTEMPTS {
+            if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == POLITE_ATTEMPTS
+            {
                 return Ok(res);
             }
-            let after = res.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(str::to_string);
+            let after = res
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             std::thread::sleep(retry_backoff(after.as_deref(), attempt));
             req = again;
         }
@@ -107,12 +114,26 @@ impl AuthStore {
     /// plus the env fallbacks. `sid` comes from the caller (`--sid` /
     /// `COSENSE_SID`).
     pub fn load(sid: Option<String>) -> Self {
-        let env_pat = std::env::var("COSENSE_PAT").ok().filter(|s| !s.trim().is_empty());
-        let mut store = AuthStore { env_pat, sid, ..Default::default() };
-        let Some(home) = std::env::var_os("HOME") else { return store };
-        let path = std::path::PathBuf::from(home).join(".cosense").join("settings.json");
-        let Ok(text) = std::fs::read_to_string(path) else { return store };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return store };
+        let env_pat = std::env::var("COSENSE_PAT")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let mut store = AuthStore {
+            env_pat,
+            sid,
+            ..Default::default()
+        };
+        let Some(home) = std::env::var_os("HOME") else {
+            return store;
+        };
+        let path = std::path::PathBuf::from(home)
+            .join(".cosense")
+            .join("settings.json");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return store;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return store;
+        };
         // origin of an URL string: scheme://host[:port] — lenient, like the
         // CLI it only needs to match what the CLI itself wrote.
         fn origin_of(url: &str) -> Option<String> {
@@ -131,10 +152,18 @@ impl AuthStore {
                 ) else {
                     continue;
                 };
-                let Some(origin) = origin_of(url) else { continue };
-                let name = url.split("://").nth(1).and_then(|r| r.split('/').nth(1)).unwrap_or("");
+                let Some(origin) = origin_of(url) else {
+                    continue;
+                };
+                let name = url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|r| r.split('/').nth(1))
+                    .unwrap_or("");
                 if !name.is_empty() && !sa.trim().is_empty() {
-                    store.projects.push((origin, name.to_lowercase(), sa.to_string()));
+                    store
+                        .projects
+                        .push((origin, name.to_lowercase(), sa.to_string()));
                 }
             }
         }
@@ -458,7 +487,10 @@ struct SearchResponse {
 pub enum EditOp {
     /// Insert lines before `anchor` (`"_end"` = append). `lines` are
     /// `(id, text)` pairs in order; build them with [`EditOp::insert`].
-    Insert { anchor: String, lines: Vec<(String, String)> },
+    Insert {
+        anchor: String,
+        lines: Vec<(String, String)>,
+    },
     /// Replace the body of line `id` (single line only).
     Replace { id: String, text: String },
     /// Delete line `id`.
@@ -471,7 +503,10 @@ impl EditOp {
     pub fn insert(anchor: impl Into<String>, text: &str) -> Self {
         EditOp::Insert {
             anchor: anchor.into(),
-            lines: text.split('\n').map(|t| (new_line_id(), t.to_string())).collect(),
+            lines: text
+                .split('\n')
+                .map(|t| (new_line_id(), t.to_string()))
+                .collect(),
         }
     }
 }
@@ -836,7 +871,11 @@ impl Client {
         // A stale sid must not hide a public project's appearance: retry the
         // public endpoint without credentials before falling back in the UI.
         if !res.status().is_success() && authenticated {
-            res = self.http.get(&url).header("Accept", "application/json").send_polite()?;
+            res = self
+                .http
+                .get(&url)
+                .header("Accept", "application/json")
+                .send_polite()?;
         }
         if !res.status().is_success() {
             return Err(format!("HTTP {} for {}", res.status(), url).into());
@@ -903,7 +942,11 @@ impl Client {
             .body(bytes.to_vec())
             .send_polite()?;
         if !put.status().is_success() {
-            let hint = if put.status().as_u16() == 403 { " (retrying a little later often works)" } else { "" };
+            let hint = if put.status().as_u16() == 403 {
+                " (retrying a little later often works)"
+            } else {
+                ""
+            };
             return Err(format!("HTTP {} for signed PUT{hint}", put.status()).into());
         }
         let url = format!("{}/gcs/{project_id}/verify", self.cfg.base());
@@ -946,7 +989,11 @@ impl Client {
     /// endpoint the CLI uses, because `/api/projects/<name>` itself refuses
     /// PAT (401, verified).
     pub fn get_project_id(&self, project: &str) -> Result<String, Box<dyn Error>> {
-        let url = format!("{}/projects/{}/users", self.cfg.base(), urlencoding(project));
+        let url = format!(
+            "{}/projects/{}/users",
+            self.cfg.base(),
+            urlencoding(project)
+        );
         let mut req = self.http.get(&url).header("Accept", "application/json");
         if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
             let (name, value) = cred.header();
@@ -1084,12 +1131,18 @@ impl Client {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, EditError> {
-        let mut req = self.http.post(url).header("Accept", "application/json").json(body);
+        let mut req = self
+            .http
+            .post(url)
+            .header("Accept", "application/json")
+            .json(body);
         if let Some(cred) = self.cfg.auth.resolve(&self.cfg.origin(), project) {
             let (name, value) = cred.header();
             req = req.header(name, value);
         }
-        let res = req.send_polite().map_err(|e| EditError::Other(e.to_string()))?;
+        let res = req
+            .send_polite()
+            .map_err(|e| EditError::Other(e.to_string()))?;
         let status = res.status();
         let text = res.text().map_err(|e| EditError::Other(e.to_string()))?;
         if status.is_success() {
@@ -1103,7 +1156,10 @@ impl Client {
             (409, Some("NotFastForward")) => Err(EditError::NotFastForward),
             (409, Some("DuplicateTitle")) => Err(EditError::DuplicateTitle),
             (404, _) if url.ends_with("/submit") => Err(EditError::PreviewGone),
-            _ => Err(EditError::Other(format!("HTTP {code}: {}", text.chars().take(200).collect::<String>()))),
+            _ => Err(EditError::Other(format!(
+                "HTTP {code}: {}",
+                text.chars().take(200).collect::<String>()
+            ))),
         }
     }
 
@@ -1178,7 +1234,14 @@ impl Client {
             .and_then(|p| p.get("lines"))
             .and_then(|l| serde_json::from_value(l.clone()).ok())
             .unwrap_or_default();
-        Ok(EditPreview { preview_id, expire_at, title, lines, new_ids, updated_ids })
+        Ok(EditPreview {
+            preview_id,
+            expire_at,
+            title,
+            lines,
+            new_ids,
+            updated_ids,
+        })
     }
 
     /// Commit a preview. One-shot: success or failure, the previewId is
@@ -1215,8 +1278,16 @@ mod tests {
     #[test]
     fn a_429_waits_for_retry_after_or_doubles() {
         assert_eq!(retry_backoff(Some("3"), 1), Duration::from_secs(3));
-        assert_eq!(retry_backoff(Some("999"), 1), Duration::from_secs(15), "capped");
-        assert_eq!(retry_backoff(Some("Wed, 21 Oct 2015 07:28:00 GMT"), 2), Duration::from_secs(2), "a date is not parsed: fall back");
+        assert_eq!(
+            retry_backoff(Some("999"), 1),
+            Duration::from_secs(15),
+            "capped"
+        );
+        assert_eq!(
+            retry_backoff(Some("Wed, 21 Oct 2015 07:28:00 GMT"), 2),
+            Duration::from_secs(2),
+            "a date is not parsed: fall back"
+        );
         assert_eq!(retry_backoff(None, 1), Duration::from_secs(1));
         assert_eq!(retry_backoff(None, 3), Duration::from_secs(4));
     }

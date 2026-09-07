@@ -1,5 +1,5 @@
-use crate::*;
 use crate::tests::support::*;
+use crate::*;
 
 #[test]
 fn wrapped_bullets_hang_and_stay_one_source_line() {
@@ -10,16 +10,22 @@ fn wrapped_bullets_hang_and_stay_one_source_line() {
         .rows
         .iter()
         .filter_map(|r| match r {
-            Row::Line { line, src, .. } if *src == 1 => {
-                Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-            }
+            Row::Line { line, src, .. } if *src == 1 => Some(
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            ),
             _ => None,
         })
         .collect();
     assert!(rows.len() >= 3);
     assert!(rows[0].starts_with("• 字"), "{:?}", rows[0]);
     for r in &rows[1..] {
-        assert!(r.starts_with("  字"), "continuation hangs under the text: {r:?}");
+        assert!(
+            r.starts_with("  字"),
+            "continuation hangs under the text: {r:?}"
+        );
     }
     // still one cursor stop
     app.goto_src(1);
@@ -35,9 +41,12 @@ fn wrapped_quotes_carry_the_bar_on_every_row() {
         .rows
         .iter()
         .filter_map(|r| match r {
-            Row::Line { line, src, .. } if *src == 1 => {
-                Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-            }
+            Row::Line { line, src, .. } if *src == 1 => Some(
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            ),
             _ => None,
         })
         .collect();
@@ -87,16 +96,26 @@ fn related_rows_are_cursor_addressable_virtual_lines() {
     assert_eq!(app.cursor, 4);
     assert_eq!(
         app.cursor_line_links(),
-        vec![LinkItem::ProjectPage { project: "other".into(), title: "Page".into() }]
+        vec![LinkItem::ProjectPage {
+            project: "other".into(),
+            title: "Page".into()
+        }]
     );
     // j/k walk body → related → body seamlessly
     app.goto_src(1);
     app.move_cursor(true);
     assert_eq!(app.cursor, 2, "steps over the heading rule onto Alpha");
-    assert_eq!(app.cursor_line_links(), vec![LinkItem::Page("Alpha".into())]);
+    assert_eq!(
+        app.cursor_line_links(),
+        vec![LinkItem::Page("Alpha".into())]
+    );
     // The frame closes after the body, BEFORE the related section.
     assert_eq!(app.frame_end_top(), 2);
-    let end = app.rows.iter().position(|r| matches!(r, Row::FrameEnd)).unwrap();
+    let end = app
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::FrameEnd))
+        .unwrap();
     assert!(app.rows[end + 1..].iter().any(|r| r.src() == Some(2)));
     // G is "bottom of page frame", not "last related row".
     app.view_h = 3;
@@ -110,7 +129,10 @@ fn related_rows_are_cursor_addressable_virtual_lines() {
     app.goto_src(3);
     assert!(app.make_comment("x".into()).is_none());
     // …but a selection overshooting into them clamps to the body
-    app.selection = Some(Selection { anchor: 1, cursor: 3 });
+    app.selection = Some(Selection {
+        anchor: 1,
+        cursor: 3,
+    });
     let c = app.make_comment("y".into()).unwrap();
     assert_eq!((c.start, c.end), (1, 1));
     // source mode hides related rows and clamps the cursor back
@@ -228,7 +250,11 @@ fn a_word_this_page_shares_is_asked_about_again_after_navigating() {
         },
         &ctx,
     );
-    assert_eq!(app.links.exists("タグ"), None, "a dead word does not travel");
+    assert_eq!(
+        app.links.exists("タグ"),
+        None,
+        "a dead word does not travel"
+    );
     assert_eq!(
         app.links.exists("書かれているページ"),
         Some(true),
@@ -246,7 +272,10 @@ fn a_word_this_page_shares_is_asked_about_again_after_navigating() {
     app.probe_unknown_links();
     let asked = rx.try_recv().expect("the tag is asked about again");
     assert_eq!(asked.title, "タグ");
-    assert_eq!(asked.asked_by, "pid-B", "asked on behalf of the page that now writes it");
+    assert_eq!(
+        asked.asked_by, "pid-B",
+        "asked on behalf of the page that now writes it"
+    );
 }
 
 /// A link written during the session is the case the page response
@@ -266,14 +295,20 @@ fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
     let text = app.lines[2].text.clone();
     app.session = Some(EditSession {
         line: 2,
-        input: Input { buf: text.clone(), cur: 0 },
+        input: Input {
+            buf: text.clone(),
+            cur: 0,
+        },
         orig: text,
         want_col: None,
         sel_from: None,
     });
     app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
     app.probe_unknown_links();
-    assert!(rx.try_recv().is_err(), "the line under the caret is not judged");
+    assert!(
+        rx.try_recv().is_err(),
+        "the line under the caret is not judged"
+    );
 
     // The caret moves away — now the question is worth asking, and
     // only about the title the page could not answer for.
@@ -281,8 +316,14 @@ fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
     app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
     app.probe_unknown_links();
     let asked = rx.try_recv().unwrap();
-    assert_eq!((asked.project.as_str(), asked.title.as_str()), ("proj", "いま打った"));
-    assert_eq!(asked.asked_by, app.page_id, "the asking page cannot vouch for itself");
+    assert_eq!(
+        (asked.project.as_str(), asked.title.as_str()),
+        ("proj", "いま打った")
+    );
+    assert_eq!(
+        asked.asked_by, app.page_id,
+        "the asking page cannot vouch for itself"
+    );
     assert!(rx.try_recv().is_err(), "a known link is not asked about");
 
     // Not asked twice while the answer is out.
@@ -297,7 +338,9 @@ fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
         asked_by: from.into(),
     };
     let me = app.page_id.clone();
-    app.link_probe_res_tx.send((answer("proj", "いま打った", &me), false)).unwrap();
+    app.link_probe_res_tx
+        .send((answer("proj", "いま打った", &me), false))
+        .unwrap();
     assert!(app.drain_link_probes());
     assert!(app.links.missing("いま打った"));
     assert!(!app.links.missing("もとからある"));
@@ -306,7 +349,10 @@ fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
     app.link_probe_res_tx
         .send((answer("elsewhere", "もとからある", &me), false))
         .unwrap();
-    assert!(!app.drain_link_probes(), "another project's answer changes nothing");
+    assert!(
+        !app.drain_link_probes(),
+        "another project's answer changes nothing"
+    );
     assert!(!app.links.missing("もとからある"));
 
     // Nor is "nobody but the asking page writes this" an answer once
@@ -315,7 +361,10 @@ fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
     app.link_probe_res_tx
         .send((answer("proj", "よそで聞いた", "another-page-id"), false))
         .unwrap();
-    assert!(!app.drain_link_probes(), "a dead answer belongs to the page that asked");
+    assert!(
+        !app.drain_link_probes(),
+        "a dead answer belongs to the page that asked"
+    );
     assert_eq!(app.links.exists("よそで聞いた"), None);
     // A LIVE answer travels: whoever made it live is not the page that
     // asked, so it is still live here.
@@ -338,14 +387,26 @@ fn pointer_motion_does_not_let_go_of_the_block() {
     handle_key(&mut app, &ctx, key(KeyCode::Char('m')));
     handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
 
-    let event = |kind| MouseEvent { kind, column: 6, row: 3, modifiers: KeyModifiers::NONE };
+    let event = |kind| MouseEvent {
+        kind,
+        column: 6,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
+    };
     handle_mouse(&mut app, &ctx, event(MouseEventKind::Moved));
     assert!(app.move_mode.is_some(), "motion is not an action");
     handle_mouse(&mut app, &ctx, event(MouseEventKind::ScrollDown));
-    assert!(app.move_mode.is_some(), "and the wheel only moves the viewport");
+    assert!(
+        app.move_mode.is_some(),
+        "and the wheel only moves the viewport"
+    );
     assert!(drain_jobs(&mut app).is_empty(), "nothing was sent");
 
-    handle_mouse(&mut app, &ctx, event(MouseEventKind::Down(MouseButton::Left)));
+    handle_mouse(
+        &mut app,
+        &ctx,
+        event(MouseEventKind::Down(MouseButton::Left)),
+    );
     assert!(app.move_mode.is_none(), "a button does let go");
     assert_eq!(drain_jobs(&mut app).len(), 1);
     finish_outline(&mut app, &ctx);
@@ -448,21 +509,26 @@ fn screen_row_maps_back_to_the_source_line_under_it() {
     let mut app = page(&["a", &"b".repeat(50), "c"]);
     app.rebuild(22); // rows: a, b, b, b, b, c
     assert_eq!(app.src_at_screen_row(0), Some(0));
-    assert_eq!(app.src_at_screen_row(2), Some(1), "wrapped continuation -> its line");
+    assert_eq!(
+        app.src_at_screen_row(2),
+        Some(1),
+        "wrapped continuation -> its line"
+    );
     assert_eq!(app.src_at_screen_row(5), Some(2));
     assert_eq!(app.src_at_screen_row(6), None, "past the end");
     app.scroll = 3;
-    assert_eq!(app.src_at_screen_row(-1), Some(1), "reclaimed top row maps too");
+    assert_eq!(
+        app.src_at_screen_row(-1),
+        Some(1),
+        "reclaimed top row maps too"
+    );
     assert_eq!(app.src_at_screen_row(0), Some(1));
     assert_eq!(app.src_at_screen_row(2), Some(2));
 }
 
 #[test]
 fn rendered_links_are_mouse_hit_targets() {
-    let mut app = page(&[
-        "t",
-        "see [Target] and [Docs https://example.com] #tag",
-    ]);
+    let mut app = page(&["t", "see [Target] and [Docs https://example.com] #tag"]);
     app.rebuild(80);
     // Rendered row: `see Target and Docs #tag`.
     assert_eq!(
@@ -498,7 +564,11 @@ fn rendered_links_are_mouse_hit_targets() {
         tbl.link_at_screen_position(1, 3),
         Some((1, LinkItem::Export { .. })),
     ));
-    assert_eq!(tbl.link_at_screen_position(1, 40), None, "past the label is not the label");
+    assert_eq!(
+        tbl.link_at_screen_position(1, 40),
+        None,
+        "past the label is not the label"
+    );
 
     // A link to a page nobody has written is drawn in another colour,
     // and clicking it is how that page gets written — so the hit test
@@ -521,10 +591,7 @@ fn rendered_links_are_mouse_hit_targets() {
     );
 
     // Identical labels still resolve by their rendered occurrence.
-    let mut dup = page(&[
-        "t",
-        "see [Docs] then [Docs https://example.com]",
-    ]);
+    let mut dup = page(&["t", "see [Docs] then [Docs https://example.com]"]);
     dup.rebuild(80);
     assert_eq!(
         dup.link_at_screen_position(1, 14),
@@ -592,17 +659,33 @@ fn scrollbar_click_and_drag_scrub_the_viewport_only() {
     app.goto_src(3);
     // top rule + 30 rows + FrameEnd / 10 viewport: the scrollbar
     // includes the complete visual extent.
-    handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Down(MouseButton::Left), 41, 1 + 7));
+    handle_mouse_content(
+        &mut app,
+        &test_ctx(),
+        mouse(MouseEventKind::Down(MouseButton::Left), 41, 1 + 7),
+    );
     let end = app.max_scroll(app.view_h);
     assert_eq!(app.scroll, end, "track bottom -> last page");
     assert_eq!(app.cursor, 3, "the cursor keeps its line");
     assert!(!app.follow);
-    handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Drag(MouseButton::Left), 41, 1 + 3));
+    handle_mouse_content(
+        &mut app,
+        &test_ctx(),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 41, 1 + 3),
+    );
     assert!(app.scroll < end && app.scroll > 0);
-    handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::Up(MouseButton::Left), 41, 1 + 3));
+    handle_mouse_content(
+        &mut app,
+        &test_ctx(),
+        mouse(MouseEventKind::Up(MouseButton::Left), 41, 1 + 3),
+    );
     assert_eq!(app.scrollbar_drag, None);
     // wheel over the body: one row per event, cursor untouched
-    handle_mouse_content(&mut app, &test_ctx(), mouse(MouseEventKind::ScrollUp, 10, 5));
+    handle_mouse_content(
+        &mut app,
+        &test_ctx(),
+        mouse(MouseEventKind::ScrollUp, 10, 5),
+    );
     assert_eq!(app.cursor, 3);
 }
 
@@ -616,9 +699,15 @@ fn wheel_scroll_moves_viewport_only() {
     app.wheel_scroll(3, 10);
     assert_eq!(app.scroll, 3);
     assert_eq!(app.cursor, 2, "the cursor keeps its line");
-    assert!(!app.follow, "the next frame must not yank the viewport back");
+    assert!(
+        !app.follow,
+        "the next frame must not yank the viewport back"
+    );
     app.wheel_scroll(1000, 10);
-    assert_eq!(app.scroll, 22, "clamped to max (content+2 rules - viewport)");
+    assert_eq!(
+        app.scroll, 22,
+        "clamped to max (content+2 rules - viewport)"
+    );
     app.wheel_scroll(-1000, 10);
     assert_eq!(app.scroll, 0);
 }
@@ -688,7 +777,10 @@ fn links_on_a_line_of_text_and_pictures_are_mouse_hit_targets() {
     // `see Target ` は col 0..、` then Docs` は col 11+56=67 から。
     app.rebuild(80);
     let Some(Row::Inline { height, texts, .. }) = app.rows.get(1) else {
-        panic!("expected an inline row, got {:?}", app.rows.get(1).map(Row::height))
+        panic!(
+            "expected an inline row, got {:?}",
+            app.rows.get(1).map(Row::height)
+        )
     };
     assert_eq!(*height, 17);
     assert_eq!(texts.len(), 3, "{texts:?}");
@@ -706,12 +798,23 @@ fn links_on_a_line_of_text_and_pictures_are_mouse_hit_targets() {
     // col 67+6=73 に、続きは折り返し先の col 1 にある。
     let docs = Some((
         1,
-        LinkItem::Url { label: "Docs".into(), url: "https://example.com".into() }
+        LinkItem::Url {
+            label: "Docs".into(),
+            url: "https://example.com".into(),
+        },
     ));
     assert_eq!(app.link_at_screen_position(1 + base, 73), docs);
     assert_eq!(app.link_at_screen_position(1 + base + 1, 1), docs);
     // 文字の無い列・画像の上の段は何でもない。
     assert_eq!(app.link_at_screen_position(1 + base, 1), None, "plain text");
-    assert_eq!(app.link_at_screen_position(1 + base, 20), None, "the picture");
-    assert_eq!(app.link_at_screen_position(1, 5), None, "a row above the text line");
+    assert_eq!(
+        app.link_at_screen_position(1 + base, 20),
+        None,
+        "the picture"
+    );
+    assert_eq!(
+        app.link_at_screen_position(1, 5),
+        None,
+        "a row above the text line"
+    );
 }

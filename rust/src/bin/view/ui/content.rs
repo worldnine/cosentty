@@ -21,8 +21,10 @@ impl App {
     /// notation; everything else stays rendered).
     pub(crate) fn content_view(&self, width: u16) -> Vec<Row> {
         let text_w = Self::text_width(Mode::View, width);
-        let edit: Option<(usize, &str)> =
-            self.session.as_ref().map(|s| (s.line, s.input.buf.as_str()));
+        let edit: Option<(usize, &str)> = self
+            .session
+            .as_ref()
+            .map(|s| (s.line, s.input.buf.as_str()));
         // Inside a `code:` block the caret line is code, not an outline
         // row: its leading whitespace is content and must not be drawn as
         // a bullet. Judged on the WORKING text, so typing `code:` turns
@@ -50,7 +52,11 @@ impl App {
             // still holds: its indent IS the diagram's nesting level.
             let outline = edit_code.is_none_or(|span| span.outline_header());
             let disp = session_display(buf, edit_code);
-            let prefix = if outline { display_prefix_bytes(buf) } else { 0 };
+            let prefix = if outline {
+                display_prefix_bytes(buf)
+            } else {
+                0
+            };
             let wrapped = SessionWrap::new(&disp, text_w, session_hang(buf, edit_code));
             let mut at = 0usize; // byte offset of this segment within `disp`
             for (k, seg) in wrapped.segs.iter().cloned().enumerate() {
@@ -92,8 +98,7 @@ impl App {
                 };
                 let (lo, hi) = (floor_boundary(&seg, lo), floor_boundary(&seg, hi));
                 let dim_to = if k == 0 { prefix.min(seg.len()) } else { 0 };
-                for (from, to, selected) in
-                    [(0, lo, false), (lo, hi, true), (hi, seg.len(), false)]
+                for (from, to, selected) in [(0, lo, false), (lo, hi, true), (hi, seg.len(), false)]
                 {
                     if from >= to {
                         continue;
@@ -103,15 +108,18 @@ impl App {
                     push(&seg[from..cut], selected, true);
                     push(&seg[cut..to], selected, false);
                 }
-                content.push(Row::Line { line: Line::from(spans), src, start: 0, hang: 0 });
+                content.push(Row::Line {
+                    line: Line::from(spans),
+                    src,
+                    start: 0,
+                    hang: 0,
+                });
             }
         };
         let mut content: Vec<Row> = Vec::new();
         for (b, &src) in self.blocks.iter().zip(self.srcs.iter()) {
             if let Some((eline, ebuf)) = edit {
-                if src == eline
-                    && !matches!(b, Block::Table(_) | Block::Artifact { .. })
-                {
+                if src == eline && !matches!(b, Block::Table(_) | Block::Artifact { .. }) {
                     raw_rows(&mut content, ebuf, src);
                     // The line's inline formulas, drawn under it (cosense
                     // web previews them while the line is being edited).
@@ -175,10 +183,21 @@ impl App {
                                 continue;
                             }
                         }
-                        content.push(Row::Line { line, src: row_src, start: 0, hang: 0 });
+                        content.push(Row::Line {
+                            line,
+                            src: row_src,
+                            start: 0,
+                            hang: 0,
+                        });
                     }
                 }
-                Block::Artifact { kind, code, rows, last_src, indent } => {
+                Block::Artifact {
+                    kind,
+                    code,
+                    rows,
+                    last_src,
+                    indent,
+                } => {
                     let key = kind
                         .web()
                         .and_then(|k| self.web_request(k, code, *last_src))
@@ -196,21 +215,28 @@ impl App {
                         ArtifactKind::Mermaid => self.mermaid_text,
                         ArtifactKind::Math => self.math_text,
                     };
+                    // 幅不足で描けなかったときだけ理由を持ち越し、コード行の
+                    // 上に注記を出す(画像に落ちた場合は注記しない)。
+                    let mut too_narrow: Option<usize> = None;
                     if !editing_here && text_tier {
+                        let draw_w = text_w.saturating_sub(*indent);
                         let drawn = match kind {
                             ArtifactKind::Mermaid => {
-                                mmd_text::render_text(code, text_w.saturating_sub(*indent))
+                                match mmd_text::render_text_outcome(code, draw_w) {
+                                    mmd_text::TextOutcome::Drawn(lines) => Some(lines),
+                                    mmd_text::TextOutcome::TooNarrow { needed } => {
+                                        too_narrow = Some(needed);
+                                        None
+                                    }
+                                    mmd_text::TextOutcome::Declined => None,
+                                }
                             }
-                            ArtifactKind::Math => {
-                                cosense::math::render_text(code, text_w.saturating_sub(*indent))
-                            }
+                            ArtifactKind::Math => cosense::math::render_text(code, draw_w),
                         };
                         if let Some(lines) = drawn {
                             for text in lines {
                                 let line = drawn_line(&text, *indent, *kind);
-                                for w in
-                                    wrap_line_parts(&line, text_w, &hanging_prefix(&line))
-                                {
+                                for w in wrap_line_parts(&line, text_w, &hanging_prefix(&line)) {
                                     content.push(Row::Line {
                                         line: w.line,
                                         src: *last_src,
@@ -225,7 +251,8 @@ impl App {
                     let art = if editing_here {
                         None
                     } else {
-                        key.as_ref().and_then(|k| self.images.get(k).map(|i| (k, i)))
+                        key.as_ref()
+                            .and_then(|k| self.images.get(k).map(|i| (k, i)))
                     };
                     if let Some((k, info)) = art {
                         content.push(Row::Image {
@@ -239,6 +266,26 @@ impl App {
                     }
                     // No artifact (yet, or ever): the plain code block, with
                     // the session's caret row swapped to raw source.
+                    if let Some(needed) = too_narrow {
+                        let have = text_w.saturating_sub(*indent);
+                        content.push(Row::Aside {
+                            line: Line::from(vec![
+                                Span::raw(" ".repeat(*indent)),
+                                Span::styled(
+                                    format!(
+                                        "▏ {}",
+                                        t!(
+                                            "図はペイン幅に入らないためソースを表示(必要 {} 桁 / 幅 {} 桁)",
+                                            "diagram wider than the pane, showing source (needs {} cols / have {})",
+                                            needed,
+                                            have
+                                        )
+                                    ),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                            ]),
+                        });
+                    }
                     for (rsrc, line) in rows {
                         if let Some((eline, ebuf)) = edit {
                             if *rsrc == eline {
@@ -267,8 +314,9 @@ impl App {
                     // source is already on screen.
                     if let Some(code) = edit.and_then(|_| {
                         let first = rows.first().map(|(s, _)| *s)?;
-                        let base =
-                            indent_of(self.lines.get(first)?.text.as_str()).chars().count();
+                        let base = indent_of(self.lines.get(first)?.text.as_str())
+                            .chars()
+                            .count();
                         let texts = self.source_texts();
                         let mut bodies = Vec::new();
                         for i in first + 1..=*last_src {
@@ -306,12 +354,18 @@ impl App {
                                     Span::styled(bar.to_string(), dim),
                                 ];
                                 spans.extend(drawn_line(&text, 0, *kind).spans);
-                                content.push(Row::Aside { line: Line::from(spans) });
+                                content.push(Row::Aside {
+                                    line: Line::from(spans),
+                                });
                             }
                         }
                     }
                 }
-                Block::Inline { indent, item, parts } => {
+                Block::Inline {
+                    indent,
+                    item,
+                    parts,
+                } => {
                     let indent = (*indent).min(text_w.saturating_sub(4));
                     content.push(self.inline_row(parts, indent, *item, text_w, src));
                 }
@@ -335,7 +389,12 @@ impl App {
                     } else {
                         // still downloading — reserve space so the page is
                         // readable now and the image slots in when it lands
-                        content.push(Row::ImageLoading { src, indent, item: *item, url: url.clone() });
+                        content.push(Row::ImageLoading {
+                            src,
+                            indent,
+                            item: *item,
+                            url: url.clone(),
+                        });
                     }
                 }
             }
@@ -373,9 +432,17 @@ impl App {
                 InlinePart::Text(line) => Inline::Text(line.clone()),
                 InlinePart::Image(url) => {
                     let (w, h) = reserved(url);
-                    Inline::Image { url: url.clone(), w, h }
+                    Inline::Image {
+                        url: url.clone(),
+                        w,
+                        h,
+                    }
                 }
-                InlinePart::Formula { source, rows, baseline } => {
+                InlinePart::Formula {
+                    source,
+                    rows,
+                    baseline,
+                } => {
                     // A formula cannot be wrapped — the two-dimensional
                     // setting is the meaning — so in a pane too narrow to
                     // hold it the LaTeX goes back, which wraps like prose.
@@ -425,7 +492,11 @@ impl App {
         // The one-line gap before the sections is where the standing sort
         // says itself: the index's `s` choice reaches here too, and `S`
         // re-orders from this side.
-        let arrow = if self.index_sort == cosense::index::SortKey::Title { "↑" } else { "↓" };
+        let arrow = if self.index_sort == cosense::index::SortKey::Title {
+            "↑"
+        } else {
+            "↓"
+        };
         let mut rows = vec![Row::Aside {
             line: Line::from(Span::styled(
                 format!(
@@ -454,7 +525,9 @@ impl App {
                 });
                 vsrc += 1;
             }
-            rows.push(Row::Aside { line: Line::from("") });
+            rows.push(Row::Aside {
+                line: Line::from(""),
+            });
         }
         rows
     }
@@ -477,7 +550,12 @@ impl App {
                 };
                 let mut spans: Vec<Span<'static>> = vec![Span::styled(label, num_style)];
                 spans.extend(wrapped.spans);
-                content.push(Row::Line { line: Line::from(spans), src, start: 0, hang: 0 });
+                content.push(Row::Line {
+                    line: Line::from(spans),
+                    src,
+                    start: 0,
+                    hang: 0,
+                });
             }
         }
         content
@@ -546,7 +624,10 @@ impl App {
         // on exactly that range is being edited, so its card gives way to
         // the bar (one bar, not two stacked).
         let mut composer: Option<(usize, Vec<Row>)> = self.composing.as_ref().map(|input| {
-            let range = self.selection.map(|s| s.range()).unwrap_or((self.cursor, self.cursor));
+            let range = self
+                .selection
+                .map(|s| s.range())
+                .unwrap_or((self.cursor, self.cursor));
             let anchor = content
                 .iter()
                 .enumerate()
@@ -554,7 +635,9 @@ impl App {
                 .map(|(idx, _)| idx)
                 .last()
                 .unwrap_or(content.len().saturating_sub(1));
-            let revision = self.shown_revision().map(|r| cosense::theme::format_local(r.created));
+            let revision = self
+                .shown_revision()
+                .map(|r| cosense::theme::format_local(r.created));
             // The body may take the pane minus the badge row, the band
             // row, and one row of the page for context; at least one row.
             // Before the first frame the height is not known (0): no cap.
@@ -562,9 +645,23 @@ impl App {
                 0 => usize::MAX,
                 h => (h as usize).saturating_sub(3).max(1),
             };
-            (anchor, composer_rows(input, range, self.comment_for_range().is_some(), revision, width_cols, max_body))
+            (
+                anchor,
+                composer_rows(
+                    input,
+                    range,
+                    self.comment_for_range().is_some(),
+                    revision,
+                    width_cols,
+                    max_body,
+                ),
+            )
         });
-        let hidden_card = if self.composing.is_some() { self.comment_for_range() } else { None };
+        let hidden_card = if self.composing.is_some() {
+            self.comment_for_range()
+        } else {
+            None
+        };
         for (idx, row) in content.into_iter().enumerate() {
             rows.push(row);
             if let Some(cidxs) = cards_after.get(&idx) {
@@ -595,7 +692,9 @@ impl App {
     /// picture, the source line that owns that picture's row.
     pub(crate) fn diagram_row_owner(&self, src: usize) -> Option<usize> {
         self.blocks.iter().find_map(|b| {
-            let Block::Artifact { rows, last_src, .. } = b else { return None };
+            let Block::Artifact { rows, last_src, .. } = b else {
+                return None;
+            };
             if !rows.iter().any(|(rsrc, _)| *rsrc == src) {
                 return None;
             }
@@ -622,7 +721,8 @@ impl App {
         // `screen_row == 0` is the normal content anchor one row below the
         // top rule. Once scrolled, `-1` is valid: content reclaims the screen
         // row where that rule used to be.
-        self.row_and_offset_at_screen_row(screen_row).map(|(row, _)| row)
+        self.row_and_offset_at_screen_row(screen_row)
+            .map(|(row, _)| row)
     }
 
     /// The source line rendered at `screen_row`; `None` on a card row or
@@ -634,13 +734,18 @@ impl App {
     /// The rendered (unwrapped) line for a source line and what can be
     /// followed on it. `Hit::span` counts spans of THIS line, which is the
     /// coordinate system the renderer reported in.
-    pub(crate) fn text_block_at(&self, src: usize) -> Option<(&Line<'static>, &[cosense::render::Hit])> {
+    pub(crate) fn text_block_at(
+        &self,
+        src: usize,
+    ) -> Option<(&Line<'static>, &[cosense::render::Hit])> {
         let i = self
             .srcs
             .iter()
             .position(|s| *s == src)
             .filter(|i| matches!(self.blocks.get(*i), Some(Block::Text(_))))?;
-        let Some(Block::Text(line)) = self.blocks.get(i) else { return None };
+        let Some(Block::Text(line)) = self.blocks.get(i) else {
+            return None;
+        };
         Some((line, self.hits.get(i).map(|v| v.as_slice()).unwrap_or(&[])))
     }
 
@@ -655,7 +760,9 @@ impl App {
             .iter()
             .position(|s| *s == src)
             .filter(|i| matches!(self.blocks.get(*i), Some(Block::Inline { .. })))?;
-        let Some(Block::Inline { parts, .. }) = self.blocks.get(i) else { return None };
+        let Some(Block::Inline { parts, .. }) = self.blocks.get(i) else {
+            return None;
+        };
         Some((parts, self.hits.get(i).map(|v| v.as_slice()).unwrap_or(&[])))
     }
 
@@ -688,4 +795,3 @@ impl App {
         self.rows.iter().map(Row::height).sum()
     }
 }
-

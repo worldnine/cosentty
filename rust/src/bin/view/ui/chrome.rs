@@ -21,7 +21,6 @@ pub(crate) const SOURCE_NUM_W: usize = 5;
 /// Cursor-row highlight inside the page body.
 pub(crate) const CURSOR_BG: Color = Color::DarkGray;
 
-
 // Non-content chrome uses ANSI palette entries, never fixed RGB. Terminal
 // themes own the actual values behind these role colors.
 pub(crate) const CHROME_ACCENT: Color = Color::Cyan;
@@ -42,7 +41,10 @@ pub(crate) struct HeaderColors {
 
 impl HeaderColors {
     pub(crate) fn fallback() -> Self {
-        Self { fg: Color::Black, bg: CHROME_ACCENT }
+        Self {
+            fg: Color::Black,
+            bg: CHROME_ACCENT,
+        }
     }
 }
 
@@ -67,10 +69,8 @@ impl App {
                 HeaderColors::fallback()
             } else {
                 let theme = ctx.project_theme(&self.index_project);
-                let (fg, bg) = cosense::theme::project_header_colors(
-                    theme.as_deref(),
-                    ctx.terminal_bg,
-                );
+                let (fg, bg) =
+                    cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg);
                 HeaderColors { fg, bg }
             }
         } else {
@@ -162,7 +162,9 @@ impl App {
         }
         if let Some(s) = self.session.as_ref() {
             let dirty = s.input.buf != s.orig;
-            let keys = t!("{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了", "{}↑↓ move · Enter new line · ⌫@BOL join · Tab indent · Esc done",
+            let keys = t!(
+                "{}↑↓ 移動 · Enter 改行 · ⌫@行頭 前の行と結合 · Tab 字下げ · Esc 終了",
+                "{}↑↓ move · Enter new line · ⌫@BOL join · Tab indent · Esc done",
                 if dirty { "● " } else { "" }
             );
             // An upload's progress arrives while the keys are being typed;
@@ -181,13 +183,19 @@ impl App {
                     // A link with nothing behind it does not open: Enter
                     // starts the page. Better said before it is pressed.
                     let mark = match l {
-                        LinkItem::Page(t) if self.links.missing(t) => ts!("(未作成)", "(uncreated)"),
+                        LinkItem::Page(t) if self.links.missing(t) => {
+                            ts!("(未作成)", "(uncreated)")
+                        }
                         _ => "",
                     };
                     format!("{}:{}{mark}", i + 1, l.label())
                 })
                 .collect();
-            return t!("Enter/f で開く → {}", "Enter/f open → {}", listed.join("  "));
+            return t!(
+                "Enter/f で開く → {}",
+                "Enter/f open → {}",
+                listed.join("  ")
+            );
         }
         if !self.status.is_empty() {
             return self.status.clone();
@@ -195,10 +203,12 @@ impl App {
         if self.editable {
             t!("j/k 移動  Enter リンク  e 編集  o 行追加  u 取り消し  w ブラウザ  ? ヘルプ  q 終了", "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit")
         } else {
-            t!("j/k 移動  Enter リンク  w ブラウザ  ? ヘルプ  q 終了  · 読み取り専用", "j/k move  Enter link  w browser  ? help  q quit  · read-only")
+            t!(
+                "j/k 移動  Enter リンク  w ブラウザ  ? ヘルプ  q 終了  · 読み取り専用",
+                "j/k move  Enter link  w browser  ? help  q quit  · read-only"
+            )
         }
     }
-
 }
 
 /// One header row: ` name / title` at the left edge, `right` flush with
@@ -218,7 +228,11 @@ pub(crate) fn header_line(name: &str, title: &str, right: &str, width: u16) -> S
         full
     } else {
         let bare = format!(" / {title}");
-        if UnicodeWidthStr::width(bare.as_str()) <= room { bare } else { truncate_width(&bare, room) }
+        if UnicodeWidthStr::width(bare.as_str()) <= room {
+            bare
+        } else {
+            truncate_width(&bare, room)
+        }
     };
     let pad = width.saturating_sub(UnicodeWidthStr::width(left.as_str()) + rw);
     format!("{left}{}{right}", " ".repeat(pad))

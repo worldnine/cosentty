@@ -1,5 +1,5 @@
-use crate::*;
 use crate::tests::support::*;
+use crate::*;
 
 /// The index is a list of links, so the mouse treats it as one: the
 /// wheel moves through it and a click opens the row it landed on.
@@ -20,7 +20,11 @@ fn a_click_in_the_index_opens_that_page() {
     // …and enough behind them that the list has somewhere to scroll.
     entries.extend((0..30).map(|i| mk(&format!("その他{i}"))));
     let n = entries.len();
-    app.index = Some(cosense::index::Index::new(entries, n, cosense::index::SortKey::Updated));
+    app.index = Some(cosense::index::Index::new(
+        entries,
+        n,
+        cosense::index::SortKey::Updated,
+    ));
     // A frame has to have been drawn: the click is answered with the
     // geometry that was on screen.
     let mut t = Terminal::new(TestBackend::new(100, 10)).unwrap();
@@ -37,9 +41,16 @@ fn a_click_in_the_index_opens_that_page() {
     for _ in 0..3 {
         handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, 5, 3));
     }
-    assert_eq!(app.index.as_ref().unwrap().cursor, 0, "the selection stayed");
+    assert_eq!(
+        app.index.as_ref().unwrap().cursor,
+        0,
+        "the selection stayed"
+    );
     assert!(app.index.as_ref().unwrap().scroll > 0, "and the view moved");
-    assert!(app.index_scrolled_at.is_some(), "so the scrollbar shows itself");
+    assert!(
+        app.index_scrolled_at.is_some(),
+        "so the scrollbar shows itself"
+    );
     for _ in 0..3 {
         handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollUp, 5, 3));
     }
@@ -48,9 +59,17 @@ fn a_click_in_the_index_opens_that_page() {
     // Over the excerpt dock the wheel scrolls the excerpt instead.
     let preview_x = app.index_preview_rect.x + 2;
     let preview_y = app.index_preview_rect.y;
-    handle_mouse(&mut app, &ctx, at(MouseEventKind::ScrollDown, preview_x, preview_y));
+    handle_mouse(
+        &mut app,
+        &ctx,
+        at(MouseEventKind::ScrollDown, preview_x, preview_y),
+    );
     assert_eq!(app.index.as_ref().unwrap().preview_scroll, 1);
-    assert_eq!(app.index.as_ref().unwrap().cursor, 0, "and leaves the list alone");
+    assert_eq!(
+        app.index.as_ref().unwrap().cursor,
+        0,
+        "and leaves the list alone"
+    );
 
     // A click on the third row opens the third page — one click. The
     // opening itself is a page fetch, which a test has no server for;
@@ -64,7 +83,10 @@ fn a_click_in_the_index_opens_that_page() {
     // The opening itself is a page fetch, which runs in the background —
     // so the list is still there (the reader keeps their place until the
     // page lands). What is checked is which row it resolved to.
-    assert!(app.index.is_some(), "the list stays while the page is fetched");
+    assert!(
+        app.index.is_some(),
+        "the list stays while the page is fetched"
+    );
     assert_eq!(
         app.pending_load.as_ref().map(|p| p.title.as_str()),
         Some("三番目"),
@@ -103,7 +125,10 @@ fn the_index_is_somewhere_you_can_come_back_to() {
     // fails leaves the reader in the list rather than dropping them onto
     // the page they had left.
     open_from_index(&mut app, &ctx, Some(("B".into(), false)));
-    assert!(app.index.is_some(), "the list stays while the page is fetched");
+    assert!(
+        app.index.is_some(),
+        "the list stays while the page is fetched"
+    );
     assert!(app.history.is_empty(), "and nothing went on the stack yet");
     fail_pending_load(&mut app, &ctx, "no server");
     assert!(app.index.is_some(), "the list survives a failed open");
@@ -113,17 +138,29 @@ fn the_index_is_somewhere_you_can_come_back_to() {
     // place too — reached from the PAGE the reader is on.
     app.history.clear();
     app.index = None;
-    activate_link(&mut app, &ctx, LinkItem::ProjectIndex { project: "help-jp".into() });
+    activate_link(
+        &mut app,
+        &ctx,
+        LinkItem::ProjectIndex {
+            project: "help-jp".into(),
+        },
+    );
     // (No network in tests: the index only opens when the list arrives.
     // Either way the reader must not lose their place.)
     if app.index.is_some() {
         assert_eq!(app.index_project, "help-jp");
         assert_eq!(
             app.history.last(),
-            Some(&Place::Page { project: "proj".into(), title: "A".into() })
+            Some(&Place::Page {
+                project: "proj".into(),
+                title: "A".into()
+            })
         );
     } else {
-        assert!(app.history.is_empty(), "a failed open leaves the stack alone");
+        assert!(
+            app.history.is_empty(),
+            "a failed open leaves the stack alone"
+        );
     }
 }
 
@@ -153,17 +190,27 @@ fn brackets_and_escape_leave_and_restore_the_index() {
     index.focus = cosense::index::Pane::Preview;
     let saved = index.clone();
     app.index = Some(index);
-    app.history.push(Place::Page { project: "proj".into(), title: "A".into() });
+    app.history.push(Place::Page {
+        project: "proj".into(),
+        title: "A".into(),
+    });
 
     handle_index_key(&mut app, &ctx, key(KeyCode::Char('[')));
-    assert!(app.index.is_none(), "[ leaves the index rather than filtering");
+    assert!(
+        app.index.is_none(),
+        "[ leaves the index rather than filtering"
+    );
     assert!(matches!(
         app.forward.last(),
         Some(Place::Index { project, state }) if project == "proj" && **state == saved
     ));
 
     go_history(&mut app, &ctx, false);
-    assert_eq!(app.index.as_ref(), Some(&saved), "] restores the exact list state");
+    assert_eq!(
+        app.index.as_ref(),
+        Some(&saved),
+        "] restores the exact list state"
+    );
 
     handle_index_key(&mut app, &ctx, key(KeyCode::Esc));
     assert!(app.index.is_none(), "Esc uses the same back route");
@@ -201,17 +248,30 @@ fn the_index_filter_is_a_line_that_slash_opens_and_q_quits_beside_it() {
         handle_index_key(&mut app, &ctx, key(KeyCode::Char('q'))),
         Action::Quit
     ));
-    assert!(matches!(handle_index_key(&mut app, &ctx, ctrl('c')), Action::Quit));
+    assert!(matches!(
+        handle_index_key(&mut app, &ctx, ctrl('c')),
+        Action::Quit
+    ));
     handle_index_key(&mut app, &ctx, key(KeyCode::Char('j')));
-    assert_eq!(app.index.as_ref().unwrap().cursor, 1, "j moves even under a filter");
-    assert!(app.index.as_ref().unwrap().filter.is_empty(), "nothing was typed");
+    assert_eq!(
+        app.index.as_ref().unwrap().cursor,
+        1,
+        "j moves even under a filter"
+    );
+    assert!(
+        app.index.as_ref().unwrap().filter.is_empty(),
+        "nothing was typed"
+    );
 
     // `/` opens it, and now the same letters are text.
     handle_index_key(&mut app, &ctx, key(KeyCode::Char('/')));
     // …and the line holds the IME guard while it is open, so a Japanese
     // title can be typed without toggling the input source by hand —
     // the whole reason the filter became a line you open.
-    assert!(app.ime_guard.is_some(), "the open line switches the input source");
+    assert!(
+        app.ime_guard.is_some(),
+        "the open line switches the input source"
+    );
     for c in "qui".chars() {
         handle_index_key(&mut app, &ctx, key(KeyCode::Char(c)));
     }
@@ -223,7 +283,10 @@ fn the_index_filter_is_a_line_that_slash_opens_and_q_quits_beside_it() {
     // ↑/↓ still pick while typing; `^c` still leaves.
     handle_index_key(&mut app, &ctx, key(KeyCode::Down));
     assert_eq!(app.index.as_ref().unwrap().cursor, 1);
-    assert!(matches!(handle_index_key(&mut app, &ctx, ctrl('c')), Action::Quit));
+    assert!(matches!(
+        handle_index_key(&mut app, &ctx, ctrl('c')),
+        Action::Quit
+    ));
 
     // Enter keeps the filter and hands the keys back to the list.
     handle_index_key(&mut app, &ctx, key(KeyCode::Enter));
@@ -245,10 +308,16 @@ fn the_index_filter_is_a_line_that_slash_opens_and_q_quits_beside_it() {
     handle_index_key(&mut app, &ctx, key(KeyCode::Char('/')));
     assert!(app.ime_guard.is_some());
     handle_index_key(&mut app, &ctx, key(KeyCode::Esc));
-    let ix = app.index.as_ref().expect("Esc closed the line, not the index");
+    let ix = app
+        .index
+        .as_ref()
+        .expect("Esc closed the line, not the index");
     assert!(!ix.filter_editing);
     assert!(ix.filter.is_empty());
-    assert!(app.ime_guard.is_none(), "Esc gives the input source back too");
+    assert!(
+        app.ime_guard.is_none(),
+        "Esc gives the input source back too"
+    );
 }
 
 /// The same screen answers in English when the environment asks for
@@ -269,7 +338,11 @@ fn the_whole_screen_can_be_read_in_english() {
         "j/k move  Enter link  e edit  o new line  u undo  w browser  ? help  q quit"
     );
     handle_key(&mut app, &ctx, key(KeyCode::Char('y')));
-    assert!(app.note_text().contains("copied"), "note: {}", app.note_text());
+    assert!(
+        app.note_text().contains("copied"),
+        "note: {}",
+        app.note_text()
+    );
 
     app.overlay = Some(Overlay::Help);
     // Tall enough for every help line: the panel clips from the
@@ -288,13 +361,25 @@ fn the_whole_screen_can_be_read_in_english() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    assert!(screen.contains("move        j/k"), "help is in English: {screen}");
+    assert!(
+        screen.contains("move        j/k"),
+        "help is in English: {screen}"
+    );
     assert!(screen.contains("Esc close"));
-    assert!(!screen.contains("移動"), "and nothing Japanese is left behind");
+    assert!(
+        !screen.contains("移動"),
+        "and nothing Japanese is left behind"
+    );
     // Keys and env vars are names, not words: they read the same either way.
     assert!(screen.contains("── EDIT ──"), "the edit section: {screen}");
-    assert!(screen.contains("── index ──"), "the index section: {screen}");
-    assert!(screen.contains("── overlays ──"), "the overlay section: {screen}");
+    assert!(
+        screen.contains("── index ──"),
+        "the index section: {screen}"
+    );
+    assert!(
+        screen.contains("── overlays ──"),
+        "the overlay section: {screen}"
+    );
     assert!(screen.contains("quit        q twice"));
     assert!(screen.contains("^u/^d · PgUp/PgDn"));
 
@@ -332,8 +417,14 @@ fn the_help_lists_four_sections_and_no_stale_deletion_key() {
     for section in ["──一覧──", "──オーバーレイ──"] {
         assert!(packed.contains(section), "missing {section}: {screen}");
     }
-    assert!(!packed.contains("x行/選択を削除"), "stale deletion row: {screen}");
-    assert!(!screen.contains("COSENSE_WEB_IDLE_SECS"), "the diagram notes moved to KEYMAP: {screen}");
+    assert!(
+        !packed.contains("x行/選択を削除"),
+        "stale deletion row: {screen}"
+    );
+    assert!(
+        !screen.contains("COSENSE_WEB_IDLE_SECS"),
+        "the diagram notes moved to KEYMAP: {screen}"
+    );
 }
 
 /// The panel does not scroll, so every help row fits its 90 cells
@@ -348,11 +439,7 @@ fn every_help_row_fits_the_panel_in_both_languages() {
         let rows = help_keys(&app);
         assert_eq!(rows.len(), 26, "four sections, nothing clipped vertically");
         for r in &rows {
-            assert!(
-                str_width(r) <= 88,
-                "clipped: {r} ({} cells)",
-                str_width(r)
-            );
+            assert!(str_width(r) <= 88, "clipped: {r} ({} cells)", str_width(r));
         }
     }
     set_for_thread(Lang::Ja);
@@ -376,14 +463,27 @@ fn question_opens_help_from_the_index_and_from_an_overlay() {
     };
     let entries = vec![mk("a"), mk("b")];
     let n = entries.len();
-    app.index = Some(cosense::index::Index::new(entries, n, cosense::index::SortKey::Updated));
-    assert!(!app.index.as_ref().unwrap().filter_editing, "filter line closed");
+    app.index = Some(cosense::index::Index::new(
+        entries,
+        n,
+        cosense::index::SortKey::Updated,
+    ));
+    assert!(
+        !app.index.as_ref().unwrap().filter_editing,
+        "filter line closed"
+    );
     handle_key(&mut app, &ctx, key(KeyCode::Char('?')));
-    assert!(matches!(app.overlay, Some(Overlay::Help)), "? in the index should open help");
+    assert!(
+        matches!(app.overlay, Some(Overlay::Help)),
+        "? in the index should open help"
+    );
 
     app.overlay = Some(Overlay::LineInfo);
     handle_overlay_key(&mut app, &ctx, KeyCode::Char('?'), KeyModifiers::NONE);
-    assert!(matches!(app.overlay, Some(Overlay::Help)), "? on an overlay should open help");
+    assert!(
+        matches!(app.overlay, Some(Overlay::Help)),
+        "? on an overlay should open help"
+    );
 }
 
 /// Eyeball the help and footer: prints the drawn screen so the mixed
@@ -427,10 +527,42 @@ fn index_screen_dump() {
     };
     app.index = Some(cosense::index::Index::new(
         vec![
-            mk("改善案", 1, true, &["from [テスト]", "進め方", " 方針: 編集は EDIT セッションを本筋にする", " READ は読むためのモードに寄せる"]),
-            mk("画像表示テスト", 60 * 26, false, &["画像の出方を並べたページ", "[https://gyazo.com/abc]"]),
-            mk("ブラケット記法テスト", 60 * 24 * 9, false, &["各行は「`ソース` → 実際の描画」の形で並べてある", "`[]` → []"]),
-            mk("websocket 同期の設計メモ", 60 * 24 * 40, true, &["socket.io の生フレームで話す", "code:frame.txt", " 0{\"sid\":…}"]),
+            mk(
+                "改善案",
+                1,
+                true,
+                &[
+                    "from [テスト]",
+                    "進め方",
+                    " 方針: 編集は EDIT セッションを本筋にする",
+                    " READ は読むためのモードに寄せる",
+                ],
+            ),
+            mk(
+                "画像表示テスト",
+                60 * 26,
+                false,
+                &["画像の出方を並べたページ", "[https://gyazo.com/abc]"],
+            ),
+            mk(
+                "ブラケット記法テスト",
+                60 * 24 * 9,
+                false,
+                &[
+                    "各行は「`ソース` → 実際の描画」の形で並べてある",
+                    "`[]` → []",
+                ],
+            ),
+            mk(
+                "websocket 同期の設計メモ",
+                60 * 24 * 40,
+                true,
+                &[
+                    "socket.io の生フレームで話す",
+                    "code:frame.txt",
+                    " 0{\"sid\":…}",
+                ],
+            ),
             mk("テスト", 60 * 24 * 400, false, &["ここはテスト用のページ"]),
         ],
         137,
@@ -439,7 +571,12 @@ fn index_screen_dump() {
     // …and a real project's worth of pages, where the scrollbar has
     // something to say.
     for i in 0..200 {
-        let e = mk(&format!("ページ{i}"), 60 * (i as i64 + 2), i % 7 == 0, &["本文"]);
+        let e = mk(
+            &format!("ページ{i}"),
+            60 * (i as i64 + 2),
+            i % 7 == 0,
+            &["本文"],
+        );
         app.index.as_mut().unwrap().entries.push(e);
     }
     for (w, h) in [(100u16, 14u16), (78, 12)] {
@@ -449,7 +586,10 @@ fn index_screen_dump() {
         println!("\n┌{}┐  ({w}x{h})", "─".repeat(w as usize));
         for y in 0..buf.area.height {
             let row: String = (0..buf.area.width)
-                .map(|x| buf.cell((x, y)).map_or(' ', |c| c.symbol().chars().next().unwrap_or(' ')))
+                .map(|x| {
+                    buf.cell((x, y))
+                        .map_or(' ', |c| c.symbol().chars().next().unwrap_or(' '))
+                })
                 .collect();
             println!("│{row}│");
         }
@@ -494,7 +634,10 @@ fn the_index_draws_a_list_above_a_shallow_excerpt() {
         (0..buf.area.height)
             .map(|y| {
                 (0..buf.area.width)
-                    .map(|x| buf.cell((x, y)).map_or(" ".into(), |c| c.symbol().to_string()))
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .map_or(" ".into(), |c| c.symbol().to_string())
+                    })
                     .collect::<String>()
                     .trim_end()
                     .to_string()
@@ -509,8 +652,16 @@ fn the_index_draws_a_list_above_a_shallow_excerpt() {
 
     // Wide: the list spends the full row; the excerpt starts below it.
     let rows = draw(&mut app, 100);
-    assert!(rows[0].contains("proj"), "header names the project: {:?}", rows[0]);
-    assert!(flat(&rows[1]).contains("改善案"), "first row: {:?}", rows[1]);
+    assert!(
+        rows[0].contains("proj"),
+        "header names the project: {:?}",
+        rows[0]
+    );
+    assert!(
+        flat(&rows[1]).contains("改善案"),
+        "first row: {:?}",
+        rows[1]
+    );
     let layout = cosense::index::layout(ctx.preview, 100, 8);
     let excerpt_y = 1 + layout.list as usize + layout.gap as usize;
     assert!(
@@ -518,21 +669,37 @@ fn the_index_draws_a_list_above_a_shallow_excerpt() {
         "the page under the cursor heads the excerpt below: {:?}",
         rows[excerpt_y]
     );
-    assert!(has(&rows[excerpt_y + 1..], "進め方"), "…including its first lines: {rows:?}");
-    assert!(rows.last().unwrap().contains("Esc"), "footer: {:?}", rows.last());
+    assert!(
+        has(&rows[excerpt_y + 1..], "進め方"),
+        "…including its first lines: {rows:?}"
+    );
+    assert!(
+        rows.last().unwrap().contains("Esc"),
+        "footer: {:?}",
+        rows.last()
+    );
 
     // Narrow: no excerpt, and the list has the height to itself. If a
     // resize removed the focused excerpt, focus returns to what remains.
     app.index.as_mut().unwrap().focus = cosense::index::Pane::Preview;
     let rows = draw(&mut app, 70);
     assert!(flat(&rows[1]).contains("改善案"));
-    assert!(!has(&rows, "進め方"), "under 80 columns the excerpt is gone: {rows:?}");
-    assert_eq!(app.index.as_ref().unwrap().focus, cosense::index::Pane::List);
+    assert!(
+        !has(&rows, "進め方"),
+        "under 80 columns the excerpt is gone: {rows:?}"
+    );
+    assert_eq!(
+        app.index.as_ref().unwrap().focus,
+        cosense::index::Pane::List
+    );
 
     // Moving the cursor updates the excerpt.
     app.index.as_mut().unwrap().move_cursor(1);
     let rows = draw(&mut app, 100);
-    assert!(has(&rows, "画像の出方"), "the preview follows the cursor: {rows:?}");
+    assert!(
+        has(&rows, "画像の出方"),
+        "the preview follows the cursor: {rows:?}"
+    );
 }
 
 /// 並び順の切り替えは取り直しではなく、さっき取った一覧の再利用。6つの
@@ -554,17 +721,28 @@ fn a_fetched_list_is_reused_by_an_order_switch_while_young() {
         views: 0,
         linked: 0,
     };
-    assert!(app.cached_list("proj", SortKey::Updated).is_none(), "nothing fetched yet");
+    assert!(
+        app.cached_list("proj", SortKey::Updated).is_none(),
+        "nothing fetched yet"
+    );
     app.remember_list("proj", SortKey::Updated, 1, &[p]);
-    let (count, pages) = app.cached_list("proj", SortKey::Updated).expect("young entry");
+    let (count, pages) = app
+        .cached_list("proj", SortKey::Updated)
+        .expect("young entry");
     assert_eq!((count, pages.len()), (1, 1));
     // 順ごと・プロジェクトごとに別の一覧。
     assert!(app.cached_list("proj", SortKey::Title).is_none());
     assert!(app.cached_list("other", SortKey::Updated).is_none());
     // 古くなった一覧は使わない(取り直す)。
-    let c = app.index_cache.get_mut(&("proj".to_string(), SortKey::Updated)).unwrap();
+    let c = app
+        .index_cache
+        .get_mut(&("proj".to_string(), SortKey::Updated))
+        .unwrap();
     c.at = Instant::now() - INDEX_CACHE_SECS - Duration::from_secs(1);
-    assert!(app.cached_list("proj", SortKey::Updated).is_none(), "stale entry is a miss");
+    assert!(
+        app.cached_list("proj", SortKey::Updated).is_none(),
+        "stale entry is a miss"
+    );
 }
 
 #[test]
@@ -597,7 +775,10 @@ fn s_shift_opens_the_order_menu_and_enter_applies_everywhere() {
     let ctx = test_ctx();
     let mut app = page(&["t"]);
     let want = cosense::index::SortKey::Title;
-    let at = cosense::index::SortKey::ALL.iter().position(|&k| k == want).unwrap();
+    let at = cosense::index::SortKey::ALL
+        .iter()
+        .position(|&k| k == want)
+        .unwrap();
     app.index_sort_menu = Some(at);
     handle_key(&mut app, &ctx, key(KeyCode::Enter));
     assert!(app.index_sort_menu.is_none(), "the menu closed");

@@ -52,7 +52,10 @@ impl RelEntry {
 /// the server sent it", and the default order is what that is. Sections
 /// themselves (Links, one per hub in page order, External links) are not
 /// reordered: the grouping IS the information there.
-pub(crate) fn sort_related(pages: &mut [&cosense::api::RelatedPage], sort: cosense::index::SortKey) {
+pub(crate) fn sort_related(
+    pages: &mut [&cosense::api::RelatedPage],
+    sort: cosense::index::SortKey,
+) {
     use cosense::index::SortKey;
     match sort {
         SortKey::Updated | SortKey::Views => {}
@@ -170,11 +173,13 @@ pub(crate) fn build_related(
     let mut secs: Vec<RelSection> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let visits = load_visits();
-    let unread = |p: &str, title: &str, updated: i64| {
-        related_is_unread(&visits, p, title, updated)
-    };
+    let unread = |p: &str, title: &str, updated: i64| related_is_unread(&visits, p, title, updated);
     let key_of = |p: &cosense::api::RelatedPage| {
-        if p.title_lc.is_empty() { p.title.to_lowercase() } else { p.title_lc.clone() }
+        if p.title_lc.is_empty() {
+            p.title.to_lowercase()
+        } else {
+            p.title_lc.clone()
+        }
     };
     let entry_of = |p: &cosense::api::RelatedPage| RelEntry {
         item: LinkItem::Page(p.title.clone()),
@@ -190,14 +195,20 @@ pub(crate) fn build_related(
     // sections themselves stay put.
     let section = |heading: String, mut group: Vec<&cosense::api::RelatedPage>| {
         sort_related(&mut group, sort);
-        RelSection { heading, entries: group.into_iter().map(&entry_of).collect() }
+        RelSection {
+            heading,
+            entries: group.into_iter().map(&entry_of).collect(),
+        }
     };
     if let Some(rel) = related {
         if !rel.links1hop.is_empty() {
             for p in &rel.links1hop {
                 seen.insert(key_of(p));
             }
-            secs.push(section(format!("Links ({})", rel.links1hop.len()), rel.links1hop.iter().collect()));
+            secs.push(section(
+                format!("Links ({})", rel.links1hop.len()),
+                rel.links1hop.iter().collect(),
+            ));
         }
         // 2-hop groups, one per link of this page (page order). `links_lc`
         // of an entry lists which links it shares.
@@ -218,8 +229,11 @@ pub(crate) fn build_related(
         }
         // 2-hop entries whose hubs did not match any current link (rename
         // races and the like) still deserve a place.
-        let rest: Vec<&cosense::api::RelatedPage> =
-            rel.links2hop.iter().filter(|p| !seen.contains(&key_of(p))).collect();
+        let rest: Vec<&cosense::api::RelatedPage> = rel
+            .links2hop
+            .iter()
+            .filter(|p| !seen.contains(&key_of(p)))
+            .collect();
         if !rest.is_empty() {
             secs.push(section(format!("2 hop links ({})", rest.len()), rest));
         }
@@ -295,7 +309,9 @@ pub(crate) fn unread_since(updated: i64, read_at: Option<i64>) -> bool {
 pub(crate) fn visits_path() -> Option<std::path::PathBuf> {
     let base = match std::env::var("XDG_STATE_HOME") {
         Ok(x) if !x.is_empty() => std::path::PathBuf::from(x),
-        _ => std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".local").join("state"),
+        _ => std::path::PathBuf::from(std::env::var("HOME").ok()?)
+            .join(".local")
+            .join("state"),
     };
     Some(base.join("cosense-tui").join("visits.json"))
 }
@@ -331,11 +347,19 @@ pub(crate) fn record_visit(project: &str, title: &str, now: i64) -> Option<i64> 
 pub(crate) fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, bool)>) {
     let from = app.here();
     let project = app.index_project.clone();
-    let Some((title, create)) = target else { return };
+    let Some((title, create)) = target else {
+        return;
+    };
     // The list stays on screen while the page is fetched: a page that
     // fails to load is not a reason to lose the list you were choosing
     // from, and until it lands there is nothing else to show.
-    start_page_load(app, ctx, &project, &title, LoadIntent::Navigate { from, create });
+    start_page_load(
+        app,
+        ctx,
+        &project,
+        &title,
+        LoadIntent::Navigate { from, create },
+    );
 }
 
 /// `[` / `]`: step back or forward through the places visited.
@@ -344,9 +368,17 @@ pub(crate) fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, 
 /// you reached from the index lands in the index — where you were — rather
 /// than in whatever page happened to precede it.
 pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
-    let place = if back { app.history.pop() } else { app.forward.pop() };
+    let place = if back {
+        app.history.pop()
+    } else {
+        app.forward.pop()
+    };
     let Some(place) = place else {
-        app.toast(if back { t!("戻る先の履歴はありません", "no history") } else { t!("進む先の履歴はありません", "no forward history") });
+        app.toast(if back {
+            t!("戻る先の履歴はありません", "no history")
+        } else {
+            t!("進む先の履歴はありません", "no forward history")
+        });
         return;
     };
     let here = app.here();
@@ -364,15 +396,24 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
                 // the move, and a failed back puts the destination back on
                 // its stack so the same key can retry.
                 let here = here.clone();
-                start_page_load(app, ctx, &project, &title, LoadIntent::History { back, here });
+                start_page_load(
+                    app,
+                    ctx,
+                    &project,
+                    &title,
+                    LoadIntent::History { back, here },
+                );
             }
         }
         Place::Index { project, state } => {
             // The projects list names no project: nothing to look up.
             let projects = state.scope == cosense::index::Scope::Projects;
             app.index = Some(*state);
-            app.index_display =
-                if projects { String::new() } else { ctx.project_display(&project) };
+            app.index_display = if projects {
+                String::new()
+            } else {
+                ctx.project_display(&project)
+            };
             app.index_project = project;
             app.overlay = None;
             arrived = true;
@@ -436,7 +477,11 @@ impl App {
     ) {
         self.index_cache.insert(
             (project.to_string(), sort),
-            ListCache { count, pages: pages.to_vec(), at: Instant::now() },
+            ListCache {
+                count,
+                pages: pages.to_vec(),
+                at: Instant::now(),
+            },
         );
     }
 }
@@ -473,7 +518,10 @@ pub(crate) fn open_projects(app: &mut App, ctx: &Ctx, reuse: bool) {
         Some(p) => p,
         None => match ctx.client.list_projects() {
             Ok(p) => {
-                app.projects_cache = Some(ProjectsCache { projects: p.clone(), at: Instant::now() });
+                app.projects_cache = Some(ProjectsCache {
+                    projects: p.clone(),
+                    at: Instant::now(),
+                });
                 p
             }
             Err(e) => {
@@ -489,7 +537,10 @@ pub(crate) fn open_projects(app: &mut App, ctx: &Ctx, reuse: bool) {
     let already = matches!(&from, Place::Index { state, .. } if state.scope == Scope::Projects);
     // Kept across a refetch: the list is the same list, only fresher.
     let filter = if already {
-        app.index.as_ref().map(|ix| ix.filter.clone()).unwrap_or_default()
+        app.index
+            .as_ref()
+            .map(|ix| ix.filter.clone())
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -544,7 +595,9 @@ pub(crate) fn open_selected(app: &mut App, ctx: &Ctx) {
             open_from_index(app, ctx, target);
         }
         Scope::Projects => {
-            let Some(slug) = ix.selected().map(|e| e.slug.clone()) else { return };
+            let Some(slug) = ix.selected().map(|e| e.slug.clone()) else {
+                return;
+            };
             enter_project(app, ctx, &slug);
         }
     }
@@ -556,10 +609,17 @@ pub(crate) fn open_selected(app: &mut App, ctx: &Ctx) {
 fn open_index_from(app: &mut App, ctx: &Ctx, project: &str, filter: String, reuse: bool) {
     use cosense::index::{Entry, Index};
     let sort = app.index_sort;
-    let cached = if reuse { app.cached_list(project, sort) } else { None };
+    let cached = if reuse {
+        app.cached_list(project, sort)
+    } else {
+        None
+    };
     let (count, pages) = match cached {
         Some(v) => v,
-        None => match ctx.client.list_pages_in(project, INDEX_PAGE_LIMIT, 0, sort.name()) {
+        None => match ctx
+            .client
+            .list_pages_in(project, INDEX_PAGE_LIMIT, 0, sort.name())
+        {
             Ok(v) => {
                 app.remember_list(project, sort, v.0, &v.1);
                 v
@@ -568,7 +628,10 @@ fn open_index_from(app: &mut App, ctx: &Ctx, project: &str, filter: String, reus
                 // Both, because this is reached from two places: from a
                 // page (no index open — the page's own status line shows
                 // it) and from `s`/`^u` with the list already on screen.
-                app.toast_err(t!("ページ一覧を取得できません: {e}", "page list failed: {e}"));
+                app.toast_err(t!(
+                    "ページ一覧を取得できません: {e}",
+                    "page list failed: {e}"
+                ));
                 return;
             }
         },
@@ -602,7 +665,10 @@ fn open_index_from(app: &mut App, ctx: &Ctx, project: &str, filter: String, reus
 /// the title filter every time the list was refetched. A `^o` from a page
 /// (no index yet) starts at the default, which is the title filter.
 pub(crate) fn carried_filter_mode(app: &App) -> cosense::index::FilterMode {
-    app.index.as_ref().map(|ix| ix.filter_mode).unwrap_or_default()
+    app.index
+        .as_ref()
+        .map(|ix| ix.filter_mode)
+        .unwrap_or_default()
 }
 
 /// Run a full-text search and put its hits on screen in place of the list.
@@ -620,7 +686,10 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
     let (count, capped, hits) = match ctx.client.search_pages_in(&project, &query) {
         Ok(v) => v,
         Err(e) => {
-            app.toast_err(t!("本文検索に失敗しました: {e}", "full-text search failed: {e}"));
+            app.toast_err(t!(
+                "本文検索に失敗しました: {e}",
+                "full-text search failed: {e}"
+            ));
             return;
         }
     };
@@ -642,7 +711,11 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
     ix.filter_mode = carried_filter_mode(app);
     app.index = Some(ix);
     if found == 0 {
-        app.toast(t!("「{}」は本文にありません", "no page's body has \"{}\"", query));
+        app.toast(t!(
+            "「{}」は本文にありません",
+            "no page's body has \"{}\"",
+            query
+        ));
     }
 }
 
@@ -663,7 +736,11 @@ pub(crate) fn clear_index_search(app: &mut App, ctx: &Ctx) {
 /// what ran into the site's 429.
 pub(crate) fn resort_index(app: &mut App, ctx: &Ctx, sort: cosense::index::SortKey) {
     let project = app.index_project.clone();
-    let filter = app.index.as_ref().map(|ix| ix.filter.clone()).unwrap_or_default();
+    let filter = app
+        .index
+        .as_ref()
+        .map(|ix| ix.filter.clone())
+        .unwrap_or_default();
     app.index_sort = sort;
     app.rebuild_related();
     app.laid_width = 0; // related rows may have moved
@@ -706,7 +783,11 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
 
 /// The network half of a page load: the page itself, with ids filled in
 /// for a template. Runs on whichever thread asks.
-pub(crate) fn fetch_page(client: &Client, project: &str, title: &str) -> Result<cosense::api::Page, Box<dyn Error>> {
+pub(crate) fn fetch_page(
+    client: &Client,
+    project: &str,
+    title: &str,
+) -> Result<cosense::api::Page, Box<dyn Error>> {
     let mut page = client.get_page_in(project, title)?;
     if !page.persistent {
         // An uncreated page comes back as a template: a title line with no
@@ -724,7 +805,12 @@ pub(crate) fn fetch_page(client: &Client, project: &str, title: &str) -> Result<
 /// The rendering half of a page load, on the UI thread: highlight, theme,
 /// visit stamp. Any project lookups here are answered from the caches the
 /// fetch thread warmed (`spawn_page_load`).
-pub(crate) fn finish_load(ctx: &Ctx, project: &str, title: &str, page: cosense::api::Page) -> Loaded {
+pub(crate) fn finish_load(
+    ctx: &Ctx,
+    project: &str,
+    title: &str,
+    page: cosense::api::Page,
+) -> Loaded {
     let lines: Vec<PageLine> = page.lines.clone();
     let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
     let facts = PageFacts::of(&page);
@@ -753,7 +839,10 @@ pub(crate) fn finish_load(ctx: &Ctx, project: &str, title: &str, page: cosense::
     Loaded {
         project: project.to_string(),
         title: title.to_string(),
-        header_colors: HeaderColors { fg: header_fg, bg: header_bg },
+        header_colors: HeaderColors {
+            fg: header_fg,
+            bg: header_bg,
+        },
         project_display: ctx.project_display(project),
         page_id: live_page_id(&page),
         lines,
@@ -803,7 +892,13 @@ pub(crate) struct PageLoadMsg {
 /// Ask for `project/title` in the background and remember what to do
 /// with it. Any fetch still pending is abandoned first: its result, if it
 /// ever arrives, carries an older generation and is dropped.
-pub(crate) fn start_page_load(app: &mut App, ctx: &Ctx, project: &str, title: &str, intent: LoadIntent) {
+pub(crate) fn start_page_load(
+    app: &mut App,
+    ctx: &Ctx,
+    project: &str,
+    title: &str,
+    intent: LoadIntent,
+) {
     abandon_pending_load(app);
     app.page_load_gen += 1;
     let gen = app.page_load_gen;
@@ -815,18 +910,33 @@ pub(crate) fn start_page_load(app: &mut App, ctx: &Ctx, project: &str, title: &s
     });
     app.status = loading_status(project, title);
     if app.page_loads_on {
-        spawn_page_load(ctx, gen, project.to_string(), title.to_string(), app.page_load_tx.clone());
+        spawn_page_load(
+            ctx,
+            gen,
+            project.to_string(),
+            title.to_string(),
+            app.page_load_tx.clone(),
+        );
     }
 }
 
 fn loading_status(project: &str, title: &str) -> String {
-    t!("読み込み中: /{project}/{title}", "loading /{project}/{title}")
+    t!(
+        "読み込み中: /{project}/{title}",
+        "loading /{project}/{title}"
+    )
 }
 
 /// The thread behind `start_page_load`. Besides the page it warms the
 /// per-project caches, so that `finish_load` on the UI thread finds the
 /// theme and the edit permission already answered.
-fn spawn_page_load(ctx: &Ctx, gen: u64, project: String, title: String, tx: mpsc::Sender<PageLoadMsg>) {
+fn spawn_page_load(
+    ctx: &Ctx,
+    gen: u64,
+    project: String,
+    title: String,
+    tx: mpsc::Sender<PageLoadMsg>,
+) {
     let client = ctx.client.clone();
     let settings = ctx.project_settings.clone();
     let editability = ctx.editability.clone();
@@ -843,12 +953,17 @@ fn spawn_page_load(ctx: &Ctx, gen: u64, project: String, title: String, tx: mpsc
 /// Forget the fetch in flight, undoing what its start took: a history
 /// hop had already popped its destination, which goes back on its stack.
 fn abandon_pending_load(app: &mut App) {
-    let Some(pending) = app.pending_load.take() else { return };
+    let Some(pending) = app.pending_load.take() else {
+        return;
+    };
     if app.status == loading_status(&pending.project, &pending.title) {
         app.status.clear();
     }
     if let LoadIntent::History { back, .. } = pending.intent {
-        let place = Place::Page { project: pending.project, title: pending.title };
+        let place = Place::Page {
+            project: pending.project,
+            title: pending.title,
+        };
         if back {
             app.history.push(place);
         } else {
@@ -896,7 +1011,10 @@ fn arrive(app: &mut App, ctx: &Ctx, loaded: Loaded, intent: LoadIntent) {
             // wiki grows, so say what it is and what makes it real.
             if page_is_uncreated(app) {
                 let title = app.title.clone();
-                app.toast(t!("未作成のページ — e / o で書き始めると作成されます（{title}）", "an uncreated page — e / o starts writing it ({title})"));
+                app.toast(t!(
+                    "未作成のページ — e / o で書き始めると作成されます（{title}）",
+                    "an uncreated page — e / o starts writing it ({title})"
+                ));
             }
             if create {
                 app.cursor = 0;
@@ -918,10 +1036,18 @@ fn arrive(app: &mut App, ctx: &Ctx, loaded: Loaded, intent: LoadIntent) {
 /// The page did not come: the reader is still where they were. A history
 /// hop gets its destination back so the same key retries.
 fn fail(app: &mut App, pending: PendingLoad, e: &str) {
-    let PendingLoad { project, title, intent, .. } = pending;
+    let PendingLoad {
+        project,
+        title,
+        intent,
+        ..
+    } = pending;
     match intent {
         LoadIntent::Navigate { .. } => {
-            app.toast_err(t!("開けません: /{project}/{title} — {e}", "open failed: /{project}/{title} — {e}"));
+            app.toast_err(t!(
+                "開けません: /{project}/{title} — {e}",
+                "open failed: /{project}/{title} — {e}"
+            ));
         }
         LoadIntent::History { back, .. } => {
             let place = Place::Page { project, title };
@@ -974,13 +1100,18 @@ pub(crate) fn link_truth(
     // colour rather than all of them turning red at once. That is also the
     // state a page is in for the first moment it is on screen, before the
     // related fetch lands.
-    let Some(r) = related else { return LinkTruth::default() };
+    let Some(r) = related else {
+        return LinkTruth::default();
+    };
     let neighbours = || r.links1hop.iter().chain(r.links2hop.iter());
     let mut existing: Vec<&str> = neighbours().map(|p| p.title.as_str()).collect();
     // Titles this page links to that a neighbour ALSO links to: shared
     // words, live whether or not anyone wrote the page.
-    let ours: HashSet<String> =
-        facts.links.iter().map(|l| cosense::render::title_lc(l)).collect();
+    let ours: HashSet<String> = facts
+        .links
+        .iter()
+        .map(|l| cosense::render::title_lc(l))
+        .collect();
     existing.extend(
         neighbours()
             .flat_map(|p| p.links_lc.iter())
@@ -1016,11 +1147,17 @@ pub(crate) fn spawn_link_prober(
 ) {
     std::thread::spawn(move || {
         while let Ok(probe) = rx.recv() {
-            let LinkProbe { project, title, asked_by } = &probe;
+            let LinkProbe {
+                project,
+                title,
+                asked_by,
+            } = &probe;
             // A failed lookup answers nothing, and is not retried (see
             // `App::link_pending`): the title stays unknown and keeps its
             // ordinary colour, which is the safe direction.
-            let Ok(written) = client.page_exists(project, title) else { continue };
+            let Ok(written) = client.page_exists(project, title) else {
+                continue;
+            };
             let live = if written {
                 true
             } else {
@@ -1059,7 +1196,10 @@ impl App {
                 project: self.index_project.clone(),
                 state: Box::new(index.clone()),
             },
-            None => Place::Page { project: self.project.clone(), title: self.title.clone() },
+            None => Place::Page {
+                project: self.project.clone(),
+                title: self.title.clone(),
+            },
         }
     }
 
@@ -1078,7 +1218,10 @@ impl App {
     /// Read state for a cursor-addressable related row. The flattening order
     /// is exactly the same as `virtual_items`. History never wears unread
     /// blues — the past is all read — so the row answers in states.
-    pub(crate) fn related_telomere(&self, src: usize) -> Option<(i64, cosense::theme::TelomereState)> {
+    pub(crate) fn related_telomere(
+        &self,
+        src: usize,
+    ) -> Option<(i64, cosense::theme::TelomereState)> {
         use cosense::theme::TelomereState as S;
         let index = src.checked_sub(self.lines.len())?;
         let entry = self
@@ -1130,7 +1273,8 @@ impl App {
         self.header_colors = l.header_colors;
         self.project_display = l.project_display;
         self.page_id = l.page_id;
-        self.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.web_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Navigating leaves the joined room. Until the thread has re-joined
         // the new one AND caught it up, there is no push channel here, so
         // the fast poll covers the gap — and `absorb_interval` fetches at
@@ -1297,7 +1441,9 @@ impl App {
     /// the order changes, so the page under the index does not keep the
     /// old order while the list shows the new one.
     pub(crate) fn rebuild_related(&mut self) {
-        let Some(rel) = self.related_block.as_ref() else { return };
+        let Some(rel) = self.related_block.as_ref() else {
+            return;
+        };
         self.related = build_related(&self.facts, Some(rel), &self.project, self.index_sort);
         self.virtual_items = self
             .related
@@ -1331,19 +1477,32 @@ impl App {
             Ok(ms) => ms
                 .into_iter()
                 .map(|m| {
-                    let name = if m.display_name.is_empty() { m.name } else { m.display_name };
+                    let name = if m.display_name.is_empty() {
+                        m.name
+                    } else {
+                        m.display_name
+                    };
                     (m.id, name)
                 })
                 .collect(),
             Err(e) => {
                 // Say so: a silent empty table would look like "unknown
                 // member" and hide a permission or network problem.
-                self.toast_err(t!("メンバー一覧を取得できません: {} — {e}", "member list failed for {}: {e}", self.project));
+                self.toast_err(t!(
+                    "メンバー一覧を取得できません: {} — {e}",
+                    "member list failed for {}: {e}",
+                    self.project
+                ));
                 HashMap::new()
             }
         };
-        self.members
-            .insert(self.project.clone(), MembersCache { names, fetched_at: Instant::now() });
+        self.members.insert(
+            self.project.clone(),
+            MembersCache {
+                names,
+                fetched_at: Instant::now(),
+            },
+        );
     }
 
     /// Display name for a userId in the current project, from the cached

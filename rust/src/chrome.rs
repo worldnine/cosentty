@@ -334,7 +334,12 @@ impl ChromeBackend {
             .and_then(|url| Cdp::connect(&url));
         self.debug(format!("launch+attach {:?}", t0.elapsed()));
         match attach {
-            Ok(cdp) => Ok(Session { child, cdp, auth, profile }),
+            Ok(cdp) => Ok(Session {
+                child,
+                cdp,
+                auth,
+                profile,
+            }),
             Err(e) => {
                 // Session::drop is what normally reaps these; there is no
                 // Session yet, so do it by hand.
@@ -353,9 +358,15 @@ impl ChromeBackend {
     /// thread runs while the TUI owns the alternate screen, so a print
     /// would corrupt the display. `COSENSE_WEB_DEBUG` is a FILE PATH.
     fn debug(&self, line: String) {
-        let Some(path) = std::env::var_os("COSENSE_WEB_DEBUG") else { return };
+        let Some(path) = std::env::var_os("COSENSE_WEB_DEBUG") else {
+            return;
+        };
         use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "[webrender] {line}");
         }
     }
@@ -722,7 +733,9 @@ impl ChromeBackend {
                     return Err(e);
                 }
                 if !ever_loaded {
-                    return Err(WebError::Timeout { seconds: budget().as_secs() });
+                    return Err(WebError::Timeout {
+                        seconds: budget().as_secs(),
+                    });
                 }
                 // Some diagrams may still have made it; report per request.
                 return Ok(last);
@@ -779,7 +792,9 @@ impl ChromeBackend {
         }
         let now = Instant::now();
         if now >= deadline {
-            return Err(WebError::Timeout { seconds: budget().as_secs() });
+            return Err(WebError::Timeout {
+                seconds: budget().as_secs(),
+            });
         }
         std::thread::sleep(step.min(deadline - now));
         Ok(())
@@ -922,13 +937,14 @@ fn segments(path: &str) -> Vec<&str> {
 /// compared against the project we actually requested — never about
 /// substrings, and never about the title, which the user may call anything.
 fn redirected_to_auth(requested: &str, current: &str) -> bool {
-    let (Some((rhost, rpath)), Some((chost, cpath))) =
-        (url_parts(requested), url_parts(current))
+    let (Some((rhost, rpath)), Some((chost, cpath))) = (url_parts(requested), url_parts(current))
     else {
         return false;
     };
     let csegs = segments(cpath);
-    let Some(first) = csegs.first() else { return false };
+    let Some(first) = csegs.first() else {
+        return false;
+    };
     if !AUTH_ROUTES.iter().any(|r| first.eq_ignore_ascii_case(r)) {
         return false;
     }
@@ -940,7 +956,10 @@ fn redirected_to_auth(requested: &str, current: &str) -> bool {
     // an ordinary page of that project, not a wall — but a bare `/auth` is
     // the root route however the project is named.
     let project = segments(rpath).first().copied();
-    csegs.len() < 2 || project.map(|p| !p.eq_ignore_ascii_case(first)).unwrap_or(true)
+    csegs.len() < 2
+        || project
+            .map(|p| !p.eq_ignore_ascii_case(first))
+            .unwrap_or(true)
 }
 
 /// Why a page that did not finish drawing failed.
@@ -1003,7 +1022,9 @@ fn page_target_at(
             }
         }
         if Instant::now() >= deadline {
-            return Err(WebError::Timeout { seconds: budget().as_secs() });
+            return Err(WebError::Timeout {
+                seconds: budget().as_secs(),
+            });
         }
         if stopped.load(Ordering::Relaxed) {
             // Without this the quit path could wait out the whole budget
@@ -1048,7 +1069,9 @@ impl Cdp {
             .map_err(|e| WebError::Backend(format!("devtools send failed: {e}")))?;
         loop {
             if Instant::now() >= deadline {
-                return Err(WebError::Timeout { seconds: budget().as_secs() });
+                return Err(WebError::Timeout {
+                    seconds: budget().as_secs(),
+                });
             }
             match self.ws.read() {
                 Ok(tungstenite::Message::Text(t)) => {
@@ -1060,7 +1083,10 @@ impl Cdp {
                         continue; // an event, or another call's answer
                     }
                     if let Some(err) = v.get("error") {
-                        let m = err.get("message").and_then(|m| m.as_str()).unwrap_or("cdp error");
+                        let m = err
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("cdp error");
                         return Err(WebError::Backend(format!("{method}: {m}")));
                     }
                     return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
@@ -1070,7 +1096,7 @@ impl Cdp {
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    continue // read timeout: loop back and re-check the deadline
+                    continue; // read timeout: loop back and re-check the deadline
                 }
                 Err(e) => return Err(WebError::Backend(format!("devtools read failed: {e}"))),
             }
@@ -1082,7 +1108,11 @@ impl Cdp {
 /// without manufacturing a screenshot request for this diagnostic.
 fn cosense_page_url(project: &str, title: &str) -> String {
     use crate::url::encode_component as segment;
-    format!("https://scrapbox.io/{}/{}", segment(project), segment(title))
+    format!(
+        "https://scrapbox.io/{}/{}",
+        segment(project),
+        segment(title)
+    )
 }
 
 fn kill(child: &mut Child) {
@@ -1205,27 +1235,48 @@ mod tests {
         }
         // A bare root, or another page, is not.
         assert!(!redirected_to_auth(&requested, "https://scrapbox.io/"));
-        assert!(!redirected_to_auth(&requested, "https://scrapbox.io/proj/Other"));
+        assert!(!redirected_to_auth(
+            &requested,
+            "https://scrapbox.io/proj/Other"
+        ));
         // Even for a project named `auth`, the ROOT route still counts.
         let from_auth_project = page_url_for("auth", "Mermaid");
-        assert!(redirected_to_auth(&from_auth_project, "https://scrapbox.io/login"));
+        assert!(redirected_to_auth(
+            &from_auth_project,
+            "https://scrapbox.io/login"
+        ));
     }
 
     #[test]
     fn a_readable_page_is_never_called_unauthorised() {
         // The API outranks the URL: if this browser can read the page, the
         // missing picture is not an authentication problem.
-        assert!(auth_verdict(Some(200), true).is_none(), "200 beats a redirect guess");
+        assert!(
+            auth_verdict(Some(200), true).is_none(),
+            "200 beats a redirect guess"
+        );
         assert!(auth_verdict(Some(200), false).is_none());
         // A refusal is a refusal either way.
-        assert!(matches!(auth_verdict(Some(401), false), Some(WebError::NotAuthorized)));
-        assert!(matches!(auth_verdict(Some(403), true), Some(WebError::NotAuthorized)));
+        assert!(matches!(
+            auth_verdict(Some(401), false),
+            Some(WebError::NotAuthorized)
+        ));
+        assert!(matches!(
+            auth_verdict(Some(403), true),
+            Some(WebError::NotAuthorized)
+        ));
         // Slow, blank, or odd statuses: keep waiting, then time out.
         for st in [204u16, 404, 429, 500, 503] {
-            assert!(auth_verdict(Some(st), false).is_none(), "HTTP {st} is not a refusal");
+            assert!(
+                auth_verdict(Some(st), false).is_none(),
+                "HTTP {st} is not a refusal"
+            );
         }
         // No evidence at all: the redirect is all we have.
-        assert!(matches!(auth_verdict(None, true), Some(WebError::NotAuthorized)));
+        assert!(matches!(
+            auth_verdict(None, true),
+            Some(WebError::NotAuthorized)
+        ));
         assert!(auth_verdict(None, false).is_none());
     }
 
@@ -1244,8 +1295,14 @@ mod tests {
         // Contrast: a genuine wall on the same page still reports one.
         let wall = redirected_to_auth(&requested, "https://scrapbox.io/login");
         assert!(wall);
-        assert!(matches!(auth_verdict(None, wall), Some(WebError::NotAuthorized)));
-        assert!(matches!(auth_verdict(Some(401), false), Some(WebError::NotAuthorized)));
+        assert!(matches!(
+            auth_verdict(None, wall),
+            Some(WebError::NotAuthorized)
+        ));
+        assert!(matches!(
+            auth_verdict(Some(401), false),
+            Some(WebError::NotAuthorized)
+        ));
     }
 
     #[test]
@@ -1346,7 +1403,11 @@ mod tests {
         let key = "COSENSE_WEB_TIMEOUT";
         let prev = std::env::var(key).ok();
         std::env::set_var(key, "0");
-        assert_eq!(budget(), Duration::from_secs(25), "0 is nonsense; use the default");
+        assert_eq!(
+            budget(),
+            Duration::from_secs(25),
+            "0 is nonsense; use the default"
+        );
         std::env::set_var(key, "8");
         assert_eq!(budget(), Duration::from_secs(8));
         match prev {

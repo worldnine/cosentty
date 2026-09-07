@@ -90,10 +90,29 @@ fn uses_char_grid(code: &str) -> bool {
     )
 }
 
+/// テキスト段の結果。幅不足は理由を持って返し、呼び出し側が注記を出せるようにする。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TextOutcome {
+    /// 描けた行。
+    Drawn(Vec<String>),
+    /// 描けたが指定幅に入らない。`needed` は lib が出した図の最大幅(桁)。
+    TooNarrow { needed: usize },
+    /// 未知の型・lib の Err・panic。理由は言わず黙って縮退する。
+    Declined,
+}
+
 /// lib に描かせる。失敗・panic・幅超過は `None` で縮退せよ。
 pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
+    match render_text_outcome(code, width) {
+        TextOutcome::Drawn(lines) => Some(lines),
+        _ => None,
+    }
+}
+
+/// `render_text` の理由付き版。幅不足だけは「何桁あれば描けたか」を添える。
+pub(crate) fn render_text_outcome(code: &str, width: usize) -> TextOutcome {
     if !supported(code) {
-        return None;
+        return TextOutcome::Declined;
     }
     // Mermaidパーサは入力を受ける境界。既知のCJK classDiagramを含め、
     // lib内panicをviewer全体の終了にしない。
@@ -103,9 +122,11 @@ pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
         } else {
             mermaid_text::render_with_width(code, Some(width.max(1)))
         }
-    }))
-    .ok()?
-    .ok()?;
+    }));
+    let rendered = match rendered {
+        Ok(Ok(r)) => r,
+        _ => return TextOutcome::Declined,
+    };
     let out = if uses_char_grid(code) {
         remove_wide_continuation_cells(&rendered)
     } else {
@@ -113,13 +134,16 @@ pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
     };
     let lines: Vec<String> = out.lines().map(str::to_string).collect();
     if lines.is_empty() {
-        return None;
+        return TextOutcome::Declined;
     }
-    // lib の compaction が効かなかった分は欠けより縮退。
-    if lines.iter().any(|l| str_width(l) > width.max(1)) {
-        return None;
+    // lib の compaction が効かなかった分は欠けより縮退。ただし理由は残す:
+    // subgraph の多い flowchart は lib が横並びに置くため 100 桁超になりがちで、
+    // 黙って落とすと「なぜ出ないか」が読者に伝わらない。
+    let needed = lines.iter().map(|l| str_width(l)).max().unwrap_or(0);
+    if needed > width.max(1) {
+        return TextOutcome::TooNarrow { needed };
     }
-    Some(lines)
+    TextOutcome::Drawn(lines)
 }
 
 #[cfg(test)]
@@ -166,8 +190,7 @@ mod tests {
             remove_wide_continuation_cells("│ 開 始  │\n╔═[alt]══[成═功═]══╗"),
             "│ 開始 │\n╔═[alt]══[成功]══╗"
         );
-        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60)
-            .expect("flowchart draws");
+        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60).expect("flowchart draws");
         let joined = out.join("\n");
         assert!(joined.contains("開始"), "phantom cell remains: {joined}");
         assert!(!joined.contains("開 始"), "phantom cell remains: {joined}");
@@ -194,16 +217,35 @@ mod tests {
     fn ascii_mode_drops_box_glyphs() {
         // 環境変数に触らず lib の ASCII 変換だけ確かめる(並列テストのため)。
         // ラベル(日本語)は残り、罫線・塗り・矢頭だけ ASCII になる。
-        let out = mermaid_text::render_ascii_with_width(
-            "flowchart TB\n A[開始]-->B{判断?}",
-            Some(60),
-        )
-        .expect("ascii renders");
+        let out =
+            mermaid_text::render_ascii_with_width("flowchart TB\n A[開始]-->B{判断?}", Some(60))
+                .expect("ascii renders");
         for risky in ['┌', '─', '│', '░', '▸', '═', '┆', '╔'] {
             assert!(!out.contains(risky), "{risky} left in: {out}");
         }
         // lib は CJK に字間を空ける流儀なので文字単位で見る。
-        assert!(out.contains("開") && out.contains("始"), "label stays: {out}");
+        assert!(
+            out.contains("開") && out.contains("始"),
+            "label stays: {out}"
+        );
+    }
+
+    #[test]
+    fn too_narrow_reports_needed_width() {
+        // 3 ノード横並びは 20 桁には入らない。理由と必要幅が返る。
+        let code = "flowchart LR\n A[開始する]-->B[判断する]-->C[終了する]";
+        match render_text_outcome(code, 20) {
+            TextOutcome::TooNarrow { needed } => assert!(needed > 20, "{needed}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(render_text(code, 20), None);
+        // 十分な幅なら描ける。
+        assert!(matches!(
+            render_text_outcome(code, 200),
+            TextOutcome::Drawn(_)
+        ));
+        // 未知の型は幅不足ではなく Declined。
+        assert_eq!(render_text_outcome("foobar\n x", 20), TextOutcome::Declined);
     }
 
     #[test]

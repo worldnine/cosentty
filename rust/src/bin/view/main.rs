@@ -46,27 +46,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
-use cosense::{t, ts};
 use cosense::capability::{self, RenderCapability, SyncState};
-use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
-use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::comment::{format_all, Comment, Selection};
-use cosense::image_fetch::ImageFetcher;
-use cosense::outline::{Destination, Direction as OutlineDirection, LineRange, Plan as OutlinePlan, PlanError, Scope as OutlineScope};
-use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
+use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::highlight::Highlighter;
+use cosense::image_fetch::ImageFetcher;
+use cosense::outline::{
+    Destination, Direction as OutlineDirection, LineRange, Plan as OutlinePlan, PlanError,
+    Scope as OutlineScope,
+};
 use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
     render_lines_with, ArtifactKind, Block, CodeSpan, LinkTruth,
 };
+use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_parts};
+use cosense::ws::{self, RemoteCommit, WsEvent};
+use cosense::{t, ts};
 
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent,
     MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
@@ -135,7 +138,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 download_dir = Some(s["--download-dir=".len()..].to_string())
             }
             "--send-cmd" => send_cmd = it.next(),
-            s if s.starts_with("--send-cmd=") => send_cmd = Some(s["--send-cmd=".len()..].to_string()),
+            s if s.starts_with("--send-cmd=") => {
+                send_cmd = Some(s["--send-cmd=".len()..].to_string())
+            }
             _ => positional.push(a),
         }
     }
@@ -149,7 +154,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let gyazo_teams_token = env_token("GYAZO_TEAMS_ACCESS_TOKEN");
     let gyazo_personal_token = env_token("GYAZO_ACCESS_TOKEN");
     // Reading is forgiving: either token can look a picture up.
-    let gyazo_token = gyazo_teams_token.clone().or_else(|| gyazo_personal_token.clone());
+    let gyazo_token = gyazo_teams_token
+        .clone()
+        .or_else(|| gyazo_personal_token.clone());
 
     // Auth: the official CLI's `cosense login` store (PAT / service
     // account), then the sid cookie fallback — see `AuthStore`.
@@ -188,7 +195,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         },
     };
-    let cfg = Config { project: project.clone(), auth, api_domain };
+    let cfg = Config {
+        project: project.clone(),
+        auth,
+        api_domain,
+    };
     let client = Client::new(cfg)?;
 
     // No title on the command line = "show me the project". The most
@@ -199,7 +210,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(t) => t,
         None => {
             let (_, pages) = client.list_pages(1, 0, "updated")?;
-            pages.first().map(|p| p.title.clone()).ok_or("empty project")?
+            pages
+                .first()
+                .map(|p| p.title.clone())
+                .ok_or("empty project")?
         }
     };
 
@@ -222,8 +236,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Ghostty, iTerm2, Alacritty, …), ask it to disambiguate so the
     // composer can take Shift+Enter as a line break. Elsewhere the
     // request is not sent and `^j` / Alt+Enter remain the way.
-    let keyboard_enhanced =
-        matches!(ratatui::crossterm::terminal::supports_keyboard_enhancement(), Ok(true));
+    let keyboard_enhanced = matches!(
+        ratatui::crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    );
     if keyboard_enhanced {
         let _ = execute!(
             std::io::stdout(),
@@ -308,7 +324,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(project.clone());
     app.light = ctx.light;
     if let Some(e) = ctx.config_error.as_ref() {
-        app.toast_err(t!("設定ファイルを読めませんでした: {e}", "could not read the config file: {e}"));
+        app.toast_err(t!(
+            "設定ファイルを読めませんでした: {e}",
+            "could not read the config file: {e}"
+        ));
     }
     app.session_ime = cosense::ime::SessionIme::new(ime_mode);
     // The serial commit worker: owns its own Client clone and answers on
@@ -337,17 +356,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
         }
     };
-    let web_worker = app.web_jobs_rx.take().filter(|_| !renderer_off).map(|jobs_rx| {
-        spawn_web_worker(
-            jobs_rx,
-            app.web_tx.clone(),
-            Arc::clone(&web_backend),
-            ctx.picker.clone(),
-            ArtifactCache::new(),
-            Arc::clone(&app.web_gen),
-            Arc::clone(&app.src_epoch),
-        )
-    });
+    let web_worker = app
+        .web_jobs_rx
+        .take()
+        .filter(|_| !renderer_off)
+        .map(|jobs_rx| {
+            spawn_web_worker(
+                jobs_rx,
+                app.web_tx.clone(),
+                Arc::clone(&web_backend),
+                ctx.picker.clone(),
+                ArtifactCache::new(),
+                Arc::clone(&app.web_gen),
+                Arc::clone(&app.src_epoch),
+            )
+        });
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
     // PAT while the push channel only accepts the sid), polling otherwise.
@@ -440,7 +463,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 app.cursor = i;
                 app.follow = true;
             }
-            None => app.toast_err(t!("このページに行 {id} はありません", "line {id} not found on this page")),
+            None => app.toast_err(t!(
+                "このページに行 {id} はありません",
+                "line {id} not found on this page"
+            )),
         }
     }
 
@@ -610,7 +636,11 @@ enum Action {
     Repaint,
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Result<(), Box<dyn Error>> {
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    ctx: &Ctx,
+) -> Result<(), Box<dyn Error>> {
     // 文字を打ち込める場所に入る/出るでハードウェアカーソルの形を
     // 切り替える: 点滅する縦棒が見えている=入力中、という一次サイン。
     // 応えない端末のために ui 側が同じセルを REVERSED でも塗る
@@ -703,7 +733,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         // only then, so an idle viewer still costs ~8 wake-ups a second.
         // The same goes for a picture on its way: its `[URL]` row pulses.
         // A toast fades at both ends, so it wants the smoother rate too.
-        let tick = if app.web_shimmer.is_empty() && app.pending.is_empty() && app.toast.is_none() { 120 } else { 60 };
+        let tick = if app.web_shimmer.is_empty() && app.pending.is_empty() && app.toast.is_none() {
+            120
+        } else {
+            60
+        };
         if !event::poll(Duration::from_millis(tick))? {
             continue;
         }
@@ -765,7 +799,10 @@ fn flush_commits(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &C
     }
     if app.inflight > 0 {
         // Leave a trace on the real terminal after restore.
-        eprintln!("warning: {} edit(s) may not have reached the server", app.inflight);
+        eprintln!(
+            "warning: {} edit(s) may not have reached the server",
+            app.inflight
+        );
     }
 }
 
@@ -812,16 +849,19 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
     // READ has nowhere to put it. Silence here reads as "paste is broken",
     // so say where it does go.
     if !clean.trim().is_empty() {
-        app.toast(t!("貼り付けは編集中に — e / i / o で入ってから", "paste while editing — enter with e / i / o first"));
+        app.toast(t!(
+            "貼り付けは編集中に — e / i / o で入ってから",
+            "paste while editing — enter with e / i / o first"
+        ));
     }
 }
 
+mod images;
 #[cfg(test)]
 mod tests;
-mod images;
 use images::*;
-mod mmd_text;
 mod links;
+mod mmd_text;
 use links::*;
 mod upload;
 use upload::*;
@@ -849,5 +889,3 @@ mod toast;
 use toast::*;
 mod handoff;
 use handoff::*;
-
-

@@ -187,10 +187,38 @@ pub enum WebError {
 impl fmt::Display for WebError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WebError::NoBrowser => write!(f, "{}", crate::ts!("Chrome が見つかりません（COSENSE_CHROME で指定できます）", "no Chrome found (set COSENSE_CHROME)")),
-            WebError::Timeout { seconds } => write!(f, "{}", crate::t!("ブラウザが {seconds} 秒でタイムアウトしました", "browser timed out after {seconds}s")),
-            WebError::NotRendered => write!(f, "{}", crate::ts!("Cosense 側が図を描きませんでした", "diagram not drawn by Cosense")),
-            WebError::NotAuthorized => write!(f, "{}", crate::ts!("このログインではページを見られません", "page not visible to this login")),
+            WebError::NoBrowser => write!(
+                f,
+                "{}",
+                crate::ts!(
+                    "Chrome が見つかりません（COSENSE_CHROME で指定できます）",
+                    "no Chrome found (set COSENSE_CHROME)"
+                )
+            ),
+            WebError::Timeout { seconds } => write!(
+                f,
+                "{}",
+                crate::t!(
+                    "ブラウザが {seconds} 秒でタイムアウトしました",
+                    "browser timed out after {seconds}s"
+                )
+            ),
+            WebError::NotRendered => write!(
+                f,
+                "{}",
+                crate::ts!(
+                    "Cosense 側が図を描きませんでした",
+                    "diagram not drawn by Cosense"
+                )
+            ),
+            WebError::NotAuthorized => write!(
+                f,
+                "{}",
+                crate::ts!(
+                    "このログインではページを見られません",
+                    "page not visible to this login"
+                )
+            ),
             WebError::Backend(m) => write!(f, "{m}"),
         }
     }
@@ -368,7 +396,9 @@ impl ArtifactCache {
     ///   * temp files left by an interrupted write are removed once they
     ///     are too old to belong to a live writer.
     fn sweep(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else { return };
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
         let ttl = artifact_ttl();
         let now = SystemTime::now();
         for entry in entries.flatten() {
@@ -442,7 +472,9 @@ impl ArtifactCache {
         if png.is_empty() {
             return;
         }
-        let Some((tmp, mut file)) = self.open_tmp() else { return };
+        let Some((tmp, mut file)) = self.open_tmp() else {
+            return;
+        };
         let written = file
             .write_all(png)
             // The rename is atomic, but only the bytes that reached the
@@ -467,11 +499,11 @@ impl ArtifactCache {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as u64)
                 .unwrap_or(0)
-                ^ N.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-            let tmp = self.dir.join(format!(
-                "{TMP_PREFIX}{}-{nonce:016x}",
-                std::process::id()
-            ));
+                ^ N.fetch_add(1, Ordering::Relaxed)
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let tmp = self
+                .dir
+                .join(format!("{TMP_PREFIX}{}-{nonce:016x}", std::process::id()));
             let mut opts = std::fs::OpenOptions::new();
             opts.write(true).create_new(true);
             #[cfg(unix)]
@@ -493,7 +525,9 @@ fn harden_file(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let Ok(meta) = std::fs::metadata(path) else { return };
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
         let mode = meta.permissions().mode();
         if mode & 0o077 != 0 {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700)).ok();
@@ -593,7 +627,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let c = scratch("perm");
         c.put("web:mermaid:aaaa", b"png-bytes");
-        assert_eq!(mode_of(c.dir()), 0o700, "the directory holds renders of private pages");
+        assert_eq!(
+            mode_of(c.dir()),
+            0o700,
+            "the directory holds renders of private pages"
+        );
         let entry = c.dir().join("web-mermaid-aaaa.png");
         assert_eq!(mode_of(&entry), 0o600);
 
@@ -604,7 +642,10 @@ mod tests {
         let reopened = ArtifactCache::at(c.dir().to_path_buf());
         assert_eq!(mode_of(reopened.dir()), 0o700);
         assert_eq!(mode_of(&entry), 0o600);
-        assert_eq!(reopened.get("web:mermaid:aaaa").as_deref(), Some(&b"png-bytes"[..]));
+        assert_eq!(
+            reopened.get("web:mermaid:aaaa").as_deref(),
+            Some(&b"png-bytes"[..])
+        );
     }
 
     #[test]
@@ -643,7 +684,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with(TMP_PREFIX))
             .collect();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -652,16 +696,21 @@ mod tests {
         // An empty file is never a valid PNG; it must not be handed out.
         std::fs::write(c.dir().join("web-mermaid-empty.png"), b"").unwrap();
         assert!(c.get("web:mermaid:empty").is_none());
-        assert!(!c.dir().join("web-mermaid-empty.png").exists(), "and it is removed");
+        assert!(
+            !c.dir().join("web-mermaid-empty.png").exists(),
+            "and it is removed"
+        );
 
         // Past the TTL an artifact is a miss: Cosense's own Mermaid version
         // and the project CSS can change without anything in the key moving.
         c.put("web:mermaid:old", b"png-bytes");
         let path = c.dir().join("web-mermaid-old.png");
-        let ancient =
-            SystemTime::now() - artifact_ttl() - Duration::from_secs(3600);
+        let ancient = SystemTime::now() - artifact_ttl() - Duration::from_secs(3600);
         filetime_set(&path, ancient);
-        assert!(c.get("web:mermaid:old").is_none(), "expired entries are misses");
+        assert!(
+            c.get("web:mermaid:old").is_none(),
+            "expired entries are misses"
+        );
         assert!(!path.exists());
 
         // Inside the TTL it is served.
@@ -674,7 +723,10 @@ mod tests {
         let key = "COSENSE_WEB_CACHE_TTL_DAYS";
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
-        assert_eq!(artifact_ttl(), Duration::from_secs(ARTIFACT_TTL_DAYS * 86400));
+        assert_eq!(
+            artifact_ttl(),
+            Duration::from_secs(ARTIFACT_TTL_DAYS * 86400)
+        );
         std::env::set_var(key, "1");
         assert_eq!(artifact_ttl(), Duration::from_secs(86400));
         std::env::set_var(key, "0");
@@ -695,7 +747,10 @@ mod tests {
     fn a_corrupt_entry_can_be_dropped_so_it_is_re_rendered() {
         let c = scratch("corrupt");
         // Truncated: a real PNG signature with nothing behind it.
-        c.put("web:mermaid:trunc", &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        c.put(
+            "web:mermaid:trunc",
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+        );
         assert!(c.get("web:mermaid:trunc").is_some(), "bytes are there…");
         assert!(
             image::load_from_memory(&c.get("web:mermaid:trunc").unwrap()).is_err(),
@@ -716,7 +771,13 @@ mod tests {
         // one again; the TTL sweep is what eventually reclaims the file.
         let k = req().cache_key();
         let mut h = Fnv::new();
-        for part in ["mermaid", "help-jp", "Mermaid", "65695a556db42200239324b9", "65695bc797c2910000c699b2"] {
+        for part in [
+            "mermaid",
+            "help-jp",
+            "Mermaid",
+            "65695a556db42200239324b9",
+            "65695bc797c2910000c699b2",
+        ] {
             h.write(part.as_bytes());
             h.write(b"\x1f");
         }
@@ -735,7 +796,10 @@ mod tests {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as i64;
-            let tv = libc::timeval { tv_sec: secs, tv_usec: 0 };
+            let tv = libc::timeval {
+                tv_sec: secs,
+                tv_usec: 0,
+            };
             let times = [tv, tv];
             let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
             assert_eq!(unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) }, 0);
@@ -745,7 +809,10 @@ mod tests {
     #[test]
     fn selector_addresses_the_preview_by_line_id() {
         // Verified live: div.mermaid-preview#mermaid-preview-<lineId>.
-        assert_eq!(req().selector(), "#mermaid-preview-65695bc797c2910000c699b2");
+        assert_eq!(
+            req().selector(),
+            "#mermaid-preview-65695bc797c2910000c699b2"
+        );
         assert_eq!(WebKind::Mermaid.ready_child(), "svg");
     }
 
@@ -770,7 +837,11 @@ mod tests {
         ] {
             let mut v = base.clone();
             mutate(&mut v);
-            assert_ne!(base.cache_key(), v.cache_key(), "{v:?} must not reuse the base key");
+            assert_ne!(
+                base.cache_key(),
+                v.cache_key(),
+                "{v:?} must not reuse the base key"
+            );
         }
         // …and an identical request is the same artifact (cache hits work).
         assert!(base.same_artifact(&req()));
@@ -817,7 +888,10 @@ mod tests {
         assert!(matches!(out[0], Err(WebError::NoBrowser)));
         // The reason is told in the reader's own language.
         crate::lang::set_for_thread(crate::lang::Lang::En);
-        assert_eq!(WebError::NoBrowser.to_string(), "no Chrome found (set COSENSE_CHROME)");
+        assert_eq!(
+            WebError::NoBrowser.to_string(),
+            "no Chrome found (set COSENSE_CHROME)"
+        );
         crate::lang::set_for_thread(crate::lang::Lang::Ja);
         assert_eq!(
             WebError::NoBrowser.to_string(),

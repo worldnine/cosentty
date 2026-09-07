@@ -5,8 +5,11 @@
 //! reference (resolved to a real image later), or a table (pre-formatted rows).
 
 mod inline;
-pub use inline::{bullet_indent_width, file_name_of_url, gyazo_permalink, indent_info, inline_formulas, is_scrapbox_file_url, looks_like_image_url, matching_bracket, strip_leading_ws, text_column};
 use inline::*;
+pub use inline::{
+    bullet_indent_width, file_name_of_url, gyazo_permalink, indent_info, inline_formulas,
+    is_scrapbox_file_url, looks_like_image_url, matching_bracket, strip_leading_ws, text_column,
+};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -25,7 +28,11 @@ pub enum Block {
     /// picture that is its own item wears the bullet; a picture under a
     /// line of text is that line's continuation and wears none.
     ///
-    Image { url: String, indent: usize, item: bool },
+    Image {
+        url: String,
+        indent: usize,
+        item: bool,
+    },
     /// A line that mixes text and pictures (`本文 [画像]`, `[画像]本文`,
     /// `[A] と [B]`). The viewer lays the parts out left to right with each
     /// picture sitting ON the text line — its bottom edge level with the
@@ -34,7 +41,11 @@ pub enum Block {
     ///
     /// `item`: the line is an indented list item, so it wears a bullet at
     /// its top-left like every other item at that level.
-    Inline { indent: usize, item: bool, parts: Vec<InlinePart> },
+    Inline {
+        indent: usize,
+        item: bool,
+        parts: Vec<InlinePart>,
+    },
     /// A structured table, laid out against the pane width at draw time.
     Table(crate::table::Table),
     /// A code block that is really a PICTURE of something: a Mermaid
@@ -187,7 +198,11 @@ pub fn code_span_at(lines: &[&str], i: usize) -> Option<CodeSpan> {
                     .strip_prefix("code:")
                     .map(mermaid_lang)
                     .unwrap_or(false);
-            return Some(CodeSpan { header: k, header_indent, mermaid_header });
+            return Some(CodeSpan {
+                header: k,
+                header_indent,
+                mermaid_header,
+            });
         }
         if i < k {
             return None; // headers only come later now
@@ -301,7 +316,9 @@ fn lang_is(lang: &str, names: &[&str]) -> bool {
 /// limit the header and every line under it are ordinary list items, each
 /// keeping its own indentation — the block is not even a code block.
 fn artifact_too_deep(header_indent: usize, body: &str) -> bool {
-    let Some(lang) = body.strip_prefix("code:") else { return false };
+    let Some(lang) = body.strip_prefix("code:") else {
+        return false;
+    };
     match artifact_max_indent(lang) {
         Some(max) => header_indent > max,
         None => false,
@@ -367,7 +384,10 @@ pub enum HitTarget {
     /// The text inside the brackets of a page link, or a `#tag` without
     /// its `#`. `/project/title` included, verbatim.
     Page(String),
-    Url { label: String, url: String },
+    Url {
+        label: String,
+        url: String,
+    },
     /// A `code:name` / `table:name` header, which the viewer serves as a
     /// file.
     BlockLabel,
@@ -478,7 +498,6 @@ impl LinkTruth {
     }
 }
 
-
 /// Render with defaults (dark palette, no syntax highlighting).
 pub fn render_lines(lines: &[String]) -> RenderOutput {
     let pal = Palette::for_light(false);
@@ -506,7 +525,9 @@ pub fn render_lines_with(
 
     // Every block records the source line it came from (see RenderOutput.srcs).
     macro_rules! emit {
-        ($block:expr) => {{ emit!($block, 0) }};
+        ($block:expr) => {{
+            emit!($block, 0)
+        }};
         ($block:expr, $shift:expr) => {{
             out.push($block);
             srcs.push(i);
@@ -514,7 +535,10 @@ pub fn render_lines_with(
             all_hits.push(
                 std::mem::take(&mut hits)
                     .into_iter()
-                    .map(|h| Hit { span: h.span + shift, ..h })
+                    .map(|h| Hit {
+                        span: h.span + shift,
+                        ..h
+                    })
                     .collect(),
             );
         }};
@@ -536,7 +560,10 @@ pub fn render_lines_with(
         }
         if body.is_empty() {
             let mut spans: Vec<Span<'static>> = vec![Span::raw(indent.clone())];
-            spans.push(Span::styled("•".to_string(), Style::default().fg(pal.bullet)));
+            spans.push(Span::styled(
+                "•".to_string(),
+                Style::default().fg(pal.bullet),
+            ));
             emit!(Block::Text(Line::from(spans)));
             i += 1;
             continue;
@@ -557,7 +584,13 @@ pub fn render_lines_with(
                 if rl <= raw_len {
                     break;
                 }
-                rows.push((j, rrest.split('\t').map(|c| c.trim_end().to_string()).collect()));
+                rows.push((
+                    j,
+                    rrest
+                        .split('\t')
+                        .map(|c| c.trim_end().to_string())
+                        .collect(),
+                ));
                 j += 1;
             }
             // decorate cells to styled spans (links stay navigable via extraction)
@@ -568,7 +601,14 @@ pub fn render_lines_with(
                         *src,
                         r.iter()
                             .map(|c| {
-                                decorate_inline(c, &mut ex.links, &mut ex.images, pal, known, &mut hits)
+                                decorate_inline(
+                                    c,
+                                    &mut ex.links,
+                                    &mut ex.images,
+                                    pal,
+                                    known,
+                                    &mut hits,
+                                )
                             })
                             .collect(),
                     )
@@ -606,7 +646,10 @@ pub fn render_lines_with(
             // bullet says where the block hangs, the wash says what it is.
             let mut header_spans = vec![Span::raw(indent.clone())];
             if level > 0 {
-                header_spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
+                header_spans.push(Span::styled(
+                    "• ".to_string(),
+                    Style::default().fg(pal.bullet),
+                ));
             }
             header_spans.push(Span::styled(format!("code:{lang}"), style_block_label(pal)));
             let header = Line::from(header_spans);
@@ -620,7 +663,10 @@ pub fn render_lines_with(
                 None
             };
             if artifact.is_none() {
-                hits.push(Hit { span: 0, target: HitTarget::BlockLabel });
+                hits.push(Hit {
+                    span: 0,
+                    target: HitTarget::BlockLabel,
+                });
                 // Past the indent and, when nested, the bullet: the hit
                 // has to land on the `code:` label itself.
                 emit!(Block::Text(header.clone()), if level > 0 { 2 } else { 1 });
@@ -666,7 +712,8 @@ pub fn render_lines_with(
                     }
                     for (k, spans) in highlighted.into_iter().enumerate() {
                         let src = raws.get(k).copied().unwrap_or(i);
-                        let mut line_spans: Vec<Span<'static>> = vec![Span::raw(format!("{indent}  "))];
+                        let mut line_spans: Vec<Span<'static>> =
+                            vec![Span::raw(format!("{indent}  "))];
                         for (text, style) in spans {
                             line_spans.push(Span::styled(text, style));
                         }
@@ -703,7 +750,10 @@ pub fn render_lines_with(
                         });
                     }
                     None => {
-                        hits.push(Hit { span: 0, target: HitTarget::BlockLabel });
+                        hits.push(Hit {
+                            span: 0,
+                            target: HitTarget::BlockLabel,
+                        });
                         emit!(Block::Text(header), 1)
                     }
                 }
@@ -724,7 +774,11 @@ pub fn render_lines_with(
         // either of them is worse than stacking them.
         if let Some(url) = standalone_image(body) {
             ex.images.push(url.clone());
-            emit!(Block::Image { url, indent: text_column(level), item: level > 0 });
+            emit!(Block::Image {
+                url,
+                indent: text_column(level),
+                item: level > 0
+            });
             i += 1;
             continue;
         }
@@ -740,7 +794,11 @@ pub fn render_lines_with(
             // spans (`App::link_at_screen_position`). No shift: the indent
             // and bullet are drawn by the viewer, not carried as spans.
             let parts = inline_parts(body, &mut ex.links, &mut ex.images, pal, known, &mut hits);
-            emit!(Block::Inline { indent: text_column(level), item: level > 0, parts });
+            emit!(Block::Inline {
+                indent: text_column(level),
+                item: level > 0,
+                parts
+            });
             i += 1;
             continue;
         }
@@ -773,7 +831,14 @@ pub fn render_lines_with(
                 Span::raw(indent.clone()),
                 Span::styled("┃ ".to_string(), Style::default().fg(pal.quote_bar)),
             ];
-            for s in decorate_inline(q.trim(), &mut ex.links, &mut ex.images, pal, known, &mut hits) {
+            for s in decorate_inline(
+                q.trim(),
+                &mut ex.links,
+                &mut ex.images,
+                pal,
+                known,
+                &mut hits,
+            ) {
                 let styled = s.style.add_modifier(Modifier::ITALIC);
                 spans.push(Span::styled(s.content.into_owned(), styled));
             }
@@ -786,11 +851,16 @@ pub fn render_lines_with(
         // Markdown would make these competing block types; Cosense composes
         // them. Keep the positional bullet in the bullet style and apply the
         // theme's heading style only to the heading text.
-        if let Some(heading) = parse_heading(body, pal, known, &mut hits, &mut ex.links, &mut ex.images) {
+        if let Some(heading) =
+            parse_heading(body, pal, known, &mut hits, &mut ex.links, &mut ex.images)
+        {
             let mut spans: Vec<Span<'static>> = Vec::new();
             if level > 0 {
                 spans.push(Span::raw(indent.clone()));
-                spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
+                spans.push(Span::styled(
+                    "• ".to_string(),
+                    Style::default().fg(pal.bullet),
+                ));
             }
             spans.extend(heading);
             let prefix = if level > 0 { 2 } else { 0 };
@@ -804,7 +874,10 @@ pub fn render_lines_with(
         let mut spans: Vec<Span<'static>> = Vec::new();
         if level > 0 {
             spans.push(Span::raw(indent.clone()));
-            spans.push(Span::styled("• ".to_string(), Style::default().fg(pal.bullet)));
+            spans.push(Span::styled(
+                "• ".to_string(),
+                Style::default().fg(pal.bullet),
+            ));
         }
         spans.extend(content);
         let prefix = if level > 0 { 2 } else { 0 };
@@ -812,7 +885,12 @@ pub fn render_lines_with(
         i += 1;
     }
 
-    RenderOutput { blocks: out, srcs, extracted: ex, hits: all_hits }
+    RenderOutput {
+        blocks: out,
+        srcs,
+        extracted: ex,
+        hits: all_hits,
+    }
 }
 
 /// If the whole body is `[* ...]`/`[** ...]`/…, render it as a heading.
@@ -834,7 +912,10 @@ fn parse_heading(
         return None; // something follows the bracket: not a heading LINE
     }
     let inner = &body.trim_end()[body.find('[')? + 1..close];
-    let stars = inner.char_indices().find(|(_, c)| *c != '*').map(|(i, _)| i)?;
+    let stars = inner
+        .char_indices()
+        .find(|(_, c)| *c != '*')
+        .map(|(i, _)| i)?;
     if stars == 0 {
         return None;
     }

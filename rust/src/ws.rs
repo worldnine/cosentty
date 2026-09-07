@@ -49,7 +49,10 @@ const STATUS_THROTTLE: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IoPacket {
     /// engine.io open: `0{"sid":…,"pingInterval":…,"pingTimeout":…}`.
-    Open { ping_interval: u64, ping_timeout: u64 },
+    Open {
+        ping_interval: u64,
+        ping_timeout: u64,
+    },
     /// engine.io ping (`2`) — reply with a pong (`3`).
     Ping,
     /// engine.io pong (`3`).
@@ -64,7 +67,10 @@ pub enum IoPacket {
     Disconnect,
     /// `42[name, data]` (a trailing packet id between `42` and `[` is
     /// accepted and dropped — the server's join ack uses one).
-    Event { name: String, data: serde_json::Value },
+    Event {
+        name: String,
+        data: serde_json::Value,
+    },
     /// `43<packet-id>[…]` — acknowledgement (the join reply).
     Ack(serde_json::Value),
     /// `44{…}` — connect error ("You are not logged in yet." and friends).
@@ -108,11 +114,7 @@ pub fn parse_packet(text: &str) -> IoPacket {
             };
             match serde_json::from_str::<serde_json::Value>(json) {
                 Ok(serde_json::Value::Array(mut a)) if !a.is_empty() => {
-                    let name = a
-                        .remove(0)
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_default();
+                    let name = a.remove(0).as_str().map(str::to_string).unwrap_or_default();
                     let data = a.into_iter().next().unwrap_or(serde_json::Value::Null);
                     IoPacket::Event { name, data }
                 }
@@ -139,7 +141,10 @@ pub fn parse_packet(text: &str) -> IoPacket {
 fn parse_open(json: &str) -> IoPacket {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
         let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        IoPacket::Open { ping_interval: n("pingInterval"), ping_timeout: n("pingTimeout") }
+        IoPacket::Open {
+            ping_interval: n("pingInterval"),
+            ping_timeout: n("pingTimeout"),
+        }
     } else {
         IoPacket::Other(format!("0{json}"))
     }
@@ -200,9 +205,19 @@ pub fn parse_commit(data: &serde_json::Value) -> Option<RemoteCommit> {
     let commit_id = data.get("id")?.as_str()?.to_string();
     let parent_id = data.get("parentId")?.as_str()?.to_string();
     let page_id = data.get("pageId")?.as_str()?.to_string();
-    let user_id = data.get("userId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let user_id = data
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let ops = parse_changes(data.get("changes")?.as_array()?);
-    Some(RemoteCommit { commit_id, parent_id, page_id, user_id, ops })
+    Some(RemoteCommit {
+        commit_id,
+        parent_id,
+        page_id,
+        user_id,
+        ops,
+    })
 }
 
 /// `changes` entries → [`EditOp`]. `_insert`/`_update`/`_delete` map
@@ -214,7 +229,10 @@ pub fn parse_changes(changes: &[serde_json::Value]) -> Vec<EditOp> {
         if let Some(anchor) = c.get("_insert").and_then(|v| v.as_str()) {
             let lines = insert_lines(c.get("lines"));
             if !lines.is_empty() {
-                ops.push(EditOp::Insert { anchor: anchor.to_string(), lines });
+                ops.push(EditOp::Insert {
+                    anchor: anchor.to_string(),
+                    lines,
+                });
             }
         } else if let Some(id) = c.get("_update").and_then(|v| v.as_str()) {
             if let Some(text) = c
@@ -222,7 +240,10 @@ pub fn parse_changes(changes: &[serde_json::Value]) -> Vec<EditOp> {
                 .and_then(|l| l.get("text"))
                 .and_then(|v| v.as_str())
             {
-                ops.push(EditOp::Replace { id: id.to_string(), text: text.to_string() });
+                ops.push(EditOp::Replace {
+                    id: id.to_string(),
+                    text: text.to_string(),
+                });
             }
         } else if let Some(id) = c.get("_delete").and_then(|v| v.as_str()) {
             ops.push(EditOp::Delete { id: id.to_string() });
@@ -250,7 +271,11 @@ fn insert_lines(v: Option<&serde_json::Value>) -> Vec<(String, String)> {
             .filter_map(|l| {
                 let id = l.get("id").and_then(|s| s.as_str())?;
                 let text = l.get("text").and_then(|s| s.as_str()).unwrap_or_default();
-                if id.is_empty() { None } else { Some((id.to_string(), text.to_string())) }
+                if id.is_empty() {
+                    None
+                } else {
+                    Some((id.to_string(), text.to_string()))
+                }
             })
             .collect(),
         _ => Vec::new(),
@@ -274,11 +299,17 @@ pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp], user_id: &str
         .unwrap_or(0);
     for op in ops {
         match op {
-            EditOp::Insert { anchor, lines: newl } => {
+            EditOp::Insert {
+                anchor,
+                lines: newl,
+            } => {
                 let mut at = if anchor == "_end" {
                     lines.len()
                 } else {
-                    lines.iter().position(|l| l.id == *anchor).unwrap_or(lines.len())
+                    lines
+                        .iter()
+                        .position(|l| l.id == *anchor)
+                        .unwrap_or(lines.len())
                 };
                 for (id, text) in newl {
                     if lines.iter().any(|l| l.id == *id) {
@@ -343,7 +374,10 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// whole budget when an IPv4 one would answer.
 fn connect_within(addr: (&str, u16), timeout: Duration) -> Result<TcpStream, String> {
     use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = addr.to_socket_addrs().map_err(|e| format!("resolve: {e}"))?.collect();
+    let addrs: Vec<_> = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve: {e}"))?
+        .collect();
     if addrs.is_empty() {
         return Err(format!("resolve: no addresses for {}", addr.0));
     }
@@ -364,9 +398,10 @@ impl RoomLink {
     /// `connect.sid` cookie value — the ONLY credential the server takes
     /// on the websocket (PAT is refused, verified live).
     pub fn connect(api_domain: &str, sid: &str) -> Result<Self, String> {
-        let uri: tungstenite::http::Uri = format!("wss://{api_domain}/socket.io/?EIO=4&transport=websocket")
-            .parse()
-            .map_err(|e| format!("bad ws uri: {e}"))?;
+        let uri: tungstenite::http::Uri =
+            format!("wss://{api_domain}/socket.io/?EIO=4&transport=websocket")
+                .parse()
+                .map_err(|e| format!("bad ws uri: {e}"))?;
         let request = ClientRequestBuilder::new(uri)
             .with_header("Origin", format!("https://{api_domain}"))
             .with_header("Cookie", format!("connect.sid={sid}"))
@@ -429,7 +464,10 @@ impl RoomLink {
                 _ => {} // tick — keep waiting
             }
         }
-        Ok(RoomLink { ws, last_rx: Instant::now() })
+        Ok(RoomLink {
+            ws,
+            last_rx: Instant::now(),
+        })
     }
 
     /// Join the page room (`420[…]`) and wait for the `430[…]` ack.
@@ -486,9 +524,7 @@ impl RoomLink {
     }
 
     /// Raw tick-able read: `Err` on kernel timeout, `Ok(None)` on nothing.
-    fn read_once(
-        ws: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    ) -> Result<Option<Message>, String> {
+    fn read_once(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Result<Option<Message>, String> {
         match ws.read() {
             Ok(m) => Ok(Some(m)),
             Err(tungstenite::Error::Io(e))
@@ -599,7 +635,11 @@ struct ResyncRequest {
 
 impl ResyncRequest {
     fn new() -> Self {
-        Self { due: false, next_at: Instant::now(), backoff: Duration::from_secs(1) }
+        Self {
+            due: false,
+            next_at: Instant::now(),
+            backoff: Duration::from_secs(1),
+        }
     }
 
     /// (Re)arm the request (arrival of a `WsRequest::Resync`).
@@ -661,7 +701,10 @@ pub fn spawn_ws_sync(
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
-            if joined.as_ref().map_or(true, |j| *j != (project.clone(), title.clone())) {
+            if joined
+                .as_ref()
+                .map_or(true, |j| *j != (project.clone(), title.clone()))
+            {
                 joined = Some((project.clone(), title.clone()));
                 last_commit_id = None; // new room: commit lineage is unknown
             }
@@ -673,7 +716,11 @@ pub fn spawn_ws_sync(
             let page = match client.get_page_in(&project, &title) {
                 Ok(p) => p,
                 Err(e) => {
-                    throttled_status(&tx, &mut last_status, &format!("ws: page lookup failed ({e})"));
+                    throttled_status(
+                        &tx,
+                        &mut last_status,
+                        &format!("ws: page lookup failed ({e})"),
+                    );
                     state(&tx, &project, &title, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
@@ -683,7 +730,11 @@ pub fn spawn_ws_sync(
             let project_id = match client.get_project_id(&project) {
                 Ok(p) => p,
                 Err(e) => {
-                    throttled_status(&tx, &mut last_status, &format!("ws: project lookup failed ({e})"));
+                    throttled_status(
+                        &tx,
+                        &mut last_status,
+                        &format!("ws: project lookup failed ({e})"),
+                    );
                     state(&tx, &project, &title, SyncState::Reconnecting);
                     std::thread::sleep(backoff);
                     backoff = grow(backoff);
@@ -868,12 +919,7 @@ fn grow(b: Duration) -> Duration {
 
 /// Publish a push-channel state. Deliberately NOT throttled — see
 /// [`WsEvent::State`].
-fn state(
-    tx: &Sender<WsEvent>,
-    project: &str,
-    title: &str,
-    s: crate::capability::SyncState,
-) {
+fn state(tx: &Sender<WsEvent>, project: &str, title: &str, s: crate::capability::SyncState) {
     let _ = tx.send(WsEvent::State {
         project: project.to_string(),
         title: title.to_string(),
@@ -900,7 +946,13 @@ mod tests {
     use crate::api::PageLine;
 
     fn pl(id: &str, text: &str) -> PageLine {
-        PageLine { id: id.into(), text: text.into(), user_id: String::new(), created: 0, updated: 0 }
+        PageLine {
+            id: id.into(),
+            text: text.into(),
+            user_id: String::new(),
+            created: 0,
+            updated: 0,
+        }
     }
 
     #[test]
@@ -911,17 +963,14 @@ mod tests {
         // used to cost up to 60 s of silence here.
         assert_eq!(initial_plan(true), (true, SyncState::Polling));
         assert_eq!(initial_plan(false), (false, SyncState::Polling));
-        assert_eq!(
-            initial_plan(true).1.poll_interval(),
-            Duration::from_secs(3)
-        );
+        assert_eq!(initial_plan(true).1.poll_interval(), Duration::from_secs(3));
     }
 
     #[test]
     fn resync_request_survives_failures_until_success() {
         let mut r = ResyncRequest::new();
         let t0 = Instant::now(); // after construction, so the first attempt may run
-        // quietly idle until armed
+                                 // quietly idle until armed
         assert!(!r.attempt(t0));
         r.request();
         // first attempt is allowed immediately
@@ -939,7 +988,10 @@ mod tests {
         assert!(r.attempt(t0 + Duration::from_secs(4)));
         r.ok(); // success consumes it
         assert!(!r.due);
-        assert!(!r.attempt(t0 + Duration::from_secs(5)), "cleared request stays quiet");
+        assert!(
+            !r.attempt(t0 + Duration::from_secs(5)),
+            "cleared request stays quiet"
+        );
         // …and the backoff reset for the next request
         r.request();
         assert!(r.attempt(Instant::now()));
@@ -954,7 +1006,11 @@ mod tests {
         let t0 = Instant::now();
         r.request();
         assert!(r.attempt(t0));
-        assert_eq!(r.backoff, Duration::from_secs(15), "retry gap never exceeds 15s");
+        assert_eq!(
+            r.backoff,
+            Duration::from_secs(15),
+            "retry gap never exceeds 15s"
+        );
     }
 
     #[test]
@@ -965,15 +1021,17 @@ mod tests {
         // After joining, the worker must publish a fresh catch-up snapshot.
         let sid = std::env::var("COSENSE_SID").expect("COSENSE_SID is required");
         assert!(!sid.is_empty(), "COSENSE_SID must not be empty");
-        let project = std::env::var("COSENSE_PROJECT_NAME")
-            .unwrap_or_else(|_| "my-sandbox".into());
+        let project =
+            std::env::var("COSENSE_PROJECT_NAME").unwrap_or_else(|_| "my-sandbox".into());
         let cfg = crate::api::Config {
             project: project.clone(),
             auth: crate::api::AuthStore::load(Some(sid.clone())),
             api_domain: "scrapbox.io".into(),
         };
         let client = crate::api::Client::new(cfg).expect("client");
-        let (_, pages) = client.list_pages_in(&project, 1, 0, "updated").expect("latest page");
+        let (_, pages) = client
+            .list_pages_in(&project, 1, 0, "updated")
+            .expect("latest page");
         let title = pages.first().expect("non-empty project").title.clone();
 
         let (req_tx, req_rx) = mpsc::channel();
@@ -996,13 +1054,17 @@ mod tests {
                 Ok(WsEvent::Resynced(res)) => {
                     // the published snapshot is the CURRENT page — as read
                     // post-join, not some pre-join fetch
-                    let now_page =
-                        client.get_page_in(&project, &title).expect("current page read");
+                    let now_page = client
+                        .get_page_in(&project, &title)
+                        .expect("current page read");
                     assert_eq!(res.page.id, now_page.id, "catch-up is the live page");
                     assert_eq!(res.page.title, now_page.title);
                     catch_up = Some(now_page);
                 }
-                Ok(WsEvent::State { state: crate::capability::SyncState::Live, .. }) => connected = true,
+                Ok(WsEvent::State {
+                    state: crate::capability::SyncState::Live,
+                    ..
+                }) => connected = true,
                 Ok(_) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(e) => panic!("ws channel died: {e}"),
@@ -1012,7 +1074,10 @@ mod tests {
             }
         }
         assert!(connected, "the thread reported itself connected");
-        assert!(catch_up.is_some(), "a post-join catch-up snapshot was published");
+        assert!(
+            catch_up.is_some(),
+            "a post-join catch-up snapshot was published"
+        );
         // keep the request half alive so the thread exits its room cycle
         // cleanly when the channel closes (test process ends next anyway)
         drop(req_tx);
@@ -1023,7 +1088,10 @@ mod tests {
     fn parses_engine_io_open_ping_pong_and_close() {
         assert!(matches!(
             parse_packet(r#"0{"sid":"x","upgrades":[],"pingInterval":25000,"pingTimeout":20000}"#),
-            IoPacket::Open { ping_interval: 25000, ping_timeout: 20000 }
+            IoPacket::Open {
+                ping_interval: 25000,
+                ping_timeout: 20000
+            }
         ));
         assert_eq!(parse_packet("2"), IoPacket::Ping);
         assert_eq!(parse_packet("3"), IoPacket::Pong);
@@ -1033,7 +1101,10 @@ mod tests {
     #[test]
     fn parses_namespace_connect_and_errors() {
         assert_eq!(parse_packet("40"), IoPacket::Connect);
-        assert!(matches!(parse_packet(r#"40{"sid":"s"}"#), IoPacket::Connected(_)));
+        assert!(matches!(
+            parse_packet(r#"40{"sid":"s"}"#),
+            IoPacket::Connected(_)
+        ));
         // the observed failure when no sid cookie is sent
         assert!(matches!(
             parse_packet(r#"44{"message":"You are not logged in yet."}"#),
@@ -1097,8 +1168,14 @@ mod tests {
         assert_eq!(
             ops,
             vec![
-                EditOp::Insert { anchor: "_end".into(), lines: vec![("i1".into(), "new line".into())] },
-                EditOp::Replace { id: "u1".into(), text: "edited".into() },
+                EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![("i1".into(), "new line".into())]
+                },
+                EditOp::Replace {
+                    id: "u1".into(),
+                    text: "edited".into()
+                },
                 EditOp::Delete { id: "d1".into() },
             ]
         );
@@ -1135,7 +1212,13 @@ mod tests {
         assert_eq!(c.parent_id, "p0");
         assert_eq!(c.page_id, "pg");
         assert_eq!(c.user_id, "me");
-        assert_eq!(c.ops, vec![EditOp::Replace { id: "u1".into(), text: "edited".into() }]);
+        assert_eq!(
+            c.ops,
+            vec![EditOp::Replace {
+                id: "u1".into(),
+                text: "edited".into()
+            }]
+        );
     }
 
     #[test]
@@ -1169,8 +1252,11 @@ mod tests {
             }
             let ops = vec![EditOp::Insert {
                 anchor: anchor.into(),
-                lines: vec![("x".into(), "already received".into()),
-                            ("y".into(), "new".into()), ("z".into(), "newest".into())],
+                lines: vec![
+                    ("x".into(), "already received".into()),
+                    ("y".into(), "new".into()),
+                    ("z".into(), "newest".into()),
+                ],
             }];
             apply_remote_ops(&mut lines, &ops, "alice");
             let ids: Vec<_> = lines.iter().map(|l| l.id.as_str()).collect();
@@ -1181,7 +1267,10 @@ mod tests {
             };
             assert_eq!(ids, expected);
             apply_remote_ops(&mut lines, &ops, "bob");
-            assert_eq!(lines.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), expected);
+            assert_eq!(
+                lines.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+                expected
+            );
             assert_eq!(lines[2].user_id, "alice");
         }
     }
@@ -1193,8 +1282,14 @@ mod tests {
         apply_remote_ops(
             &mut lines,
             &[
-                EditOp::Insert { anchor: "b".into(), lines: vec![("x".into(), "mid".into())] },
-                EditOp::Replace { id: "a".into(), text: "TITLE".into() },
+                EditOp::Insert {
+                    anchor: "b".into(),
+                    lines: vec![("x".into(), "mid".into())],
+                },
+                EditOp::Replace {
+                    id: "a".into(),
+                    text: "TITLE".into(),
+                },
                 EditOp::Delete { id: "b".into() },
             ],
             "alice",
@@ -1208,8 +1303,14 @@ mod tests {
         apply_remote_ops(
             &mut lines,
             &[
-                EditOp::Insert { anchor: "b".into(), lines: vec![("x".into(), "mid".into())] },
-                EditOp::Replace { id: "a".into(), text: "TITLE".into() },
+                EditOp::Insert {
+                    anchor: "b".into(),
+                    lines: vec![("x".into(), "mid".into())],
+                },
+                EditOp::Replace {
+                    id: "a".into(),
+                    text: "TITLE".into(),
+                },
                 EditOp::Delete { id: "b".into() },
             ],
             "bob",
@@ -1222,9 +1323,15 @@ mod tests {
         apply_remote_ops(
             &mut lines,
             &[
-                EditOp::Replace { id: "ghost".into(), text: "??".into() },
+                EditOp::Replace {
+                    id: "ghost".into(),
+                    text: "??".into(),
+                },
                 EditOp::Delete { id: "ghost".into() },
-                EditOp::Insert { anchor: "_end".into(), lines: vec![("y".into(), "end".into())] },
+                EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![("y".into(), "end".into())],
+                },
             ],
             "carol",
         );

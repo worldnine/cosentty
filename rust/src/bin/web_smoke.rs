@@ -49,7 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = render_lines(&texts);
     let mut reqs: Vec<WebRequest> = Vec::new();
     for b in &out.blocks {
-        let Block::Artifact { kind, code, last_src, .. } = b else { continue };
+        let Block::Artifact {
+            kind,
+            code,
+            last_src,
+            ..
+        } = b
+        else {
+            continue;
+        };
         // Only the kinds the browser draws. Math is text-or-source, so it
         // has no selector to smoke-test.
         let Some(kind) = kind.web() else { continue };
@@ -83,7 +91,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!(
         "browser auth: {}",
-        if sid.is_some() { "session cookie" } else { "anonymous" }
+        if sid.is_some() {
+            "session cookie"
+        } else {
+            "anonymous"
+        }
     );
     let backend = ChromeBackend::detect(sid).ok_or("no Chrome found (set COSENSE_CHROME)")?;
     let dir = std::env::temp_dir().join("cosense-web-smoke");
@@ -95,7 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t1 = std::time::Instant::now();
         let again = backend.render_batch(&reqs, auth);
         let ok = again.iter().filter(|r| r.is_ok()).count();
-        println!("second batch (warm browser): {ok}/{} ok in {:?}", again.len(), t1.elapsed());
+        println!(
+            "second batch (warm browser): {ok}/{} ok in {:?}",
+            again.len(),
+            t1.elapsed()
+        );
     }
     // Route successes through the real artifact cache, exactly as the
     // viewer's render worker does, so a run also exercises (and lets the
@@ -112,7 +128,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let dim = image::load_from_memory(&png)
                     .map(|i| format!("{}x{}", i.width(), i.height()))
                     .unwrap_or_else(|e| format!("undecodable: {e}"));
-                println!("  OK  {} -> {} {dim} ({} bytes)", req.line_id, path.display(), png.len());
+                println!(
+                    "  OK  {} -> {} {dim} ({} bytes)",
+                    req.line_id,
+                    path.display(),
+                    png.len()
+                );
             }
             Err(e) => {
                 println!("  ERR {} -> {e}", req.line_id);

@@ -263,4 +263,3 @@ mod tests {
         assert_eq!(ImeMode::parse(""), ImeMode::Jp);
     }
 }
-

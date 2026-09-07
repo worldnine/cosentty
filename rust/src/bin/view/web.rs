@@ -23,7 +23,11 @@ pub(crate) enum WebJob {
     /// Re-encode an artifact already on disk at a new column cap, because
     /// the pane was resized. No browser is involved: this is a decode plus
     /// a resize, done on the worker so the UI thread never stalls on it.
-    Rescale { gen: u64, key: String, max_cols: u16 },
+    Rescale {
+        gen: u64,
+        key: String,
+        max_cols: u16,
+    },
     /// Quit. Sent once, on the way out, so the worker can be joined.
     Stop,
 }
@@ -166,19 +170,32 @@ pub(crate) fn spawn_web_worker(
                                 Ok(info) => WebOutcome::Drawn(info),
                                 Err(e) => WebOutcome::Failed(e),
                             },
-                            None => WebOutcome::Failed(t!("作り直せる図はありません", "no cached artifact to resize")),
+                            None => WebOutcome::Failed(t!(
+                                "作り直せる図はありません",
+                                "no cached artifact to resize"
+                            )),
                         };
-                        let _ = out.send(WebMsg { gen, key, rescale: true, attempted: None, res });
+                        let _ = out.send(WebMsg {
+                            gen,
+                            key,
+                            rescale: true,
+                            attempted: None,
+                            res,
+                        });
                     }
-                    WebJob::Render { gen, src_epoch, reqs, max_cols, auth } => {
+                    WebJob::Render {
+                        gen,
+                        src_epoch,
+                        reqs,
+                        max_cols,
+                        auth,
+                    } => {
                         // Freshness is judged PER JOB, before merging. The
                         // checks around the browser below are per batch, so
                         // a job built against the old source that merged
                         // with a fresh one would ride in on its freshness —
                         // and be filed under a hash it no longer matches.
-                        if src_epoch
-                            != current_src.load(std::sync::atomic::Ordering::SeqCst)
-                        {
+                        if src_epoch != current_src.load(std::sync::atomic::Ordering::SeqCst) {
                             for req in &reqs {
                                 let _ = out.send(WebMsg {
                                     gen,
@@ -268,7 +285,10 @@ pub(crate) fn run_render_batch(
     let mut to_render: Vec<WebRequest> = Vec::new();
     for req in reqs {
         let key = req.cache_key();
-        match cache.get(&key).map(|png| decode_web_png(picker, &png, max_cols)) {
+        match cache
+            .get(&key)
+            .map(|png| decode_web_png(picker, &png, max_cols))
+        {
             Some(Ok(info)) => {
                 let _ = out.send(WebMsg {
                     gen,
@@ -342,7 +362,13 @@ pub(crate) fn run_render_batch(
             Err(WebError::NotAuthorized) => WebOutcome::Denied,
             Err(e) => WebOutcome::Failed(e.to_string()),
         };
-        let _ = out.send(WebMsg { gen, key, rescale: false, attempted: Some(auth), res });
+        let _ = out.send(WebMsg {
+            gen,
+            key,
+            rescale: false,
+            attempted: Some(auth),
+            res,
+        });
     }
 }
 
@@ -399,7 +425,15 @@ pub(crate) fn spawn_web_poller(
             // while it is in flight makes the answer stale.
             let started_at = epoch.load(std::sync::atomic::Ordering::SeqCst);
             if let Ok(page) = client.get_page_in(&project, &title) {
-                if tx.send(PolledPage { project, title, page, epoch: started_at }).is_err() {
+                if tx
+                    .send(PolledPage {
+                        project,
+                        title,
+                        page,
+                        epoch: started_at,
+                    })
+                    .is_err()
+                {
                     return; // app gone
                 }
             }
@@ -528,7 +562,16 @@ impl App {
         }
         let mut reqs: Vec<WebRequest> = Vec::new();
         for b in &self.blocks {
-            let Block::Artifact { kind, code, rows, last_src, indent } = b else { continue };
+            let Block::Artifact {
+                kind,
+                code,
+                rows,
+                last_src,
+                indent,
+            } = b
+            else {
+                continue;
+            };
             // The text tier is the mainline: what it can draw is already
             // drawn, so nothing automatic goes looking for a picture of it.
             // `R` still does — that key means "show me the browser's own
@@ -543,7 +586,10 @@ impl App {
             if self.caret_is_inside(rows) {
                 continue;
             }
-            let Some(req) = kind.web().and_then(|k| self.web_request(k, code, *last_src)) else {
+            let Some(req) = kind
+                .web()
+                .and_then(|k| self.web_request(k, code, *last_src))
+            else {
                 continue;
             };
             let key = req.cache_key();
@@ -676,7 +722,11 @@ impl App {
             self.caps.visibility = capability::Visibility::Public;
             return;
         }
-        spawn_visibility_probe(ctx.client.clone(), self.project.clone(), self.vis_tx.clone());
+        spawn_visibility_probe(
+            ctx.client.clone(),
+            self.project.clone(),
+            self.vis_tx.clone(),
+        );
     }
 
     /// Take whatever the visibility probe learned. Pure bookkeeping: the
@@ -708,8 +758,20 @@ impl App {
             return out;
         }
         for b in &self.blocks {
-            let Block::Artifact { kind, code, rows, last_src, .. } = b else { continue };
-            let Some(req) = kind.web().and_then(|k| self.web_request(k, code, *last_src)) else {
+            let Block::Artifact {
+                kind,
+                code,
+                rows,
+                last_src,
+                ..
+            } = b
+            else {
+                continue;
+            };
+            let Some(req) = kind
+                .web()
+                .and_then(|k| self.web_request(k, code, *last_src))
+            else {
                 continue;
             };
             if !self.web_pending.contains(&req.cache_key()) {
@@ -732,12 +794,25 @@ impl App {
         let want = self.web_cols;
         let mut keys: Vec<String> = Vec::new();
         for b in &self.blocks {
-            let Block::Artifact { kind, code, last_src, .. } = b else { continue };
-            let Some(req) = kind.web().and_then(|k| self.web_request(k, code, *last_src)) else {
+            let Block::Artifact {
+                kind,
+                code,
+                last_src,
+                ..
+            } = b
+            else {
+                continue;
+            };
+            let Some(req) = kind
+                .web()
+                .and_then(|k| self.web_request(k, code, *last_src))
+            else {
                 continue;
             };
             let key = req.cache_key();
-            let Some(info) = self.images.get(&key) else { continue };
+            let Some(info) = self.images.get(&key) else {
+                continue;
+            };
             if info.built_for != want && !self.web_rescaling.contains(&key) {
                 keys.push(key);
             }
@@ -746,7 +821,11 @@ impl App {
             self.web_rescaling.insert(key.clone());
             if self
                 .web_job_tx
-                .send(WebJob::Rescale { gen: self.gen_now(), key: key.clone(), max_cols: want })
+                .send(WebJob::Rescale {
+                    gen: self.gen_now(),
+                    key: key.clone(),
+                    max_cols: want,
+                })
                 .is_err()
             {
                 self.web_rescaling.remove(&key);
@@ -774,7 +853,13 @@ impl App {
             if msg.gen != self.gen_now() {
                 continue;
             }
-            let WebMsg { key, rescale, attempted, res, .. } = msg;
+            let WebMsg {
+                key,
+                rescale,
+                attempted,
+                res,
+                ..
+            } = msg;
             if rescale {
                 // A rescale only ever changes the SIZE of a picture that is
                 // already on screen. If it failed, the reader keeps the
@@ -808,7 +893,10 @@ impl App {
                 // error. The next pass sees the new source and asks again.
                 WebOutcome::Stale => {}
                 WebOutcome::Failed(e) => {
-                    self.note_web_failure(t!("diagram: {e}（ソースを表示します）", "diagram: {e} (showing source)"));
+                    self.note_web_failure(t!(
+                        "diagram: {e}（ソースを表示します）",
+                        "diagram: {e} (showing source)"
+                    ));
                     self.web_errors.insert(key, e);
                 }
             }

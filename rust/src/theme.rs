@@ -55,7 +55,9 @@ impl Palette {
     pub fn for_light(light: bool) -> Self {
         let mut p = Self::colors_for_light(light);
         p.heading_style = std::array::from_fn(|i| {
-            Style::default().fg(p.heading[i]).add_modifier(heading_modifier(i + 1))
+            Style::default()
+                .fg(p.heading[i])
+                .add_modifier(heading_modifier(i + 1))
         });
         p
     }
@@ -262,11 +264,9 @@ pub fn cosense_telomere_tint(theme: &str) -> Option<TelomereTint> {
         "paper-dark-dark" => (134, 168, 187, 107, 184, 237),
         "paper-light" => (149, 181, 210, 110, 154, 194),
         // 以下は自前で定義しない(新系を含む): css のフォールバックの青
-        "autumn" | "blue" | "default" | "default-dark" | "default-minimal"
-        | "green" | "hacker1" | "kyoto" | "newyork" | "orange" | "paris"
-        | "purple" | "red" | "spring" | "tropical" | "winter" => {
-            (137, 163, 255, 107, 140, 255)
-        }
+        "autumn" | "blue" | "default" | "default-dark" | "default-minimal" | "green"
+        | "hacker1" | "kyoto" | "newyork" | "orange" | "paris" | "purple" | "red" | "spring"
+        | "tropical" | "winter" => (137, 163, 255, 107, 140, 255),
         _ => return None,
     };
     Some(TelomereTint {
@@ -334,7 +334,7 @@ pub fn telomere_with(
                     Color::Rgb(0x6b, 0x8c, 0xff)
                 }
             }
-        }
+        },
         TelomereState::WillDelete => {
             if light {
                 Color::Rgb(0xd9, 0x4f, 0x4f)
@@ -358,7 +358,11 @@ pub fn telomere_with(
 /// Thickness and tint are driven by the SAME bucket so they never disagree.
 pub fn telomere(age_secs: i64, unread: bool, light: bool) -> (&'static str, Color) {
     telomere_in(
-        if unread { TelomereState::Unread } else { TelomereState::Read },
+        if unread {
+            TelomereState::Unread
+        } else {
+            TelomereState::Read
+        },
         age_secs,
         light,
     )
@@ -378,7 +382,9 @@ pub fn border_color(light: bool) -> Color {
 /// The border gray receded ~40% toward the background: the oldest read
 /// telomere bucket — "present but quiet".
 pub fn faded_border_color(light: bool) -> Color {
-    let Color::Rgb(r, g, b) = border_color(light) else { return border_color(light) };
+    let Color::Rgb(r, g, b) = border_color(light) else {
+        return border_color(light);
+    };
     let toward = if light { 0xff } else { 0x18 };
     let mix = |c: u8| (c as f32 + (toward as f32 - c as f32) * 0.4).round() as u8;
     Color::Rgb(mix(r), mix(g), mix(b))
@@ -400,7 +406,11 @@ pub fn scrollbar_thumb(light: bool) -> Color {
 /// thumb length is proportional to the visible fraction (`viewport² /
 /// content`), and the start maps the offset range onto the track so the
 /// thumb sits at the bottom at max offset. Ported from akapen's theme.rs.
-pub fn scroll_thumb(content_len: usize, viewport: usize, position: usize) -> Option<(usize, usize)> {
+pub fn scroll_thumb(
+    content_len: usize,
+    viewport: usize,
+    position: usize,
+) -> Option<(usize, usize)> {
     scroll_thumb_in_track(content_len, viewport, viewport, position)
 }
 
@@ -415,7 +425,11 @@ pub fn scroll_thumb_in_track(
 ) -> Option<(usize, usize)> {
     let (max_pos, thumb_len, thumb_max) = scroll_geometry(content_len, viewport, track_len)?;
     let pos = position.min(max_pos);
-    let start = if thumb_max == 0 { 0 } else { (pos * thumb_max / max_pos).min(thumb_max) };
+    let start = if thumb_max == 0 {
+        0
+    } else {
+        (pos * thumb_max / max_pos).min(thumb_max)
+    };
     Some((start, thumb_len))
 }
 
@@ -506,10 +520,7 @@ pub fn scroll_offset_drag_in_track(
 ///
 /// Source for the standard navbar values (checked 2026-08-28):
 /// https://scrapbox.io/terfno/Scrapbox_%E3%81%AE_theme_%E3%81%94%E3%81%A8%E3%81%AE_CSS
-pub fn project_header_colors(
-    theme: Option<&str>,
-    terminal_bg: (u8, u8, u8),
-) -> (Color, Color) {
+pub fn project_header_colors(theme: Option<&str>, terminal_bg: (u8, u8, u8)) -> (Color, Color) {
     let Some((r, g, b, alpha)) = theme.and_then(cosense_navbar_rgba) else {
         return (Color::Black, Color::Cyan);
     };
@@ -517,8 +528,16 @@ pub fn project_header_colors(
         let a = alpha as u16;
         ((site as u16 * a + terminal as u16 * (255 - a) + 127) / 255) as u8
     };
-    let bg = (blend(r, terminal_bg.0), blend(g, terminal_bg.1), blend(b, terminal_bg.2));
-    let fg = if relative_luminance(bg) > 0.179 { Color::Black } else { Color::White };
+    let bg = (
+        blend(r, terminal_bg.0),
+        blend(g, terminal_bg.1),
+        blend(b, terminal_bg.2),
+    );
+    let fg = if relative_luminance(bg) > 0.179 {
+        Color::Black
+    } else {
+        Color::White
+    };
     (fg, Color::Rgb(bg.0, bg.1, bg.2))
 }
 
@@ -578,9 +597,8 @@ pub fn cosense_link_colors(theme: &str) -> Option<(Color, Color)> {
         "paper-dark-dark" => (104, 179, 229, 251, 116, 118),
         "paper-light" => (94, 139, 179, 251, 116, 118),
         // 以下は自前で定義しないテーマ: web の基底 #3d72f5 / #fd7373
-        "autumn" | "default" | "hacker1" | "hacker2" | "kyoto" | "lgreen"
-        | "mred" | "newyork" | "paris" | "spring" | "summer" | "tropical"
-        | "winter" => (61, 114, 245, 253, 115, 115),
+        "autumn" | "default" | "hacker1" | "hacker2" | "kyoto" | "lgreen" | "mred" | "newyork"
+        | "paris" | "spring" | "summer" | "tropical" | "winter" => (61, 114, 245, 253, 115, 115),
         _ => return None,
     };
     Some((Color::Rgb(r, g, b), Color::Rgb(mr, mg, mb)))
@@ -604,7 +622,11 @@ pub fn tinted_page_palette(base: &Palette, theme: Option<&str>) -> Palette {
 fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
     let linear = |c: u8| {
         let c = c as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
 }
@@ -649,7 +671,13 @@ pub fn detect_background() -> Option<(u8, u8, u8)> {
     let mut out: Box<dyn Write> = if std::io::stdout().is_terminal() {
         Box::new(std::io::stdout())
     } else {
-        Box::new(std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?)
+        Box::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .ok()?,
+        )
     };
     out.write_all(OSC11_QUERY).ok()?;
     out.flush().ok()?;
@@ -663,9 +691,17 @@ pub fn detect_background() -> Option<(u8, u8, u8)> {
         if now >= deadline {
             break;
         }
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let n = unsafe {
-            libc::poll(&mut pfd, 1, deadline.saturating_duration_since(now).as_millis() as i32)
+            libc::poll(
+                &mut pfd,
+                1,
+                deadline.saturating_duration_since(now).as_millis() as i32,
+            )
         };
         if n <= 0 {
             break;
@@ -699,7 +735,9 @@ pub fn background_is_light(rgb: (u8, u8, u8)) -> bool {
 }
 
 fn response_complete(resp: &[u8]) -> bool {
-    let Some(pos) = find(resp, OSC11_HEADER) else { return false };
+    let Some(pos) = find(resp, OSC11_HEADER) else {
+        return false;
+    };
     let rest = &resp[pos + OSC11_HEADER.len()..];
     rest.windows(2).any(|w| w == b"\x1b\\") || rest.contains(&0x07)
 }
@@ -713,7 +751,10 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn parse_osc11(resp: &[u8]) -> Option<(u8, u8, u8)> {
     let pos = find(resp, OSC11_HEADER)? + OSC11_HEADER.len();
     let rest = &resp[pos..];
-    let end = rest.iter().position(|&b| b == 0x1b || b == 0x07).unwrap_or(rest.len());
+    let end = rest
+        .iter()
+        .position(|&b| b == 0x1b || b == 0x07)
+        .unwrap_or(rest.len());
     let s = std::str::from_utf8(&rest[..end]).ok()?;
     if let Some(hex) = s.strip_prefix('#') {
         if hex.len() != 6 {
@@ -860,7 +901,13 @@ pub fn palette_rgb(color: Color) -> Option<(u8, u8, u8)> {
             }
             if n < 232 {
                 let v = n - 16;
-                let ch = |i: u8| -> u8 { if i == 0 { 0 } else { 55 + i * 40 } };
+                let ch = |i: u8| -> u8 {
+                    if i == 0 {
+                        0
+                    } else {
+                        55 + i * 40
+                    }
+                };
                 Some((ch(v / 36), ch((v / 6) % 6), ch(v % 6)))
             } else {
                 // 232..=255: the greyscale ramp.
@@ -906,9 +953,17 @@ pub fn code_wash(terminal_bg: (u8, u8, u8)) -> Color {
 pub fn selection_band(terminal_bg: (u8, u8, u8)) -> Color {
     let (r, g, b) = terminal_bg;
     if relative_luminance(terminal_bg) > 0.179 {
-        Color::Rgb(r.saturating_sub(40), g.saturating_sub(20), b.saturating_sub(2))
+        Color::Rgb(
+            r.saturating_sub(40),
+            g.saturating_sub(20),
+            b.saturating_sub(2),
+        )
     } else {
-        Color::Rgb(r.saturating_add(12), g.saturating_add(28), b.saturating_add(56))
+        Color::Rgb(
+            r.saturating_add(12),
+            g.saturating_add(28),
+            b.saturating_add(56),
+        )
     }
 }
 
@@ -922,9 +977,17 @@ pub fn selection_band(terminal_bg: (u8, u8, u8)) -> Color {
 pub fn match_wash(terminal_bg: (u8, u8, u8)) -> Color {
     let (r, g, b) = terminal_bg;
     if relative_luminance(terminal_bg) > 0.179 {
-        Color::Rgb(r.saturating_sub(2), g.saturating_sub(22), b.saturating_sub(48))
+        Color::Rgb(
+            r.saturating_sub(2),
+            g.saturating_sub(22),
+            b.saturating_sub(48),
+        )
     } else {
-        Color::Rgb(r.saturating_add(64), g.saturating_add(34), b.saturating_add(6))
+        Color::Rgb(
+            r.saturating_add(64),
+            g.saturating_add(34),
+            b.saturating_add(6),
+        )
     }
 }
 
@@ -937,9 +1000,17 @@ pub fn match_wash(terminal_bg: (u8, u8, u8)) -> Color {
 pub fn edit_backdrop(terminal_bg: (u8, u8, u8)) -> Color {
     let (r, g, b) = terminal_bg;
     if relative_luminance(terminal_bg) > 0.179 {
-        Color::Rgb(r.saturating_sub(24), g.saturating_sub(24), b.saturating_sub(22))
+        Color::Rgb(
+            r.saturating_sub(24),
+            g.saturating_sub(24),
+            b.saturating_sub(22),
+        )
     } else {
-        Color::Rgb(r.saturating_add(16), g.saturating_add(16), b.saturating_add(20))
+        Color::Rgb(
+            r.saturating_add(16),
+            g.saturating_add(16),
+            b.saturating_add(20),
+        )
     }
 }
 
@@ -973,9 +1044,15 @@ pub fn shimmer_style(base: Style, terminal_bg: (u8, u8, u8), level: f32) -> Styl
     }
     let mix = |fg: (u8, u8, u8)| -> Color {
         let f = |a: u8, b: u8| -> u8 {
-            (b as f32 + (a as f32 - b as f32) * level).round().clamp(0.0, 255.0) as u8
+            (b as f32 + (a as f32 - b as f32) * level)
+                .round()
+                .clamp(0.0, 255.0) as u8
         };
-        Color::Rgb(f(fg.0, terminal_bg.0), f(fg.1, terminal_bg.1), f(fg.2, terminal_bg.2))
+        Color::Rgb(
+            f(fg.0, terminal_bg.0),
+            f(fg.1, terminal_bg.1),
+            f(fg.2, terminal_bg.2),
+        )
     };
     match base.fg.and_then(palette_rgb) {
         Some(fg) => base.fg(mix(fg)),
@@ -995,9 +1072,21 @@ mod tests {
     /// 溶けない。
     #[test]
     fn toast_bg_stands_off_the_terminal_background() {
-        assert_eq!(toast_bg((0, 0, 0)), Color::Rgb(44, 44, 48), "pure black: lifted");
-        assert_eq!(toast_bg((30, 30, 46)), Color::Rgb(0, 0, 0), "a dark theme: black");
-        assert_eq!(toast_bg((250, 250, 250)), Color::Rgb(44, 44, 48), "light: dark grey, not ink");
+        assert_eq!(
+            toast_bg((0, 0, 0)),
+            Color::Rgb(44, 44, 48),
+            "pure black: lifted"
+        );
+        assert_eq!(
+            toast_bg((30, 30, 46)),
+            Color::Rgb(0, 0, 0),
+            "a dark theme: black"
+        );
+        assert_eq!(
+            toast_bg((250, 250, 250)),
+            Color::Rgb(44, 44, 48),
+            "light: dark grey, not ink"
+        );
     }
 
     /// 選択バンドは「端末背景」「コードの wash」「カーソル行の DarkGray」の
@@ -1036,9 +1125,15 @@ mod tests {
 
     #[test]
     fn parse_osc11_forms() {
-        assert_eq!(parse_osc11(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\"), Some((0x1e, 0x1e, 0x1e)));
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\"),
+            Some((0x1e, 0x1e, 0x1e))
+        );
         assert_eq!(parse_osc11(b"\x1b]11;#ffffff\x1b\\"), Some((255, 255, 255)));
-        assert_eq!(parse_osc11(b"\x1b]11;rgb:f/0/8\x1b\\"), Some((0xff, 0x00, 0x88)));
+        assert_eq!(
+            parse_osc11(b"\x1b]11;rgb:f/0/8\x1b\\"),
+            Some((0xff, 0x00, 0x88))
+        );
     }
 
     #[test]
@@ -1064,10 +1159,7 @@ mod tests {
         let marks: Vec<&str> = ages.iter().map(|&a| telomere(a, true, false).0).collect();
         // thinning, newest -> oldest; every glyph is a left-aligned block
         // (no centred `│`), the two oldest share the hairline
-        assert_eq!(
-            marks,
-            vec!["█", "▉", "▊", "▋", "▌", "▍", "▎", "▏", "▏"]
-        );
+        assert_eq!(marks, vec!["█", "▉", "▊", "▋", "▌", "▍", "▎", "▏", "▏"]);
         assert!(marks.iter().all(|m| "█▉▊▋▌▍▎▏".contains(m)));
         // unread stays BLUE at every age: a first visit to a years-old page
         // must still show the tint. It mellows a little, never to gray.
@@ -1105,7 +1197,10 @@ mod tests {
             // theme, distinct from both the unread blue and the gutter gray.
             let fresh = telomere_in(TelomereState::UpdatedAfterLoad, 60, light).1;
             for &a in &ages {
-                assert_eq!(telomere_in(TelomereState::UpdatedAfterLoad, a, light).1, fresh);
+                assert_eq!(
+                    telomere_in(TelomereState::UpdatedAfterLoad, a, light).1,
+                    fresh
+                );
                 assert_ne!(
                     telomere_in(TelomereState::UpdatedAfterLoad, a, light).1,
                     telomere(a, true, light).1,
@@ -1130,8 +1225,14 @@ mod tests {
 
             // thickness still follows the age in every state
             assert_eq!(telomere_in(TelomereState::WillDelete, 60, light).0, "█");
-            assert_eq!(telomere_in(TelomereState::WillDelete, 200_000_000, light).0, "▏");
-            assert_eq!(telomere_in(TelomereState::UpdatedAfterLoad, 7_200, light).0, "▉");
+            assert_eq!(
+                telomere_in(TelomereState::WillDelete, 200_000_000, light).0,
+                "▏"
+            );
+            assert_eq!(
+                telomere_in(TelomereState::UpdatedAfterLoad, 7_200, light).0,
+                "▉"
+            );
         }
     }
 
@@ -1143,7 +1244,10 @@ mod tests {
             assert_eq!(glyph, "█");
             assert_eq!(color, border_color(light));
             // 30d-1y: plain gray hairline; >1y: the same glyph, a step fainter
-            assert_eq!(telomere(15_552_000, false, light), ("▏", border_color(light)));
+            assert_eq!(
+                telomere(15_552_000, false, light),
+                ("▏", border_color(light))
+            );
             let oldest = telomere(94_608_000, false, light);
             assert_eq!(oldest.0, "▏");
             assert_eq!(oldest.1, faded_border_color(light));
@@ -1175,7 +1279,11 @@ mod tests {
         // 100 rows, 20-row viewport: thumb 4 rows, track rows 0..=16
         assert_eq!(scroll_offset_at(100, 20, 0), Some(0));
         assert_eq!(scroll_offset_at(100, 20, 16), Some(80));
-        assert_eq!(scroll_offset_at(100, 20, 99), Some(80), "clamped onto the track");
+        assert_eq!(
+            scroll_offset_at(100, 20, 99),
+            Some(80),
+            "clamped onto the track"
+        );
         assert_eq!(scroll_offset_at(10, 20, 3), None);
         // drag: grabbed at row 4 with offset 20 (thumb at 4); pointer to
         // row 8 moves the thumb 4 rows -> offset 40
@@ -1195,12 +1303,22 @@ mod tests {
     fn the_code_wash_nudges_the_terminal_background_both_ways() {
         let dark = code_wash((24, 24, 24));
         let light = code_wash((250, 250, 250));
-        assert_eq!(dark, Color::Rgb(36, 36, 36), "dark terminal: a little lighter");
-        assert_eq!(light, Color::Rgb(240, 240, 240), "light terminal: a little darker");
+        assert_eq!(
+            dark,
+            Color::Rgb(36, 36, 36),
+            "dark terminal: a little lighter"
+        );
+        assert_eq!(
+            light,
+            Color::Rgb(240, 240, 240),
+            "light terminal: a little darker"
+        );
         assert_ne!(dark, light);
         // Never so far that the text on top has to be re-chosen.
         for bg in [(0, 0, 0), (255, 255, 255), (40, 44, 52)] {
-            let Color::Rgb(r, g, b) = code_wash(bg) else { panic!("rgb") };
+            let Color::Rgb(r, g, b) = code_wash(bg) else {
+                panic!("rgb")
+            };
             let delta = (r as i16 - bg.0 as i16).abs();
             assert!(delta <= 12, "{bg:?} moved by {delta}");
             assert_eq!((r as i16 - bg.0 as i16), (g as i16 - bg.1 as i16));
@@ -1246,7 +1364,10 @@ mod tests {
         let dark = project_header_colors(Some("blue"), (24, 24, 24));
         assert_eq!(light, (Color::Black, Color::Rgb(125, 148, 229)));
         assert_eq!(dark, (Color::White, Color::Rgb(80, 102, 184)));
-        assert_ne!(light.1, dark.1, "translucent navbar adapts to terminal background");
+        assert_ne!(
+            light.1, dark.1,
+            "translucent navbar adapts to terminal background"
+        );
 
         // Opaque site themes are independent of the terminal base.
         assert_eq!(
@@ -1254,7 +1375,10 @@ mod tests {
             (Color::Black, Color::Rgb(249, 249, 251)),
         );
         // Missing/private-without-SID and future theme ids stay terminal-themed.
-        assert_eq!(project_header_colors(None, (24, 24, 24)), (Color::Black, Color::Cyan));
+        assert_eq!(
+            project_header_colors(None, (24, 24, 24)),
+            (Color::Black, Color::Cyan)
+        );
         assert_eq!(
             project_header_colors(Some("future-theme"), (250, 250, 250)),
             (Color::Black, Color::Cyan),
@@ -1270,7 +1394,11 @@ mod tests {
         assert_eq!(p.heading_style[1].fg, Some(p.heading[1]));
         // Dracula's heading rule is bold: taken verbatim, no extra modifier
         assert_eq!(p.heading_style[1].add_modifier, Modifier::BOLD);
-        assert_eq!(p.heading_style_for(3), p.heading_style[1], "three stars = level 2");
+        assert_eq!(
+            p.heading_style_for(3),
+            p.heading_style[1],
+            "three stars = level 2"
+        );
         assert_eq!(p.title, p.heading[0], "the page title is the top heading");
 
         // headings are not the same color as links in this theme
@@ -1278,13 +1406,20 @@ mod tests {
         // An uncreated link borrows the theme's "deleted" colour, which is
         // a FOREGROUND (unlike `invalid`, which most themes spell as a
         // background) — and it must not collide with a live link.
-        assert_eq!(p.link_missing, Color::Rgb(255, 121, 198), "dracula's deleted pink");
+        assert_eq!(
+            p.link_missing,
+            Color::Rgb(255, 121, 198),
+            "dracula's deleted pink"
+        );
         assert_ne!(p.link_missing, p.link);
         // a theme without markdown rules falls back to the hand palette
         let plain = Highlighter::new(Some("definitely-not-a-theme"), false); // -> default theme
         let q = Palette::from_theme(&plain, false);
         let base = Palette::for_light(false);
-        assert_eq!(q.link_missing, base.link_missing, "no rule → the hand-picked red");
+        assert_eq!(
+            q.link_missing, base.link_missing,
+            "no rule → the hand-picked red"
+        );
         // every slot is either the theme's color or the base color — never unset
         for (a, b) in q.heading.iter().zip(base.heading.iter()) {
             assert!(matches!(a, Color::Rgb(..)), "{a:?} vs {b:?}");
@@ -1300,7 +1435,10 @@ mod tests {
             assert_eq!(p.heading_for(9), p.heading[0], "clamps at four");
             assert_eq!(p.heading_for(0), p.heading[3], "zero is treated as one");
             // the hand palette pairs each level with akapen's structural style
-            assert_eq!(p.heading_style_for(4).add_modifier, Modifier::BOLD | Modifier::UNDERLINED);
+            assert_eq!(
+                p.heading_style_for(4).add_modifier,
+                Modifier::BOLD | Modifier::UNDERLINED
+            );
             assert_eq!(p.heading_style_for(1).add_modifier, Modifier::ITALIC);
             assert_eq!(p.heading_style_for(1).fg, Some(p.heading[3]));
             for c in p.heading {
@@ -1319,7 +1457,11 @@ mod shimmer_tests {
     fn the_band_sweeps_the_block_and_repeats() {
         // At t=0 the band is on the first row and nowhere near the last.
         assert!(shimmer_level(0, 6, 0.0) > 0.99);
-        assert_eq!(shimmer_level(5, 6, 0.0), 0.55, "far from the band = the floor");
+        assert_eq!(
+            shimmer_level(5, 6, 0.0),
+            0.55,
+            "far from the band = the floor"
+        );
         // A third of a second later (6 rows/s) it has moved two rows down.
         assert!(shimmer_level(2, 6, 2.0 / 6.0) > 0.99);
         assert!(shimmer_level(0, 6, 2.0 / 6.0) < shimmer_level(0, 6, 0.0));
@@ -1347,9 +1489,15 @@ mod shimmer_tests {
         let bg = (0, 0, 0);
         let base = Style::default().fg(Color::Rgb(200, 100, 50));
         // Full brightness leaves the theme's color exactly alone.
-        assert_eq!(shimmer_style(base, bg, 1.0).fg, Some(Color::Rgb(200, 100, 50)));
+        assert_eq!(
+            shimmer_style(base, bg, 1.0).fg,
+            Some(Color::Rgb(200, 100, 50))
+        );
         // Half way to the background is half the distance on every channel.
-        assert_eq!(shimmer_style(base, bg, 0.5).fg, Some(Color::Rgb(100, 50, 25)));
+        assert_eq!(
+            shimmer_style(base, bg, 0.5).fg,
+            Some(Color::Rgb(100, 50, 25))
+        );
         // …and the mix is toward the ACTUAL background, not toward black.
         assert_eq!(
             shimmer_style(base, (100, 100, 100), 0.0).fg,
@@ -1363,7 +1511,11 @@ mod shimmer_tests {
         // foreground — a palette entry, not an RGB triple. Mixing it through
         // the palette's grey is the whole reason that band became visible.
         let base = Style::default().fg(Color::DarkGray);
-        assert_eq!(shimmer_style(base, (0, 0, 0), 1.0), base, "untouched at full");
+        assert_eq!(
+            shimmer_style(base, (0, 0, 0), 1.0),
+            base,
+            "untouched at full"
+        );
         assert_eq!(
             shimmer_style(base, (0, 0, 0), 0.55).fg,
             Some(Color::Rgb(70, 70, 70)),
@@ -1371,12 +1523,17 @@ mod shimmer_tests {
         );
         // The signal is a colour change, not the DIM attribute: grey dimmed
         // by DIM on a dark terminal is the same grey the band just left.
-        assert!(!shimmer_style(base, (0, 0, 0), 0.55).add_modifier.contains(Modifier::DIM));
+        assert!(!shimmer_style(base, (0, 0, 0), 0.55)
+            .add_modifier
+            .contains(Modifier::DIM));
         // A span with no foreground at all still gets the coarse fallback.
         assert!(shimmer_style(Style::default(), (0, 0, 0), 0.55)
             .add_modifier
             .contains(Modifier::DIM));
-        assert_eq!(shimmer_style(Style::default(), (0, 0, 0), 1.0), Style::default());
+        assert_eq!(
+            shimmer_style(Style::default(), (0, 0, 0), 1.0),
+            Style::default()
+        );
     }
 
     #[test]
@@ -1384,9 +1541,18 @@ mod shimmer_tests {
         // Half a second in, the band is halfway along ANY row — which is the
         // point: at six cells a second a 48-cell `[URL]` never finished a
         // sweep inside the download.
-        assert!(shimmer_level_across(24, 48, 0.6) > 0.99, "mid-sweep on a long row");
-        assert!(shimmer_level_across(6, 12, 0.6) > 0.99, "…and the same moment on a short one");
-        assert!(shimmer_level_across(47, 48, 0.6) < 0.6, "the far end of a long row waits");
+        assert!(
+            shimmer_level_across(24, 48, 0.6) > 0.99,
+            "mid-sweep on a long row"
+        );
+        assert!(
+            shimmer_level_across(6, 12, 0.6) > 0.99,
+            "…and the same moment on a short one"
+        );
+        assert!(
+            shimmer_level_across(47, 48, 0.6) < 0.6,
+            "the far end of a long row waits"
+        );
         // Fully clear of the row at both ends of the sweep.
         assert_eq!(shimmer_level_across(0, 48, 0.0), 0.55);
         assert_eq!(shimmer_level_across(47, 48, 1.2), 0.55);
@@ -1412,45 +1578,62 @@ mod shimmer_tests {
     fn the_palette_answer_is_monotone_in_lightness() {
         // Only the ordering matters to `shimmer_style`: a darker name must
         // not resolve brighter than a lighter one, or the band inverts.
-        let lum = |c: Color| palette_rgb(c).map(|(r, g, b)| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32);
+        let lum = |c: Color| {
+            palette_rgb(c).map(|(r, g, b)| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32)
+        };
         for (dark, light) in [
             (Color::Black, Color::DarkGray),
             (Color::DarkGray, Color::Gray),
             (Color::Gray, Color::White),
         ] {
-            assert!(lum(dark).unwrap() < lum(light).unwrap(), "{dark:?} vs {light:?}");
+            assert!(
+                lum(dark).unwrap() < lum(light).unwrap(),
+                "{dark:?} vs {light:?}"
+            );
         }
-        assert_eq!(palette_rgb(Color::Reset), None, "the terminal's own default: nothing to mix");
-        assert_eq!(palette_rgb(Color::Indexed(232)), Some((8, 8, 8)), "the grey ramp");
-        assert_eq!(palette_rgb(Color::Indexed(196)), Some((255, 0, 0)), "the 6x6x6 cube");
+        assert_eq!(
+            palette_rgb(Color::Reset),
+            None,
+            "the terminal's own default: nothing to mix"
+        );
+        assert_eq!(
+            palette_rgb(Color::Indexed(232)),
+            Some((8, 8, 8)),
+            "the grey ramp"
+        );
+        assert_eq!(
+            palette_rgb(Color::Indexed(196)),
+            Some((255, 0, 0)),
+            "the 6x6x6 cube"
+        );
         assert_eq!(palette_rgb(Color::Rgb(1, 2, 3)), Some((1, 2, 3)));
     }
 
-        /// The telomere follows the project theme: new themes are blue, the
-        /// old ones (Hacker and below) are green — web's two generations.
-        #[test]
-        fn the_telomere_tint_follows_the_project_theme() {
-            // a NEW theme (even named "green") is the css fallback blue
-            let new = cosense_telomere_tint("green").unwrap();
-            assert_eq!(new.unread, Color::Rgb(137, 163, 255));
-            assert_eq!(new.updated, Color::Rgb(107, 140, 255));
-            // an OLD theme defines its own green
-            let old = cosense_telomere_tint("mred").unwrap();
-            assert_eq!(old.unread, Color::Rgb(127, 202, 143));
-            assert_eq!(old.updated, Color::Rgb(71, 186, 95));
-            assert_ne!(old, new);
-            // an unknown theme answers nothing
-            assert_eq!(cosense_telomere_tint("future-theme"), None);
+    /// The telomere follows the project theme: new themes are blue, the
+    /// old ones (Hacker and below) are green — web's two generations.
+    #[test]
+    fn the_telomere_tint_follows_the_project_theme() {
+        // a NEW theme (even named "green") is the css fallback blue
+        let new = cosense_telomere_tint("green").unwrap();
+        assert_eq!(new.unread, Color::Rgb(137, 163, 255));
+        assert_eq!(new.updated, Color::Rgb(107, 140, 255));
+        // an OLD theme defines its own green
+        let old = cosense_telomere_tint("mred").unwrap();
+        assert_eq!(old.unread, Color::Rgb(127, 202, 143));
+        assert_eq!(old.updated, Color::Rgb(71, 186, 95));
+        assert_ne!(old, new);
+        // an unknown theme answers nothing
+        assert_eq!(cosense_telomere_tint("future-theme"), None);
 
-            // the tint reaches the mark: an unread line wears the theme's
-            // hue (fresh), and updated-after-load the theme's second colour
-            let (g1, c1) = telomere_with(TelomereState::Unread, 60, false, Some(old));
-            assert_eq!(g1, "█");
-            assert_eq!(c1, old.unread);
-            let (_, c2) = telomere_with(TelomereState::UpdatedAfterLoad, 60, false, Some(old));
-            assert_eq!(c2, old.updated);
-            // without a tint the original blues stand (theme unknown)
-            let (_, c3) = telomere_in(TelomereState::Unread, 60, false);
-            assert_eq!(c3, Color::Rgb(0x7f, 0xc8, 0xff));
-        }
+        // the tint reaches the mark: an unread line wears the theme's
+        // hue (fresh), and updated-after-load the theme's second colour
+        let (g1, c1) = telomere_with(TelomereState::Unread, 60, false, Some(old));
+        assert_eq!(g1, "█");
+        assert_eq!(c1, old.unread);
+        let (_, c2) = telomere_with(TelomereState::UpdatedAfterLoad, 60, false, Some(old));
+        assert_eq!(c2, old.updated);
+        // without a tint the original blues stand (theme unknown)
+        let (_, c3) = telomere_in(TelomereState::Unread, 60, false);
+        assert_eq!(c3, Color::Rgb(0x7f, 0xc8, 0xff));
     }
+}

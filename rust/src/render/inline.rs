@@ -2,24 +2,31 @@
 
 use super::*;
 
-
 /// A block label that can be followed (`code:name`, `table:name`): the
 /// notation colour, underlined like every other followable row.
 pub(super) fn style_block_label(pal: &Palette) -> Style {
-    Style::default().fg(pal.code_fence).add_modifier(Modifier::UNDERLINED)
+    Style::default()
+        .fg(pal.code_fence)
+        .add_modifier(Modifier::UNDERLINED)
 }
 
 pub(super) fn style_link(pal: &Palette) -> Style {
-    Style::default().fg(pal.link).add_modifier(Modifier::UNDERLINED)
+    Style::default()
+        .fg(pal.link)
+        .add_modifier(Modifier::UNDERLINED)
 }
 /// A link to a page nobody has written yet. Still underlined: it is still
 /// followable — Enter opens it and the first line you type creates it.
 pub(super) fn style_link_missing(pal: &Palette) -> Style {
-    Style::default().fg(pal.link_missing).add_modifier(Modifier::UNDERLINED)
+    Style::default()
+        .fg(pal.link_missing)
+        .add_modifier(Modifier::UNDERLINED)
 }
 
 pub(super) fn style_url(pal: &Palette) -> Style {
-    Style::default().fg(pal.url).add_modifier(Modifier::UNDERLINED)
+    Style::default()
+        .fg(pal.url)
+        .add_modifier(Modifier::UNDERLINED)
 }
 
 /// LaTeX shown as LaTeX (too tall for the pane, or beyond the renderer).
@@ -164,7 +171,9 @@ pub(super) fn decorate_inline(
         let tick = rest
             .find('`')
             .and_then(|start| rest[start + 1..].find('`').map(|e| (start, start + 1 + e)));
-        let bracket = rest.find('[').and_then(|start| matching_bracket(rest, start).map(|c| (start, c)));
+        let bracket = rest
+            .find('[')
+            .and_then(|start| matching_bracket(rest, start).map(|c| (start, c)));
         match (tick, bracket) {
             // inline code
             (Some((start, end)), b) if b.map_or(true, |(bs, _)| start < bs) => {
@@ -184,11 +193,17 @@ pub(super) fn decorate_inline(
                 // Balanced, so notation can nest: `[[[page]]]` is a bold link
                 // and `[* [page]]` is a decorated one. Closing at the first
                 // `]` cut both one bracket short, and the link inside was lost.
-                let doubled =
-                    rest[start + 1..].starts_with('[') && rest[..close].ends_with(']');
+                let doubled = rest[start + 1..].starts_with('[') && rest[..close].ends_with(']');
                 push_plain(&mut spans, &rest[..start], links, pal, known, hits);
                 if doubled {
-                    decorate_bold(&rest[start + 2..close - 1], &mut spans, links, pal, known, hits);
+                    decorate_bold(
+                        &rest[start + 2..close - 1],
+                        &mut spans,
+                        links,
+                        pal,
+                        known,
+                        hits,
+                    );
                 } else {
                     decorate_bracket(
                         &rest[start + 1..close],
@@ -215,7 +230,10 @@ pub(super) fn decorate_inline(
 /// Merge the hits of a nested decoration, whose span indices start at 0,
 /// into a line that already has `base` spans in front of them.
 pub(super) fn merge_hits(hits: &mut Vec<Hit>, inner: Vec<Hit>, base: usize) {
-    hits.extend(inner.into_iter().map(|h| Hit { span: h.span + base, ..h }));
+    hits.extend(inner.into_iter().map(|h| Hit {
+        span: h.span + base,
+        ..h
+    }));
 }
 
 /// Handle bare text: detect URLs and #hashtags, produce spans.
@@ -240,7 +258,10 @@ pub(super) fn push_plain(
             }
             hits.push(Hit {
                 span: spans.len(),
-                target: HitTarget::Url { label: url.to_string(), url: url.to_string() },
+                target: HitTarget::Url {
+                    label: url.to_string(),
+                    url: url.to_string(),
+                },
             });
             spans.push(Span::styled(url.to_string(), style_url(pal)));
             rest = after;
@@ -265,7 +286,11 @@ pub(super) fn push_tags(
         if let Some(pos) = rest.find('#') {
             // must be at start or preceded by whitespace
             let ok = pos == 0
-                || rest[..pos].chars().next_back().map(|c| c.is_whitespace()).unwrap_or(false);
+                || rest[..pos]
+                    .chars()
+                    .next_back()
+                    .map(|c| c.is_whitespace())
+                    .unwrap_or(false);
             let tag: String = rest[pos + 1..]
                 .chars()
                 .take_while(|c| !c.is_whitespace())
@@ -281,9 +306,15 @@ pub(super) fn push_tags(
                 // hashtag anywhere in it, uncreated ones included). So no
                 // colour of its own: the `#` already says which notation
                 // was written.
-                let style =
-                    if known.missing(&tag) { style_link_missing(pal) } else { style_link(pal) };
-                hits.push(Hit { span: spans.len(), target: HitTarget::Page(tag.clone()) });
+                let style = if known.missing(&tag) {
+                    style_link_missing(pal)
+                } else {
+                    style_link(pal)
+                };
+                hits.push(Hit {
+                    span: spans.len(),
+                    target: HitTarget::Page(tag.clone()),
+                });
                 spans.push(Span::styled(format!("#{tag}"), style));
                 let consumed = pos + 1 + tag.len();
                 rest = &rest[consumed..];
@@ -427,8 +458,11 @@ pub(super) fn decorate_bracket(
         // heading style. Rendering them as plain bold threw the level away
         // — `[* x]` and `[*** x]` looked identical.
         let stars = flags.chars().filter(|c| *c == '*').count();
-        let mut style =
-            if stars > 0 { star_style(stars, pal) } else { Style::default() };
+        let mut style = if stars > 0 {
+            star_style(stars, pal)
+        } else {
+            Style::default()
+        };
         if flags.contains('/') {
             style = style.add_modifier(Modifier::ITALIC);
         }
@@ -456,7 +490,10 @@ pub(super) fn decorate_bracket(
     // icon: [name.icon]
     if inner.ends_with(".icon") || inner.contains(".icon") {
         let name = inner.split(".icon").next().unwrap_or(inner);
-        spans.push(Span::styled(format!("@{name}"), Style::default().fg(pal.code_fence)));
+        spans.push(Span::styled(
+            format!("@{name}"),
+            Style::default().fg(pal.code_fence),
+        ));
         return;
     }
     // external link with optional title
@@ -469,7 +506,10 @@ pub(super) fn decorate_bracket(
         let mut hit = |label: &str, spans: &Vec<Span<'static>>| {
             hits.push(Hit {
                 span: spans.len(),
-                target: HitTarget::Url { label: label.to_string(), url: url.to_string() },
+                target: HitTarget::Url {
+                    label: label.to_string(),
+                    url: url.to_string(),
+                },
             });
         };
         if url.contains("gyazo.com") {
@@ -478,19 +518,29 @@ pub(super) fn decorate_bracket(
             hit(label, spans);
             spans.push(Span::styled(
                 label.to_string(),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::UNDERLINED),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::UNDERLINED),
             ));
         } else if is_scrapbox_file_url(url) {
             // Uploaded file: a paper-clip so it reads as "download", not
             // "open in browser". Enter/f in the viewer saves and opens it.
-            let label = if title.is_empty() { file_name_of_url(url) } else { title };
+            let label = if title.is_empty() {
+                file_name_of_url(url)
+            } else {
+                title
+            };
             hit(label, spans);
             spans.push(Span::styled(label.to_string(), style_url(pal)));
         } else if looks_like_image_url(url) {
             // The picture is drawn on its own row; the text row only needs
             // to say that it is there. Spelling out the whole URL made a
             // one-line note wrap over three rows of link.
-            let label = if title.is_empty() { file_name_of_url(url) } else { title };
+            let label = if title.is_empty() {
+                file_name_of_url(url)
+            } else {
+                title
+            };
             hit(label, spans);
             spans.push(Span::styled(label.to_string(), style_url(pal)));
         } else {
@@ -502,8 +552,15 @@ pub(super) fn decorate_bracket(
     }
     // internal page link
     links.push(inner.to_string());
-    let style = if known.missing(inner) { style_link_missing(pal) } else { style_link(pal) };
-    hits.push(Hit { span: spans.len(), target: HitTarget::Page(inner.to_string()) });
+    let style = if known.missing(inner) {
+        style_link_missing(pal)
+    } else {
+        style_link(pal)
+    };
+    hits.push(Hit {
+        span: spans.len(),
+        target: HitTarget::Page(inner.to_string()),
+    });
     spans.push(Span::styled(inner.to_string(), style));
 }
 
@@ -556,7 +613,11 @@ pub fn looks_like_image_url(url: &str) -> bool {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return false;
     }
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     if IMAGE_EXTS.iter().any(|e| path.ends_with(e)) {
         return true;
     }
@@ -634,7 +695,9 @@ pub(super) fn line_images(body: &str) -> Vec<String> {
                 }
             }
             (_, Some(o)) => {
-                let Some(end) = matching_bracket(rest, o) else { break };
+                let Some(end) = matching_bracket(rest, o) else {
+                    break;
+                };
                 if let Some(u) = image_in_bracket(&rest[o + 1..end]) {
                     out.push(u);
                 }
@@ -663,7 +726,9 @@ pub(super) fn has_tall_formula(body: &str) -> bool {
                 }
             }
             (_, Some(o)) => {
-                let Some(end) = matching_bracket(rest, o) else { return false };
+                let Some(end) = matching_bracket(rest, o) else {
+                    return false;
+                };
                 if tall_formula_rows(&rest[o + 1..end]).is_some() {
                     return true;
                 }
@@ -694,14 +759,18 @@ pub(super) fn inline_parts(
     // Ok(a part of its own) | Err(run index)
     let mut order: Vec<Result<InlinePart, usize>> = Vec::new();
     while i < body.len() {
-        let Some(rel) = body[i..].find('[') else { break };
+        let Some(rel) = body[i..].find('[') else {
+            break;
+        };
         let open = i + rel;
         // Quoted notation is text about a picture, not a picture.
         if body[..open].matches('`').count() % 2 == 1 {
             i = open + 1;
             continue;
         }
-        let Some(close) = matching_bracket(body, open) else { break };
+        let Some(close) = matching_bracket(body, open) else {
+            break;
+        };
         let inner = &body[open + 1..close];
         let own_part = image_in_bracket(inner)
             .map(InlinePart::Image)
@@ -784,7 +853,9 @@ pub fn inline_formulas(line: &str) -> Vec<String> {
                 }
             }
             (_, Some(o)) => {
-                let Some(end) = matching_bracket(rest, o) else { return out };
+                let Some(end) = matching_bracket(rest, o) else {
+                    return out;
+                };
                 if let Some(latex) = rest[o + 1..end].strip_prefix('$') {
                     out.push(latex.trim().to_string());
                 }

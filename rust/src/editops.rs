@@ -132,7 +132,9 @@ pub fn diff_to_ops(old: &[(String, String)], new: &[String]) -> Vec<EditOp> {
             });
         }
         for &d in dels.iter().skip(pairs) {
-            ops.push(EditOp::Delete { id: old[d].0.clone() });
+            ops.push(EditOp::Delete {
+                id: old[d].0.clone(),
+            });
         }
         if inss.len() > pairs {
             let text: Vec<&str> = inss[pairs..].iter().map(|&x| new[x].as_str()).collect();
@@ -178,11 +180,17 @@ pub fn apply_ops(lines: &mut Vec<PageLine>, ops: &[EditOp]) {
         .unwrap_or(0);
     for op in ops {
         match op {
-            EditOp::Insert { anchor, lines: newl } => {
+            EditOp::Insert {
+                anchor,
+                lines: newl,
+            } => {
                 let at = if anchor == "_end" {
                     lines.len()
                 } else {
-                    lines.iter().position(|l| l.id == *anchor).unwrap_or(lines.len())
+                    lines
+                        .iter()
+                        .position(|l| l.id == *anchor)
+                        .unwrap_or(lines.len())
                 };
                 for (k, (id, text)) in newl.iter().enumerate() {
                     lines.insert(
@@ -216,7 +224,12 @@ pub fn apply_ops(lines: &mut Vec<PageLine>, ops: &[EditOp]) {
 /// that happened to cross it.
 fn invert_move(lines: &[PageLine], ops: &[EditOp]) -> Option<Vec<EditOp>> {
     let (last, deletes) = ops.split_last()?;
-    let EditOp::Insert { lines: inserted, .. } = last else { return None };
+    let EditOp::Insert {
+        lines: inserted, ..
+    } = last
+    else {
+        return None;
+    };
     if deletes.len() != inserted.len() || deletes.is_empty() {
         return None;
     }
@@ -229,9 +242,17 @@ fn invert_move(lines: &[PageLine], ops: &[EditOp]) -> Option<Vec<EditOp>> {
         .collect::<Option<_>>()?;
     let start = lines.iter().position(|line| line.id == ids[0])?;
     let source = lines.get(start..start + ids.len())?;
-    if source.iter().map(|line| line.id.as_str()).ne(ids.iter().copied())
-        || source.iter().map(|line| line.text.as_str()).ne(inserted.iter().map(|(_, text)| text.as_str()))
-        || inserted.iter().any(|(id, _)| lines.iter().any(|line| line.id == *id))
+    if source
+        .iter()
+        .map(|line| line.id.as_str())
+        .ne(ids.iter().copied())
+        || source
+            .iter()
+            .map(|line| line.text.as_str())
+            .ne(inserted.iter().map(|(_, text)| text.as_str()))
+        || inserted
+            .iter()
+            .any(|(id, _)| lines.iter().any(|line| line.id == *id))
     {
         return None;
     }
@@ -246,7 +267,11 @@ fn invert_move(lines: &[PageLine], ops: &[EditOp]) -> Option<Vec<EditOp>> {
         .collect();
     inverse.push(EditOp::insert(
         anchor,
-        &source.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join("\n"),
+        &source
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
     ));
     Some(inverse)
 }
@@ -267,8 +292,10 @@ pub fn invert_ops(lines: &[PageLine], ops: &[EditOp]) -> Vec<EditOp> {
     let before_texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
     let mut after = lines.to_vec();
     apply_ops(&mut after, ops);
-    let after_pairs: Vec<(String, String)> =
-        after.iter().map(|l| (l.id.clone(), l.text.clone())).collect();
+    let after_pairs: Vec<(String, String)> = after
+        .iter()
+        .map(|l| (l.id.clone(), l.text.clone()))
+        .collect();
     diff_to_ops(&after_pairs, &before_texts)
 }
 
@@ -296,7 +323,11 @@ mod tests {
             EditOp::Insert { anchor, lines } => (
                 "insert".into(),
                 anchor.clone(),
-                lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n"),
+                lines
+                    .iter()
+                    .map(|(_, t)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             ),
         }
     }
@@ -317,14 +348,26 @@ mod tests {
     fn changed_line_becomes_replace_preserving_its_id() {
         let o = old(&["title", "a", "b"]);
         let ops = diff_to_ops(&o, &new(&["title", "A!", "b"]));
-        assert_eq!(ops, vec![EditOp::Replace { id: "id1".into(), text: "A!".into() }]);
+        assert_eq!(
+            ops,
+            vec![EditOp::Replace {
+                id: "id1".into(),
+                text: "A!".into()
+            }]
+        );
     }
 
     #[test]
     fn title_rename_is_a_replace_of_line_zero() {
         let o = old(&["title", "a"]);
         let ops = diff_to_ops(&o, &new(&["new title", "a"]));
-        assert_eq!(ops, vec![EditOp::Replace { id: "id0".into(), text: "new title".into() }]);
+        assert_eq!(
+            ops,
+            vec![EditOp::Replace {
+                id: "id0".into(),
+                text: "new title".into()
+            }]
+        );
     }
 
     #[test]
@@ -398,10 +441,19 @@ mod tests {
         apply_ops(
             &mut lines,
             &[
-                EditOp::Replace { id: "b".into(), text: "ONE".into() },
-                EditOp::Insert { anchor: "c".into(), lines: vec![("x".into(), "mid".into())] },
+                EditOp::Replace {
+                    id: "b".into(),
+                    text: "ONE".into(),
+                },
+                EditOp::Insert {
+                    anchor: "c".into(),
+                    lines: vec![("x".into(), "mid".into())],
+                },
                 EditOp::Delete { id: "c".into() },
-                EditOp::Insert { anchor: "_end".into(), lines: vec![("y".into(), "tail".into())] },
+                EditOp::Insert {
+                    anchor: "_end".into(),
+                    lines: vec![("y".into(), "tail".into())],
+                },
             ],
         );
         assert_eq!(texts(&lines), vec!["title", "ONE", "mid", "tail"]);
@@ -410,10 +462,21 @@ mod tests {
 
     #[test]
     fn invert_roundtrips_textually() {
-        let orig = vec![pl("a", "title"), pl("b", "one"), pl("c", "two"), pl("d", "three")];
+        let orig = vec![
+            pl("a", "title"),
+            pl("b", "one"),
+            pl("c", "two"),
+            pl("d", "three"),
+        ];
         let ops = vec![
-            EditOp::Replace { id: "b".into(), text: "ONE".into() },
-            EditOp::Insert { anchor: "c".into(), lines: vec![("x".into(), "mid".into())] },
+            EditOp::Replace {
+                id: "b".into(),
+                text: "ONE".into(),
+            },
+            EditOp::Insert {
+                anchor: "c".into(),
+                lines: vec![("x".into(), "mid".into())],
+            },
             EditOp::Delete { id: "d".into() },
         ];
         let inv = invert_ops(&orig, &ops);
@@ -428,7 +491,13 @@ mod tests {
 
     #[test]
     fn multi_line_delete_undoes_in_order_regardless_of_delete_order() {
-        let orig = vec![pl("t", "title"), pl("a", "1"), pl("b", "2"), pl("c", "3"), pl("z", "end")];
+        let orig = vec![
+            pl("t", "title"),
+            pl("a", "1"),
+            pl("b", "2"),
+            pl("c", "3"),
+            pl("z", "end"),
+        ];
         for ops in [
             // top-down and bottom-up delete of the a..c range
             vec![
@@ -454,7 +523,10 @@ mod tests {
     #[test]
     fn deleting_the_tail_undoes_via_end_anchor() {
         let orig = vec![pl("t", "title"), pl("a", "1"), pl("b", "2")];
-        let ops = vec![EditOp::Delete { id: "a".into() }, EditOp::Delete { id: "b".into() }];
+        let ops = vec![
+            EditOp::Delete { id: "a".into() },
+            EditOp::Delete { id: "b".into() },
+        ];
         let inv = invert_ops(&orig, &ops);
         let mut lines = orig.clone();
         apply_ops(&mut lines, &ops);
@@ -466,8 +538,14 @@ mod tests {
     fn redo_is_the_inverse_of_the_inverse() {
         let orig = vec![pl("t", "title"), pl("a", "1")];
         let ops = vec![
-            EditOp::Replace { id: "a".into(), text: "ONE".into() },
-            EditOp::Insert { anchor: "_end".into(), lines: vec![("n".into(), "new".into())] },
+            EditOp::Replace {
+                id: "a".into(),
+                text: "ONE".into(),
+            },
+            EditOp::Insert {
+                anchor: "_end".into(),
+                lines: vec![("n".into(), "new".into())],
+            },
         ];
         let mut lines = orig.clone();
         apply_ops(&mut lines, &ops);
@@ -493,7 +571,10 @@ mod tests {
         let ops = vec![
             EditOp::Delete { id: "b".into() },
             EditOp::Delete { id: "c".into() },
-            EditOp::Insert { anchor: "a".into(), lines: moved },
+            EditOp::Insert {
+                anchor: "a".into(),
+                lines: moved,
+            },
         ];
 
         let undo = invert_ops(&orig, &ops);
@@ -510,7 +591,10 @@ mod tests {
         assert_eq!(after[4].id, "z", "the following line kept its ID");
 
         apply_ops(&mut after, &redo);
-        assert_eq!(texts(&after), vec!["title", "root", " child", "neighbor", "after"]);
+        assert_eq!(
+            texts(&after),
+            vec!["title", "root", " child", "neighbor", "after"]
+        );
         assert_eq!(after[3].id, "a", "redo still moves the user's target");
         assert_eq!(after[4].id, "z");
     }
@@ -548,13 +632,29 @@ mod tests {
         let steps = assert_script_shape(&old, &new);
         assert_eq!(
             steps,
-            vec![Step::Match, Step::Match, Step::Match, Step::Del, Step::Ins, Step::Match, Step::Match]
+            vec![
+                Step::Match,
+                Step::Match,
+                Step::Match,
+                Step::Del,
+                Step::Ins,
+                Step::Match,
+                Step::Match
+            ]
         );
         // An identical page: all matches, an empty middle.
-        assert!(assert_script_shape(&old, &old).iter().all(|s| *s == Step::Match));
+        assert!(assert_script_shape(&old, &old)
+            .iter()
+            .all(|s| *s == Step::Match));
         // Everything shared on top, extra lines only below.
-        assert_eq!(assert_script_shape(&["t", "a"], &["t", "a", "b"]), vec![Step::Match, Step::Match, Step::Ins]);
-        assert_eq!(assert_script_shape(&["t", "a", "b"], &["t"]), vec![Step::Match, Step::Del, Step::Del]);
+        assert_eq!(
+            assert_script_shape(&["t", "a"], &["t", "a", "b"]),
+            vec![Step::Match, Step::Match, Step::Ins]
+        );
+        assert_eq!(
+            assert_script_shape(&["t", "a", "b"], &["t"]),
+            vec![Step::Match, Step::Del, Step::Del]
+        );
         // A repeated line at the edge: the head takes as many as match,
         // and the middle still comes out consistent.
         assert_script_shape(&["a", "a", "a"], &["a", "a"]);
@@ -575,11 +675,17 @@ mod tests {
         assert_eq!(steps.iter().filter(|s| **s == Step::Ins).count(), n + 2);
         // Through `diff_to_ops`, the lines pair into replaces (ids kept)
         // and the two extra lines become one insert at the end.
-        let page: Vec<(String, String)> = olds.iter().enumerate().map(|(i, t)| (format!("id{i}"), t.clone())).collect();
+        let page: Vec<(String, String)> = olds
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (format!("id{i}"), t.clone()))
+            .collect();
         let ops = diff_to_ops(&page, &news);
         assert_eq!(ops.len(), n + 1);
         assert!(matches!(&ops[0], EditOp::Replace { id, text } if id == "id0" && text == "new 0"));
-        assert!(matches!(&ops[n], EditOp::Insert { anchor, lines } if anchor == "_end" && lines.len() == 2));
+        assert!(
+            matches!(&ops[n], EditOp::Insert { anchor, lines } if anchor == "_end" && lines.len() == 2)
+        );
     }
 
     #[test]
@@ -588,6 +694,12 @@ mod tests {
         // stable and only move the actual change.
         let o = old(&["t", "", "a", "", "b", ""]);
         let ops = diff_to_ops(&o, &new(&["t", "", "a", "", "B", ""]));
-        assert_eq!(ops, vec![EditOp::Replace { id: "id4".into(), text: "B".into() }]);
+        assert_eq!(
+            ops,
+            vec![EditOp::Replace {
+                id: "id4".into(),
+                text: "B".into()
+            }]
+        );
     }
 }

@@ -1,5 +1,5 @@
-use crate::*;
 use crate::tests::support::*;
+use crate::*;
 
 // ---------------------------------------------------------------
 // Live-update plan: the poller's interval follows a TYPED push state.
@@ -82,9 +82,20 @@ fn a_failed_reload_keeps_the_reader_in_history() {
     // Esc asks for NOW. The fetch fails, so there is no NOW to show.
     handle_key(&mut app, &ctx, key(KeyCode::Esc));
     assert!(app.time.is_some(), "the snapshot stays on screen");
-    assert_ne!(app.toast_text(), "最新", "and it is not labelled as the live page");
-    assert!(app.toast_text().contains("読み直しに失敗"), "the reason is shown: {}", app.toast_text());
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(), "no diagram work");
+    assert_ne!(
+        app.toast_text(),
+        "最新",
+        "and it is not labelled as the live page"
+    );
+    assert!(
+        app.toast_text().contains("読み直しに失敗"),
+        "the reason is shown: {}",
+        app.toast_text()
+    );
+    assert!(
+        app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
+        "no diagram work"
+    );
 }
 
 #[test]
@@ -153,7 +164,10 @@ fn each_mermaid_block_is_requested_against_its_own_cosense_line_id() {
     assert!(reqs.iter().all(|r| r.page_id == "PAGE"));
     // Asking again while they are in flight queues nothing new.
     app.start_web_renders(capability::Trigger::Auto);
-    assert!(rx.try_recv().is_err(), "no duplicate batch for pending keys");
+    assert!(
+        rx.try_recv().is_err(),
+        "no duplicate batch for pending keys"
+    );
 }
 
 #[test]
@@ -161,7 +175,9 @@ fn only_the_diagrams_own_source_invalidates_it() {
     let mut app = mermaid_page();
     app.rebuild(80);
     let key = |a: &App, code: &str| {
-        a.web_request(cosense::webrender::WebKind::Mermaid, code, 3).unwrap().cache_key()
+        a.web_request(cosense::webrender::WebKind::Mermaid, code, 3)
+            .unwrap()
+            .cache_key()
     };
     let before = key(&app, "flowchart");
     // Someone (or the reader) commits elsewhere on the page: pressing
@@ -169,7 +185,11 @@ fn only_the_diagrams_own_source_invalidates_it() {
     // so it must NOT be re-rendered — keying on the page commit used to
     // re-render every diagram on the page for each such edit.
     app.ws_head = Some("COMMIT2".into());
-    assert_eq!(before, key(&app, "flowchart"), "an unrelated commit changes nothing");
+    assert_eq!(
+        before,
+        key(&app, "flowchart"),
+        "an unrelated commit changes nothing"
+    );
     // Editing the diagram itself does invalidate it.
     assert_ne!(before, key(&app, "flowchart LR"));
     // A pane resize does NOT. The viewer scales every image to a cell
@@ -181,7 +201,10 @@ fn only_the_diagrams_own_source_invalidates_it() {
     // With the page's diagrams already requested once, resizing queues
     // no further work at all.
     app.start_web_renders(capability::Trigger::Auto);
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(), "the initial batch");
+    assert!(
+        app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(),
+        "the initial batch"
+    );
     for w in [60, 100, 200, 37] {
         app.rebuild(w);
         app.start_web_renders(capability::Trigger::Auto);
@@ -191,7 +214,11 @@ fn only_the_diagrams_own_source_invalidates_it() {
         );
     }
     // …and a snapshot of an older page is never rendered from the web.
-    app.time = Some(TimeMachine { points: vec![], pos: 0, cache: HashMap::new() });
+    app.time = Some(TimeMachine {
+        points: vec![],
+        pos: 0,
+        cache: HashMap::new(),
+    });
     assert!(app
         .web_request(cosense::webrender::WebKind::Mermaid, "flowchart", 3)
         .is_none());
@@ -214,8 +241,13 @@ fn an_open_session_only_holds_back_the_block_under_the_caret() {
     // still being typed, but the second diagram has nothing to wait for.
     session_on(&mut app, 2);
     app.start_web_renders(capability::Trigger::Auto);
-    let (_, reqs) =
-        render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().expect("the other block goes"));
+    let (_, reqs) = render_job(
+        app.web_jobs_rx
+            .as_ref()
+            .unwrap()
+            .try_recv()
+            .expect("the other block goes"),
+    );
     assert_eq!(
         reqs.iter().map(|r| r.line_id.as_str()).collect::<Vec<_>>(),
         vec!["id7"],
@@ -260,12 +292,22 @@ fn a_renderer_failure_leaves_the_code_block_on_screen() {
     app.mermaid_text = false;
     app.rebuild(80);
     let key = app
-        .web_request(cosense::webrender::WebKind::Mermaid, "flowchart LR\n  A-->B", 3)
+        .web_request(
+            cosense::webrender::WebKind::Mermaid,
+            "flowchart LR\n  A-->B",
+            3,
+        )
         .unwrap()
         .cache_key();
     app.web_pending.insert(key.clone());
     app.web_tx
-        .send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Failed(WebError::NoBrowser.to_string()) })
+        .send(WebMsg {
+            gen: app.gen_now(),
+            key: key.clone(),
+            rescale: false,
+            attempted: None,
+            res: WebOutcome::Failed(WebError::NoBrowser.to_string()),
+        })
         .unwrap();
     assert!(app.drain_web_renders());
     app.laid_width = 0;
@@ -274,9 +316,12 @@ fn a_renderer_failure_leaves_the_code_block_on_screen() {
         .rows
         .iter()
         .filter_map(|r| match r {
-            Row::Line { line, .. } => {
-                Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-            }
+            Row::Line { line, .. } => Some(
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+            ),
             _ => None,
         })
         .collect();
@@ -300,19 +345,33 @@ fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
     let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().try_recv().unwrap());
     let key = reqs[0].cache_key();
     let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-    app.web_tx.send(WebMsg { gen: app.gen_now(), key: key.clone(), rescale: false, attempted: None, res: WebOutcome::Drawn(info) }).unwrap();
+    app.web_tx
+        .send(WebMsg {
+            gen: app.gen_now(),
+            key: key.clone(),
+            rescale: false,
+            attempted: None,
+            res: WebOutcome::Drawn(info),
+        })
+        .unwrap();
     assert!(app.drain_web_renders());
     app.laid_width = 0;
     app.rebuild(80);
     // The first block draws as a picture, the second is still code.
-    assert!(app.rows.iter().any(|r| matches!(r, Row::Image { url, src, .. } if *url == key && *src == 3)));
+    assert!(app
+        .rows
+        .iter()
+        .any(|r| matches!(r, Row::Image { url, src, .. } if *url == key && *src == 3)));
     let code_rows = |app: &App| {
         app.rows
             .iter()
             .filter_map(|r| match r {
-                Row::Line { line, .. } => {
-                    Some(line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-                }
+                Row::Line { line, .. } => Some(
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>(),
+                ),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -363,7 +422,9 @@ fn the_default_policy_is_off_and_touches_nothing() {
     // The note names the way out.
     handle_key(&mut app, &test_ctx(), key(KeyCode::Char('R')));
     assert!(
-        app.note.as_ref().is_some_and(|n| n.0.contains("COSENSE_WEB_RENDER")),
+        app.note
+            .as_ref()
+            .is_some_and(|n| n.0.contains("COSENSE_WEB_RENDER")),
         "R says why: {:?}",
         app.note
     );
@@ -514,9 +575,17 @@ fn a_rendering_diagram_pulses_its_code_and_stops_when_it_lands() {
     let mut srcs: Vec<usize> = app.web_shimmer.keys().copied().collect();
     srcs.sort();
     assert_eq!(srcs, vec![1, 2, 3, 6, 7]);
-    assert_eq!(app.web_shimmer[&1], (0, 3), "the code: header leads its block");
+    assert_eq!(
+        app.web_shimmer[&1],
+        (0, 3),
+        "the code: header leads its block"
+    );
     assert_eq!(app.web_shimmer[&3], (2, 3));
-    assert_eq!(app.web_shimmer[&7], (1, 2), "the second block counts from its own top");
+    assert_eq!(
+        app.web_shimmer[&7],
+        (1, 2),
+        "the second block counts from its own top"
+    );
 
     let dim_cells = |app: &mut App, ctx: &Ctx| {
         let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
@@ -525,12 +594,13 @@ fn a_rendering_diagram_pulses_its_code_and_stops_when_it_lands() {
         let buf = terminal.backend().buffer();
         (0..buf.area.width)
             .flat_map(|x| (0..buf.area.height).map(move |y| (x, y)))
-            .filter(|(x, y)| {
-                buf.cell((*x, *y)).unwrap().modifier.contains(Modifier::DIM)
-            })
+            .filter(|(x, y)| buf.cell((*x, *y)).unwrap().modifier.contains(Modifier::DIM))
             .count()
     };
-    assert!(dim_cells(&mut app, &ctx) > 0, "the reader can see the renderer working");
+    assert!(
+        dim_cells(&mut app, &ctx) > 0,
+        "the reader can see the renderer working"
+    );
 
     // The renders land: the pulse stops and the page goes back to normal.
     let keys: Vec<String> = app.web_pending.iter().cloned().collect();
@@ -540,7 +610,11 @@ fn a_rendering_diagram_pulses_its_code_and_stops_when_it_lands() {
     app.laid_width = 0;
     app.rebuild(80);
     assert!(app.web_shimmer.is_empty());
-    assert_eq!(dim_cells(&mut app, &ctx), 0, "nothing pulses once nothing is pending");
+    assert_eq!(
+        dim_cells(&mut app, &ctx),
+        0,
+        "nothing pulses once nothing is pending"
+    );
 }
 
 /// A picture written beside text has to be FETCHED like any other.

@@ -65,14 +65,22 @@ pub(crate) const CARD_BG: Color = Color::Black;
 /// badge colour changing. akapen's placement (under the range) with this
 /// viewer's flat look instead of akapen's rules.
 pub(crate) fn card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
-    let title = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let title = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
     // A comment on a past revision says which one on its title, so a
     // reader stepping through history knows the card is about THIS version.
     let label = match c.revision_label() {
         Some(at) => format!(" comment · {} · {at} ", c.range_label()),
         None => format!(" comment · {} ", c.range_label()),
     };
-    bar_lines(&label, title, c.text.lines().flat_map(|l| wrap_plain(l, width)).collect(), width)
+    bar_lines(
+        &label,
+        title,
+        c.text.lines().flat_map(|l| wrap_plain(l, width)).collect(),
+        width,
+    )
 }
 
 /// The block shape both the card and the composer use: the badge on the
@@ -107,11 +115,23 @@ pub(crate) fn composer_rows(
     max_body: usize,
 ) -> Vec<Row> {
     let width = width.max(1);
-    let title = Style::default().fg(Color::Black).bg(CHROME_ACCENT).add_modifier(Modifier::BOLD);
+    let title = Style::default()
+        .fg(Color::Black)
+        .bg(CHROME_ACCENT)
+        .add_modifier(Modifier::BOLD);
     let label = if range.0 == range.1 {
-        format!("{} {}", if editing { " edit ·" } else { " comment ·" }, range.0 + 1)
+        format!(
+            "{} {}",
+            if editing { " edit ·" } else { " comment ·" },
+            range.0 + 1
+        )
     } else {
-        format!("{} {}-{}", if editing { " edit ·" } else { " comment ·" }, range.0 + 1, range.1 + 1)
+        format!(
+            "{} {}-{}",
+            if editing { " edit ·" } else { " comment ·" },
+            range.0 + 1,
+            range.1 + 1
+        )
     };
     let label = match revision {
         Some(at) => format!("{label} · {at} "),
@@ -171,7 +191,11 @@ pub(crate) fn composer_rows(
 /// row and the next character sits where that character goes — the start
 /// of the next row. Only at the very end of the text can it sit on a full
 /// row's right edge; the drawer clamps that one cell.
-pub(crate) fn wrap_with_caret(s: &str, caret_chars: usize, width: usize) -> (Vec<String>, (usize, usize)) {
+pub(crate) fn wrap_with_caret(
+    s: &str,
+    caret_chars: usize,
+    width: usize,
+) -> (Vec<String>, (usize, usize)) {
     use unicode_width::UnicodeWidthChar;
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -226,4 +250,3 @@ pub(crate) fn wrap_plain(s: &str, width: usize) -> Vec<String> {
     }
     out
 }
-

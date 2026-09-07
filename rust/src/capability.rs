@@ -190,7 +190,10 @@ impl Capabilities {
     /// Moving to another project resets everything learned about the old one
     /// EXCEPT the session-wide fact of whether a sid exists.
     pub fn for_new_project(&self) -> Self {
-        Self { sid: self.sid, ..Default::default() }
+        Self {
+            sid: self.sid,
+            ..Default::default()
+        }
     }
 }
 
@@ -218,7 +221,11 @@ pub fn decide(caps: &Capabilities, policy: RenderPolicy, trigger: Trigger) -> De
         // Saying "you need a cookie" is only honest when we KNOW it is
         // private; the notice is suppressed for Unknown.
         (false, Visibility::Private) => Decision::CacheOnly {
-            notice: Some(if caps.sid { sid_rejected() } else { needs_sid() }),
+            notice: Some(if caps.sid {
+                sid_rejected()
+            } else {
+                needs_sid()
+            }),
         },
         // Unknown: automatic passes stay conservative — no browser is spent
         // guessing. An explicit `m` is allowed exactly one anonymous try.
@@ -266,7 +273,11 @@ mod tests {
     use super::*;
 
     fn caps(sid: bool, visibility: Visibility) -> Capabilities {
-        Capabilities { sid, visibility, ..Default::default() }
+        Capabilities {
+            sid,
+            visibility,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -279,11 +290,23 @@ mod tests {
 
     #[test]
     fn visibility_reads_the_measured_status_codes() {
-        assert_eq!(Visibility::from_anonymous_status(Some(200)), Visibility::Public);
-        assert_eq!(Visibility::from_anonymous_status(Some(401)), Visibility::Private);
-        assert_eq!(Visibility::from_anonymous_status(Some(403)), Visibility::Private);
+        assert_eq!(
+            Visibility::from_anonymous_status(Some(200)),
+            Visibility::Public
+        );
+        assert_eq!(
+            Visibility::from_anonymous_status(Some(401)),
+            Visibility::Private
+        );
+        assert_eq!(
+            Visibility::from_anonymous_status(Some(403)),
+            Visibility::Private
+        );
         // 404 is both "no such project" and "not telling you" — never Public.
-        assert_eq!(Visibility::from_anonymous_status(Some(404)), Visibility::Unknown);
+        assert_eq!(
+            Visibility::from_anonymous_status(Some(404)),
+            Visibility::Unknown
+        );
         assert_eq!(Visibility::from_anonymous_status(None), Visibility::Unknown);
     }
 
@@ -311,15 +334,28 @@ mod tests {
     #[test]
     fn no_sid_on_a_public_project_still_renders() {
         assert_eq!(
-            decide(&caps(false, Visibility::Public), RenderPolicy::Auto, Trigger::Auto),
+            decide(
+                &caps(false, Visibility::Public),
+                RenderPolicy::Auto,
+                Trigger::Auto
+            ),
             Decision::Render(RenderCapability::Anonymous)
         );
     }
 
     #[test]
     fn no_sid_on_a_private_project_falls_back_to_source_and_says_why() {
-        let d = decide(&caps(false, Visibility::Private), RenderPolicy::Auto, Trigger::Auto);
-        assert_eq!(d, Decision::CacheOnly { notice: Some(needs_sid()) });
+        let d = decide(
+            &caps(false, Visibility::Private),
+            RenderPolicy::Auto,
+            Trigger::Auto,
+        );
+        assert_eq!(
+            d,
+            Decision::CacheOnly {
+                notice: Some(needs_sid())
+            }
+        );
         // The advice names the cookie; it can never name a value.
         assert!(needs_sid().contains("connect.sid"));
     }
@@ -336,7 +372,10 @@ mod tests {
             Decision::Render(RenderCapability::Anonymous)
         );
         // ...and only once.
-        let spent = Capabilities { anonymous_spent: true, ..c };
+        let spent = Capabilities {
+            anonymous_spent: true,
+            ..c
+        };
         assert_eq!(
             decide(&spent, RenderPolicy::Auto, Trigger::Manual),
             Decision::CacheOnly { notice: None }
@@ -345,7 +384,10 @@ mod tests {
 
     #[test]
     fn a_refused_browser_is_not_retried_all_session() {
-        let c = Capabilities { browser_denied: true, ..caps(true, Visibility::Public) };
+        let c = Capabilities {
+            browser_denied: true,
+            ..caps(true, Visibility::Public)
+        };
         assert_eq!(
             decide(&c, RenderPolicy::Auto, Trigger::Manual),
             Decision::CacheOnly { notice: None }
@@ -356,17 +398,25 @@ mod tests {
     fn a_rejected_cookie_counts_as_no_cookie_at_all() {
         // This is the whole point of the retry: presenting the SAME
         // rejected cookie again would just fail again.
-        let c = Capabilities { cookie_rejected: true, ..caps(true, Visibility::Public) };
+        let c = Capabilities {
+            cookie_rejected: true,
+            ..caps(true, Visibility::Public)
+        };
         assert_eq!(
             decide(&c, RenderPolicy::Auto, Trigger::Manual),
             Decision::Render(RenderCapability::Anonymous)
         );
         // On a private project there is nothing anonymous can do, and the
         // advice differs: the cookie is stale, not absent.
-        let p = Capabilities { cookie_rejected: true, ..caps(true, Visibility::Private) };
+        let p = Capabilities {
+            cookie_rejected: true,
+            ..caps(true, Visibility::Private)
+        };
         assert_eq!(
             decide(&p, RenderPolicy::Auto, Trigger::Manual),
-            Decision::CacheOnly { notice: Some(sid_rejected()) }
+            Decision::CacheOnly {
+                notice: Some(sid_rejected())
+            }
         );
         assert!(sid_rejected().contains("connect.sid"));
     }
@@ -392,8 +442,14 @@ mod tests {
         // `anonymous_spent` is about the one Unknown-visibility gamble; it
         // must not make a cookie refusal give up early. Two diagrams in one
         // batch used to fail exactly here.
-        let spent = Capabilities { anonymous_spent: true, ..caps(true, Visibility::Public) };
-        assert_eq!(on_not_authorized(&spent, Authenticated), Denial::RetryAnonymous);
+        let spent = Capabilities {
+            anonymous_spent: true,
+            ..caps(true, Visibility::Public)
+        };
+        assert_eq!(
+            on_not_authorized(&spent, Authenticated),
+            Denial::RetryAnonymous
+        );
     }
 
     #[test]

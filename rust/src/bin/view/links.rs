@@ -22,7 +22,11 @@ pub(crate) enum LinkItem {
     /// with. The page is already here, so the file is written from it — no
     /// second credential, no round trip, and what lands is exactly what is
     /// on screen.
-    Export { label: String, src: usize, csv: bool },
+    Export {
+        label: String,
+        src: usize,
+        csv: bool,
+    },
 }
 
 impl LinkItem {
@@ -36,7 +40,6 @@ impl LinkItem {
             LinkItem::Url { label, .. } => format!("↗ {label}"),
         }
     }
-
 }
 
 /// A Cosense page URL from the command line, as `(project, title, lineId)`:
@@ -73,7 +76,11 @@ pub(crate) use cosense::url::{encode_component as urlencode_component, percent_d
 
 /// Open a URL in the default browser (macOS `open`, Linux `xdg-open`).
 pub(crate) fn open_in_browser(url: &str) -> bool {
-    let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     Command::new(cmd)
         .arg(url)
         .stdout(Stdio::null())
@@ -138,7 +145,11 @@ pub(crate) fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
             let inner = &text[start + 1..end];
             let is_deco = inner
                 .find(' ')
-                .map(|sp| inner[..sp].chars().all(|c| matches!(c, '*' | '/' | '_' | '-')))
+                .map(|sp| {
+                    inner[..sp]
+                        .chars()
+                        .all(|c| matches!(c, '*' | '/' | '_' | '-'))
+                })
                 .unwrap_or(false)
                 && inner.starts_with(|c| matches!(c, '*' | '/' | '_' | '-'));
             if is_deco {
@@ -171,8 +182,15 @@ pub(crate) fn positioned_links_on_line(text: &str) -> Vec<(usize, LinkItem)> {
     while let Some(rel_pos) = text[from..].find('#') {
         let pos = from + rel_pos;
         let ok = pos == 0
-            || text[..pos].chars().next_back().map(|c| c.is_whitespace()).unwrap_or(false);
-        let tag: String = text[pos + 1..].chars().take_while(|c| !c.is_whitespace()).collect();
+            || text[..pos]
+                .chars()
+                .next_back()
+                .map(|c| c.is_whitespace())
+                .unwrap_or(false);
+        let tag: String = text[pos + 1..]
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .collect();
         if ok && !tag.is_empty() {
             out.push((pos, LinkItem::Page(tag)));
         }
@@ -197,13 +215,21 @@ pub(crate) fn page_link_item(text: &str) -> LinkItem {
     if title.is_empty() {
         // `[/project]` (or `[/project/]`): the project itself, whose home
         // screen here is its index.
-        return LinkItem::ProjectIndex { project: project.to_string() };
+        return LinkItem::ProjectIndex {
+            project: project.to_string(),
+        };
     }
-    LinkItem::ProjectPage { project: project.to_string(), title: title.to_string() }
+    LinkItem::ProjectPage {
+        project: project.to_string(),
+        title: title.to_string(),
+    }
 }
 
 pub(crate) fn links_on_line(text: &str) -> Vec<LinkItem> {
-    positioned_links_on_line(text).into_iter().map(|(_, item)| item).collect()
+    positioned_links_on_line(text)
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect()
 }
 
 /// Every http(s) URL on a raw Scrapbox line, as `(label, url)`, left to
@@ -302,7 +328,11 @@ pub(crate) fn block_export_link(text: &str, src: usize) -> Option<LinkItem> {
     if name.is_empty() {
         return None;
     }
-    let label = if csv { format!("{name}.csv") } else { name.to_string() };
+    let label = if csv {
+        format!("{name}.csv")
+    } else {
+        name.to_string()
+    };
     Some(LinkItem::Export { label, src, csv })
 }
 
@@ -313,7 +343,9 @@ pub(crate) fn block_export_link(text: &str, src: usize) -> Option<LinkItem> {
 /// mechanical; only a cell holding a comma, a quote or a newline needs
 /// quoting (RFC 4180), and that is decided per cell rather than guessed.
 pub(crate) fn block_export_body(lines: &[PageLine], src: usize, csv: bool) -> String {
-    let Some(header) = lines.get(src) else { return String::new() };
+    let Some(header) = lines.get(src) else {
+        return String::new();
+    };
     let indent = indent_of(&header.text).chars().count();
     let mut out: Vec<String> = Vec::new();
     for line in lines.iter().skip(src + 1) {
@@ -361,7 +393,11 @@ pub(crate) fn link_item_for_url(label: String, url: String) -> LinkItem {
     } else if let Some(page) = gyazo_permalink(&url) {
         // An inline image opens its Gyazo page (comments, original, Teams
         // org), not the raw pixel URL.
-        let label = if label == url { "gyazo".to_string() } else { label };
+        let label = if label == url {
+            "gyazo".to_string()
+        } else {
+            label
+        };
         LinkItem::Url { label, url: page }
     } else {
         LinkItem::Url { label, url }
@@ -371,7 +407,10 @@ pub(crate) fn link_item_for_url(label: String, url: String) -> LinkItem {
 /// Uploaded-file links on a raw Scrapbox line (see `labelled_urls`).
 #[cfg(test)]
 pub(crate) fn files_on_line(text: &str) -> Vec<(String, String)> {
-    labelled_urls(text).into_iter().filter(|(_, u)| is_scrapbox_file_url(u)).collect()
+    labelled_urls(text)
+        .into_iter()
+        .filter(|(_, u)| is_scrapbox_file_url(u))
+        .collect()
 }
 
 /// Where downloads go, asked in the order a reader would expect to be
@@ -407,7 +446,8 @@ pub(crate) fn pick_download_dir(
         .map(|s| expand_home(s, home))
         .filter(|d| d.is_dir())
         .or_else(|| {
-            home.map(|h| std::path::PathBuf::from(h).join("Downloads")).filter(|d| d.is_dir())
+            home.map(|h| std::path::PathBuf::from(h).join("Downloads"))
+                .filter(|d| d.is_dir())
         });
     (found.unwrap_or(cwd), false)
 }
@@ -416,7 +456,9 @@ pub(crate) fn pick_download_dir(
 /// paths that way, and the env var arrives unexpanded when it was set by
 /// hand rather than by the shell.
 pub(crate) fn expand_home(path: &str, home: Option<&str>) -> std::path::PathBuf {
-    let Some(home) = home else { return std::path::PathBuf::from(path) };
+    let Some(home) = home else {
+        return std::path::PathBuf::from(path);
+    };
     match path {
         "~" => std::path::PathBuf::from(home),
         p if p.starts_with("~/") => std::path::PathBuf::from(home).join(&p[2..]),
@@ -427,9 +469,20 @@ pub(crate) fn expand_home(path: &str, home: Option<&str>) -> std::path::PathBuf 
 /// `<dir>/<name>`, where `<name>` is the link's label when it carries an
 /// extension, else the URL's file name; an existing file is not overwritten
 /// (`name (2).pdf`, `name (3).pdf`, …).
-pub(crate) fn download_path_in(dir: &std::path::Path, label: &str, url: &str) -> std::path::PathBuf {
-    let raw = if label.contains('.') { label } else { file_name_of_url(url) };
-    let name: String = raw.chars().map(|c| if c == '/' || c == '\0' { '_' } else { c }).collect();
+pub(crate) fn download_path_in(
+    dir: &std::path::Path,
+    label: &str,
+    url: &str,
+) -> std::path::PathBuf {
+    let raw = if label.contains('.') {
+        label
+    } else {
+        file_name_of_url(url)
+    };
+    let name: String = raw
+        .chars()
+        .map(|c| if c == '/' || c == '\0' { '_' } else { c })
+        .collect();
     let mut path = dir.join(&name);
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
@@ -470,12 +523,18 @@ pub(crate) fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
                 Ok(()) => {
                     let shown = dest.display().to_string();
                     app.note(if open_in_browser(&shown) {
-                        t!("保存しました {shown} · 開きました", "saved {shown} · opened")
+                        t!(
+                            "保存しました {shown} · 開きました",
+                            "saved {shown} · opened"
+                        )
                     } else {
                         t!("保存しました {shown}", "saved {shown}")
                     });
                 }
-                Err(e) => app.toast_err(t!("保存に失敗しました: {label} — {e}", "save failed: {label} — {e}")),
+                Err(e) => app.toast_err(t!(
+                    "保存に失敗しました: {label} — {e}",
+                    "save failed: {label} — {e}"
+                )),
             }
         }
         LinkItem::Url { url, .. } => {
@@ -546,7 +605,11 @@ pub(crate) fn copy_payload(app: &App, whole_page: bool) -> Option<(String, Strin
         return None;
     }
     let body: Vec<String> = (a..=b).map(text_of).collect();
-    let label = if body.len() == 1 { "line".into() } else { format!("{} lines", body.len()) };
+    let label = if body.len() == 1 {
+        "line".into()
+    } else {
+        format!("{} lines", body.len())
+    };
     Some((body.join("\n"), label))
 }
 
@@ -561,7 +624,10 @@ pub(crate) fn copy_and_report(app: &mut App, payload: Option<(String, String)>) 
     if copy_to_clipboard(&text) {
         app.note(format!("✓ copied {label}"));
     } else {
-        app.toast_err(t!("コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました", "copy failed — no clipboard tool and the terminal refused OSC 52"));
+        app.toast_err(t!(
+            "コピーできません — クリップボードのコマンドが無く、端末も OSC 52 を拒否しました",
+            "copy failed — no clipboard tool and the terminal refused OSC 52"
+        ));
     }
 }
 
@@ -623,16 +689,27 @@ pub(crate) fn osc52_copy(text: &str) -> bool {
 /// Standard base64, for OSC 52. (The decoder lives in `chrome`; this is
 /// the only place that needs to encode.)
 pub(crate) fn b64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -643,7 +720,16 @@ pub(crate) fn b64_encode(bytes: &[u8]) -> String {
 /// while the fetch runs (`start_page_load`).
 pub(crate) fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) {
     let from = app.here();
-    start_page_load(app, ctx, project, title, LoadIntent::Navigate { from, create: false });
+    start_page_load(
+        app,
+        ctx,
+        project,
+        title,
+        LoadIntent::Navigate {
+            from,
+            create: false,
+        },
+    );
 }
 
 /// READ の Tab / Shift+Tab: リンクのある行へカーソルを巡回させる
@@ -695,7 +781,9 @@ impl App {
         if self.related_pending {
             return;
         }
-        let Some(tx) = self.link_probe_tx.as_ref() else { return };
+        let Some(tx) = self.link_probe_tx.as_ref() else {
+            return;
+        };
         // Scan at once when something could have changed the answer — the
         // text was edited, or the caret left the line it was writing on,
         // which is the moment a new link becomes a question worth asking.
@@ -714,7 +802,9 @@ impl App {
                 continue;
             }
             for item in links_on_line(&mask_inline_code(&line.text)) {
-                let LinkItem::Page(title) = item else { continue };
+                let LinkItem::Page(title) = item else {
+                    continue;
+                };
                 if self.links.exists(&title).is_some() {
                     continue;
                 }
@@ -736,7 +826,8 @@ impl App {
     pub(crate) fn drain_link_probes(&mut self) -> bool {
         let mut changed = false;
         while let Ok((probe, live)) = self.link_probe_rx.try_recv() {
-            self.link_pending.remove(&cosense::render::title_lc(&probe.title));
+            self.link_pending
+                .remove(&cosense::render::title_lc(&probe.title));
             // An answer about a project we have since left says nothing
             // about the page on screen.
             if probe.project != self.project {
@@ -776,9 +867,11 @@ impl App {
             items.push(item);
         }
         items.extend(links_on_line(text));
-        items.extend(labelled_urls(text).into_iter().map(|(label, url)| {
-            link_item_for_url(label, url)
-        }));
+        items.extend(
+            labelled_urls(text)
+                .into_iter()
+                .map(|(label, url)| link_item_for_url(label, url)),
+        );
         items
     }
 
@@ -795,7 +888,10 @@ impl App {
         let fetcher = Arc::clone(&ctx.fetcher);
         self.status = t!("ダウンロード中 {label}…", "downloading {label}…");
         std::thread::spawn(move || {
-            let res = fetcher.download_to(&url, &dest).map(|_| dest).map_err(|e| e.to_string());
+            let res = fetcher
+                .download_to(&url, &dest)
+                .map(|_| dest)
+                .map_err(|e| e.to_string());
             let _ = tx.send((label, res));
         });
     }
@@ -809,14 +905,20 @@ impl App {
                     let opened = open_in_browser(&shown);
                     self.status.clear(); // "downloading…" is over
                     self.note(if opened {
-                        t!("保存しました {shown} · 開きました", "saved {shown} · opened")
+                        t!(
+                            "保存しました {shown} · 開きました",
+                            "saved {shown} · opened"
+                        )
                     } else {
                         t!("保存しました {shown}", "saved {shown}")
                     });
                 }
                 Err(e) => {
                     self.status.clear();
-                    self.toast_err(t!("ダウンロードに失敗しました: {label} — {e}", "download failed: {label} — {e}"));
+                    self.toast_err(t!(
+                        "ダウンロードに失敗しました: {label} — {e}",
+                        "download failed: {label} — {e}"
+                    ));
                 }
             }
         }
@@ -844,7 +946,11 @@ impl App {
     /// palette and counting equal labels. That made the click path depend
     /// on the styling: giving uncreated links their own colour quietly
     /// made them the one thing on a page that could not be followed.
-    pub(crate) fn link_at_screen_position(&self, screen_row: i32, col: usize) -> Option<(usize, LinkItem)> {
+    pub(crate) fn link_at_screen_position(
+        &self,
+        screen_row: i32,
+        col: usize,
+    ) -> Option<(usize, LinkItem)> {
         if self.mode != Mode::View || self.session.is_some() {
             return None;
         }
@@ -852,7 +958,13 @@ impl App {
         if let Row::Inline { src, texts, .. } = row {
             return self.inline_link_at(*src, texts, row_off, col);
         }
-        let Row::Line { line, src, start, hang } = row else {
+        let Row::Line {
+            line,
+            src,
+            start,
+            hang,
+        } = row
+        else {
             return None;
         };
         // A related-page row (a virtual line below the page) has exactly
@@ -863,7 +975,11 @@ impl App {
             if line.spans.iter().all(|sp| sp.content.trim().is_empty()) {
                 return None;
             }
-            return self.links_at_src(*src).into_iter().next().map(|item| (*src, item));
+            return self
+                .links_at_src(*src)
+                .into_iter()
+                .next()
+                .map(|item| (*src, item));
         }
         // A table is laid out against the pane at draw time, so its
         // `table:` header is not a Text block and has no hits of its own.
@@ -896,9 +1012,12 @@ impl App {
             at += w;
         }
         let hit = hits.iter().find(|h| {
-            spans.get(h.span).is_some_and(|(from, w)| *from <= want && want < from + w)
+            spans
+                .get(h.span)
+                .is_some_and(|(from, w)| *from <= want && want < from + w)
         })?;
-        self.item_for_hit(*src, &hit.target).map(|item| (*src, item))
+        self.item_for_hit(*src, &hit.target)
+            .map(|item| (*src, item))
     }
 
     /// The click path for a line of text and pictures. The layout said
@@ -927,7 +1046,9 @@ impl App {
         let mut base = 0usize;
         let mut full: Option<&Line<'static>> = None;
         for (i, part) in parts.iter().enumerate() {
-            let InlinePart::Text(line) = part else { continue };
+            let InlinePart::Text(line) = part else {
+                continue;
+            };
             if i == piece.part {
                 full = Some(line);
                 break;
@@ -954,13 +1075,15 @@ impl App {
     /// Turn what the renderer drew into what this viewer does with it: a
     /// page is opened, an upload is downloaded, a `code:`/`table:` header
     /// is saved as a file.
-    pub(crate) fn item_for_hit(&self, src: usize, target: &cosense::render::HitTarget) -> Option<LinkItem> {
+    pub(crate) fn item_for_hit(
+        &self,
+        src: usize,
+        target: &cosense::render::HitTarget,
+    ) -> Option<LinkItem> {
         use cosense::render::HitTarget;
         match target {
             HitTarget::Page(text) => Some(page_link_item(text)),
-            HitTarget::Url { label, url } => {
-                Some(link_item_for_url(label.clone(), url.clone()))
-            }
+            HitTarget::Url { label, url } => Some(link_item_for_url(label.clone(), url.clone())),
             HitTarget::BlockLabel => {
                 block_export_link(&mask_inline_code(&self.lines.get(src)?.text), src)
             }

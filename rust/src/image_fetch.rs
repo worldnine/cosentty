@@ -52,7 +52,12 @@ impl ImageFetcher {
             .build()?;
         let cache_dir = dirs_cache().join("cosense-tui").join("images");
         std::fs::create_dir_all(&cache_dir).ok();
-        Ok(Self { http, gyazo_token, cred, cache_dir })
+        Ok(Self {
+            http,
+            gyazo_token,
+            cred,
+            cache_dir,
+        })
     }
 
     /// Return a decoded image for a permalink, using the on-disk cache.
@@ -133,7 +138,12 @@ impl ImageFetcher {
     }
 
     fn og_image(&self, page_url: &str) -> Result<String, Box<dyn Error>> {
-        let html = self.http.get(page_url).send_polite()?.error_for_status()?.text()?;
+        let html = self
+            .http
+            .get(page_url)
+            .send_polite()?
+            .error_for_status()?
+            .text()?;
         og_image_from_html(&html).ok_or_else(|| "og:image not found".into())
     }
 
@@ -145,7 +155,10 @@ impl ImageFetcher {
         Ok(())
     }
 
-    fn bytes_request(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    fn bytes_request(
+        &self,
+        url: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let url = reqwest::Url::parse(url)?;
         // Credentials belong to this HTTPS origin, never a substring of a
         // path, query, user-info field, or another host's /files/ directory.
@@ -233,7 +246,10 @@ mod tests {
 
     #[test]
     fn download_credentials_are_bound_to_the_https_origin() {
-        for cred in [Credential::Pat("test-token".into()), Credential::Sid("test-sid".into())] {
+        for cred in [
+            Credential::Pat("test-token".into()),
+            Credential::Sid("test-sid".into()),
+        ] {
             let fetcher = ImageFetcher {
                 http: reqwest::blocking::Client::new(),
                 gyazo_token: None,
@@ -253,8 +269,11 @@ mod tests {
                 let request = fetcher.bytes_request(url).unwrap().build().unwrap();
                 assert!(!request.headers().contains_key(header), "{url}");
             }
-            let request = fetcher.bytes_request("https://scrapbox.io/files/a.png")
-                .unwrap().build().unwrap();
+            let request = fetcher
+                .bytes_request("https://scrapbox.io/files/a.png")
+                .unwrap()
+                .build()
+                .unwrap();
             assert!(request.headers().contains_key(header));
         }
     }
@@ -275,8 +294,14 @@ mod tests {
         );
         // property-first order and single quotes work too
         let html2 = "<meta property='og:image' content='https://x/y.png'>";
-        assert_eq!(og_image_from_html(html2).as_deref(), Some("https://x/y.png"));
-        assert_eq!(og_image_from_html("<meta property=\"og:title\" content=\"t\">"), None);
+        assert_eq!(
+            og_image_from_html(html2).as_deref(),
+            Some("https://x/y.png")
+        );
+        assert_eq!(
+            og_image_from_html("<meta property=\"og:title\" content=\"t\">"),
+            None
+        );
     }
 
     #[test]
@@ -285,14 +310,23 @@ mod tests {
             r#"{"version":"1.0","type":"photo","url":"https://i.gyazo.com/abc.jpg","width":72}"#,
         )
         .unwrap();
-        assert_eq!(oembed_image_url(&v).as_deref(), Some("https://i.gyazo.com/abc.jpg"));
-        assert_eq!(oembed_image_url(&serde_json::json!({"type": "photo"})), None);
+        assert_eq!(
+            oembed_image_url(&v).as_deref(),
+            Some("https://i.gyazo.com/abc.jpg")
+        );
+        assert_eq!(
+            oembed_image_url(&serde_json::json!({"type": "photo"})),
+            None
+        );
     }
 
     #[test]
     fn gyazo_permalink_forms_parse() {
         let id = "1d507226c261ce8cc513e8736ee5070c";
-        assert_eq!(parse_gyazo(&format!("https://gyazo.com/{id}")), Some((None, id.to_string())));
+        assert_eq!(
+            parse_gyazo(&format!("https://gyazo.com/{id}")),
+            Some((None, id.to_string()))
+        );
         assert_eq!(
             parse_gyazo(&format!("https://acme.gyazo.com/{id}")),
             Some((Some("acme".to_string()), id.to_string()))

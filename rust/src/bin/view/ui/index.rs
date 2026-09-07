@@ -35,13 +35,20 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         .entries
         .iter()
         .map(|e| {
-            (e.title.clone(), ix.terms_for(e).into_iter().map(str::to_string).collect())
+            (
+                e.title.clone(),
+                ix.terms_for(e).into_iter().map(str::to_string).collect(),
+            )
         })
         .collect();
     let focus = ix.focus;
     // Hits report their page's own age: they are not sorted on anything the
     // column could be showing instead.
-    let sort = if ix.is_search() { cosense::index::SortKey::Updated } else { ix.sort };
+    let sort = if ix.is_search() {
+        cosense::index::SortKey::Updated
+    } else {
+        ix.sort
+    };
     let searching = ix.is_search();
     let projects = ix.scope == cosense::index::Scope::Projects;
 
@@ -63,7 +70,11 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // typed and nothing is offered to create.
     // Not over the projects: nothing is written there, so nothing is
     // read-only either.
-    let ro = if ix.can_create || projects { "" } else { ts!("  [読み取り専用]", "  [read-only]") };
+    let ro = if ix.can_create || projects {
+        ""
+    } else {
+        ts!("  [読み取り専用]", "  [read-only]")
+    };
     // Where the typed text ends, in display columns — the caret's column.
     // Only meaningful while the line is open.
     let mut caret_col: Option<u16> = None;
@@ -72,10 +83,14 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         // The level, where a project's list names the project.
         ts!("プロジェクト", "Projects")
     } else {
-        [app.index_display.as_str(), app.index_project.as_str(), app.project.as_str()]
-            .into_iter()
-            .find(|s| !s.is_empty())
-            .unwrap_or("")
+        [
+            app.index_display.as_str(),
+            app.index_project.as_str(),
+            app.project.as_str(),
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or("")
     };
     let unit = if projects { "projects" } else { "pages" };
     let head = if ix.filter_editing {
@@ -94,8 +109,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         // per character, which is exactly where a re-derivation goes wrong.
         let lead = format!(" {pname} — {sigil}{}", ix.filter);
         caret_col = Some(
-            UnicodeWidthStr::width(lead.as_str())
-                .min(area.width.saturating_sub(1) as usize) as u16,
+            UnicodeWidthStr::width(lead.as_str()).min(area.width.saturating_sub(1) as usize) as u16,
         );
         format!("{lead}_ {tail}{ro}")
     } else if let Some(q) = ix.search.as_deref() {
@@ -131,9 +145,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         .saturating_sub(UnicodeWidthStr::width(order.as_str()));
     let head = format!("{head}{}{order}", " ".repeat(pad));
     f.render_widget(
-        Paragraph::new(head).style(
-            Style::default().fg(chrome.fg).bg(chrome.bg),
-        ),
+        Paragraph::new(head).style(Style::default().fg(chrome.fg).bg(chrome.bg)),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
@@ -150,7 +162,13 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // The whole row is the click target, not just its text: hitting the
     // telomere or age means that row.
     app.index_list_rect = Rect::new(area.x, area.y + 1, area.width, layout.list);
-    let dim_when_away = |st: Style| if focus == Pane::List { st } else { st.fg(CHROME_DIM) };
+    let dim_when_away = |st: Style| {
+        if focus == Pane::List {
+            st
+        } else {
+            st.fg(CHROME_DIM)
+        }
+    };
     let app_light = app.light;
     // Why this row is here: the words the search matched on it, or what was
     // typed to narrow the list. Marked with a background wash, so the
@@ -220,7 +238,12 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
                 ];
                 spans.extend(marked_spans(&shown_title, &terms_of(e), title_style, wash));
                 if !slug.is_empty() {
-                    spans.extend(marked_spans(&slug, &terms_of(e), style.fg(CHROME_DIM), wash));
+                    spans.extend(marked_spans(
+                        &slug,
+                        &terms_of(e),
+                        style.fg(CHROME_DIM),
+                        wash,
+                    ));
                 }
                 Line::from(spans)
             }
@@ -238,9 +261,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let bar = app
         .index_scrolled_at
         .filter(|t| t.elapsed() < INDEX_BAR_LINGER)
-        .and_then(|_| {
-            cosense::theme::scroll_thumb_in_track(rows.len(), rows_h, rows_h, scroll)
-        });
+        .and_then(|_| cosense::theme::scroll_thumb_in_track(rows.len(), rows_h, rows_h, scroll));
 
     // Everything the rest of the frame needs from the borrowed list, so
     // the preview can read the app again.
@@ -281,12 +302,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
             text_w,
             height,
         );
-        app.index_preview_rect = Rect::new(
-            area.x,
-            prev_area.y,
-            area.width,
-            height,
-        );
+        app.index_preview_rect = Rect::new(area.x, prev_area.y, area.width, height);
         let lines = index_preview_lines(app, ctx, text_w as usize);
         let ix = app.index.as_ref().expect("open");
         let skip = ix.preview_scroll as usize;
@@ -302,7 +318,11 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let hint: String = if let Some((n, _)) = app.note.as_ref() {
         n.clone()
     } else if ix.filter_editing && projects {
-        ts!("絞り込み — Enter 確定 · Esc 解除", "filter — Enter apply · Esc clear").to_string()
+        ts!(
+            "絞り込み — Enter 確定 · Esc 解除",
+            "filter — Enter apply · Esc clear"
+        )
+        .to_string()
     } else if projects {
         ts!(
             "j/k · / 絞り込み · Enter 開く · ^o 取り直す · Esc/[ 戻る · q 終了",
@@ -352,8 +372,14 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
         format!("{}/{}", cursor + 1, row_count)
     };
     f.render_widget(
-        Paragraph::new(format!(" {} {pos} · {hint}", ts!("一覧", "index"))).style(Style::default().fg(CHROME_DIM)),
-        Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
+        Paragraph::new(format!(" {} {pos} · {hint}", ts!("一覧", "index")))
+            .style(Style::default().fg(CHROME_DIM)),
+        Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(1),
+            area.width,
+            1,
+        ),
     );
 
     // The filter line's caret: put the HARDWARE cursor on it. Terminal
@@ -370,7 +396,12 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     //
     // Drawn here rather than through `Overlay`: the index returns early in
     // `ui`, so an overlay laid over the page would never appear above it.
-    draw_sort_menu(f, area, app.index.as_ref().map(|ix| ix.sort).unwrap_or_default(), app.index_sort_menu);
+    draw_sort_menu(
+        f,
+        area,
+        app.index.as_ref().map(|ix| ix.sort).unwrap_or_default(),
+        app.index_sort_menu,
+    );
 }
 
 /// The order menu, shared by the index (`s`) and the page (`S`): the same
@@ -422,7 +453,11 @@ pub(crate) fn marked_spans(
     cosense::index::split_on_terms(text, &refs)
         .into_iter()
         .map(|(piece, hit)| {
-            let st = if hit { base.bg(wash).add_modifier(Modifier::BOLD) } else { base };
+            let st = if hit {
+                base.bg(wash).add_modifier(Modifier::BOLD)
+            } else {
+                base
+            };
             Span::styled(piece.to_string(), st)
         })
         .collect()
@@ -455,10 +490,15 @@ pub(crate) fn mark_line(line: Line<'static>, terms: &[String], wash: Color) -> L
 /// The excerpt dock for the page under the cursor: one compact heading and
 /// the first lines supplied by the pages API, rendered as the page would.
 pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Line<'static>> {
-    let Some(ix) = app.index.as_ref() else { return Vec::new() };
+    let Some(ix) = app.index.as_ref() else {
+        return Vec::new();
+    };
     let Some(entry) = ix.selected() else {
         return vec![Line::from(Span::styled(
-            t!("（まだ無いページ — Enter で書きはじめる）", "(an uncreated page — Enter starts writing it)"),
+            t!(
+                "（まだ無いページ — Enter で書きはじめる）",
+                "(an uncreated page — Enter starts writing it)"
+            ),
             Style::default().fg(CHROME_DIM),
         ))];
     };
@@ -472,14 +512,24 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
         if entry.unread { " · 未読" } else { "" }
     );
     let show_meta = width > str_width(&meta) + 8;
-    let title_width = if show_meta { width - str_width(&meta) } else { width };
+    let title_width = if show_meta {
+        width - str_width(&meta)
+    } else {
+        width
+    };
     let title = truncate_width(&entry.title, title_width);
-    let terms: Vec<String> = ix.terms_for(entry).into_iter().map(str::to_string).collect();
+    let terms: Vec<String> = ix
+        .terms_for(entry)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let wash = cosense::theme::match_wash(ctx.terminal_bg);
     let mut heading = marked_spans(
         &title,
         &terms,
-        Style::default().fg(ctx.palette.title).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(ctx.palette.title)
+            .add_modifier(Modifier::BOLD),
         wash,
     );
     if show_meta {
@@ -523,4 +573,3 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     }
     lines
 }
-

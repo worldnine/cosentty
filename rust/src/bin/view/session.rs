@@ -3,16 +3,16 @@
 use super::*;
 
 mod display;
-mod text;
-mod structure;
 mod keys;
 mod paste;
+mod structure;
+mod text;
 
 pub(crate) use display::*;
-pub(crate) use text::*;
-pub(crate) use structure::*;
 pub(crate) use keys::*;
 pub(crate) use paste::*;
+pub(crate) use structure::*;
+pub(crate) use text::*;
 
 /// The modeless edit session (SPEC-edit-session.md): the caret line shows
 /// raw source and takes every printable key; ↑/↓ walk lines, Enter splits
@@ -44,7 +44,13 @@ impl EditSession {
     pub(crate) fn sel_ends(&self) -> Option<((usize, usize), (usize, usize))> {
         let from = self.sel_from?;
         let head = (self.line, self.input.cur);
-        (from != head).then(|| if from <= head { (from, head) } else { (head, from) })
+        (from != head).then(|| {
+            if from <= head {
+                (from, head)
+            } else {
+                (head, from)
+            }
+        })
     }
 
     /// The selected byte range WHEN IT FITS ON THE CARET LINE, normalised
@@ -73,28 +79,38 @@ impl EditSession {
     }
 }
 
-
-
 /// Open the session on body line `line` with the caret at byte `caret`.
 pub(crate) fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize) {
     if outline_mutation_blocked(app) || !ensure_editable(app) {
         return;
     }
     if app.time.is_some() {
-        app.toast_err(t!("履歴を表示中 — 読み取り専用（Esc で最新へ）", "viewing history — read-only (Esc → NOW)"));
+        app.toast_err(t!(
+            "履歴を表示中 — 読み取り専用（Esc で最新へ）",
+            "viewing history — read-only (Esc → NOW)"
+        ));
         return;
     }
     if line >= app.lines.len() {
-        app.toast_err(t!("関連ページの行は編集できません（o でページ末尾に行を足せます）", "related rows cannot be edited (o adds a line at the end)"));
+        app.toast_err(t!(
+            "関連ページの行は編集できません（o でページ末尾に行を足せます）",
+            "related rows cannot be edited (o adds a line at the end)"
+        ));
         return;
     }
     let text = app.lines[line].text.clone();
     let caret = caret.min(text.len());
     // snap to a char boundary
-    let caret = (0..=caret).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    let caret = (0..=caret)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
     app.session = Some(EditSession {
         line,
-        input: Input { buf: text.clone(), cur: caret },
+        input: Input {
+            buf: text.clone(),
+            cur: caret,
+        },
         orig: text,
         want_col: None,
         sel_from: None,
@@ -112,14 +128,24 @@ pub(crate) fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize)
 /// Commit the caret line's text if it changed (called whenever the caret
 /// leaves the line, and on Esc).
 pub(crate) fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     if s.input.buf == s.orig {
         return;
     }
     let (line, buf) = (s.line, s.input.buf.clone());
     let id = app.lines[line].id.clone();
     let label = format!("line {}", line + 1);
-    do_edit(app, ctx, &label, vec![EditOp::Replace { id, text: buf.clone() }]);
+    do_edit(
+        app,
+        ctx,
+        &label,
+        vec![EditOp::Replace {
+            id,
+            text: buf.clone(),
+        }],
+    );
     if let Some(s) = app.session.as_mut() {
         s.orig = buf;
     }
@@ -155,12 +181,20 @@ pub(crate) fn leave_session(app: &mut App, ctx: &Ctx) {
 /// Pressing undo N times must never eject you from EDIT.
 pub(crate) fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
     session_commit_dirty(app, ctx);
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     let id = app.lines[s.line].id.clone();
     // Where to land if this very line is undone away.
     let fallback = s.line.checked_sub(1).map(|i| app.lines[i].id.clone());
-    let col = s.want_col.unwrap_or_else(|| str_width(&s.input.buf[..s.input.cur]));
-    let stack_was_empty = if back { app.undo_stack.is_empty() } else { app.redo_stack.is_empty() };
+    let col = s
+        .want_col
+        .unwrap_or_else(|| str_width(&s.input.buf[..s.input.cur]));
+    let stack_was_empty = if back {
+        app.undo_stack.is_empty()
+    } else {
+        app.redo_stack.is_empty()
+    };
     let seated = if back { undo(app, ctx) } else { redo(app, ctx) };
     if stack_was_empty {
         return; // nothing happened; the status line already says so
@@ -183,7 +217,10 @@ pub(crate) fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
     let caret = byte_at_col(&text, col);
     if let Some(s) = app.session.as_mut() {
         s.line = line;
-        s.input = Input { buf: text.clone(), cur: caret };
+        s.input = Input {
+            buf: text.clone(),
+            cur: caret,
+        };
         s.orig = text;
         s.want_col = Some(col);
     }
@@ -195,7 +232,9 @@ pub(crate) fn session_history(app: &mut App, ctx: &Ctx, back: bool) {
 /// Move the session's caret to `line`, committing the line it leaves —
 /// what ↑/↓ do, addressed by line number instead of by direction.
 pub(crate) fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
-    let Some(s) = app.session.as_ref() else { return };
+    let Some(s) = app.session.as_ref() else {
+        return;
+    };
     if s.line == line || line >= app.lines.len() {
         return;
     }
@@ -203,15 +242,16 @@ pub(crate) fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
     let text = app.lines[line].text.clone();
     if let Some(s) = app.session.as_mut() {
         s.line = line;
-        s.input = Input { buf: text.clone(), cur: text.len() };
+        s.input = Input {
+            buf: text.clone(),
+            cur: text.len(),
+        };
         s.orig = text;
         s.want_col = None;
         s.sel_from = None;
     }
     app.cursor = line;
 }
-
-
 
 impl App {
     /// Is the edit session's caret on one of these source lines? Such a
@@ -228,15 +268,22 @@ impl App {
     /// leaving the caret wherever it happened to be. Returns whether the
     /// line was still there to stand on.
     pub(crate) fn focus_edit(&mut self, focus: Option<(String, usize)>) -> bool {
-        let Some((id, caret)) = focus else { return false };
-        let Some(line) = self.lines.iter().position(|l| l.id == id) else { return false };
+        let Some((id, caret)) = focus else {
+            return false;
+        };
+        let Some(line) = self.lines.iter().position(|l| l.id == id) else {
+            return false;
+        };
         let text = self.lines[line].text.clone();
         self.cursor = line;
         self.follow = true;
         self.laid_width = 0;
         if let Some(s) = self.session.as_mut() {
             s.line = line;
-            s.input = Input { buf: text.clone(), cur: caret.min(text.len()) };
+            s.input = Input {
+                buf: text.clone(),
+                cur: caret.min(text.len()),
+            };
             s.orig = text;
             s.want_col = None;
             s.sel_from = None;
