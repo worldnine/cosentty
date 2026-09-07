@@ -1517,3 +1517,37 @@ fn the_gutter_cell_wears_the_state_colour() {
     assert_eq!(glyph, "▊", "the <24h bucket");
     assert_eq!(style.fg, Some(Color::Rgb(0xfd, 0x73, 0x73)));
 }
+
+/// ページ側の並び順メニュー(`S`)は本文の上に丸ごと見える。以前は本文を
+/// 描く前にパネルを描いていたので、行がパネルを塗りつぶして欠けていた。
+#[test]
+fn the_page_side_order_menu_is_drawn_over_the_body() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let ctx = test_ctx();
+    let texts: Vec<String> = (0..20)
+        .map(|i| format!("line {i} xxxxxxxxxxxxxxxxxxxxxxxx"))
+        .collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let mut app = page(&refs);
+    app.index_sort_menu = Some(0);
+    let mut term = Terminal::new(TestBackend::new(40, 14)).unwrap();
+    term.draw(|f| ui(f, &mut app, &ctx)).unwrap();
+    let buf = term.backend().buffer();
+    let rows: Vec<String> = (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    for key in cosense::index::SortKey::ALL {
+        let row = rows
+            .iter()
+            .find(|r| r.contains(key.name()))
+            .unwrap_or_else(|| panic!("{} is not on screen", key.name()));
+        assert!(
+            !row.contains("xxxx"),
+            "body text bleeds through the menu row: {row:?}"
+        );
+    }
+}

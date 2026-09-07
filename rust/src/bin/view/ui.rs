@@ -160,13 +160,6 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
 
-    // The order menu (S) floats over the page, exactly as the index's `s`
-    // menu floats over the list: one order everywhere, applied here to the
-    // related sections and remembered as the index's standing choice.
-    if app.index.is_none() {
-        draw_sort_menu(f, area, app.index_sort, app.index_sort_menu);
-    }
-
     // The page is boxed flush with the terminal edge. The cursor `>` rides
     // ON the left frame column, while the telomere keeps its own inside
     // column and therefore remains visible on the cursor line. One blank
@@ -869,6 +862,14 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // Modal overlay (comments list / link picker / help) on top.
     if app.overlay.is_some() {
         draw_overlay(f, app, area);
+    }
+    // The order menu (S) floats over the page, exactly as the index's `s`
+    // menu floats over the list: one order everywhere, applied here to the
+    // related sections and remembered as the index's standing choice. It
+    // is drawn AFTER the body: drawn before it, the rows painted over the
+    // panel and left it torn.
+    if app.index.is_none() {
+        draw_sort_menu(f, area, app.index_sort, app.index_sort_menu);
     }
     // A toast rides above the footer, over everything else, and leaves by
     // itself (toast.rs).
