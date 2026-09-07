@@ -380,6 +380,8 @@ pub(crate) struct App {
     /// Next commit-job id. Monotonic for the life of the process, so an
     /// outcome can always be traced back to the job that produced it.
     pub(crate) next_job_id: CommitJobId,
+    /// Outstanding save ownership; navigation must not clear this map.
+    pub(crate) commit_origins: HashMap<CommitJobId, CommitOrigin>,
     /// Commit ids this viewer wrote, newest last. Their websocket echoes
     /// carry ops we have already applied locally — and may arrive AFTER we
     /// have edited past them, in which case applying the ops again would
@@ -704,6 +706,7 @@ impl App {
             commit_res_tx,
             inflight: 0,
             next_job_id: 1,
+            commit_origins: HashMap::new(),
             own_commits: std::collections::VecDeque::new(),
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),

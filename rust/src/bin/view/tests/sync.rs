@@ -816,3 +816,51 @@ fn a_resync_drops_only_history_that_cannot_be_replayed() {
     assert_eq!(app.undo_stack[0].0, "valid");
     assert!(app.history_dropped);
 }
+
+#[test]
+fn ordinary_commit_outcomes_never_mutate_the_page_opened_after_queueing() {
+    for result in ["done", "failed", "conflict", "skipped"] {
+        let ctx = test_ctx();
+        let mut app = page(&["title", "body"]);
+        let job = queue_commit(&mut app, "old edit", vec![EditOp::Replace {
+            id: "id1".into(), text: "changed".into(),
+        }]).unwrap();
+        app.project = "other-project".into();
+        app.page_id = "other-id".into();
+        app.title = "other title".into();
+        app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let epoch = app.server_epoch_now();
+        let outcome = match result {
+            "done" => CommitOutcome::Done { job, label: "old".into(), title: "old renamed".into(), commit_id: "old-commit".into() },
+            "failed" => CommitOutcome::Failed { job, label: "old".into(), msg: "offline".into() },
+            "conflict" => CommitOutcome::Conflict { job },
+            _ => CommitOutcome::Skipped { job },
+        };
+        handle_commit_outcome(&mut app, &ctx, outcome);
+        assert_eq!(app.title, "other title", "{result}");
+        assert_eq!(app.page_id, "other-id", "{result}");
+        assert_eq!(app.project, "other-project", "{result}");
+        assert_eq!(app.server_epoch_now(), epoch, "{result}");
+        assert!(!app.web_unsynced, "{result}");
+        assert!(app.own_commits.is_empty(), "{result}");
+        assert_eq!(app.inflight, 0);
+        assert!(app.commit_origins.is_empty());
+    }
+}
+
+#[test]
+fn an_old_installations_save_requests_resync_without_renaming_the_new_installation() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "body"]);
+    let job = queue_commit(&mut app, "old edit", Vec::new()).unwrap();
+    app.web_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let epoch = app.server_epoch_now();
+    handle_commit_outcome(&mut app, &ctx, CommitOutcome::Done {
+        job, label: "old".into(), title: "old renamed".into(), commit_id: "old-commit".into(),
+    });
+    assert_eq!(app.title, "t");
+    assert!(app.server_epoch_now() > epoch);
+    assert!(app.ws_resync_pending);
+    assert!(app.own_commits.is_empty());
+    assert!(app.commit_origins.is_empty());
+}

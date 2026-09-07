@@ -114,6 +114,15 @@ impl Input {
 /// Identifies one queued commit for its whole life, outcome included.
 pub(crate) type CommitJobId = u64;
 
+/// The page installation that queued a job. Kept until its outcome arrives,
+/// including across navigation; a title is mutable and cannot identify a page.
+pub(crate) struct CommitOrigin {
+    pub(crate) project: String,
+    pub(crate) page_id: String,
+    pub(crate) title: String,
+    pub(crate) install_gen: u64,
+}
+
 /// One queued commit for the serial background worker. `id` names this job
 /// so its outcome can be recognised; `gen` invalidates jobs queued before a
 /// conflict reload (their base state is gone).
@@ -471,6 +480,12 @@ pub(crate) fn queue_commit(app: &mut App, label: &str, ops: Vec<EditOp>) -> Opti
         ops,
     };
     if app.commit_tx.send(job).is_ok() {
+        app.commit_origins.insert(id, CommitOrigin {
+            project: app.project.clone(),
+            page_id: app.page_id.clone(),
+            title: app.title.clone(),
+            install_gen: app.gen_now(),
+        });
         app.inflight += 1;
         Some(id)
     } else {

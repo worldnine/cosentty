@@ -3,6 +3,7 @@ use super::*;
 /// A commit came back from the worker (drained per frame).
 pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
     app.inflight = app.inflight.saturating_sub(1);
+    let origin = app.commit_origins.remove(&outcome.job());
     // Take the structural gate only for the job it is actually waiting on.
     // An ordinary commit may have been in flight when the action started, or
     // been queued behind it, and either could come back first — arrival
@@ -13,6 +14,37 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
         }
         _ => None,
     };
+    // Structural jobs have their own snapshot recovery below. Ordinary
+    // jobs also outlive navigation: their result must never rename the new
+    // page or run conflict recovery against that page's local text.
+    if outline.is_none() {
+        if let Some(origin) = origin {
+            let same_page = app.project == origin.project && app.page_id == origin.page_id;
+            if !same_page || app.gen_now() != origin.install_gen {
+                match &outcome {
+                    CommitOutcome::Done { .. } if same_page => {
+                        // Away and back: invalidate an older poll and ask
+                        // for a fresh snapshot. The normal remote gate
+                        // protects any new local edits until it can land.
+                        app.bump_server_epoch();
+                        app.ws_resync_pending = true;
+                    }
+                    CommitOutcome::Failed { msg, .. } => app.toast_err(t!(
+                        "移動前のページ /{}/{} の保存に失敗しました: {msg}",
+                        "save failed for previous page /{}/{}: {msg}",
+                        origin.project, origin.title
+                    )),
+                    CommitOutcome::Conflict { .. } => app.toast_err(t!(
+                        "移動前のページ /{}/{} の保存が競合しました",
+                        "save conflicted for previous page /{}/{}",
+                        origin.project, origin.title
+                    )),
+                    _ => {}
+                }
+                return;
+            }
+        }
+    }
     match outcome {
         CommitOutcome::Done { job: _, label, title, commit_id } => {
             // Navigation may still happen while the gate is up. In that case
