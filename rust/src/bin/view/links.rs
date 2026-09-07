@@ -637,38 +637,13 @@ pub(crate) fn b64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// Load `project/title` and install it, pushing the current page onto
-/// history. `project` may differ from the current one (`[/project/title]`).
+/// Ask for `project/title` and, when it arrives, install it with the
+/// current place pushed onto history. `project` may differ from the
+/// current one (`[/project/title]`). The page on screen stays usable
+/// while the fetch runs (`start_page_load`).
 pub(crate) fn navigate_to(app: &mut App, ctx: &Ctx, project: &str, title: &str) {
     let from = app.here();
-    // The caller has nothing to undo: it was not holding anything the way
-    // the index holds its list.
-    let _ = navigate_from(app, ctx, project, title, from);
-}
-
-/// `navigate_to`, saying explicitly where it is being left from — the
-/// index closes before the page loads, so it has to name itself while it
-/// still can.
-#[must_use = "a failed navigation leaves the reader where they were"]
-pub(crate) fn navigate_from(app: &mut App, ctx: &Ctx, project: &str, title: &str, from: Place) -> bool {
-    match load_page(ctx, project, title) {
-        Ok(loaded) => {
-            app.history.push(from);
-            app.forward.clear();
-            app.set_page(loaded, ctx);
-            // The header now says where we are; only a page nobody has
-            // written yet needs a word — following a link to it is how a
-            // wiki grows, so say what it is and what makes it real.
-            if page_is_uncreated(app) {
-                app.toast(t!("未作成のページ — e / o で書き始めると作成されます（{title}）", "an uncreated page — e / o starts writing it ({title})"));
-            }
-            true
-        }
-        Err(e) => {
-            app.toast_err(t!("開けません: /{project}/{title} — {e}", "open failed: /{project}/{title} — {e}"));
-            false
-        }
-    }
+    start_page_load(app, ctx, project, title, LoadIntent::Navigate { from, create: false });
 }
 
 /// READ の Tab / Shift+Tab: リンクのある行へカーソルを巡回させる

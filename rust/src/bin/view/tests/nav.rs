@@ -380,3 +380,123 @@ use super::support::*;
         app.read_at = None;
         assert_eq!(app.unread_count(), 3);
     }
+
+/// Following a link asks for the page in the background: the page on
+/// screen stays as it is, the status says what was asked for, and only
+/// the answer moves the reader — with history recorded then, not before.
+#[test]
+fn navigation_keeps_the_current_page_until_the_fetch_lands() {
+    let ctx = test_ctx();
+    let mut app = page(&["A", "one"]);
+    app.title = "A".into();
+    navigate_to(&mut app, &ctx, "proj", "B");
+    assert_eq!(app.title, "A", "still on A while B is fetched");
+    assert!(app.history.is_empty(), "nothing on the stack yet");
+    assert!(app.status.contains("/proj/B"), "the status names the fetch: {}", app.status);
+    assert_eq!(
+        app.pending_load.as_ref().map(|p| &p.intent),
+        Some(&LoadIntent::Navigate { from: Place::Page { project: "proj".into(), title: "A".into() }, create: false })
+    );
+
+    assert!(answer_pending_load(&mut app, &ctx, Ok(server_page("B", &["B", "body"]))));
+    assert_eq!(app.title, "B");
+    assert_eq!(app.lines[1].text, "body");
+    assert_eq!(app.history, vec![Place::Page { project: "proj".into(), title: "A".into() }]);
+    assert!(app.pending_load.is_none());
+    assert!(app.status.is_empty(), "the loading status is gone: {}", app.status);
+}
+
+/// A fetch that fails leaves the reader where they were, with a word on
+/// why; the stack is untouched.
+#[test]
+fn a_failed_navigation_leaves_the_reader_in_place() {
+    let ctx = test_ctx();
+    let mut app = page(&["A", "one"]);
+    app.title = "A".into();
+    navigate_to(&mut app, &ctx, "proj", "B");
+    fail_pending_load(&mut app, &ctx, "HTTP 500");
+    assert_eq!(app.title, "A");
+    assert!(app.history.is_empty());
+    assert!(app.toast_text().contains("/proj/B"), "{}", app.toast_text());
+    assert!(app.toast_text().contains("HTTP 500"), "{}", app.toast_text());
+    assert!(app.status.is_empty());
+}
+
+/// Two links in a row: only the last one asked for counts. The first
+/// answer arrives with an older generation and is dropped, whatever its
+/// order on the wire.
+#[test]
+fn a_newer_request_supersedes_an_older_one() {
+    let ctx = test_ctx();
+    let mut app = page(&["A", "one"]);
+    app.title = "A".into();
+    navigate_to(&mut app, &ctx, "proj", "B");
+    let old_gen = app.pending_load.as_ref().unwrap().gen;
+    navigate_to(&mut app, &ctx, "proj", "C");
+    assert_eq!(app.pending_load.as_ref().map(|p| p.title.as_str()), Some("C"));
+
+    // The stale answer: B lands after C was asked for.
+    app.page_load_tx.send(PageLoadMsg { gen: old_gen, result: Ok(server_page("B", &["B"])) }).unwrap();
+    assert!(!drain_page_loads(&mut app, &ctx), "an abandoned fetch installs nothing");
+    assert_eq!(app.title, "A");
+    assert!(app.pending_load.is_some(), "C is still awaited");
+
+    assert!(answer_pending_load(&mut app, &ctx, Ok(server_page("C", &["C"]))));
+    assert_eq!(app.title, "C");
+    assert_eq!(app.history.len(), 1, "one move, not two");
+}
+
+/// `[` pops its destination when it asks for it. Until the page lands the
+/// stacks are as if the key had not been pressed on the destination's
+/// side; a failure — or a newer request — puts the destination back so
+/// the same key retries.
+#[test]
+fn a_history_hop_returns_its_destination_when_it_does_not_land() {
+    let ctx = test_ctx();
+    let mut app = page(&["B", "one"]);
+    app.title = "B".into();
+    let a = Place::Page { project: "proj".into(), title: "A".into() };
+    app.history.push(a.clone());
+
+    go_history(&mut app, &ctx, true);
+    assert!(app.history.is_empty(), "the destination was taken off the stack");
+    assert_eq!(app.title, "B", "still on B");
+    fail_pending_load(&mut app, &ctx, "offline");
+    assert_eq!(app.history, vec![a.clone()], "a failed back keeps the destination");
+    assert!(app.forward.is_empty());
+
+    // A back superseded by a link: the destination goes back too.
+    go_history(&mut app, &ctx, true);
+    navigate_to(&mut app, &ctx, "proj", "C");
+    assert_eq!(app.history, vec![a.clone()], "the abandoned back restored A");
+    assert!(answer_pending_load(&mut app, &ctx, Ok(server_page("C", &["C"]))));
+    assert_eq!(app.history, vec![a.clone(), Place::Page { project: "proj".into(), title: "B".into() }]);
+
+    // And a back that lands moves the place left onto the forward stack.
+    go_history(&mut app, &ctx, true);
+    assert!(answer_pending_load(&mut app, &ctx, Ok(server_page("B", &["B"]))));
+    assert_eq!(app.title, "B");
+    assert_eq!(app.history, vec![a]);
+    assert_eq!(app.forward, vec![Place::Page { project: "proj".into(), title: "C".into() }]);
+}
+
+/// Opening a row from the list keeps the list on screen until the page
+/// lands; the list itself is the place that goes onto history.
+#[test]
+fn opening_from_the_index_closes_it_only_when_the_page_lands() {
+    let ctx = test_ctx();
+    let mut app = page(&["A", "one"]);
+    app.title = "A".into();
+    app.index_project = "proj".into();
+    app.index = Some(cosense::index::Index::new(
+        vec![cosense::index::Entry { title: "B".into(), updated: now_secs(), ..Default::default() }],
+        1,
+        cosense::index::SortKey::Updated,
+    ));
+    open_from_index(&mut app, &ctx, Some(("B".into(), false)));
+    assert!(app.index.is_some(), "the list stays up while B is fetched");
+    assert!(answer_pending_load(&mut app, &ctx, Ok(server_page("B", &["B"]))));
+    assert!(app.index.is_none(), "the list closes when the page lands");
+    assert_eq!(app.title, "B");
+    assert!(matches!(app.history.last(), Some(Place::Index { project, .. }) if project == "proj"));
+}

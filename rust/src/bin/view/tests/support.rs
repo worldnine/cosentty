@@ -29,8 +29,8 @@ use crate::*;
             ime_mode: cosense::ime::ImeMode::Off,
             preview: cosense::index::PreviewMode::Auto,
             download_dir: std::env::temp_dir(),
-            editability: std::sync::Mutex::new(HashMap::new()),
-            project_settings: std::sync::Mutex::new(HashMap::new()),
+            editability: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
             gyazo_teams_token: None,
             gyazo_personal_token: None,
             config: cosense::config::Config::default(),
@@ -49,6 +49,48 @@ use crate::*;
             api_domain: "cosense-tui-test.invalid".into(),
         };
         Ctx { client: Client::new(cfg).unwrap(), ..test_ctx() }
+    }
+
+    /// A server page as `fetch_page` would return it, for feeding a
+    /// pending load by hand.
+    pub(crate) fn server_page(title: &str, texts: &[&str]) -> cosense::api::Page {
+        cosense::api::Page {
+            id: format!("pid-{title}"),
+            persistent: true,
+            title: title.to_string(),
+            commit_id: String::new(),
+            lines: texts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| PageLine {
+                    id: format!("{title}-{i}"),
+                    text: t.to_string(),
+                    user_id: String::new(),
+                    created: 0,
+                    updated: 0,
+                })
+                .collect(),
+            links: vec![],
+            project_links: vec![],
+            related: None,
+            updated: 0,
+            created: 0,
+            lines_count: texts.len() as i64,
+            last_accessed: None,
+        }
+    }
+
+    /// Answer the fetch the app is waiting on, as the fetch thread would
+    /// (tests do not spawn it: `page_loads_on` is off), and let the app
+    /// install the result.
+    pub(crate) fn answer_pending_load(app: &mut App, ctx: &Ctx, result: Result<cosense::api::Page, String>) -> bool {
+        let gen = app.pending_load.as_ref().expect("a fetch is pending").gen;
+        app.page_load_tx.send(PageLoadMsg { gen, result }).unwrap();
+        drain_page_loads(app, ctx)
+    }
+
+    pub(crate) fn fail_pending_load(app: &mut App, ctx: &Ctx, why: &str) {
+        assert!(!answer_pending_load(app, ctx, Err(why.to_string())), "a failure installs nothing");
     }
 
     /// A page parked on a historical snapshot.

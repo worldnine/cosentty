@@ -517,6 +517,19 @@ pub(crate) struct App {
     pub(crate) uploads_on: bool,
     pub(crate) related_tx: mpsc::Sender<RelatedMsg>,
     pub(crate) related_rx: mpsc::Receiver<RelatedMsg>,
+    /// The page fetch the reader is waiting on, if any (see `PendingLoad`).
+    /// Only the newest one counts: a result whose generation is older is
+    /// thrown away when it arrives.
+    pub(crate) pending_load: Option<PendingLoad>,
+    /// Generation of the newest page fetch requested; each request takes
+    /// the next number.
+    pub(crate) page_load_gen: u64,
+    /// Whether a page fetch may spawn a thread. `false` in tests, where the
+    /// request is recorded as pending and the test feeds the answer on
+    /// `page_load_tx` itself — same gate as `related_fetch`.
+    pub(crate) page_loads_on: bool,
+    pub(crate) page_load_tx: mpsc::Sender<PageLoadMsg>,
+    pub(crate) page_load_rx: mpsc::Receiver<PageLoadMsg>,
     /// The page's snapshot stamps (oldest → newest), fetched in the
     /// background with the related block so the header can count NOW as
     /// `N+1/N+1` before the reader ever presses ←. `None` = not known yet
@@ -606,6 +619,7 @@ impl App {
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         let (link_probe_res_tx, link_probe_rx) = mpsc::channel();
         let (related_tx, related_rx) = mpsc::channel();
+        let (page_load_tx, page_load_rx) = mpsc::channel();
         let (snapshots_tx, snapshots_rx) = mpsc::channel();
         App {
             mode: Mode::View,
@@ -746,6 +760,11 @@ impl App {
             uploads_on: false,
             related_tx,
             related_rx,
+            pending_load: None,
+            page_load_gen: 0,
+            page_loads_on: false,
+            page_load_tx,
+            page_load_rx,
             snapshots: None,
             snapshots_tx,
             snapshots_rx,

@@ -61,13 +61,14 @@ fn a_click_in_the_index_opens_that_page() {
         &ctx,
         at(MouseEventKind::Down(MouseButton::Left), 5, 3),
     );
-    // The opening itself is a page fetch, which a test has no server
-    // for — so the list is still there (a failed open keeps the
-    // reader's place). What is checked is which row it resolved to.
-    assert!(
-        app.toast_text().contains("三番目"),
-        "the third row was opened, not another: {}",
-        app.toast_text()
+    // The opening itself is a page fetch, which runs in the background —
+    // so the list is still there (the reader keeps their place until the
+    // page lands). What is checked is which row it resolved to.
+    assert!(app.index.is_some(), "the list stays while the page is fetched");
+    assert_eq!(
+        app.pending_load.as_ref().map(|p| p.title.as_str()),
+        Some("三番目"),
+        "the third row was opened, not another"
     );
 }
 
@@ -98,10 +99,13 @@ fn the_index_is_somewhere_you_can_come_back_to() {
             if project == "proj" && state.selected().map(|e| e.title.as_str()) == Some("B")
     ));
 
-    // Opening a row that cannot be fetched (no server in a test) puts
-    // the reader back in the list rather than dropping them onto the
-    // page they had left.
+    // Opening a row fetches the page in the background; a fetch that
+    // fails leaves the reader in the list rather than dropping them onto
+    // the page they had left.
     open_from_index(&mut app, &ctx, Some(("B".into(), false)));
+    assert!(app.index.is_some(), "the list stays while the page is fetched");
+    assert!(app.history.is_empty(), "and nothing went on the stack yet");
+    fail_pending_load(&mut app, &ctx, "no server");
     assert!(app.index.is_some(), "the list survives a failed open");
     assert!(app.history.is_empty(), "and nothing went on the stack");
 

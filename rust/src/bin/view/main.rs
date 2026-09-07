@@ -295,8 +295,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         ime_mode,
         preview,
         download_dir,
-        editability: std::sync::Mutex::new(HashMap::new()),
-        project_settings: std::sync::Mutex::new(HashMap::new()),
+        editability: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         gyazo_teams_token,
         gyazo_personal_token,
         config,
@@ -383,6 +383,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // block, which is the other half of that answer (`start_related_load`).
     app.related_fetch = true;
     app.uploads_on = true;
+    app.page_loads_on = true;
     if let Some(sid) = &sid {
         let ws_req_rx = app
             .ws_req_rx
@@ -497,11 +498,13 @@ struct Ctx {
     download_dir: std::path::PathBuf,
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
-    editability: std::sync::Mutex<HashMap<String, bool>>,
+    /// Shared with the page-load thread, which warms it off the UI thread
+    /// (`spawn_page_load`).
+    editability: EditabilityCache,
     /// `/api/projects/<name>` per project: the site theme and the Upload
     /// tab. `None` is cached too: a PAT-only private project falls back
-    /// without retrying on every page.
-    project_settings: std::sync::Mutex<HashMap<String, Option<cosense::api::ProjectSettings>>>,
+    /// without retrying on every page. Shared like `editability`.
+    project_settings: SettingsCache,
     /// Gyazo tokens for uploads, kept APART: which Gyazo a picture lands
     /// in is decided by the token, and the permalink the page gets is
     /// built from the destination — so a Teams token must only ever serve
@@ -536,41 +539,60 @@ impl Ctx {
     }
 
     fn project_settings(&self, project: &str) -> Option<cosense::api::ProjectSettings> {
-        if let Ok(cache) = self.project_settings.lock() {
-            if let Some(settings) = cache.get(project) {
-                return settings.clone();
-            }
-        }
-        let settings = self.client.get_project_settings(project).ok();
-        if let Ok(mut cache) = self.project_settings.lock() {
-            cache.insert(project.to_string(), settings.clone());
-        }
-        settings
+        project_settings_cached(&self.client, &self.project_settings, project)
     }
 
     fn can_edit_in(&self, project: &str) -> bool {
-        if let Ok(cache) = self.editability.lock() {
-            if let Some(&editable) = cache.get(project) {
-                return editable;
-            }
-        }
-        let probed: Result<bool, Box<dyn Error>> = match self.client.credential_for(project) {
-            None => Ok(false),
-            // A project-scoped service account exists specifically to act in
-            // that project; unlike a user it has no `/users/me` membership.
-            Some(cosense::api::Credential::ServiceAccount(_)) => Ok(true),
-            Some(_) => self.client.get_me().and_then(|me| {
-                self.client
-                    .list_members_in(project)
-                    .map(|members| members.iter().any(|m| m.id == me))
-            }),
-        };
-        let Ok(editable) = probed else { return false };
-        if let Ok(mut cache) = self.editability.lock() {
-            cache.insert(project.to_string(), editable);
-        }
-        editable
+        editability_cached(&self.client, &self.editability, project)
     }
+}
+
+type SettingsCache = Arc<std::sync::Mutex<HashMap<String, Option<cosense::api::ProjectSettings>>>>;
+type EditabilityCache = Arc<std::sync::Mutex<HashMap<String, bool>>>;
+
+/// The project's settings, asked of the server once per project. Free
+/// functions rather than `Ctx` methods so the page-load thread can warm
+/// the same caches with its own `Client` clone: the first visit to a
+/// project then costs the UI thread nothing either.
+fn project_settings_cached(
+    client: &Client,
+    cache: &SettingsCache,
+    project: &str,
+) -> Option<cosense::api::ProjectSettings> {
+    if let Ok(cache) = cache.lock() {
+        if let Some(settings) = cache.get(project) {
+            return settings.clone();
+        }
+    }
+    let settings = client.get_project_settings(project).ok();
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(project.to_string(), settings.clone());
+    }
+    settings
+}
+
+fn editability_cached(client: &Client, cache: &EditabilityCache, project: &str) -> bool {
+    if let Ok(cache) = cache.lock() {
+        if let Some(&editable) = cache.get(project) {
+            return editable;
+        }
+    }
+    let probed: Result<bool, Box<dyn Error>> = match client.credential_for(project) {
+        None => Ok(false),
+        // A project-scoped service account exists specifically to act in
+        // that project; unlike a user it has no `/users/me` membership.
+        Some(cosense::api::Credential::ServiceAccount(_)) => Ok(true),
+        Some(_) => client.get_me().and_then(|me| {
+            client
+                .list_members_in(project)
+                .map(|members| members.iter().any(|m| m.id == me))
+        }),
+    };
+    let Ok(editable) = probed else { return false };
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(project.to_string(), editable);
+    }
+    editable
 }
 
 /// Events processed per frame at most, so an input flood can't starve the
@@ -615,6 +637,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) -> Res
         if !app.ime_ready && app.composing.is_none() && app.session.is_none() {
             app.ime_ready = app.session_ime.force_ascii();
         }
+        // A page the reader asked for came back (or did not): install it,
+        // or say why not, while the page they were on stayed usable.
+        drain_page_loads(app, ctx);
         // Commit outcomes from the serial worker (✓ / conflict recovery).
         while let Ok(outcome) = app.commit_res_rx.try_recv() {
             handle_commit_outcome(app, ctx, outcome);

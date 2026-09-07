@@ -331,18 +331,11 @@ pub(crate) fn record_visit(project: &str, title: &str, now: i64) -> Option<i64> 
 pub(crate) fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, bool)>) {
     let from = app.here();
     let project = app.index_project.clone();
-    // Held, not dropped: a page that fails to load is not a reason to lose
-    // the list you were choosing from.
-    let saved = app.index.take();
     let Some((title, create)) = target else { return };
-    if !navigate_from(app, ctx, &project, &title, from) {
-        app.index = saved;
-        return;
-    }
-    if create {
-        app.cursor = 0;
-        open_line(app, ctx, false);
-    }
+    // The list stays on screen while the page is fetched: a page that
+    // fails to load is not a reason to lose the list you were choosing
+    // from, and until it lands there is nothing else to show.
+    start_page_load(app, ctx, &project, &title, LoadIntent::Navigate { from, create });
 }
 
 /// `[` / `]`: step back or forward through the places visited.
@@ -367,24 +360,11 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
                 app.index = None;
                 arrived = true;
             } else {
-                match load_page(ctx, &project, &title) {
-                    Ok(loaded) => {
-                        app.index = None;
-                        app.set_page(loaded, ctx);
-                        arrived = true;
-                    }
-                    Err(e) => {
-                        // A failed back must not eat the destination. The
-                        // same key can retry after the connection recovers.
-                        let place = Place::Page { project, title };
-                        if back {
-                            app.history.push(place);
-                        } else {
-                            app.forward.push(place);
-                        }
-                        app.toast_err(t!("履歴の移動に失敗しました: {e}", "history failed: {e}"));
-                    }
-                }
+                // Fetched in the background; `drain_page_loads` finishes
+                // the move, and a failed back puts the destination back on
+                // its stack so the same key can retry.
+                let here = here.clone();
+                start_page_load(app, ctx, &project, &title, LoadIntent::History { back, here });
             }
         }
         Place::Index { project, state } => {
@@ -708,22 +688,44 @@ pub(crate) fn open_page_index(app: &mut App, ctx: &Ctx) {
     }
 }
 
-/// Fetch and render one page. Images are NOT downloaded here: they are
-/// fetched on background threads (see `App::start_image_loads`) so a page
-/// with many images still appears immediately.
+/// Fetch and render one page on the calling thread. Images are NOT
+/// downloaded here: they are fetched on background threads (see
+/// `App::start_image_loads`) so a page with many images still appears
+/// immediately.
+///
+/// Navigation does not call this: it goes through `start_page_load`, which
+/// runs `fetch_page` off the UI thread and `finish_load` when the answer
+/// comes back. The blocking form remains for the first page (nothing is on
+/// screen yet to keep responsive) and for in-place reloads, whose callers
+/// act on the result at once and whose wait is bounded by the client's
+/// request timeout.
 pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Error>> {
-    let page = ctx.client.get_page_in(project, title)?;
-    let mut lines: Vec<PageLine> = page.lines.clone();
+    let page = fetch_page(&ctx.client, project, title)?;
+    Ok(finish_load(ctx, project, title, page))
+}
+
+/// The network half of a page load: the page itself, with ids filled in
+/// for a template. Runs on whichever thread asks.
+pub(crate) fn fetch_page(client: &Client, project: &str, title: &str) -> Result<cosense::api::Page, Box<dyn Error>> {
+    let mut page = client.get_page_in(project, title)?;
     if !page.persistent {
         // An uncreated page comes back as a template: a title line with no
         // id. Give every line an id here, so editing works exactly as on a
         // real page and the create request can name its own lines.
-        for l in lines.iter_mut() {
+        for l in page.lines.iter_mut() {
             if l.id.is_empty() {
                 l.id = new_line_id();
             }
         }
     }
+    Ok(page)
+}
+
+/// The rendering half of a page load, on the UI thread: highlight, theme,
+/// visit stamp. Any project lookups here are answered from the caches the
+/// fetch thread warmed (`spawn_page_load`).
+pub(crate) fn finish_load(ctx: &Ctx, project: &str, title: &str, page: cosense::api::Page) -> Loaded {
+    let lines: Vec<PageLine> = page.lines.clone();
     let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
     let facts = PageFacts::of(&page);
     // The related block is not in a v2 response, so nothing is known about
@@ -748,7 +750,7 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
     let editable = ctx.can_edit_in(project);
     let (header_fg, header_bg) =
         cosense::theme::project_header_colors(site_theme.as_deref(), ctx.terminal_bg);
-    Ok(Loaded {
+    Loaded {
         project: project.to_string(),
         title: title.to_string(),
         header_colors: HeaderColors { fg: header_fg, bg: header_bg },
@@ -766,7 +768,171 @@ pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded,
         related: Vec::new(),
         links,
         facts,
-    })
+    }
+}
+
+/// Why a page was asked for, and what to do with it when it arrives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoadIntent {
+    /// A link or an index row was followed. `from` goes onto history on
+    /// success; `create` opens the first line for writing (a new page from
+    /// the index's filter).
+    Navigate { from: Place, create: bool },
+    /// `[` / `]`. On success `here` goes onto the opposite stack; on
+    /// failure (or when a newer request supersedes this one) the popped
+    /// destination goes back where it was taken from.
+    History { back: bool, here: Place },
+}
+
+/// One page fetch in flight. The reader keeps the page (or list) they were
+/// on until this resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingLoad {
+    pub(crate) gen: u64,
+    pub(crate) project: String,
+    pub(crate) title: String,
+    pub(crate) intent: LoadIntent,
+}
+
+/// What the fetch thread sends back. `Err` is the message to show.
+pub(crate) struct PageLoadMsg {
+    pub(crate) gen: u64,
+    pub(crate) result: Result<cosense::api::Page, String>,
+}
+
+/// Ask for `project/title` in the background and remember what to do
+/// with it. Any fetch still pending is abandoned first: its result, if it
+/// ever arrives, carries an older generation and is dropped.
+pub(crate) fn start_page_load(app: &mut App, ctx: &Ctx, project: &str, title: &str, intent: LoadIntent) {
+    abandon_pending_load(app);
+    app.page_load_gen += 1;
+    let gen = app.page_load_gen;
+    app.pending_load = Some(PendingLoad {
+        gen,
+        project: project.to_string(),
+        title: title.to_string(),
+        intent,
+    });
+    app.status = loading_status(project, title);
+    if app.page_loads_on {
+        spawn_page_load(ctx, gen, project.to_string(), title.to_string(), app.page_load_tx.clone());
+    }
+}
+
+fn loading_status(project: &str, title: &str) -> String {
+    t!("読み込み中: /{project}/{title}", "loading /{project}/{title}")
+}
+
+/// The thread behind `start_page_load`. Besides the page it warms the
+/// per-project caches, so that `finish_load` on the UI thread finds the
+/// theme and the edit permission already answered.
+fn spawn_page_load(ctx: &Ctx, gen: u64, project: String, title: String, tx: mpsc::Sender<PageLoadMsg>) {
+    let client = ctx.client.clone();
+    let settings = ctx.project_settings.clone();
+    let editability = ctx.editability.clone();
+    std::thread::spawn(move || {
+        let result = fetch_page(&client, &project, &title).map_err(|e| e.to_string());
+        if result.is_ok() {
+            project_settings_cached(&client, &settings, &project);
+            editability_cached(&client, &editability, &project);
+        }
+        let _ = tx.send(PageLoadMsg { gen, result });
+    });
+}
+
+/// Forget the fetch in flight, undoing what its start took: a history
+/// hop had already popped its destination, which goes back on its stack.
+fn abandon_pending_load(app: &mut App) {
+    let Some(pending) = app.pending_load.take() else { return };
+    if app.status == loading_status(&pending.project, &pending.title) {
+        app.status.clear();
+    }
+    if let LoadIntent::History { back, .. } = pending.intent {
+        let place = Place::Page { project: pending.project, title: pending.title };
+        if back {
+            app.history.push(place);
+        } else {
+            app.forward.push(place);
+        }
+    }
+}
+
+/// Install pages that came back, or say why they did not. Only the fetch
+/// still pending counts; an answer to an abandoned request is dropped.
+/// Returns whether a page was installed.
+pub(crate) fn drain_page_loads(app: &mut App, ctx: &Ctx) -> bool {
+    let mut installed = false;
+    while let Ok(msg) = app.page_load_rx.try_recv() {
+        if app.pending_load.as_ref().is_none_or(|p| p.gen != msg.gen) {
+            continue;
+        }
+        let pending = app.pending_load.take().expect("checked above");
+        if app.status == loading_status(&pending.project, &pending.title) {
+            app.status.clear();
+        }
+        match msg.result {
+            Ok(page) => {
+                let loaded = finish_load(ctx, &pending.project, &pending.title, page);
+                arrive(app, ctx, loaded, pending.intent);
+                installed = true;
+            }
+            Err(e) => fail(app, pending, &e),
+        }
+    }
+    installed
+}
+
+/// The page is here: leave the list or the page it was asked from, record
+/// the move, and install it.
+fn arrive(app: &mut App, ctx: &Ctx, loaded: Loaded, intent: LoadIntent) {
+    match intent {
+        LoadIntent::Navigate { from, create } => {
+            app.history.push(from);
+            app.forward.clear();
+            app.index = None;
+            app.set_page(loaded, ctx);
+            // The header now says where we are; only a page nobody has
+            // written yet needs a word — following a link to it is how a
+            // wiki grows, so say what it is and what makes it real.
+            if page_is_uncreated(app) {
+                let title = app.title.clone();
+                app.toast(t!("未作成のページ — e / o で書き始めると作成されます（{title}）", "an uncreated page — e / o starts writing it ({title})"));
+            }
+            if create {
+                app.cursor = 0;
+                open_line(app, ctx, false);
+            }
+        }
+        LoadIntent::History { back, here } => {
+            app.index = None;
+            app.set_page(loaded, ctx);
+            if back {
+                app.forward.push(here);
+            } else {
+                app.history.push(here);
+            }
+        }
+    }
+}
+
+/// The page did not come: the reader is still where they were. A history
+/// hop gets its destination back so the same key retries.
+fn fail(app: &mut App, pending: PendingLoad, e: &str) {
+    let PendingLoad { project, title, intent, .. } = pending;
+    match intent {
+        LoadIntent::Navigate { .. } => {
+            app.toast_err(t!("開けません: /{project}/{title} — {e}", "open failed: /{project}/{title} — {e}"));
+        }
+        LoadIntent::History { back, .. } => {
+            let place = Place::Page { project, title };
+            if back {
+                app.history.push(place);
+            } else {
+                app.forward.push(place);
+            }
+            app.toast_err(t!("履歴の移動に失敗しました: {e}", "history failed: {e}"));
+        }
+    }
 }
 
 /// What this page's own response says about the pages it links to — by
