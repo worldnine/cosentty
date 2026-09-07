@@ -118,6 +118,7 @@ fn build_related_groups_2hop_under_hubs_and_dedupes() {
         page.related.as_ref(),
         "proj",
         cosense::index::SortKey::Updated,
+        &HashMap::new(),
     );
     let heads: Vec<&str> = secs.iter().map(|s| s.heading.as_str()).collect();
     assert_eq!(
@@ -189,7 +190,7 @@ fn related_sections_follow_the_index_sort_order_within_each_section() {
     };
     let facts = PageFacts::of(&page);
     let titles = |sort: SortKey| -> Vec<Vec<String>> {
-        build_related(&facts, page.related.as_ref(), "proj", sort)
+        build_related(&facts, page.related.as_ref(), "proj", sort, &HashMap::new())
             .iter()
             .map(|s| s.entries.iter().map(|e| e.title.clone()).collect())
             .collect()
@@ -229,7 +230,7 @@ fn related_sections_follow_the_index_sort_order_within_each_section() {
     );
 
     // The dim value after the title is the one being sorted on.
-    let secs = build_related(&facts, page.related.as_ref(), "proj", SortKey::Linked);
+    let secs = build_related(&facts, page.related.as_ref(), "proj", SortKey::Linked, &HashMap::new());
     assert_eq!(secs[0].entries[0].sort_meta(SortKey::Linked), "linked 9");
     assert!(
         secs[0].entries[0]
@@ -799,4 +800,20 @@ fn back_at_the_history_boundary_keeps_the_last_destination() {
             title: "B".into()
         }]
     );
+}
+
+/// 訪問記録の保存先は起点で決めて持ち回る。`None` ならファイルに触れないので、
+/// テストが開発者の実 `visits.json` を読んだり書いたりすることがない。
+#[test]
+fn visits_stay_in_memory_without_a_path_and_persist_with_one() {
+    assert_eq!(record_visit(None, "proj", "A", 10), None);
+    assert_eq!(record_visit(None, "proj", "A", 20), None, "nothing was kept");
+    assert!(load_visits(None).is_empty());
+
+    let dir = std::env::temp_dir().join(format!("cosentty-test-visits-{}", std::process::id()));
+    let path = dir.join("visits.json");
+    assert_eq!(record_visit(Some(&path), "proj", "A", 10), None);
+    assert_eq!(record_visit(Some(&path), "proj", "A", 20), Some(10));
+    assert_eq!(load_visits(Some(&path)).get("proj/A"), Some(&20));
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -169,10 +169,10 @@ pub(crate) fn build_related(
     related: Option<&cosense::api::RelatedPages>,
     project: &str,
     sort: cosense::index::SortKey,
+    visits: &HashMap<String, i64>,
 ) -> Vec<RelSection> {
     let mut secs: Vec<RelSection> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let visits = load_visits();
     let unread = |p: &str, title: &str, updated: i64| related_is_unread(&visits, p, title, updated);
     let key_of = |p: &cosense::api::RelatedPage| {
         if p.title_lc.is_empty() {
@@ -305,8 +305,10 @@ pub(crate) fn unread_since(updated: i64, read_at: Option<i64>) -> bool {
 /// `project/title` (epoch seconds). Cosense only learns about browser
 /// visits, so without this a page read here would stay "unread" forever.
 /// Lives in `$XDG_STATE_HOME/cosentty/visits.json` (default
-/// `~/.local/state`).
-pub(crate) fn visits_path() -> Option<std::path::PathBuf> {
+/// `~/.local/state`). The path is decided ONCE at startup and carried in
+/// `Ctx` / `App`; tests leave it `None`, so they never read or write the
+/// developer's real file.
+pub(crate) fn default_visits_path() -> Option<std::path::PathBuf> {
     let base = match std::env::var("XDG_STATE_HOME") {
         Ok(x) if !x.is_empty() => std::path::PathBuf::from(x),
         _ => std::path::PathBuf::from(std::env::var("HOME").ok()?)
@@ -316,9 +318,8 @@ pub(crate) fn visits_path() -> Option<std::path::PathBuf> {
     Some(base.join("cosentty").join("visits.json"))
 }
 
-pub(crate) fn load_visits() -> HashMap<String, i64> {
-    visits_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
+pub(crate) fn load_visits(path: Option<&std::path::Path>) -> HashMap<String, i64> {
+    path.and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
@@ -326,10 +327,15 @@ pub(crate) fn load_visits() -> HashMap<String, i64> {
 /// Record a visit to `project/title` at `now`, returning the PREVIOUS
 /// local visit time (if any). Failures to persist are ignored: the worst
 /// case is a page that stays "unread" on the next visit.
-pub(crate) fn record_visit(project: &str, title: &str, now: i64) -> Option<i64> {
-    let mut visits = load_visits();
+pub(crate) fn record_visit(
+    path: Option<&std::path::Path>,
+    project: &str,
+    title: &str,
+    now: i64,
+) -> Option<i64> {
+    let mut visits = load_visits(path);
     let prev = visits.insert(format!("{project}/{title}"), now);
-    if let Some(p) = visits_path() {
+    if let Some(p) = path {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -677,7 +683,7 @@ fn open_index_from(app: &mut App, ctx: &Ctx, project: &str, filter: String, reus
             }
         },
     };
-    let visits = load_visits();
+    let visits = load_visits(ctx.visits_path.as_deref());
     let mut entries: Vec<Entry> = pages
         .into_iter()
         .map(|p| {
@@ -736,7 +742,7 @@ pub(crate) fn search_index(app: &mut App, ctx: &Ctx, query: &str) {
             return;
         }
     };
-    let visits = load_visits();
+    let visits = load_visits(ctx.visits_path.as_deref());
     let entries: Vec<Entry> = hits
         .into_iter()
         .map(|h| {
@@ -873,7 +879,7 @@ pub(crate) fn finish_load(
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
     let now = now_secs();
-    let local_prev = record_visit(project, title, now);
+    let local_prev = record_visit(ctx.visits_path.as_deref(), project, title, now);
     let read_at = match (page.last_accessed, local_prev) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -1504,7 +1510,14 @@ impl App {
         let Some(rel) = self.related_block.as_ref() else {
             return;
         };
-        self.related = build_related(&self.facts, Some(rel), &self.project, self.index_sort);
+        let visits = load_visits(self.visits_path.as_deref());
+        self.related = build_related(
+            &self.facts,
+            Some(rel),
+            &self.project,
+            self.index_sort,
+            &visits,
+        );
         self.virtual_items = self
             .related
             .iter()

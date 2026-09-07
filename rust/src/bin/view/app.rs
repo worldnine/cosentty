@@ -579,6 +579,8 @@ pub(crate) struct App {
     pub(crate) virtual_items: Vec<LinkItem>,
     /// Terminal background is light (for related-row colors; set from Ctx).
     pub(crate) light: bool,
+    /// Where visit times persist (copied from `Ctx` at startup; `None` in tests).
+    pub(crate) visits_path: Option<std::path::PathBuf>,
 }
 
 /// One project's member table and when it was fetched.
@@ -805,6 +807,7 @@ impl App {
             snapshots_rx,
             virtual_items: Vec::new(),
             light: false,
+            visits_path: None,
         }
     }
 

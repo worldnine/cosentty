@@ -311,6 +311,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ime_mode,
         preview,
         download_dir,
+        visits_path: nav::default_visits_path(),
         editability: Arc::new(std::sync::Mutex::new(HashMap::new())),
         project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         gyazo_teams_token,
@@ -323,6 +324,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut app = App::new(project.clone());
     app.light = ctx.light;
+    app.visits_path = ctx.visits_path.clone();
     if let Some(e) = ctx.config_error.as_ref() {
         app.toast_err(t!(
             "設定ファイルを読めませんでした: {e}",
@@ -522,6 +524,9 @@ struct Ctx {
     preview: cosense::index::PreviewMode,
     /// Where saved files land (`--download-dir`, see `pick_download_dir`).
     download_dir: std::path::PathBuf,
+    /// Where this viewer's own visit times persist (`nav::default_visits_path`).
+    /// `None` keeps everything in memory — that is what tests run with.
+    visits_path: Option<std::path::PathBuf>,
     /// Per-project edit permission. Membership changes are rare; navigation
     /// should not refetch `/users/me` + the member table on every page.
     /// Shared with the page-load thread, which warms it off the UI thread

@@ -29,6 +29,7 @@ pub(crate) fn test_ctx() -> Ctx {
         ime_mode: cosense::ime::ImeMode::Off,
         preview: cosense::index::PreviewMode::Auto,
         download_dir: std::env::temp_dir(),
+        visits_path: None,
         editability: Arc::new(std::sync::Mutex::new(HashMap::new())),
         project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         gyazo_teams_token: None,
