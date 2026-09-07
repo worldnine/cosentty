@@ -780,3 +780,39 @@ fn the_history_marks_rows_the_next_version_deletes() {
     let a = app.lines.iter().find(|l| l.id == "a").unwrap();
     assert_eq!(app.line_state(a), TelomereState::Read);
 }
+
+#[test]
+fn a_resync_keeps_history_whose_newer_entry_restores_an_older_anchor() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "body"]);
+    let dependent = vec![
+        ("older delete".into(), vec![EditOp::Delete { id: "restored".into() }]),
+        ("newer insert".into(), vec![EditOp::Insert {
+            anchor: "_end".into(),
+            lines: vec![("restored".into(), "text".into())],
+        }]),
+    ];
+    app.undo_stack = dependent.clone();
+    app.redo_stack = dependent.clone();
+    let remote = polled(&[("id0", "title"), ("id1", "web edit")]).page;
+    install_remote_lines(&mut app, &ctx, &remote, None);
+    assert_eq!(app.undo_stack, dependent);
+    assert_eq!(app.redo_stack, dependent);
+    assert!(!app.history_dropped);
+    assert_eq!(app.lines[1].text, "web edit");
+}
+
+#[test]
+fn a_resync_drops_only_history_that_cannot_be_replayed() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "body"]);
+    app.undo_stack = vec![
+        ("valid".into(), vec![EditOp::Replace { id: "id1".into(), text: "old".into() }]),
+        ("gone".into(), vec![EditOp::Delete { id: "gone".into() }]),
+    ];
+    let remote = polled(&[("id0", "title"), ("id1", "web edit")]).page;
+    install_remote_lines(&mut app, &ctx, &remote, None);
+    assert_eq!(app.undo_stack.len(), 1);
+    assert_eq!(app.undo_stack[0].0, "valid");
+    assert!(app.history_dropped);
+}

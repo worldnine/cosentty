@@ -206,12 +206,9 @@ pub(crate) fn install_remote_lines(
     // cannot be replayed, but the rest still can. Dropping the WHOLE
     // history here is what made `^r` look dead: a single web-side edit (or
     // one 3 s poll that differed) silently took the redo stack with it.
-    let live: std::collections::HashSet<&str> =
-        app.lines.iter().map(|l| l.id.as_str()).collect();
-    let before = app.undo_stack.len() + app.redo_stack.len();
-    app.undo_stack.retain(|(_, ops)| ops_replayable(ops, &live));
-    app.redo_stack.retain(|(_, ops)| ops_replayable(ops, &live));
-    if app.undo_stack.len() + app.redo_stack.len() < before {
+    let dropped = retain_replayable_history(&mut app.undo_stack, &app.lines)
+        + retain_replayable_history(&mut app.redo_stack, &app.lines);
+    if dropped > 0 {
         app.history_dropped = true;
     }
     rerender(app, ctx);
