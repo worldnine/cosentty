@@ -6,6 +6,8 @@ description = "Terminal viewer and editor for Cosense (Scrapbox) pages"
 license = "MIT"
 repository = "https://github.com/worldnine/cosentty"
 readme = "../README.md"
+# 設計メモ(docs/)は GitHub で読むもの。crate には入れない
+exclude = ["docs/"]
 keywords = ["cosense", "scrapbox", "tui", "ratatui", "wiki"]
 categories = ["command-line-utilities", "text-editors"]
 default-run = "cosentty"

@@ -31,7 +31,7 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
   ハイライトとは別物) `math`(数式の組図: `code:tex` ブロックとインライン
   `[$ ... ]` の共通部) ほか
 - `code:mmd` / `code:tex` は**テキスト描画が本流**。`mmd_text`(viewer側の
-  アダプタ)と `NOTE-mmd-text.md` / `NOTE-math-text.md` を参照
+  アダプタ)と `rust/docs/NOTE-mmd-text.md` / `rust/docs/NOTE-math-text.md` を参照
 - viewer(`rust/src/bin/view/`): `main`(起動+イベントループ)/ `app`(状態)/
   `keys` / `mouse` / `session`(EDIT)/ `editing`(コミット・undo)/ `outline` /
   `sync`(ws・resync)/ `nav` / `links` / `images` / `web` / `ui`(描画)/
@@ -69,22 +69,22 @@ RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" \
 
 ## ドキュメント索引
 
-- `rust/NOTE-codebase-review.md` — 全体レビューの所見、修正記録、モジュール対応表
-- `rust/PLAN-next.md` — **次にやること**(優先順)。まずこれを読む
-- `rust/PLAN-view-split.md` — view.rs 分割(実施済み・記録)
-- `rust/PLAN-mode-ux.md` — モード体系・カーソル表現の再設計(実施済み・記録)
+- `rust/docs/NOTE-codebase-review.md` — 全体レビューの所見、修正記録、モジュール対応表
+- `rust/docs/PLAN-next.md` — **次にやること**(優先順)。まずこれを読む
+- `rust/docs/PLAN-view-split.md` — view.rs 分割(実施済み・記録)
+- `rust/docs/PLAN-mode-ux.md` — モード体系・カーソル表現の再設計(実施済み・記録)
 - `rust/KEYMAP.md` — キー体系(akapen 対応表つき)
-- `rust/SPEC-edit-session.md` — EDIT セッションの仕様
-- `rust/NOTE-webrender-handoff.md` — web レンダラ(mmd 描画)MVP の詳細設計・
+- `rust/docs/SPEC-edit-session.md` — EDIT セッションの仕様
+- `rust/docs/NOTE-webrender-handoff.md` — web レンダラ(mmd 描画)MVP の詳細設計・
   調査記録(旧 HANDOFF.md の全文)
-- `rust/NOTE-mmd-text.md` — Mermaid のテキスト描画(本流。ブラウザ描画は
+- `rust/docs/NOTE-mmd-text.md` — Mermaid のテキスト描画(本流。ブラウザ描画は
   既定でオフ)
-- `rust/NOTE-math-text.md` — 数式のテキスト描画。`code:tex` とインライン数式を扱う
-- `rust/NOTE-websocket-sync.md` / `NOTE-outline-editing.md` /
-  `NOTE-edit-selection.md` — 各機能の設計メモ
-- `rust/SPEC-telomere-web-parity.md` — テロメアの web 仕様(実測)と対応表。
+- `rust/docs/NOTE-math-text.md` — 数式のテキスト描画。`code:tex` とインライン数式を扱う
+- `rust/docs/NOTE-websocket-sync.md` / `rust/docs/NOTE-outline-editing.md` /
+  `rust/docs/NOTE-edit-selection.md` — 各機能の設計メモ
+- `rust/docs/SPEC-telomere-web-parity.md` — テロメアの web 仕様(実測)と対応表。
   `scripts/cosense-theme-vars.py` は同梱 app.css からテーマ色テーブルを生成する
-- `rust/NOTE-scrapbox-parser.md` — 本家パーサの規則と出典。
+- `rust/docs/NOTE-scrapbox-parser.md` — 本家パーサの規則と出典。
   ブロックの子は「ヘッダより深いインデントの行」のみで、空行はブロックを終端する。
   記法の解析や編集の挙動を変える前に読む。
   実装は `render.rs` の3走査と `session/structure.rs` の Enter 処理

@@ -45,7 +45,7 @@ cargo run --features dev-tools --bin probe -- help-jp   # 実測用バイナリ
 ```
 
 実編集を伴う検証は、自分の非公開プロジェクトを 1 つ作って行ってください。
-設計判断は `rust/PLAN-*.md` / `NOTE-*.md` / `SPEC-*.md` に、全体像は `HANDOFF.md` にあります。
+設計判断は `rust/docs/` の PLAN-*.md / NOTE-*.md / SPEC-*.md に、全体像は `HANDOFF.md` にあります。
 
 ## 主な機能
 
