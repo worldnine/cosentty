@@ -368,6 +368,36 @@ pub(crate) fn open_from_index(app: &mut App, ctx: &Ctx, target: Option<(String, 
 /// you reached from the index lands in the index — where you were — rather
 /// than in whatever page happened to precede it.
 pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
+    // 同じ向きの連打: 待っていた目的地(C)には着いたものとして扱い、今いる場所と
+    // C を反対側の山に置いてから次を取り出す。これで A→B→C→D で `[` を 2 回押すと
+    // B に着き、`]` は C、D の順に戻る。他の待ちは、目的地を元の山へ返してから
+    // 取り出す(取り出した後に返すと順序が入れ替わる)。
+    let mut here = app.here();
+    if let Some(pending) = app.pending_load.as_ref() {
+        if let LoadIntent::History {
+            back: pending_back,
+            here: pending_here,
+        } = &pending.intent
+        {
+            if *pending_back == back {
+                let pending_here = pending_here.clone();
+                let pending = app.pending_load.take().expect("checked above");
+                if app.status == loading_status(&pending.project, &pending.title) {
+                    app.status.clear();
+                }
+                if back {
+                    app.forward.push(pending_here);
+                } else {
+                    app.history.push(pending_here);
+                }
+                here = Place::Page {
+                    project: pending.project,
+                    title: pending.title,
+                };
+            }
+        }
+    }
+    abandon_pending_load(app);
     let place = if back {
         app.history.pop()
     } else {
@@ -381,7 +411,6 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
         });
         return;
     };
-    let here = app.here();
     let mut arrived = false;
     match place {
         Place::Page { project, title } => {
@@ -552,6 +581,8 @@ pub(crate) fn open_projects(app: &mut App, ctx: &Ctx, reuse: bool) {
     if !filter.is_empty() {
         ix.set_filter(filter);
     }
+    // 別の画面へ移った: 待っていたページが届いても、この一覧を置き換えさせない。
+    abandon_pending_load(app);
     app.index = Some(ix);
     // No project is being listed. The header names the level instead.
     app.index_project = String::new();
@@ -653,6 +684,8 @@ fn open_index_from(app: &mut App, ctx: &Ctx, project: &str, filter: String, reus
     if !filter.is_empty() {
         ix.set_filter(filter);
     }
+    // 別の画面へ移った: 待っていたページが届いても、この一覧を置き換えさせない。
+    abandon_pending_load(app);
     app.index = Some(ix);
     app.index_project = project.to_string();
     app.index_display = ctx.project_display(project);
@@ -778,7 +811,8 @@ pub(crate) fn open_page_index(app: &mut App, ctx: &Ctx) {
 /// request timeout.
 pub(crate) fn load_page(ctx: &Ctx, project: &str, title: &str) -> Result<Loaded, Box<dyn Error>> {
     let page = fetch_page(&ctx.client, project, title)?;
-    Ok(finish_load(ctx, project, title, page))
+    let editable = ctx.can_edit_in(project);
+    Ok(finish_load(ctx, project, title, page, editable))
 }
 
 /// The network half of a page load: the page itself, with ids filled in
@@ -810,6 +844,7 @@ pub(crate) fn finish_load(
     project: &str,
     title: &str,
     page: cosense::api::Page,
+    editable: bool,
 ) -> Loaded {
     let lines: Vec<PageLine> = page.lines.clone();
     let texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
@@ -833,7 +868,6 @@ pub(crate) fn finish_load(
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     };
-    let editable = ctx.can_edit_in(project);
     let (header_fg, header_bg) =
         cosense::theme::project_header_colors(site_theme.as_deref(), ctx.terminal_bg);
     Loaded {
@@ -884,9 +918,17 @@ pub(crate) struct PendingLoad {
 }
 
 /// What the fetch thread sends back. `Err` is the message to show.
+/// 編集権限も同じスレッドで調べて添える: 権限取得が失敗したときに UI
+/// スレッドが `can_edit_in` で通信をやり直さないため(失敗はキャッシュされない)。
 pub(crate) struct PageLoadMsg {
     pub(crate) gen: u64,
-    pub(crate) result: Result<cosense::api::Page, String>,
+    pub(crate) result: Result<LoadedPage, String>,
+}
+
+/// 背景スレッドが持ち帰るもの。
+pub(crate) struct LoadedPage {
+    pub(crate) page: cosense::api::Page,
+    pub(crate) editable: bool,
 }
 
 /// Ask for `project/title` in the background and remember what to do
@@ -941,11 +983,13 @@ fn spawn_page_load(
     let settings = ctx.project_settings.clone();
     let editability = ctx.editability.clone();
     std::thread::spawn(move || {
-        let result = fetch_page(&client, &project, &title).map_err(|e| e.to_string());
-        if result.is_ok() {
-            project_settings_cached(&client, &settings, &project);
-            editability_cached(&client, &editability, &project);
-        }
+        let result = fetch_page(&client, &project, &title)
+            .map_err(|e| e.to_string())
+            .map(|page| {
+                project_settings_cached(&client, &settings, &project);
+                let editable = editability_cached(&client, &editability, &project);
+                LoadedPage { page, editable }
+            });
         let _ = tx.send(PageLoadMsg { gen, result });
     });
 }
@@ -986,8 +1030,8 @@ pub(crate) fn drain_page_loads(app: &mut App, ctx: &Ctx) -> bool {
             app.status.clear();
         }
         match msg.result {
-            Ok(page) => {
-                let loaded = finish_load(ctx, &pending.project, &pending.title, page);
+            Ok(LoadedPage { page, editable }) => {
+                let loaded = finish_load(ctx, &pending.project, &pending.title, page, editable);
                 arrive(app, ctx, loaded, pending.intent);
                 installed = true;
             }
@@ -1000,6 +1044,12 @@ pub(crate) fn drain_page_loads(app: &mut App, ctx: &Ctx) -> bool {
 /// The page is here: leave the list or the page it was asked from, record
 /// the move, and install it.
 fn arrive(app: &mut App, ctx: &Ctx, loaded: Loaded, intent: LoadIntent) {
+    // 読み込みを待つ間も元のページは編集できる。届いた瞬間に `set_page` が
+    // セッションを畳むので、その前に汚れた行を保存キューへ入れる(保存結果は
+    // ページと世代に結び付いているので、移動先へ誤って当たることはない)。
+    if app.session.is_some() {
+        session_commit_dirty(app, ctx);
+    }
     match intent {
         LoadIntent::Navigate { from, create } => {
             app.history.push(from);

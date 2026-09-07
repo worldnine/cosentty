@@ -91,7 +91,16 @@ pub(crate) fn answer_pending_load(
     ctx: &Ctx,
     result: Result<cosense::api::Page, String>,
 ) -> bool {
-    let gen = app.pending_load.as_ref().expect("a fetch is pending").gen;
+    let pending = app.pending_load.as_ref().expect("a fetch is pending");
+    let gen = pending.gen;
+    // テストのスレッドは立たないので、権限は ctx のキャッシュから読む(未登録は false)。
+    let editable = ctx
+        .editability
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&pending.project).copied())
+        .unwrap_or(false);
+    let result = result.map(|page| LoadedPage { page, editable });
     app.page_load_tx.send(PageLoadMsg { gen, result }).unwrap();
     drain_page_loads(app, ctx)
 }

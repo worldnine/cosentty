@@ -554,7 +554,10 @@ fn a_newer_request_supersedes_an_older_one() {
     app.page_load_tx
         .send(PageLoadMsg {
             gen: old_gen,
-            result: Ok(server_page("B", &["B"])),
+            result: Ok(LoadedPage {
+                page: server_page("B", &["B"]),
+                editable: false,
+            }),
         })
         .unwrap();
     assert!(
@@ -671,4 +674,93 @@ fn opening_from_the_index_closes_it_only_when_the_page_lands() {
     assert!(app.index.is_none(), "the list closes when the page lands");
     assert_eq!(app.title, "B");
     assert!(matches!(app.history.last(), Some(Place::Index { project, .. }) if project == "proj"));
+}
+
+/// 非同期ページ移動のレビュー(2026-09-07)で見つかった 3 件の再現。
+fn warmed_ctx() -> Ctx {
+    let ctx = test_ctx();
+    ctx.project_settings
+        .lock()
+        .unwrap()
+        .insert("proj".into(), None);
+    ctx.editability.lock().unwrap().insert("proj".into(), true);
+    ctx
+}
+
+#[test]
+fn pending_navigation_preserves_text_typed_while_waiting() {
+    let ctx = warmed_ctx();
+    let mut app = page(&["A", "body"]);
+    app.title = "A".into();
+    navigate_to(&mut app, &ctx, "proj", "B");
+    enter_session(&mut app, &ctx, 1, 4);
+    app.session.as_mut().unwrap().input.insert_str(" UNSAVED");
+    answer_pending_load(&mut app, &ctx, Ok(server_page("B", &["B", "new body"])));
+    let retained = app
+        .session
+        .as_ref()
+        .is_some_and(|s| s.input.buf.contains("UNSAVED"));
+    let queued = drain_jobs(&mut app).iter().any(|job| {
+        job.1
+            .iter()
+            .any(|op| matches!(op, EditOp::Replace { text, .. } if text.contains("UNSAVED")))
+    });
+    assert!(
+        retained || queued,
+        "arrival discarded the dirty session without queueing a commit"
+    );
+}
+
+#[test]
+fn entering_projects_cancels_the_old_page_request() {
+    let ctx = warmed_ctx();
+    let mut app = page(&["A", "body"]);
+    navigate_to(&mut app, &ctx, "proj", "B");
+    let gen = app.pending_load.as_ref().unwrap().gen;
+    app.projects_cache = Some(ProjectsCache {
+        projects: vec![],
+        at: Instant::now(),
+    });
+    open_projects(&mut app, &ctx, true);
+    assert!(app
+        .index
+        .as_ref()
+        .is_some_and(|i| i.scope == cosense::index::Scope::Projects));
+    app.page_load_tx
+        .send(PageLoadMsg {
+            gen,
+            result: Ok(LoadedPage {
+                page: server_page("B", &["B"]),
+                editable: true,
+            }),
+        })
+        .unwrap();
+    assert!(
+        !drain_page_loads(&mut app, &ctx),
+        "an obsolete page request replaced the projects picker"
+    );
+}
+
+#[test]
+fn two_back_presses_do_not_reorder_the_remaining_history() {
+    let ctx = warmed_ctx();
+    let mut app = page(&["D", "body"]);
+    app.title = "D".into();
+    let place = |title: &str| Place::Page {
+        project: "proj".into(),
+        title: title.into(),
+    };
+    app.history = vec![place("A"), place("B"), place("C")];
+    go_history(&mut app, &ctx, true);
+    go_history(&mut app, &ctx, true);
+    assert_eq!(app.pending_load.as_ref().unwrap().title, "B");
+    answer_pending_load(&mut app, &ctx, Ok(server_page("B", &["B"])));
+    assert_eq!(
+        app.history,
+        vec![place("A")],
+        "C is newer than B and must not become B's back destination"
+    );
+    // 飛ばした C と出発点 D は進む側に、押す順(C, D)で並ぶ。
+    assert_eq!(app.forward, vec![place("D"), place("C")]);
+    assert_eq!(app.title, "B");
 }
