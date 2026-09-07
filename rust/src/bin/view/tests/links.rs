@@ -416,3 +416,11 @@ use super::support::*;
             "隣のリンクはそのまま残る"
         );
     }
+
+#[test]
+fn pasted_page_urls_keep_stray_percent_before_japanese() {
+    assert_eq!(
+        parse_page_url("https://scrapbox.io/proj/100%日本語"),
+        Some(("proj".into(), Some("100%日本語".into()), None)),
+    );
+}

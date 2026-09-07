@@ -69,39 +69,7 @@ pub(crate) fn parse_page_url(arg: &str) -> Option<(String, Option<String>, Optio
     Some((project, title, line_id))
 }
 
-/// Decode `%XX` escapes (UTF-8) as browsers encode page titles; a stray
-/// `%` that is not an escape is kept as is.
-pub(crate) fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-pub(crate) fn urlencode_component(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.as_bytes() {
-        let c = *b;
-        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') {
-            out.push(c as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{c:02X}"));
-        }
-    }
-    out
-}
+pub(crate) use cosense::url::{encode_component as urlencode_component, percent_decode};
 
 /// Open a URL in the default browser (macOS `open`, Linux `xdg-open`).
 pub(crate) fn open_in_browser(url: &str) -> bool {

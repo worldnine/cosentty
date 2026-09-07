@@ -16,6 +16,7 @@ pub mod render;
 pub mod table;
 pub mod theme;
 pub mod upload;
+pub mod url;
 pub mod wrap;
 pub mod webrender;
 pub mod ws;

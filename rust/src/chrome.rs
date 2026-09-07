@@ -1081,18 +1081,7 @@ impl Cdp {
 /// Build the same percent-encoded Cosense page URL as `WebRequest::page_url`
 /// without manufacturing a screenshot request for this diagnostic.
 fn cosense_page_url(project: &str, title: &str) -> String {
-    fn segment(value: &str) -> String {
-        let mut out = String::with_capacity(value.len());
-        for byte in value.bytes() {
-            match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(byte as char)
-                }
-                _ => out.push_str(&format!("%{byte:02X}")),
-            }
-        }
-        out
-    }
+    use crate::url::encode_component as segment;
     format!("https://scrapbox.io/{}/{}", segment(project), segment(title))
 }
 

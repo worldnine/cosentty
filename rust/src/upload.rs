@@ -19,6 +19,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::api::ProjectSettings;
+use crate::url::percent_decode;
 use crate::config::Config;
 
 /// File extensions accepted as an image to upload — the same set the
@@ -66,24 +67,6 @@ pub fn image_path_from_paste(pasted: &str) -> Option<PathBuf> {
 pub fn has_image_ext(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     IMAGE_EXTS.iter().any(|e| lower.ends_with(e))
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// MIME type from the extension. Only the image set above ever reaches

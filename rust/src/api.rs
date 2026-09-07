@@ -1196,22 +1196,7 @@ impl Client {
     }
 }
 
-/// Minimal percent-encoding for path/query components (RFC 3986 unreserved kept).
-fn urlencoding(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.as_bytes() {
-        let c = *b;
-        let unreserved = c.is_ascii_alphanumeric()
-            || matches!(c, b'-' | b'_' | b'.' | b'~');
-        if unreserved {
-            out.push(c as char);
-        } else {
-            out.push('%');
-            out.push_str(&format!("{c:02X}"));
-        }
-    }
-    out
-}
+use crate::url::encode_component as urlencoding;
 
 #[cfg(test)]
 mod tests {

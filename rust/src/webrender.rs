@@ -521,19 +521,7 @@ fn cache_root() -> PathBuf {
     std::env::temp_dir()
 }
 
-/// Percent-encode a path segment the way scrapbox.io's own URLs do.
-fn enc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+use crate::url::encode_component as enc;
 
 /// FNV-1a. Small, stable across runs (unlike `DefaultHasher`), which matters
 /// because these keys name files on disk.
