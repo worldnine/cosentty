@@ -1,3 +1,4 @@
 rust/target/
 .DS_Store
 CLAUDE.local.md
+examples/demo/out/
