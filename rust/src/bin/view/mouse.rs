@@ -444,6 +444,13 @@ pub(crate) fn handle_mouse_content(app: &mut App, ctx: &Ctx, m: MouseEvent) {
                 app.follow = true;
                 return;
             }
+            // A drag that overshoots into the related rows clamps at the
+            // body's last line: the selection is of THIS page's text.
+            let end = if end >= app.lines.len() {
+                app.last_body_src().unwrap_or(end)
+            } else {
+                end
+            };
             app.selection = Some(Selection {
                 anchor,
                 cursor: end,

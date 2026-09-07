@@ -186,10 +186,31 @@ pub(crate) fn session_enter_selection(app: &mut App, ctx: &Ctx) -> bool {
 /// Anchors on the first press; after that the ordinary cursor move carries
 /// the far end (`after_cursor_move`).
 pub(crate) fn read_select_line(app: &mut App, down: bool) {
+    // A line selection is a selection of BODY lines: the related rows
+    // below the frame are other pages, not text of this one, so neither
+    // does a selection start on them nor may it grow into them. Coming
+    // from a related row, ↑ first climbs back into the body as a plain
+    // move and selects from there.
+    let body = app.lines.len();
+    if app.cursor >= body {
+        if down {
+            return;
+        }
+        if let Some(last) = app.last_body_src() {
+            app.goto_src(last);
+        }
+        return;
+    }
     if app.selection.is_none() {
         app.selection = Some(Selection::new(app.cursor));
     }
+    let before = app.cursor;
     app.move_cursor(down);
+    if app.cursor >= body {
+        // The step would have left the body: stay on its last line.
+        app.cursor = app.last_body_src().unwrap_or(before);
+        app.after_cursor_move();
+    }
     if let Some((a, b)) = app.selection.map(|s| s.range()) {
         app.status = t!(
             "{} 行を選択 · y コピー · c コメント · Esc 解除",

@@ -1843,3 +1843,39 @@ fn ctrl_l_asks_the_loop_for_a_full_repaint() {
         Action::Repaint
     ));
 }
+
+/// READ の行選択は本文の行を選ぶもの。枠の下に続く関連ページ行は他の
+/// ページであって本文ではないので、Shift+↓ を連打しても選択は本文の
+/// 末行で止まり、関連行の上からは選択が始まらない。
+#[test]
+fn read_line_selection_never_reaches_the_related_rows() {
+    let mut app = page(&["title", "one", "two"]);
+    app.related = test_related();
+    app.virtual_items = app
+        .related
+        .iter()
+        .flat_map(|s| s.entries.iter().map(|e| e.item.clone()))
+        .collect();
+    app.rebuild(60);
+    assert!(
+        app.src_count() > app.lines.len(),
+        "the page has related rows"
+    );
+
+    app.goto_src(1);
+    for _ in 0..10 {
+        read_select_line(&mut app, true);
+    }
+    assert_eq!(app.selection.map(|s| s.range()), Some((1, 2)));
+    assert_eq!(app.cursor, 2, "the cursor stays on the body's last line");
+
+    // 関連行の上では選択が始まらず、↑ はまず本文へ戻るだけ。
+    app.selection = None;
+    app.goto_src(app.lines.len());
+    read_select_line(&mut app, true);
+    assert!(app.selection.is_none());
+    assert_eq!(app.cursor, app.lines.len());
+    read_select_line(&mut app, false);
+    assert!(app.selection.is_none());
+    assert_eq!(app.cursor, 2);
+}
