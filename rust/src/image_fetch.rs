@@ -71,10 +71,6 @@ impl ImageFetcher {
     }
 
     fn download(&self, permalink: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-        // Scrapbox uploaded file: direct download (with SID).
-        if permalink.contains("scrapbox.io/files/") || permalink.contains("/files/") {
-            return self.get_bytes(permalink, true);
-        }
         // Gyazo permalink.
         if let Some((org, id)) = parse_gyazo(permalink) {
             let page = match &org {
@@ -86,7 +82,7 @@ impl ImageFetcher {
             //    here just falls through.
             if let Some(token) = &self.gyazo_token {
                 if let Ok(url) = self.gyazo_api_url(&id, token) {
-                    if let Ok(b) = self.get_bytes(&url, false) {
+                    if let Ok(b) = self.get_bytes(&url) {
                         return Ok(b);
                     }
                 }
@@ -95,18 +91,18 @@ impl ImageFetcher {
             //    URL with the right extension (jpg/png/gif) — the plain
             //    `gyazo.com/<id>` capture case.
             if let Ok(url) = self.gyazo_oembed_url(&page) {
-                if let Ok(b) = self.get_bytes(&url, false) {
+                if let Ok(b) = self.get_bytes(&url) {
                     return Ok(b);
                 }
             }
             // 3. og:image from the public page (a 1200px thumbnail).
             if let Ok(img_url) = self.og_image(&page) {
-                return self.get_bytes(&img_url, false);
+                return self.get_bytes(&img_url);
             }
             return Err(format!("gyazo fetch failed for {permalink}").into());
         }
         // Anything else: try direct.
-        self.get_bytes(permalink, false)
+        self.get_bytes(permalink)
     }
 
     fn gyazo_api_url(&self, id: &str, token: &str) -> Result<String, Box<dyn Error>> {
@@ -140,13 +136,18 @@ impl ImageFetcher {
     /// Download an arbitrary URL to `dest` (a Scrapbox upload on a private
     /// project needs credentials, so they are always sent for those).
     pub fn download_to(&self, url: &str, dest: &std::path::Path) -> Result<(), Box<dyn Error>> {
-        let with_auth = url.contains("scrapbox.io/");
-        let bytes = self.get_bytes(url, with_auth)?;
+        let bytes = self.get_bytes(url)?;
         std::fs::write(dest, bytes)?;
         Ok(())
     }
 
-    fn get_bytes(&self, url: &str, with_auth: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn bytes_request(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+        let url = reqwest::Url::parse(url)?;
+        // Credentials belong to this HTTPS origin, never a substring of a
+        // path, query, user-info field, or another host's /files/ directory.
+        let with_auth = url.scheme() == "https"
+            && url.host_str() == Some("scrapbox.io")
+            && url.port_or_known_default() == Some(443);
         let mut req = self.http.get(url);
         if with_auth {
             if let Some(cred) = &self.cred {
@@ -154,7 +155,11 @@ impl ImageFetcher {
                 req = req.header(name, value);
             }
         }
-        let res = req.send_polite()?.error_for_status()?;
+        Ok(req)
+    }
+
+    fn get_bytes(&self, url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+        let res = self.bytes_request(url)?.send_polite()?.error_for_status()?;
         Ok(res.bytes()?.to_vec())
     }
 }
@@ -221,6 +226,34 @@ fn dirs_cache() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_credentials_are_bound_to_the_https_origin() {
+        for cred in [Credential::Pat("test-token".into()), Credential::Sid("test-sid".into())] {
+            let fetcher = ImageFetcher {
+                http: reqwest::blocking::Client::new(),
+                gyazo_token: None,
+                cred: Some(cred.clone()),
+                cache_dir: PathBuf::new(),
+            };
+            let (header, _) = cred.header();
+            for url in [
+                "https://example.com/files/a.png",
+                "https://example.com/scrapbox.io/files/a.png",
+                "https://scrapbox.io.example.com/files/a.png",
+                "https://scrapbox.io@example.com/files/a.png",
+                "https://example.com/?next=https://scrapbox.io/files/a.png",
+                "http://scrapbox.io/files/a.png",
+                "https://scrapbox.io:444/files/a.png",
+            ] {
+                let request = fetcher.bytes_request(url).unwrap().build().unwrap();
+                assert!(!request.headers().contains_key(header), "{url}");
+            }
+            let request = fetcher.bytes_request("https://scrapbox.io/files/a.png")
+                .unwrap().build().unwrap();
+            assert!(request.headers().contains_key(header));
+        }
+    }
 
     #[test]
     fn og_image_reads_the_tag_whose_content_comes_first() {
