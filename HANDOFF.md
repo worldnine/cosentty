@@ -9,12 +9,13 @@ cd rust
 cargo run --bin view <project> [title]     # またはページ URL をそのまま渡す
 ```
 
-- 引数なしは `help-jp` の索引
+- 引数なしは認証ユーザーのプロジェクト一覧。取得できなければ `help-jp` の索引を開く
 - 非公開プロジェクトの読み・書き・検索は `cosense login` の PAT / Service Account
-  で完結する(`~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」)。
+  で完結する。保存先は `~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」を参照。
   `COSENSE_SID` の connect.sid が要るのは **ws push 同期**と**プロジェクト設定の
-  読み取り**(テーマ、画像のアップロード先)、それと**既定でオフの web レンダラ**
-  (`COSENSE_WEB_RENDER=manual|auto` で上げたときの非公開ページ描画)だけ。
+  読み取り**に必要。テーマと画像のアップロード先が対象になる。
+  **既定でオフの web レンダラ**も非公開ページには SID を使う。
+  `COSENSE_WEB_RENDER=manual|auto` で有効にする。
   無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
   いなければ図はテキストかコードで出る)
 - 自前の設定ファイルは `~/.config/cosense-tui/config.toml`(画像のアップロード先の
@@ -35,26 +36,40 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
   `keys` / `mouse` / `session`(EDIT)/ `editing`(コミット・undo)/ `outline` /
   `sync`(ws・resync)/ `nav` / `links` / `images` / `web` / `ui`(描画)/
   `toast`(一過性の通知バナー)/ `handoff`(コメントをエージェントへ送る: `s`、herdr / `--send-cmd`)/
-  `tests/`(モジュール対応)
+  `tests/`(モジュール対応)。`ui/` と `session/` は責務別の下位モジュール、
+  `tests/app/` は機能をまたぐシナリオを持つ
 
 ## ビルドとテスト
 
 ```bash
-cd rust && cargo test --bin view   # viewer(336 tests)
-cargo test                          # lib(197)含む全部
+cd rust && cargo test --bin view   # viewer の基本検証
+cargo test                        # lib と各 bin も含めた検証
 ```
 
-- ツールチェーンは `rust/` の rustup override で 1.90.0。
-  **git worktree では override が効かない**ので `RUSTUP_TOOLCHAIN=1.90.0` を付ける
-  (`CARGO_TARGET_DIR=<本体>/rust/target` を足すと依存ビルドを再利用できる)
-- ただし**同じ target dir を共有するとバイナリは残らない**。worktree と本体が
-  `target/debug/view` を上書きし、`cargo build` は再リンクを省いて
-  `Finished in 0.79s` と出すことがある(実測。修正前の計測が修正後の
-  バイナリを走らせていた)。修正の前後を画面で比べるなら `CARGO_TARGET_DIR`
-  を分けるか、ビルドごとに `md5 -q target/debug/view` を取って同一性を確かめる
+worktree には元の `rust/` に設定した rustup override が引き継がれない。
+`mermaid-text` が必要とする Rust 1.92 を明示し、ビルド成果物は本体と分ける。
+worktree の `rust/` で次のように実行する。
+
+```bash
+RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" cargo test --bin view
+RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" cargo test
+```
+
+同じ target ディレクトリを共有すると、本体と worktree がバイナリを上書きし合う。
+前後の比較や実行中の本体への影響を避けるため、共有しない。
+`rust/target/` はコードの検索対象からも外す。
+
+実サーバーに接続する WebSocket テストは、通常の `cargo test` では実行しない。
+有効な `COSENSE_SID` を設定した環境で、必要なときだけ実行する。
+
+```bash
+RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" \
+  cargo test --lib ws::tests::ws_sync_publishes_a_post_join_catch_up_snapshot -- --ignored
+```
 
 ## ドキュメント索引
 
+- `rust/NOTE-codebase-review.md` — 全体レビューの所見、修正記録、モジュール対応表
 - `rust/PLAN-next.md` — **次にやること**(優先順)。まずこれを読む
 - `rust/PLAN-view-split.md` — view.rs 分割(実施済み・記録)
 - `rust/PLAN-mode-ux.md` — モード体系・カーソル表現の再設計(実施済み・記録)
@@ -64,23 +79,22 @@ cargo test                          # lib(197)含む全部
   調査記録(旧 HANDOFF.md の全文)
 - `rust/NOTE-mmd-text.md` — Mermaid のテキスト描画(本流。ブラウザ描画は
   既定でオフ)
-- `rust/NOTE-math-text.md` — 数式のテキスト描画(`code:tex` とインライン
-  `[$ ... ]`)
+- `rust/NOTE-math-text.md` — 数式のテキスト描画。`code:tex` とインライン数式を扱う
 - `rust/NOTE-websocket-sync.md` / `NOTE-outline-editing.md` /
   `NOTE-edit-selection.md` — 各機能の設計メモ
 - `rust/SPEC-telomere-web-parity.md` — テロメアの web 仕様(実測)と対応表。
   `scripts/cosense-theme-vars.py` は同梱 app.css からテーマ色テーブルを生成する
-- `rust/NOTE-scrapbox-parser.md` — **本家パーサ(progfay/scrapbox-parser)の
-  規則と出典**: ブロックの子は「ヘッダより深いインデントの行」のみ、空行は
-  ブロックを終端する、等。記法の解析やレンダラ・エディタの挙動を変えるときは
-  まずこれを読む(実装は render.rs の3走査と session.rs の Enter)
+- `rust/NOTE-scrapbox-parser.md` — 本家パーサの規則と出典。
+  ブロックの子は「ヘッダより深いインデントの行」のみで、空行はブロックを終端する。
+  記法の解析や編集の挙動を変える前に読む。
+  実装は `render.rs` の3走査と `session/structure.rs` の Enter 処理
 
 ## 検証用
 
 - テストページ: `my-sandbox/テスト`(実編集してよい)
 - `cargo run --bin ws_smoke -- <project> <title>` — ws push の実測
   (実編集して自動で元に戻す)
-- **画面そのものを読む**: `python3 rust/scripts/tui_shot.py <view のパス> [引数]`
+- 画面を確認するコマンド: `python3 rust/scripts/tui_shot.py <view のパス> [引数]`
   (要 `pip install pyte`)。pty で起動して端末をエミュレートし、キーを
   送って**実際に描かれた画面**・ハードウェアカーソルの位置・セルの属性
   (太字/前景/背景)を取り出す。テストが緑でも「そう見えるか」は別問題で、

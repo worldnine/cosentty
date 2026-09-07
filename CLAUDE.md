@@ -1,6 +1,6 @@
 # cosense-tui
 
-Cosense(旧 Scrapbox)の TUI ビューワ/エディタ。本体は `rust/`(lib 名は `cosense`)。
+Cosense(旧 Scrapbox)の TUI ビューワ/エディタ。本体は `rust/`。lib 名は `cosense`。
 全体像とドキュメント索引は `HANDOFF.md`、次のタスクは `rust/PLAN-next.md`。
 
 ## ビルド・テスト
@@ -18,11 +18,11 @@ override が効かず古い系で依存解決に失敗する**。worktree では
 
 ## コードの歩き方
 
-- viewer は `rust/src/bin/view/` 配下に関心事別で分割済み
-  (`app` 状態 / `keys` / `mouse` / `session` EDIT / `editing` / `outline` /
-  `sync` / `nav` / `links` / `images` / `web` / `ui` / `toast` / `handoff` / `tests/`)。
-  巨大ファイルはもう無いので、まず該当モジュールを開けばよい
-- 挙動を変えたら `rust/KEYMAP.md` とヘルプ文言(`ui.rs` の Overlay::Help)も追随させる
+- viewer は `rust/src/bin/view/` 配下に関心事別で分割済み。
+  `app` が状態、`keys` / `mouse` が入力、`editing` / `sync` が保存と同期を扱う。
+  `ui/` は描画の責務別、`session/` は編集操作別に下位モジュールを持つ。
+  詳しい対応表は `rust/NOTE-codebase-review.md` を参照する。
+- 挙動を変えたら `rust/KEYMAP.md` とヘルプ文言(`ui/overlay.rs` の `help_keys` / Overlay::Help)も追随させる
 - UI の文言は `t!("日本語", "english")` で両言語を並べる。キー名・フラグ・
   記法・製品名は翻訳しない(view/main.rs 冒頭のコメント参照)
 

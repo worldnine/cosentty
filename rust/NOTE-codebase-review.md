@@ -1,0 +1,85 @@
+# 全体レビュー：非同期結果の照合と共通処理を整えた
+
+2026-09-07 に、`180bd9b` 時点のリポジトリ全体をレビューした。
+`rust/src/` のライブラリ、viewer、テスト群を中心に調べた。
+`browser/script.js`、TypeScript の初期実装、ビルド用スクリプト、設計文書も確認した。
+今後の変更では、下の対応表から該当する実装とテストを開く。
+
+## 認証・同期・文字列処理の不具合を修正した
+
+| 優先度 | 修正前の問題 | 対応 |
+| --- | --- | --- |
+| P1 | `image_fetch.rs` が `/files/` や `scrapbox.io/` の部分一致で認証を付け、外部ホストにも PAT / SID を送り得た | リクエストを作る段階で HTTPS・ホスト・ポートを検証する。画像とファイル保存で同じ判定を使う |
+| P1 | ページ URL や `file://` の `%日本語` をデコードすると、UTF-8 の途中をスライスして panic した | バイト単位でエスケープを読む `url::percent_decode` に統一する |
+| P1 | WebSocket の複数行挿入で、既存 ID を飛ばしても挿入位置が進み、部分的な再送で範囲外アクセスが起きた | 実際に挿入したときだけ位置を進める |
+| P1 | 通常の保存結果がページ移動後に届くと、移動先のタイトル変更や競合復旧を実行し得た | ジョブ ID ごとにプロジェクト・ページ ID・読み込み世代を記録し、保存結果の対象を照合する |
+| P2 | 再同期で undo/redo を個別に検査し、新しい履歴が復元する行 ID を使う古い履歴まで捨てていた | アウトライン復旧と同じ `retain_replayable_history` を使い、実行順に検査する |
+| P2 | 通常の `cargo test` が `COSENSE_SID` の有無で実サーバーへ接続した | 接続テストを明示実行にし、接続成功は表示文言に依存せず `SyncState::Live` で判定する |
+
+保存結果の照合では、移動前の失敗を元ページの名前付きで通知する。
+同じページへ戻った後に以前の保存が完了した場合は、現在のタイトルを直接変えず、再同期を要求する。
+受信・保存・描画の結果は、それぞれが作られたページと世代に結び付ける必要がある。
+
+URL のエンコードも API、リンク操作、Chrome、Web レンダラの4か所から `url.rs` に集約した。
+コメントの読みやすい URL を作る `comment::encode_title_for_url` は、空白を `_` にする別の仕様なので維持した。
+
+## 大きなファイルを責務別に分けた
+
+`ui.rs` は2,971行、`session.rs` は1,813行、`render.rs` は2,782行に成長していた。
+`tests/app.rs` も2,491行あり、描画・ナビゲーション・コメントのテストが混在していた。
+公開関数の呼び出し方を維持しながら下位モジュールへ移し、変更時に読む範囲を絞った。
+
+| 変更したいこと | 実装の入口 |
+| --- | --- |
+| 画面全体の描画順、本文の描画 | `src/bin/view/ui.rs` |
+| ヘッダ色、ガター、モード別ヒント | `src/bin/view/ui/chrome.rs` |
+| 本文の行モデル、折り返し、レイアウト再構築 | `src/bin/view/ui/content.rs` |
+| 一覧、並び順、検索の印、抜粋 | `src/bin/view/ui/index.rs` |
+| 画像・数式の行内配置、選択範囲の装飾 | `src/bin/view/ui/inline.rs` |
+| ヘルプ、モーダルメニュー | `src/bin/view/ui/overlay.rs` |
+| 文字幅、コメントカード、入力欄 | `src/bin/view/ui/text.rs` |
+| EDIT の状態と開始・終了 | `src/bin/view/session.rs` |
+| UTF-8 と表示位置の変換 | `src/bin/view/session/display.rs` |
+| 文字入力、選択、見出し、カーソル移動 | `src/bin/view/session/text.rs` |
+| 改行・行結合・コードブロックの字下げ | `src/bin/view/session/structure.rs` |
+| EDIT のキー振り分け | `src/bin/view/session/keys.rs` |
+| 複数行ペースト、外部エディタ | `src/bin/view/session/paste.rs` |
+| ブロック解析、出力型、リンクの存在情報 | `src/render.rs` |
+| 行内記法、画像・リンク認識、装飾 | `src/render/inline.rs` |
+| レンダラの回帰テスト | `src/render/tests.rs` |
+| 複数機能をまたぐシナリオ | `src/bin/view/tests/app/` |
+
+親モジュールは従来の関数を再公開する。
+viewer の既存の `use super::*` と `impl App` の配置方針を維持し、今回の分割で状態管理方式まで変更しない。
+`tests/app/` は `artifacts`、`layout`、`index`、`interaction`、`comments`、`projects`、`theme` に分けた。
+
+## 設計の良い点と残る課題
+
+ライブラリと viewer の分離、行 ID に基づく編集、直列の保存ワーカーは、変更の影響を追いやすい構成になっている。
+画像・Web 描画では、ページ世代やソースの世代による古い結果の破棄が既に使われていた。
+表示幅、選択範囲、カーソル位置を画面バッファで検査するテストもあり、今回の分割の検証に使えた。
+
+残る課題は次の2点。
+
+- `nav::load_page` や一覧取得は UI スレッドで同期通信し、API クライアントにも通信全体のタイムアウトがない。通信が止まるとキー入力や再描画も止まる。次はページ読込も世代付きの非同期処理へ移し、タイムアウトを設けたい。
+- `editops::edit_script` は全ページの LCS 表を作るため、時間・メモリが行数の積に比例する。大きなページの外部編集では計測が必要になる。今回は編集結果と行 ID の対応を保つことを優先し、アルゴリズムは変更していない。
+
+TypeScript 版は README のとおり初期スパイクとして扱う。
+ブラウザ版には Rust と同じコメント形式を作る処理があるが、実行環境が別なので共通モジュール化はしていない。
+ブラウザ版の DOM 操作とクリップボード操作の実機確認は今回の検証に含めていない。
+
+## 実施記録
+
+専用 worktree `/private/tmp/cosense-codebase-review` と `review/codebase-structure` ブランチで変更した。
+ツールチェーンは `RUSTUP_TOOLCHAIN=1.92`、成果物は本体と共有しない `/private/tmp/cosense-review-target` を使った。
+HANDOFF.md に残っていた Rust 1.90 と target 共有の案内も修正した。
+
+変更前の基準テストは352件成功、3件が既存の ignored だった。
+変更後は `cargo test --bin view` が357件成功、3件 ignored。
+`cargo test` も成功し、lib は205件成功、2件 ignored だった。
+実サーバーの WebSocket 接続テストも別途実行して成功を確認した。
+`node --check browser/script.js` も成功した。
+
+`cargo clippy --all-targets` はエラーなしで完了した。
+引数の多さ、反復処理、簡略化可能な条件式などの警告は残っている。
+`git diff --check` と、変更した Markdown 3ファイルの textlint も成功した。
