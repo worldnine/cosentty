@@ -372,6 +372,21 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
     // C を反対側の山に置いてから次を取り出す。これで A→B→C→D で `[` を 2 回押すと
     // B に着き、`]` は C、D の順に戻る。他の待ちは、目的地を元の山へ返してから
     // 取り出す(取り出した後に返すと順序が入れ替わる)。
+    // 末端では何も片付けない: 次の目的地がないのに待ちを捨てると、読み込み中の
+    // 最後の目的地(A)が履歴からも画面からも消える。待ちはそのまま続ける。
+    let stack_empty = if back {
+        app.history.is_empty()
+    } else {
+        app.forward.is_empty()
+    };
+    if stack_empty {
+        app.toast(if back {
+            t!("戻る先の履歴はありません", "no history")
+        } else {
+            t!("進む先の履歴はありません", "no forward history")
+        });
+        return;
+    }
     let mut here = app.here();
     if let Some(pending) = app.pending_load.as_ref() {
         if let LoadIntent::History {
@@ -404,12 +419,7 @@ pub(crate) fn go_history(app: &mut App, ctx: &Ctx, back: bool) {
         app.forward.pop()
     };
     let Some(place) = place else {
-        app.toast(if back {
-            t!("戻る先の履歴はありません", "no history")
-        } else {
-            t!("進む先の履歴はありません", "no forward history")
-        });
-        return;
+        return; // 上で空でないことを見ている
     };
     let mut arrived = false;
     match place {

@@ -764,3 +764,39 @@ fn two_back_presses_do_not_reorder_the_remaining_history() {
     assert_eq!(app.forward, vec![place("D"), place("C")]);
     assert_eq!(app.title, "B");
 }
+
+#[test]
+fn back_at_the_history_boundary_keeps_the_last_destination() {
+    // A→B と訪問し、B で `[` を素早く 2 回。2 回目は戻る先がないので、A の読み込みを
+    // 取り消さずそのまま待つ。
+    let ctx = warmed_ctx();
+    let mut app = page(&["B", "body"]);
+    app.title = "B".into();
+    let a = Place::Page {
+        project: "proj".into(),
+        title: "A".into(),
+    };
+    app.history = vec![a.clone()];
+    go_history(&mut app, &ctx, true);
+    go_history(&mut app, &ctx, true);
+    assert!(
+        app.pending_load.as_ref().is_some_and(|p| p.title == "A"),
+        "the extra press must not cancel A: history={:?} forward={:?}",
+        app.history,
+        app.forward
+    );
+    assert!(app.history.is_empty() && app.forward.is_empty());
+    assert!(answer_pending_load(
+        &mut app,
+        &ctx,
+        Ok(server_page("A", &["A"]))
+    ));
+    assert_eq!(app.title, "A");
+    assert_eq!(
+        app.forward,
+        vec![Place::Page {
+            project: "proj".into(),
+            title: "B".into()
+        }]
+    );
+}
