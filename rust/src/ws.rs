@@ -275,17 +275,17 @@ pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp], user_id: &str
     for op in ops {
         match op {
             EditOp::Insert { anchor, lines: newl } => {
-                let at = if anchor == "_end" {
+                let mut at = if anchor == "_end" {
                     lines.len()
                 } else {
                     lines.iter().position(|l| l.id == *anchor).unwrap_or(lines.len())
                 };
-                for (k, (id, text)) in newl.iter().enumerate() {
+                for (id, text) in newl {
                     if lines.iter().any(|l| l.id == *id) {
                         continue; // already applied (replay / own echo) — never duplicate
                     }
                     lines.insert(
-                        at + k,
+                        at,
                         PageLine {
                             id: id.clone(),
                             text: text.clone(),
@@ -294,6 +294,7 @@ pub fn apply_remote_ops(lines: &mut Vec<PageLine>, ops: &[EditOp], user_id: &str
                             updated: now,
                         },
                     );
+                    at += 1;
                 }
             }
             EditOp::Replace { id, text } => {
@@ -1160,6 +1161,32 @@ mod tests {
     fn malformed_commit_is_none() {
         assert!(parse_commit(&serde_json::json!({"kind": "page"})).is_none());
         assert!(parse_commit(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn partial_insert_replay_skips_existing_ids_without_advancing_the_insertion_slot() {
+        for anchor in ["_end", "tail", "missing"] {
+            let mut lines = vec![pl("a", "title"), pl("x", "already received")];
+            if anchor == "tail" {
+                lines.push(pl("tail", "last"));
+            }
+            let ops = vec![EditOp::Insert {
+                anchor: anchor.into(),
+                lines: vec![("x".into(), "already received".into()),
+                            ("y".into(), "new".into()), ("z".into(), "newest".into())],
+            }];
+            apply_remote_ops(&mut lines, &ops, "alice");
+            let ids: Vec<_> = lines.iter().map(|l| l.id.as_str()).collect();
+            let expected = if anchor == "tail" {
+                vec!["a", "x", "y", "z", "tail"]
+            } else {
+                vec!["a", "x", "y", "z"]
+            };
+            assert_eq!(ids, expected);
+            apply_remote_ops(&mut lines, &ops, "bob");
+            assert_eq!(lines.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), expected);
+            assert_eq!(lines[2].user_id, "alice");
+        }
     }
 
     #[test]
