@@ -21,30 +21,65 @@ enum Step {
     Ins,
 }
 
-/// LCS edit script over line texts. O(n·m) — pages are at most a few
-/// thousand lines, this is instant.
+/// The LCS table is allowed this many cells. Beyond it the middle of the
+/// page is paired positionally instead (see `edit_script`): the ops stay
+/// correct, only the pairing is no longer the smallest possible one.
+/// 4M cells of `u32` is 16 MB and a few milliseconds.
+const LCS_CELL_CAP: usize = 4_000_000;
+
+/// Edit script over line texts.
+///
+/// An external edit usually touches one region of the page, so the lines
+/// shared at the top and bottom are matched first without any table.
+/// Only the middle is diffed by LCS, whose time and memory are the product
+/// of the two middle lengths. When even that is too large (`LCS_CELL_CAP`)
+/// the middle is paired line by line, top to bottom: the extra lines on
+/// one side become inserts or deletes. Either way every old line is
+/// consumed and every new line is produced exactly once.
 fn edit_script(old: &[&str], new: &[&str]) -> Vec<Step> {
+    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (mid_old, mid_new) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
+    let mut steps = Vec::with_capacity(old.len() + new.len() - head - tail);
+    steps.extend(std::iter::repeat_n(Step::Match, head));
+    if mid_old.len().saturating_mul(mid_new.len()) <= LCS_CELL_CAP {
+        lcs_script(mid_old, mid_new, &mut steps);
+    } else {
+        positional_script(mid_old.len(), mid_new.len(), &mut steps);
+    }
+    steps.extend(std::iter::repeat_n(Step::Match, tail));
+    steps
+}
+
+/// The classic O(n·m) LCS script, appended to `steps`.
+fn lcs_script(old: &[&str], new: &[&str], steps: &mut Vec<Step>) {
     let n = old.len();
     let m = new.len();
-    // dp[i][j] = LCS length of old[i..] vs new[j..]
-    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    let w = m + 1;
+    // dp[i*w + j] = LCS length of old[i..] vs new[j..]; one flat table
+    // rather than a Vec per row.
+    let mut dp = vec![0u32; (n + 1) * w];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
-            dp[i][j] = if old[i] == new[j] {
-                dp[i + 1][j + 1] + 1
+            dp[i * w + j] = if old[i] == new[j] {
+                dp[(i + 1) * w + j + 1] + 1
             } else {
-                dp[i + 1][j].max(dp[i][j + 1])
+                dp[(i + 1) * w + j].max(dp[i * w + j + 1])
             };
         }
     }
-    let mut steps = Vec::with_capacity(n + m);
     let (mut i, mut j) = (0, 0);
     while i < n && j < m {
         if old[i] == new[j] {
             steps.push(Step::Match);
             i += 1;
             j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
+        } else if dp[(i + 1) * w + j] >= dp[i * w + j + 1] {
             steps.push(Step::Del);
             i += 1;
         } else {
@@ -52,9 +87,16 @@ fn edit_script(old: &[&str], new: &[&str]) -> Vec<Step> {
             j += 1;
         }
     }
-    steps.extend(std::iter::repeat(Step::Del).take(n - i));
-    steps.extend(std::iter::repeat(Step::Ins).take(m - j));
-    steps
+    steps.extend(std::iter::repeat_n(Step::Del, n - i));
+    steps.extend(std::iter::repeat_n(Step::Ins, m - j));
+}
+
+/// Pair `n` old lines with `m` new lines in order, no table. Emitted as
+/// one hunk (all deletes, then all inserts) so `diff_to_ops` pairs them
+/// into replaces exactly as it would a changed region of the same shape.
+fn positional_script(n: usize, m: usize, steps: &mut Vec<Step>) {
+    steps.extend(std::iter::repeat_n(Step::Del, n));
+    steps.extend(std::iter::repeat_n(Step::Ins, m));
 }
 
 /// Diff `old` (id, text) against `new` texts and emit ops.
@@ -471,6 +513,73 @@ mod tests {
         assert_eq!(texts(&after), vec!["title", "root", " child", "neighbor", "after"]);
         assert_eq!(after[3].id, "a", "redo still moves the user's target");
         assert_eq!(after[4].id, "z");
+    }
+
+    /// Every old line must be consumed and every new line produced once,
+    /// whatever route the script took.
+    fn assert_script_shape(old: &[&str], new: &[&str]) -> Vec<Step> {
+        let steps = edit_script(old, new);
+        let dels = steps.iter().filter(|s| **s != Step::Ins).count();
+        let inss = steps.iter().filter(|s| **s != Step::Del).count();
+        assert_eq!(dels, old.len(), "old lines consumed");
+        assert_eq!(inss, new.len(), "new lines produced");
+        // Replaying the script reproduces `new`.
+        let (mut i, mut j) = (0, 0);
+        for s in &steps {
+            match s {
+                Step::Match => {
+                    assert_eq!(old[i], new[j], "a Match pairs equal lines");
+                    i += 1;
+                    j += 1;
+                }
+                Step::Del => i += 1,
+                Step::Ins => j += 1,
+            }
+        }
+        steps
+    }
+
+    #[test]
+    fn shared_head_and_tail_are_matched_without_a_table() {
+        // 3 shared on top, 2 below, one changed line in the middle: the
+        // script is exactly what a full LCS would say.
+        let old = ["t", "a", "b", "x", "y", "z"];
+        let new = ["t", "a", "b", "X", "y", "z"];
+        let steps = assert_script_shape(&old, &new);
+        assert_eq!(
+            steps,
+            vec![Step::Match, Step::Match, Step::Match, Step::Del, Step::Ins, Step::Match, Step::Match]
+        );
+        // An identical page: all matches, an empty middle.
+        assert!(assert_script_shape(&old, &old).iter().all(|s| *s == Step::Match));
+        // Everything shared on top, extra lines only below.
+        assert_eq!(assert_script_shape(&["t", "a"], &["t", "a", "b"]), vec![Step::Match, Step::Match, Step::Ins]);
+        assert_eq!(assert_script_shape(&["t", "a", "b"], &["t"]), vec![Step::Match, Step::Del, Step::Del]);
+        // A repeated line at the edge: the head takes as many as match,
+        // and the middle still comes out consistent.
+        assert_script_shape(&["a", "a", "a"], &["a", "a"]);
+        assert_script_shape(&["a", "b", "a"], &["a", "a"]);
+    }
+
+    #[test]
+    fn an_oversized_middle_pairs_positionally_and_still_replaces() {
+        // Two pages with no line in common and a product above the cap.
+        // Each side is 2001+ lines so the middle is 2001*2001 > 4M cells.
+        let n = 2_001;
+        let olds: Vec<String> = (0..n).map(|i| format!("old {i}")).collect();
+        let news: Vec<String> = (0..n + 2).map(|i| format!("new {i}")).collect();
+        let old: Vec<&str> = olds.iter().map(String::as_str).collect();
+        let new: Vec<&str> = news.iter().map(String::as_str).collect();
+        let steps = assert_script_shape(&old, &new);
+        assert_eq!(steps.iter().filter(|s| **s == Step::Del).count(), n);
+        assert_eq!(steps.iter().filter(|s| **s == Step::Ins).count(), n + 2);
+        // Through `diff_to_ops`, the lines pair into replaces (ids kept)
+        // and the two extra lines become one insert at the end.
+        let page: Vec<(String, String)> = olds.iter().enumerate().map(|(i, t)| (format!("id{i}"), t.clone())).collect();
+        let ops = diff_to_ops(&page, &news);
+        assert_eq!(ops.len(), n + 1);
+        assert!(matches!(&ops[0], EditOp::Replace { id, text } if id == "id0" && text == "new 0"));
+        assert!(matches!(&ops[n], EditOp::Insert { anchor, lines } if anchor == "_end" && lines.len() == 2));
     }
 
     #[test]
