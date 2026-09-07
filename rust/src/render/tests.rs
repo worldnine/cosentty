@@ -1283,7 +1283,7 @@ fn a_link_before_inline_code_on_the_same_line_is_still_a_link() {
     );
     assert_eq!(out.extracted.links, vec!["crowdin"]);
 }
-/// 実ページ(my-sandbox/文章入力遅延テスト)で起きたこと:ブロックの
+/// 実ページ(<sandbox>/文章入力遅延テスト)で起きたこと:ブロックの
 /// 中の完全な空行で web はブロックを切り、後続のインデント行は箇条書きに
 /// 戻る。本家パーサ(progfay/scrapbox-parser の packRows)も同じ:子は
 /// 「ヘッダより深いインデントの行」だけ。旧実装は空行を越えてブロックを

@@ -54,7 +54,7 @@ Ctrl+G H/J/K/L      ブロックを左・下・上・右へ
 
 ## 保存方式の実測結果
 
-検証ページは[アウトライン編集プロトコル実験](https://scrapbox.io/my-sandbox/アウトライン編集プロトコル実験)。ヘッドレスChromeから本家へキーを送り、同じページのWebSocket commitとREST APIの前後を記録した。
+検証ページは`アウトライン編集プロトコル実験`(手元の非公開プロジェクト)。ヘッドレスChromeから本家へキーを送り、同じページのWebSocket commitとREST APIの前後を記録した。
 
 ### `Ctrl+↑`は移動元だけを作り直す
 

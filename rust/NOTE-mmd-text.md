@@ -90,7 +90,7 @@ merge しない。
 - `cargo test --bin view` green、`cargo test --lib` green(1.92)
 - `tui_shot.py` で flowchart・sequence・pie の実画面を確認
 - KEYMAP・`?`ヘルプ・`t!()` 両言語の追随(振る舞いが変わるもののみ)
-- `my-sandbox/テスト` で実編集したら元に戻す
+- `<sandbox>/テスト` で実編集したら元に戻す
 
 ## 色
 

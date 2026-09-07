@@ -98,7 +98,7 @@ tungstenite (blocking) + 手書きフレーミングを推奨（依存は tungst
 5. テスト: フレームのエンコード/デコード、changes→EditOp パース、
    自己エコー除去、ガード付き適用。ネットワーク統合は smoke バイナリ
    （`src/bin/ws_smoke.rs` 等、edit_smoke に倣う）で
-   `my-sandbox/テスト` に対して実施してよい（書き込みは必ず原状復帰）。
+   `<sandbox>/テスト` に対して実施してよい（書き込みは必ず原状復帰）。
 6. `cargo test` 全 green・警告ゼロ。KEYMAP.md の「リアルタイム反映」記述を更新。
 
 ## 受け入れ基準

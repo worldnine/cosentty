@@ -91,7 +91,7 @@ RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" \
 
 ## 検証用
 
-- テストページ: `my-sandbox/テスト`(実編集してよい)
+- テストページ: 自分の非公開プロジェクトの `テスト`(実編集してよい。文書中の `<sandbox>` はその名前)
 - `cargo run --bin ws_smoke -- <project> <title>` — ws push の実測
   (実編集して自動で元に戻す)
 - 画面を確認するコマンド: `python3 rust/scripts/tui_shot.py <view のパス> [引数]`

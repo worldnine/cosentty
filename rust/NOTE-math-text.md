@@ -112,7 +112,7 @@ lib 内の panic を viewer 全体の終了にしない。
 
 ## 検証ページ
 
-`https://scrapbox.io/my-sandbox/数式テスト`(公式ヘルプ「数式」の
+`<sandbox>/数式テスト`(公式ヘルプ「数式」の
 対応範囲そのまま)。
 
 ## 色

@@ -2,7 +2,7 @@
 // NOT part of `cargo test`: it launches a browser and hits the network.
 //
 //   cargo run --bin web_smoke -- help-jp Mermaid
-//   COSENSE_SID=s:xxx cargo run --bin web_smoke -- my-sandbox テスト
+//   COSENSE_SID=s:xxx cargo run --bin web_smoke -- <sandbox> テスト
 //
 // Prints, per Mermaid block: the line id, the selector, the PNG size and the
 // wall time; PNGs land in $TMPDIR/cosense-web-smoke/.

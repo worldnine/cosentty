@@ -33,7 +33,7 @@ pub enum Visibility {
 impl Visibility {
     /// Map an anonymous `GET /api/projects/<name>` outcome. `None` is a
     /// transport failure (no response at all). Measured live: 200 on
-    /// `help-jp`, 401 on `my-sandbox`, 404 on a name that is not there.
+    /// `help-jp`, 401 on a private project, 404 on a name that is not there.
     pub fn from_anonymous_status(status: Option<u16>) -> Self {
         match status {
             Some(200) => Visibility::Public,

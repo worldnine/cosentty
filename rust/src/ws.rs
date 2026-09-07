@@ -1022,7 +1022,7 @@ mod tests {
         let sid = std::env::var("COSENSE_SID").expect("COSENSE_SID is required");
         assert!(!sid.is_empty(), "COSENSE_SID must not be empty");
         let project =
-            std::env::var("COSENSE_PROJECT_NAME").unwrap_or_else(|_| "my-sandbox".into());
+            std::env::var("COSENSE_PROJECT_NAME").expect("COSENSE_PROJECT_NAME is required");
         let cfg = crate::api::Config {
             project: project.clone(),
             auth: crate::api::AuthStore::load(Some(sid.clone())),

@@ -259,7 +259,7 @@ Measured anonymously against the live API:
 | response | meaning |
 |---|---|
 | 200 | `Public` (`help-jp`) |
-| 401 / 403 | `Private` (`my-sandbox`) |
+| 401 / 403 | `Private` (手元の非公開プロジェクト) |
 | 404 | `Unknown` — Cosense returns it both for a missing project and for some hidden ones |
 | network error | `Unknown` |
 
@@ -345,7 +345,7 @@ New coverage, against the acceptance list:
 
 The 3.5 s is Cosense's own page boot, not ours; it is the floor for a first render.
 
-**Private, with `COSENSE_SID` — `https://scrapbox.io/my-sandbox/テスト`**
+**Private, with `COSENSE_SID` — `<sandbox>/テスト`**
 
 | line id | result | time |
 | --- | --- | --- |
@@ -363,7 +363,7 @@ private project with no credential → REST 401 before the browser is ever reach
 
 ### What was written to the smoke page
 
-Two commits were appended to `https://scrapbox.io/my-sandbox/テスト` (a throwaway
+Two commits were appended to `<sandbox>/テスト` (a throwaway
 page). **They are still there** — deliberately, so the smoke keeps something to render:
 
 ```
@@ -572,7 +572,7 @@ after every batch.
 
 ## 7i. What a private page looks like to a browser with no cookie
 
-Found by running the smoke against `my-sandbox` with `COSENSE_SID` unset.
+Found by running the smoke against 手元の非公開プロジェクト with `COSENSE_SID` unset.
 
 An anonymous request for a private page returns **HTTP 401** and the SPA shell renders
 with no `.lines` and no `.page` — and **the URL does not change**, so the existing
