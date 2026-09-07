@@ -131,7 +131,7 @@ impl Destination {
     /// A project response WITHOUT `uploadImageTo` counts as unread: the
     /// public view of a project (no sid, or a PAT) carries the theme and
     /// even `gyazoTeamsName` but not this field (measured on acme-edu),
-    /// and a team name alone does not mean Gyazo — `別のプロジェクト` has one
+    /// and a team name alone does not mean Gyazo — another project has one
     /// and uploads to gcs.
     pub fn resolve_with(
         config: &Config,

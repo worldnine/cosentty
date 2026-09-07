@@ -14,7 +14,7 @@ fn two_projects() -> Vec<cosense::api::ProjectSummary> {
             plan: Some("business".into()),
             updated: now_secs() - 60,
             created: 1,
-            users_count: 20,
+            users_count: 5,
         },
         cosense::api::ProjectSummary {
             name: "my-sandbox".into(),
@@ -47,7 +47,7 @@ fn the_projects_list_filters_on_slug_and_name_and_offers_nothing_to_create() {
         "no proper name: the slug stands in"
     );
     assert_eq!(entries[0].descriptions[0], "scrapbox.io/acme");
-    assert_eq!(entries[0].descriptions[1], "非公開 · 20 members · business");
+    assert_eq!(entries[0].descriptions[1], "非公開 · 5 members · business");
     let mut ix = Index::new(entries, 2, SortKey::Updated);
     ix.scope = Scope::Projects;
     ix.can_create = true; // would offer on the page list; must not here

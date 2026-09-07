@@ -981,7 +981,7 @@ EDIT 中の `^v`。macOS は `scripts/pbimage.swift`(`ime.swift` と同じ経路
 **追記(同日、ユーザー指摘)**: 「個人プロジェクトでも scrapbox に上がる」。調べると
 「設定が読めない」場面が想定より広かった——非公開は sid 無しで 401、**公開でも
 sid 無しの応答には `uploadImageTo` が無い**(acme-edu で実測。`gyazoTeamsName`
-は入っているが、それだけでは Gyazo と決められない: 別のプロジェクト は team 名が
+は入っているが、それだけでは Gyazo と決められない: 別のプロジェクトは team 名が
 あって gcs)。縮退先が gcs なのは決めどおりだが、ステータスが `(gcs)` しか言わず
 理由が分からなかったので、`Destination::resolve_with` で「誰が決めたか」を返し、
 既定に落ちたときは「プロジェクト設定を読めないので既定。COSENSE_SID か
