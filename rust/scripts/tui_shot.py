@@ -43,7 +43,7 @@ import pyte
 
 ROWS, COLS = 30, 100
 
-exe = sys.argv[1] if len(sys.argv) > 1 else "rust/target/debug/view"
+exe = sys.argv[1] if len(sys.argv) > 1 else "rust/target/debug/cosentty"
 args = sys.argv[2:]
 
 pid, fd = pty.fork()

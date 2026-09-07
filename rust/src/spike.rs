@@ -50,7 +50,7 @@ struct App {
 
 fn download_image(url: &str) -> Result<DynamicImage, Box<dyn Error>> {
     let client = reqwest::blocking::Client::builder()
-        .user_agent("cosense-tui-spike")
+        .user_agent("cosentty-spike")
         .build()?;
     let bytes = client.get(url).send()?.error_for_status()?.bytes()?;
     let img = image::load_from_memory(&bytes)?;

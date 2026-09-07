@@ -1,5 +1,5 @@
-//! The viewer's own settings file: `$XDG_CONFIG_HOME/cosense-tui/config.toml`
-//! (default `~/.config/cosense-tui/config.toml`).
+//! The viewer's own settings file: `$XDG_CONFIG_HOME/cosentty/config.toml`
+//! (default `~/.config/cosentty/config.toml`).
 //!
 //! Until now everything was flags and environment variables. Two things
 //! wanted a file at once — where pasted images are uploaded, and (later)
@@ -63,7 +63,7 @@ impl Config {
             .map(PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("cosense-tui").join("config.toml"))
+        Some(base.join("cosentty").join("config.toml"))
     }
 
     /// Read the file. `Ok(Config::default())` when there is none;

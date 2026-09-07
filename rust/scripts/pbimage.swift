@@ -10,8 +10,8 @@
 //     <out.png> as PNG and that path is printed.
 // Exit 1 when the clipboard holds no image, 2 on bad usage.
 //
-// cosense-tui embeds this file (src/clipboard.rs, include_str!) and builds
-// it once into ~/.cache/cosense-tui/pbimage-<hash>, the way ime.swift is.
+// cosentty embeds this file (src/clipboard.rs, include_str!) and builds
+// it once into ~/.cache/cosentty/pbimage-<hash>, the way ime.swift is.
 import AppKit
 
 let args = CommandLine.arguments

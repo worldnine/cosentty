@@ -405,7 +405,7 @@ impl RoomLink {
         let request = ClientRequestBuilder::new(uri)
             .with_header("Origin", format!("https://{api_domain}"))
             .with_header("Cookie", format!("connect.sid={sid}"))
-            .with_header("User-Agent", "cosense-tui");
+            .with_header("User-Agent", "cosentty");
         // A bounded connect: the OS default can hang for minutes on a
         // black-holed route, and every second of that is a second the
         // reader is on the slow poll believing a push channel is coming.

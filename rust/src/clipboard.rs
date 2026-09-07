@@ -5,7 +5,7 @@
 //! around the terminal, to the OS:
 //!
 //! * macOS — a tiny Swift helper (`scripts/pbimage.swift`, embedded here
-//!   and compiled once into `~/.cache/cosense-tui/pbimage-<hash>`, exactly
+//!   and compiled once into `~/.cache/cosentty/pbimage-<hash>`, exactly
 //!   as `ime` does). It writes the pixels out as PNG, or, when what was
 //!   copied is an image FILE, answers with that file's own path;
 //! * Wayland — `wl-paste --type image/png`; X11 — `xclip … -t image/png -o`.
@@ -136,7 +136,7 @@ fn which(cmd: &str) -> Option<PathBuf> {
 
 fn helper_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".cache").join("cosense-tui")
+    PathBuf::from(home).join(".cache").join("cosentty")
 }
 
 fn helper_bin_name() -> String {
@@ -191,7 +191,7 @@ mod tests {
     fn png_signature_and_scratch_paths() {
         assert!(is_png(b"\x89PNG\r\n\x1a\n...."));
         assert!(!is_png(b"GIF89a"));
-        let dir = Path::new("/tmp/cosense-tui/clip");
+        let dir = Path::new("/tmp/cosentty/clip");
         assert!(is_scratch(&dir.join("clipboard-1.png"), dir));
         assert!(!is_scratch(Path::new("/Users/me/shot.png"), dir));
     }

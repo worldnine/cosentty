@@ -101,13 +101,13 @@ TypeScript 版は README のとおり初期スパイクとして扱う。
 HANDOFF.md に残っていた Rust 1.90 と target 共有の案内も修正した。
 
 変更前の基準テストは352件成功、3件が既存の ignored だった。
-変更後は `cargo test --bin view` が357件成功、3件 ignored。
+変更後は `cargo test --bin cosentty` が357件成功、3件 ignored。
 `cargo test` も成功し、lib は205件成功、2件 ignored だった。
 実サーバーの WebSocket 接続テストも別途実行して成功を確認した。
 `node --check browser/script.js` も成功した。
 
 追補は worktree `/private/tmp/cosense-remaining` と `review/remaining-issues` ブランチで変更した。
-`cargo test --bin view` は362件成功、3件 ignored。lib は207件成功、2件 ignored。
+`cargo test --bin cosentty` は362件成功、3件 ignored。lib は207件成功、2件 ignored。
 `cargo clippy --all-targets` で追加したコードに警告はない。
 
 `cargo clippy --all-targets` はエラーなしで完了した。

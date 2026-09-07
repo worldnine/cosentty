@@ -2,7 +2,7 @@
 
 ## 背景
 
-cosense-tui（Rust + ratatui）のビューを akapen（https://github.com/worldnine/akapen）の
+cosentty（Rust + ratatui）のビューを akapen（https://github.com/worldnine/akapen）の
 モデルに寄せる。現在の実装はカーソルが「表示行インデックス」ベースで、akapen の
 「ソース行アンカー」モデルと異なる。下記を実装する。
 

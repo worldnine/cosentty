@@ -321,7 +321,7 @@ impl ChromeBackend {
         // runs, so it is created 0700 with a name an attacker cannot
         // predict or pre-create — never a fixed path plus create_dir_all.
         let profile = tempfile::Builder::new()
-            .prefix("cosense-tui-chrome-")
+            .prefix("cosentty-chrome-")
             .tempdir()
             .map_err(|e| WebError::Backend(format!("no private profile directory: {e}")))?;
         let t0 = Instant::now();

@@ -44,7 +44,7 @@ pub(crate) fn splice_image(text: &str, offset: usize, url: &str) -> (String, usi
 /// Where clipboard pictures are written before they go up. Files here
 /// are the viewer's own and are removed once read.
 pub(crate) fn clipboard_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join("cosense-tui").join("clipboard")
+    std::env::temp_dir().join("cosentty").join("clipboard")
 }
 
 impl App {

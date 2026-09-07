@@ -1,4 +1,4 @@
-# cosense-tui — handoff
+# cosentty — handoff
 
 Cosense(旧 Scrapbox)のページを端末で読み書きする TUI。本体は `rust/`。
 
@@ -6,7 +6,7 @@ Cosense(旧 Scrapbox)のページを端末で読み書きする TUI。本体は 
 
 ```bash
 cd rust
-cargo run --bin view <project> [title]     # またはページ URL をそのまま渡す
+cargo run --bin cosentty <project> [title]     # またはページ URL をそのまま渡す
 ```
 
 - 引数なしは認証ユーザーのプロジェクト一覧。取得できなければ `help-jp` の索引を開く
@@ -18,7 +18,7 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
   `COSENSE_WEB_RENDER=manual|auto` で有効にする。
   無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
   いなければ図はテキストかコードで出る)
-- 自前の設定ファイルは `~/.config/cosense-tui/config.toml`(画像のアップロード先の
+- 自前の設定ファイルは `~/.config/cosentty/config.toml`(画像のアップロード先の
   上書き。書き方は `rust/src/config.rs` 冒頭)。無くてよい
 - 主なフラグ: `--light`/`--dark`/`--theme`、`--preview`、`--ime jp|en`、`--lang`、`--download-dir`
 - キー一覧は `rust/KEYMAP.md`(READ で `?` でも引ける)
@@ -42,7 +42,7 @@ cargo run --bin view <project> [title]     # またはページ URL をそのま
 ## ビルドとテスト
 
 ```bash
-cd rust && cargo test --bin view   # viewer の基本検証
+cd rust && cargo test --bin cosentty   # viewer の基本検証
 cargo test                        # lib と各 bin も含めた検証
 ```
 
@@ -51,7 +51,7 @@ worktree には元の `rust/` に設定した rustup override が引き継がれ
 worktree の `rust/` で次のように実行する。
 
 ```bash
-RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" cargo test --bin view
+RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" cargo test --bin cosentty
 RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" cargo test
 ```
 

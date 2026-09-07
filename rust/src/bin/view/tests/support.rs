@@ -46,7 +46,7 @@ pub(crate) fn offline_ctx() -> Ctx {
     let cfg = Config {
         project: "proj".into(),
         auth: AuthStore::default(),
-        api_domain: "cosense-tui-test.invalid".into(),
+        api_domain: "cosentty-test.invalid".into(),
     };
     Ctx {
         client: Client::new(cfg).unwrap(),
@@ -199,7 +199,7 @@ pub(crate) fn tiny_png() -> Vec<u8> {
 
 pub(crate) fn scratch_cache() -> cosense::webrender::ArtifactCache {
     let dir = std::env::temp_dir().join(format!(
-        "cosense-tui-test-webcache-{}-{:?}",
+        "cosentty-test-webcache-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));

@@ -14,7 +14,7 @@
   (本家パーサの規則)、KEYMAP のテロメア/テーマ節。テーマ色テーブルは
   `scripts/cosense-theme-vars.py` が app.css 実測から生成(手で触らない)。
   非公開プロジェクトでテーマ色を出すには **sid が必要**(PAT は settings/code
-  API が 401)。`cosense-tui` は release ビルドへの symlink — コードを変えたら
+  API が 401)。`cosentty` は release ビルドへの symlink — コードを変えたら
   `cargo build --release` を忘れない
 - 2026-09-05: **図と数式のテキスト描画を master にマージ**
   (6621743。`NOTE-mmd-text.md` / `NOTE-math-text.md` が正本)。webレンダラは
@@ -145,9 +145,9 @@ sid が要る。** これは `get_project_theme` と同じ制約で、**sid が�
 ##### 設定ファイル(まだ無い。ここが初出になる)
 
 いまリポジトリに自前の設定ファイルは無く、すべて環境変数とフラグで
-できている。状態は `$XDG_STATE_HOME/cosense-tui/visits.json` に置いている
-ので、設定は素直に `$XDG_CONFIG_HOME/cosense-tui/config.toml`
-(既定 `~/.config/cosense-tui/config.toml`)になる。
+できている。状態は `$XDG_STATE_HOME/cosentty/visits.json` に置いている
+ので、設定は素直に `$XDG_CONFIG_HOME/cosentty/config.toml`
+(既定 `~/.config/cosentty/config.toml`)になる。
 
 書き味の案(実装時に詰める):
 
@@ -405,7 +405,7 @@ akapen/src/effects.rs の toast_effect):
 - **済(2026-09-05)** 混在行のプレースホルダは**絵の高さを当たりで置いている**(24×8 マス)ため、
   画像が届くと箱より高くなって本文が跳ねる。**「隣の文字が跳ねないよう箱で
   場所を確保する」という約束は、実測では守られていない**
-  - 実施内容: (a) を実測裏付きで採用し 56×16 にした。`~/.cache/cosense-tui/images/`
+  - 実施内容: (a) を実測裏付きで採用し 56×16 にした。`~/.cache/cosentty/images/`
     の約740件を `build_image` の換算(上限64列・20行)で測ると高さ15〜20が81%、
     幅53〜64に集中。24×8は上限に張り付くスクショと9行以上ずれていた。56は集中帯の
     中で全幅に届かない値(短い後続文字が箱の横に残る)。高さ16は平均絶対誤差3.1行
@@ -535,7 +535,7 @@ akapen/src/effects.rs の toast_effect):
 
 ## 将来メモ(今はやらない)
 
-- **設定ファイル(`~/.config/cosense-tui/config.toml`)**: 画像アップロード先の
+- **設定ファイル(`~/.config/cosentty/config.toml`)**: 画像アップロード先の
   上書き(2. で初出)と**キーバインドの設定**が同じ場所を欲しがっている。
   片方だけのために作らず、最初から両方が乗る形にする
 
@@ -946,7 +946,7 @@ v1 の範囲は計画どおり「パス貼り付けだけ」。ヘルパは作�
   プロジェクト設定は `get_project_theme` を `get_project_settings` に育てて
   同じ1回の取得で theme と `uploadImageTo` / `gyazoTeamsName` を得る
   (`Ctx::project_settings` キャッシュ)。設定ファイルは `src/config.rs`
-  (`~/.config/cosense-tui/config.toml`、`[upload]` と `[upload.project.<name>]`)。
+  (`~/.config/cosentty/config.toml`、`[upload]` と `[upload.project.<name>]`)。
   読めない TOML は既定にせず、起動時のステータスで言う
 - **合流**は `start_related_load` / `drain_related` と同じ形(背景スレッド +
   チャネル + ページ照合)。行IDとキャレット位置を覚え、届いたときキャレットが
@@ -971,7 +971,7 @@ v1 の範囲は計画どおり「パス貼り付けだけ」。ヘルパは作�
 EDIT 中の `^v`。macOS は `scripts/pbimage.swift`(`ime.swift` と同じ経路で
 初回に裏ビルド)がピクセルを PNG に書き出し、コピーされたのが画像**ファイル**
 ならそのパスを返す。Linux は `wl-paste` / `xclip`。PNG は
-`$TMPDIR/cosense-tui/clipboard/` に置いて上のアップロード経路に流し、読んだら
+`$TMPDIR/cosentty/clipboard/` に置いて上のアップロード経路に流し、読んだら
 消す(`clipboard::is_scratch`)。理由(画像なし・ヘルパ準備中・swiftc なし・
 ツールなし)は全部ステータスに出す。ヘルパは実クリップボードで3通り
 (ピクセル・ファイル URL・テキスト)を確認済み。

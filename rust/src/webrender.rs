@@ -359,7 +359,7 @@ const TMP_PREFIX: &str = "incoming-";
 
 impl ArtifactCache {
     pub fn new() -> Self {
-        Self::at(cache_root().join("cosense-tui").join("webrender"))
+        Self::at(cache_root().join("cosentty").join("webrender"))
     }
 
     /// A cache rooted anywhere — tests point it at a scratch directory so a
@@ -607,7 +607,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "cosense-tui-cachetest-{}-{tag}-{}",
+            "cosentty-cachetest-{}-{tag}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));

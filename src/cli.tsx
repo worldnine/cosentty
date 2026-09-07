@@ -23,9 +23,9 @@ function parseArgs(argv: string[]): Config {
 
   if (!project) {
     console.error(
-      "Usage: cosense-tui <project> [--sid <connect.sid>] [--domain scrapbox.io]\n" +
+      "Usage: cosentty <project> [--sid <connect.sid>] [--domain scrapbox.io]\n" +
         "   or set COSENSE_PROJECT_NAME / COSENSE_SID env vars.\n" +
-        "Example (public): cosense-tui help-jp"
+        "Example (public): cosentty help-jp"
     );
     process.exit(1);
   }

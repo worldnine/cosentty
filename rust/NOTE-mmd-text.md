@@ -78,7 +78,7 @@ Cosense webに合わせ、Mermaidブロックは先頭空白0〜2個まで図と
   `RUSTUP_TOOLCHAIN=1.92`。1.90 系と成果物を共有しないよう
   `CARGO_TARGET_DIR` は本体と分ける(worktree 既定の `rust/target` 等)
 - 本分支の `CLAUDE.md` も 1.92 に書き換え済み。merge 時に本体へ反映
-- `cargo test --bin view` + `cargo test` が緑なのを確認
+- `cargo test --bin cosentty` + `cargo test` が緑なのを確認
 
 ## 旧分支
 
@@ -87,7 +87,7 @@ merge しない。
 
 ## 終了条件
 
-- `cargo test --bin view` green、`cargo test --lib` green(1.92)
+- `cargo test --bin cosentty` green、`cargo test --lib` green(1.92)
 - `tui_shot.py` で flowchart・sequence・pie の実画面を確認
 - KEYMAP・`?`ヘルプ・`t!()` 両言語の追随(振る舞いが変わるもののみ)
 - `<sandbox>/テスト` で実編集したら元に戻す

@@ -1,15 +1,53 @@
-# cosense-tui
+# cosentty
 
-Scrapbox / Cosense の TUI ビューア＋編集クライアント。
+Cosense(旧 Scrapbox)のページを端末で読み、編集する TUI クライアント。
+Cosense は Helpfeel 社の製品であり、cosentty は非公式のサードパーティ製ツールです。
 
-**現行実装は `rust/`（ratatui）。** 以下の TypeScript 版 (v0) は初期スパイク。
+## インストール
 
 ```bash
-cd rust && cargo run --bin view -- <project> [ページタイトル]
-cargo run --bin view -- https://scrapbox.io/help-jp/リンク   # URL 直貼りも可
+cargo install cosentty
 ```
 
-## rust 版の主な機能
+ソースから:
+
+```bash
+git clone https://github.com/worldnine/cosentty
+cd cosentty/rust && cargo install --path .
+```
+
+外部バイナリは不要です。macOS では IME 制御とクリップボード画像の読み取りに
+小さな Swift ヘルパを初回だけ `swiftc` でビルドします(無ければ自動で無効)。
+
+## 使い方
+
+```bash
+cosentty help-jp                              # 公開プロジェクトのページ一覧
+cosentty <project> <ページタイトル>             # ページを開く
+cosentty https://scrapbox.io/help-jp/リンク    # URL 直貼りも可
+cosentty                                      # 引数なし: 参加プロジェクトの一覧
+```
+
+### 認証
+
+- 非公開プロジェクトの読み書きは、公式 CLI の [`cosense login`](https://www.npmjs.com/package/@helpfeel/cosense-cli)
+  が保存する `~/.cosense/settings.json`(PAT / Service Account)を自動で使います
+- `COSENSE_SID` 環境変数(ブラウザの `connect.sid`)はフォールバックで、
+  ws push 同期・web レンダラ(mermaid)・プロジェクト設定の読み取りにだけ必要です
+
+## 開発
+
+```bash
+cd rust
+cargo test                        # lib + viewer の全テスト(ネットワーク不要)
+cargo run -- help-jp              # 手元でビューワを起動
+cargo run --features dev-tools --bin probe -- help-jp   # 実測用バイナリ
+```
+
+実編集を伴う検証は、自分の非公開プロジェクトを 1 つ作って行ってください。
+設計判断は `rust/PLAN-*.md` / `NOTE-*.md` / `SPEC-*.md` に、全体像は `HANDOFF.md` にあります。
+
+## 主な機能
 
 - **認証**: 公式 CLI（`cosense login`）の `~/.cosense/settings.json` を自動で使う
   （PAT / Service Account。`COSENSE_SID` はフォールバック）。非公開プロジェクト対応

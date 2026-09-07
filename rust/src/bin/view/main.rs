@@ -539,7 +539,7 @@ struct Ctx {
     /// `GYAZO_TEAMS_ACCESS_TOKEN` / `GYAZO_ACCESS_TOKEN`.
     gyazo_teams_token: Option<String>,
     gyazo_personal_token: Option<String>,
-    /// `~/.config/cosense-tui/config.toml`, or the defaults when there is
+    /// `~/.config/cosentty/config.toml`, or the defaults when there is
     /// none. A file that failed to parse is the defaults too, and
     /// `config_error` says so once on the status line.
     config: cosense::config::Config,

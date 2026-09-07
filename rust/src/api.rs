@@ -592,7 +592,7 @@ pub struct Client {
 impl Client {
     pub fn new(cfg: Config) -> Result<Self, Box<dyn Error>> {
         let http = reqwest::blocking::Client::builder()
-            .user_agent("cosense-tui")
+            .user_agent("cosentty")
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()?;

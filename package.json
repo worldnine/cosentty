@@ -1,10 +1,10 @@
 {
-  "name": "cosense-tui",
+  "name": "cosentty",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "bin": {
-    "cosense-tui": "./src/cli.tsx"
+    "cosentty": "./src/cli.tsx"
   },
   "scripts": {
     "start": "tsx src/cli.tsx",

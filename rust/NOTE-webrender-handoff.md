@@ -71,7 +71,7 @@ trait WebBackend: Send + Sync {
 
 struct UnavailableBackend(WebError)      // installed when no browser is found
 struct FakeBackend                       // tests: scripted answers + a gate
-struct ArtifactCache                     // ~/.cache/cosense-tui/webrender/<key>.png
+struct ArtifactCache                     // ~/.cache/cosentty/webrender/<key>.png
 ```
 
 `render_batch` takes a **whole page's worth** of requests: one navigation serves every
@@ -356,7 +356,7 @@ The 3.5 s is Cosense's own page boot, not ours; it is the floor for a first rend
 
 Browser lifecycle, measured in the same run: **10** Chrome processes alive while the
 session is warm, **0** after `idle()`, **0** after `shutdown()`, **0** after the process
-exits, and no leftover `cosense-tui-chrome-*` profile directory.
+exits, and no leftover `cosentty-chrome-*` profile directory.
 
 Failure paths exercised live: `COSENSE_CHROME=/nonexistent/chrome` → `no Chrome found`;
 private project with no credential → REST 401 before the browser is ever reached.
@@ -702,7 +702,7 @@ reports `Timeout`/`NotRendered`. A redirect with no API evidence still counts.
   diagram on a historical snapshot would be a lie. Snapshots show code.
 * **Cost.** ~5.8 s for the first uncached page, ~2.6 s for a re-render in a warm
   browser; ~3.5 s of the first is Cosense's own page boot and cannot be removed from
-  this design. Results are cached to `~/.cache/cosense-tui/webrender/`, so a revisit is
+  this design. Results are cached to `~/.cache/cosentty/webrender/`, so a revisit is
   instant and launches nothing. Resizing never involves the browser at all (§7c), and
   renders never fire for the block under the edit caret or while the page is desynced.
 * **Process hygiene.** `Session::drop` kills *and waits* the child and removes its

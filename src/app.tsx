@@ -168,7 +168,7 @@ export default function App({ config }: { config: Config }) {
     <Box>
       <Text backgroundColor="blue" color="white" bold>
         {" "}
-        cosense-tui{" "}
+        cosentty{" "}
       </Text>
       <Text color="gray"> {config.project} </Text>
       {loading && <Text color="yellow">⟳ loading…</Text>}

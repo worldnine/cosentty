@@ -1,7 +1,19 @@
 [package]
-name = "cosense-tui"
-version = "0.0.1"
+name = "cosentty"
+version = "0.1.0"
 edition = "2021"
+description = "Terminal viewer and editor for Cosense (Scrapbox) pages"
+license = "MIT"
+repository = "https://github.com/worldnine/cosentty"
+readme = "../README.md"
+keywords = ["cosense", "scrapbox", "tui", "ratatui", "wiki"]
+categories = ["command-line-utilities", "text-editors"]
+default-run = "cosentty"
+autobins = false
+
+[features]
+# 開発時の実測用バイナリ(probe / *_smoke / spike)。cargo install では入らない
+dev-tools = []
 
 [dependencies]
 ratatui = "0.30"
@@ -35,31 +47,43 @@ path = "src/lib.rs"
 [[bin]]
 name = "spike"
 path = "src/spike.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "probe"
 path = "src/bin/probe.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
-name = "view"
+name = "cosentty"
 path = "src/bin/view/main.rs"
 
 [[bin]]
 name = "edit_smoke"
 path = "src/bin/edit_smoke.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "web_smoke"
 path = "src/bin/web_smoke.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "ws_smoke"
 path = "src/bin/ws_smoke.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "upload_smoke"
 path = "src/bin/upload_smoke.rs"
+required-features = ["dev-tools"]
 
 [[bin]]
 name = "outline_probe"
 path = "src/bin/outline_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "create_smoke"
+path = "src/bin/create_smoke.rs"
+required-features = ["dev-tools"]

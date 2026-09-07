@@ -1,6 +1,6 @@
 # ぶら下げインデント折り返し — akapen への移植メモ
 
-cosense-tui で入れた「箇条書きの継続行をマーカーの右に揃える」折り返しの要点。
+cosentty で入れた「箇条書きの継続行をマーカーの右に揃える」折り返しの要点。
 akapen（`highlight::wrap_spans` ＋ tui-markdown の出力）に同じものを入れるときの手引き。
 
 ## 何をするか
@@ -53,7 +53,7 @@ pub fn hanging_prefix(line: &Line) -> Vec<Span> {
   1 パターンとして足す。
 - **引用**: tui-markdown の blockquote は先頭に `│ ` 等の縦棒が付く。`HANG_MARKERS` に
   `('│', true)` として入れれば、継続行にも同じスタイルの縦棒が繰り返される。
-- **入れ子の測り方**: tui-markdown はネストを空白インデントで出すので、cosense-tui と同じく
+- **入れ子の測り方**: tui-markdown はネストを空白インデントで出すので、cosentty と同じく
   「行頭空白の幅」で拾える。
 - **wrap_spans の位置**: akapen は `highlight::wrap_spans(spans, width)` を view 生成
   （`ViewState::render`）と source 側で共用している。ぶら下げは **view 側だけ**に入れる

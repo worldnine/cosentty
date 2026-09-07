@@ -345,7 +345,7 @@ fn file_links_are_found_with_their_labels() {
 
 #[test]
 fn download_path_prefers_the_label_and_never_overwrites() {
-    let dir = std::env::temp_dir().join(format!("cosense-tui-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cosentty-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let name = |p: &std::path::Path| p.file_name().unwrap().to_str().unwrap().to_string();
     let url = "https://scrapbox.io/files/6a8e7e5d714feb3f195319dd.pdf";

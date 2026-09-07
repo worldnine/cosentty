@@ -304,7 +304,7 @@ pub(crate) fn unread_since(updated: i64, read_at: Option<i64>) -> bool {
 /// Local record of when this viewer last opened each page, keyed by
 /// `project/title` (epoch seconds). Cosense only learns about browser
 /// visits, so without this a page read here would stay "unread" forever.
-/// Lives in `$XDG_STATE_HOME/cosense-tui/visits.json` (default
+/// Lives in `$XDG_STATE_HOME/cosentty/visits.json` (default
 /// `~/.local/state`).
 pub(crate) fn visits_path() -> Option<std::path::PathBuf> {
     let base = match std::env::var("XDG_STATE_HOME") {
@@ -313,7 +313,7 @@ pub(crate) fn visits_path() -> Option<std::path::PathBuf> {
             .join(".local")
             .join("state"),
     };
-    Some(base.join("cosense-tui").join("visits.json"))
+    Some(base.join("cosentty").join("visits.json"))
 }
 
 pub(crate) fn load_visits() -> HashMap<String, i64> {

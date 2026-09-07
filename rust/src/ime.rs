@@ -11,7 +11,7 @@
 //!     Japanese, so no manual toggle in either direction;
 //!   - on exit the input source the user had before launching is restored.
 //!
-//! The helper compiles once into `~/.cache/cosense-tui/ime-<hash>`; a
+//! The helper compiles once into `~/.cache/cosentty/ime-<hash>`; a
 //! helper already built by akapen from the SAME source (same hash, in
 //! `~/.cache/akapen/`) is reused as is. On non-macOS or without swiftc
 //! every call degrades to a no-op.
@@ -46,7 +46,7 @@ fn cache_root() -> PathBuf {
 }
 
 fn ime_dir() -> PathBuf {
-    cache_root().join("cosense-tui")
+    cache_root().join("cosentty")
 }
 
 /// The compiled helper: ours, or akapen's build of the identical source.

@@ -99,7 +99,7 @@ PLAN-view-split.md の分割により、各変更はほぼ1ファイルに閉じ
 3. **A + B**: Tab 再編。KEYMAP.md・ヘルプ文言の更新込み。SOURCE の降格を告知する
    status メッセージ(`Tab→s に引っ越しました` の一言)を数リリース残す
 
-各段階で `cargo test --bin view` green + 実機での目視確認(スクリーンショット)をセットにする。
+各段階で `cargo test --bin cosentty` green + 実機での目視確認(スクリーンショット)をセットにする。
 
 ## 未決事項(実装前にユーザー判断が要るもの)
 

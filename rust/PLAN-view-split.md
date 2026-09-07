@@ -88,14 +88,14 @@ lib(`cosense`)側には手を入れない。全モジュールは同一 bin ク�
 
 ## 実行フェーズ
 
-各フェーズの終わりに必ず `cargo build --bin view` と `cargo test --bin view` を通し、
+各フェーズの終わりに必ず `cargo build --bin cosentty` と `cargo test --bin cosentty` を通し、
 **テスト 218 個がすべて green のままであること**を確認してからコミットする。
 1 フェーズ(大きいものは 1 モジュール)= 1 コミット。
 
 ### フェーズ 0: 準備
 1. 未コミットの view.rs 変更(+146/−36)を先にコミットするか退避する。混ぜない。
 2. 作業用 worktree を切る(このリポジトリの運用ルール)。
-3. ベースライン記録: `cargo test --bin view 2>&1 | tail -3` の結果を控える。
+3. ベースライン記録: `cargo test --bin cosentty 2>&1 | tail -3` の結果を控える。
 
 ### フェーズ 1: ディレクトリ化とテスト分離(効果最大・リスク最小)
 1. `mkdir src/bin/view` し、`git mv src/bin/view.rs src/bin/view/main.rs`。
@@ -143,14 +143,14 @@ lib(`cosense`)側には手を入れない。全モジュールは同一 bin ク�
 - リネーム・可視性の最小化・dead code 除去・clippy 対応を**同時にやらない**。
   見つけたら別タスクとしてメモに残す。
 - 移動対象の特定は必ずアイテム名で行う(行番号は各移動でずれる)。
-- 各コミット前に `cargo build --bin view && cargo test --bin view` が green。
+- 各コミット前に `cargo build --bin cosentty && cargo test --bin cosentty` が green。
   テスト数が 218 から減っていないことも確認する。
 - 迷ったら「呼び出し元が最も多いモジュール」に置き、`pub(crate)` で共有する。
 
 ## 完了の定義
 
 - `src/bin/view/` 配下の各ファイルが(tests を除き)最大でも 3,000 行以下。
-- `cargo test --bin view` が分割前と同じ 218 テストで green。
+- `cargo test --bin cosentty` が分割前と同じ 218 テストで green。
 - `git log` 上で各コミットが 1 モジュールの純粋な移動として読める。
 
 ## 実施記録(2026-09-01)
@@ -158,7 +158,7 @@ lib(`cosense`)側には手を入れない。全モジュールは同一 bin ク�
 フェーズ 0〜4 を view-split ブランチで実施し、完了した。
 フェーズ 5(impl App メソッドの関心事別再配置)は未実施の任意課題として残る。
 
-- ベースライン: cargo test --bin view = 214 passed / 3 ignored(217 テスト)。
+- ベースライン: cargo test --bin cosentty = 214 passed / 3 ignored(217 テスト)。
   各コミット後も同数で green を維持。
 - 実装は計画どおりだが 1 点だけ方式を変えた: モジュール間の名前解決は
   「必要な名前だけ use」ではなく、main.rs(クレートルート)に
