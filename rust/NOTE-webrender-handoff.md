@@ -6,7 +6,7 @@ page** and screenshots the element **Cosense itself drew**. This is deliberately
 as a general `request -> artifact` boundary so TeX, `.icon` rows and ProjectCSS-styled
 blocks can be added later without touching the viewer.
 
-Branch `feat/cosense-web-render`, based on `ec91fdc`.
+Branch `feat/cosense-web-render`, based on `05aefad`.
 
 ---
 
