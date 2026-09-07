@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // A known public gyazo image (PNG). Override with argv[1].
     let url = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "https://i.gyazo.com/da78df293f9e83a74b5402411e2f2e01.png".to_string());
+        .unwrap_or_else(|| "https://i.gyazo.com/a473165a8a622012707d6a24342a8fb3.png".to_string());
 
     eprintln!("Downloading {url} ...");
     let dyn_img = download_image(&url)?;
