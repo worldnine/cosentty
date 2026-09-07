@@ -958,16 +958,13 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a live Cosense project and COSENSE_SID; run explicitly with --ignored"]
     fn ws_sync_publishes_a_post_join_catch_up_snapshot() {
-        // Integration against the real server. Runs only where a sid exists
-        // (this dev environment); skips silently otherwise so CI stays
-        // network-free. Verifies the structure: after a successful join the
-        // thread fetches AGAIN and publishes that post-join page as the
-        // catch-up snapshot.
-        let Ok(sid) = std::env::var("COSENSE_SID") else { return };
-        if sid.is_empty() {
-            return;
-        }
+        // Explicit integration against the real server. Ordinary tests must
+        // not acquire a network dependency from the developer's credentials.
+        // After joining, the worker must publish a fresh catch-up snapshot.
+        let sid = std::env::var("COSENSE_SID").expect("COSENSE_SID is required");
+        assert!(!sid.is_empty(), "COSENSE_SID must not be empty");
         let project = std::env::var("COSENSE_PROJECT_NAME")
             .unwrap_or_else(|_| "my-sandbox".into());
         let cfg = crate::api::Config {
@@ -1005,7 +1002,7 @@ mod tests {
                     assert_eq!(res.page.title, now_page.title);
                     catch_up = Some(now_page);
                 }
-                Ok(WsEvent::Status(s)) if s.contains("接続済み") => connected = true,
+                Ok(WsEvent::State { state: crate::capability::SyncState::Live, .. }) => connected = true,
                 Ok(_) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(e) => panic!("ws channel died: {e}"),
