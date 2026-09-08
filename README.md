@@ -5,7 +5,7 @@ Cosense は Helpfeel 社の製品であり、cosentty は非公式のサード�
 
 ![cosentty でページを読む — 行カーソルで進み、リンク先へ渡って戻り、ソース表示とヘルプ](docs/demo-view.gif)
 
-![cosentty でページを作る — 一覧で名前を打って作成し、そのまま本文を書く](docs/demo-edit.gif)
+![cosentty でページを作る — 左の端末で名前を打って作成し本文を書くと、右のブラウザに行ごとに現れる](docs/demo-side.gif)
 
 (撮り方は [examples/demo/README.md](examples/demo/README.md))
 

@@ -1,0 +1,9 @@
+{
+  "name": "cosentty-demo",
+  "private": true,
+  "description": "ブラウザと端末を並べたデモ動画を撮る(side-by-side.mjs)",
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.58"
+  }
+}
