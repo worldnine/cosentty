@@ -73,12 +73,16 @@ fn pick(app: &mut App, ctx: &Ctx, item: &str) {
         .iter()
         .position(|i| i == item)
         .unwrap_or_else(|| panic!("{item} not offered: {items:?}"));
-    for _ in cursor..want {
-        handle_key(app, ctx, key(KeyCode::Char('j')));
+    // Headings are stepped over, so a press may move more than one row:
+    // press until the cursor is there.
+    let down = want > cursor;
+    for _ in 0..items.len() {
+        if picker_items(app).1 == want {
+            return;
+        }
+        handle_key(app, ctx, key(KeyCode::Char(if down { 'j' } else { 'k' })));
     }
-    for _ in want..cursor {
-        handle_key(app, ctx, key(KeyCode::Char('k')));
-    }
+    assert_eq!(picker_items(app).1, want, "could not reach {item}");
 }
 
 #[test]
@@ -559,4 +563,39 @@ fn an_unknown_theme_name_is_reported_not_swallowed() {
         &mut Vec::new(),
     );
     assert!(!v.theme_missing);
+}
+
+/// The theme picker groups names under a heading per source; headings are
+/// drawn but the cursor steps over them and none can be chosen.
+#[test]
+fn the_theme_picker_groups_by_source_and_skips_headings() {
+    let (ctx, _dir) = settings_ctx();
+    let mut app = page(&["title"]);
+    handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
+    goto(&mut app, &ctx, SettingField::Theme);
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    let (items, headings) = match &view(&app).mode {
+        SettingsMode::Pick {
+            items, headings, ..
+        } => (items.clone(), headings.clone()),
+        other => panic!("{other:?}"),
+    };
+    assert!(!headings.is_empty(), "{items:?}");
+    let built_in = headings.last().copied().unwrap();
+    assert!(items[built_in].contains("同梱"), "{:?}", items[built_in]);
+    assert!(items.len() > built_in + 5, "the embedded names follow");
+    // From (unset), one step down lands on the first NAME, not a heading.
+    handle_key(&mut app, &ctx, key(KeyCode::Char('j')));
+    let cursor = picker_items(&app).1;
+    assert!(
+        !headings.contains(&cursor),
+        "cursor {cursor} is a heading: {items:?}"
+    );
+    assert!(cursor > 0);
+    // Stepping back stops on (unset).
+    handle_key(&mut app, &ctx, key(KeyCode::Char('k')));
+    assert_eq!(picker_items(&app).1, 0);
+    handle_key(&mut app, &ctx, key(KeyCode::Char('k')));
+    assert_eq!(picker_items(&app).1, 0, "stays at the top");
+    handle_key(&mut app, &ctx, key(KeyCode::Esc));
 }

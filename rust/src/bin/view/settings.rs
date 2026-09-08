@@ -103,6 +103,10 @@ pub(crate) enum SettingsMode {
         field: SettingField,
         items: Vec<String>,
         cursor: usize,
+        /// Indices in `items` that are group headings (the theme picker
+        /// says where each group of names comes from): drawn, never landed
+        /// on, never chosen.
+        headings: Vec<usize>,
         revert: Option<Option<String>>,
     },
     /// A one-line text field. Empty text removes the file's value.
@@ -183,6 +187,18 @@ fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
             origin: v.theme.1,
             note: if v.theme_missing {
                 Some(t!("見つからず既定を使用", "not found; default in use"))
+            } else if let Some((dir, true)) = v
+                .theme
+                .0
+                .as_deref()
+                .and_then(Highlighter::user_theme_source)
+            {
+                // The same name exists embedded: say which one is in force.
+                Some(t!(
+                    "同梱と同名。{} のものを使用",
+                    "same name as an embedded one; using {}",
+                    short_home(&dir)
+                ))
             } else {
                 origin_note(v.theme.1)
             },
@@ -434,25 +450,39 @@ pub(crate) fn handle_settings_key(
             field,
             items,
             cursor,
+            headings,
             revert,
         } => {
-            let last = items.len().saturating_sub(1);
             let field = *field;
+            // Step over headings; stay put at either end.
+            let step = |from: usize, down: bool| -> usize {
+                let mut i = from;
+                loop {
+                    let next = if down { i + 1 } else { i.wrapping_sub(1) };
+                    if next >= items.len() {
+                        return from;
+                    }
+                    i = next;
+                    if !headings.contains(&i) {
+                        return i;
+                    }
+                }
+            };
             let moved = match code {
                 KeyCode::Down | KeyCode::Char('j') => {
-                    *cursor = (*cursor + 1).min(last);
+                    *cursor = step(*cursor, true);
                     true
                 }
                 KeyCode::Char('n') if ctrl => {
-                    *cursor = (*cursor + 1).min(last);
+                    *cursor = step(*cursor, true);
                     true
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    *cursor = cursor.saturating_sub(1);
+                    *cursor = step(*cursor, false);
                     true
                 }
                 KeyCode::Char('p') if ctrl => {
-                    *cursor = cursor.saturating_sub(1);
+                    *cursor = step(*cursor, false);
                     true
                 }
                 _ => false,
@@ -604,6 +634,15 @@ fn unset_label() -> String {
     t!("(設定しない)", "(unset)")
 }
 
+/// `/Users/me/.config/bat/themes` → `~/.config/bat/themes`.
+fn short_home(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && s.starts_with(&h) => format!("~{}", &s[h.len()..]),
+        _ => s,
+    }
+}
+
 /// Enter on a row: a picker for the enumerated values, a text field for
 /// the free ones.
 fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
@@ -618,6 +657,7 @@ fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
             .and_then(|c| items.iter().position(|i| *i == c))
             .unwrap_or(0),
         items,
+        headings: Vec::new(),
         revert: None,
     };
     let with_unset = |vals: &[&str]| -> Vec<String> {
@@ -628,11 +668,25 @@ fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
     match field {
         SettingField::Lang => view.mode = pick(with_unset(&["ja", "en"]), cfg.view.lang.clone()),
         SettingField::Theme => {
+            // One heading per source, so the reader can tell their own
+            // files from the embedded set — and nothing on the rows.
             let mut items = vec![unset_label()];
-            items.extend(Highlighter::theme_names());
+            let mut heads = Vec::new();
+            for (dir, names) in Highlighter::theme_groups() {
+                heads.push(items.len());
+                items.push(match dir {
+                    Some(d) => format!("── {} ──", short_home(&d)),
+                    None => t!("── 同梱 ──", "── built in ──"),
+                });
+                items.extend(names);
+            }
             let mut mode = pick(items, cfg.view.theme.clone());
-            if let SettingsMode::Pick { revert, .. } = &mut mode {
+            if let SettingsMode::Pick {
+                revert, headings, ..
+            } = &mut mode
+            {
                 *revert = Some(cfg.view.theme.clone());
+                *headings = heads;
             }
             view.mode = mode;
         }

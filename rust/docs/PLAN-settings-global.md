@@ -283,6 +283,9 @@ htop の F2 と同じ live-apply で、保存は確定時に暗黙に行う(前�
 名前は当初ファイル内の `name` を優先していたが、Tokyo Night の4変種(night / storm /
 day / moon)が全部 `TokyoNight` で衝突して1つしか出なかったので、**ファイル名**に
 統一した(bat と同じ。`bat --theme tokyonight_night` の名前がそのまま使える)。
+出どころの明示は「全行に印」ではなく、ピッカーの**節見出し**(ディレクトリ名 /
+同梱)と、**同梱と同名のときだけ**の行注記にした(`Pick.headings` で見出しを飛ぶ。
+`Highlighter::theme_groups` / `user_theme_source`)。読めたテーマの数は起動時に言わない。
 
 テスト: `cargo test --bin cosentty` 386 件 green(設定画面 13 件・解決順 1 件・
 config 11 件・highlight 1 件)。実機は tmux で `XDG_CONFIG_HOME` を scratch に向けて確認。

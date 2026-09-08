@@ -54,7 +54,8 @@ fn embedded_by_name(name: &str) -> Option<Theme> {
 /// replaces it, and an earlier directory beats a later one. Files that do not parse are kept as messages, said once at
 /// startup, and skipped.
 pub struct UserThemes {
-    themes: Vec<(String, Theme)>,
+    /// Name, theme, and the directory it was read from.
+    themes: Vec<(String, Theme, PathBuf)>,
     pub errors: Vec<String>,
 }
 
@@ -84,7 +85,7 @@ impl UserThemes {
                         .and_then(|s| s.to_str())
                         .map(str::to_string)
                         .unwrap_or_else(|| path.display().to_string());
-                    themes.push((name, theme));
+                    themes.push((name, theme, dir.to_path_buf()));
                 }
                 Err(e) => errors.push(format!("{}: {e}", path.display())),
             }
@@ -101,9 +102,9 @@ impl UserThemes {
         };
         for dir in dirs {
             let one = Self::load(dir);
-            for (name, theme) in one.themes {
+            for (name, theme, from) in one.themes {
                 if all.get(&name).is_none() {
-                    all.themes.push((name, theme));
+                    all.themes.push((name, theme, from));
                 }
             }
             all.errors.extend(one.errors);
@@ -112,11 +113,35 @@ impl UserThemes {
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.themes.iter().map(|(n, _)| n.as_str())
+        self.themes.iter().map(|(n, _, _)| n.as_str())
     }
 
     pub fn get(&self, name: &str) -> Option<&Theme> {
-        self.themes.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+        self.themes
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, t, _)| t)
+    }
+
+    /// The directory `name` was read from, when it is one of these.
+    pub fn dir_of(&self, name: &str) -> Option<&Path> {
+        self.themes
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, _, d)| d.as_path())
+    }
+
+    /// The themes grouped by directory, in the order the directories were
+    /// read; directories that held none are left out.
+    pub fn by_dir(&self) -> Vec<(PathBuf, Vec<String>)> {
+        let mut groups: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        for (name, _, dir) in &self.themes {
+            match groups.iter_mut().find(|(d, _)| d == dir) {
+                Some((_, names)) => names.push(name.clone()),
+                None => groups.push((dir.clone(), vec![name.clone()])),
+            }
+        }
+        groups
     }
 }
 
@@ -195,6 +220,31 @@ impl Highlighter {
     /// Is `name` a theme `new` would actually use (rather than fall back)?
     pub fn theme_exists(name: &str) -> bool {
         theme_by_name(name).is_some()
+    }
+
+    /// The names by where they come from: each of the reader's directories
+    /// that holds any (with its path), then the embedded set (`None`).
+    /// The settings screen's picker draws a heading per group.
+    pub fn theme_groups() -> Vec<(Option<PathBuf>, Vec<String>)> {
+        let mut groups: Vec<(Option<PathBuf>, Vec<String>)> = user_themes()
+            .by_dir()
+            .into_iter()
+            .map(|(d, names)| (Some(d), names))
+            .collect();
+        let embedded: Vec<String> = EmbeddedLazyThemeSet::theme_names()
+            .iter()
+            .map(|t| t.as_name().to_string())
+            .collect();
+        groups.push((None, embedded));
+        groups
+    }
+
+    /// The reader's directory whose file `name` is read from — and, when an
+    /// embedded theme of the same name exists, that it is the one being
+    /// replaced. `None` for an embedded or unknown name.
+    pub fn user_theme_source(name: &str) -> Option<(PathBuf, bool)> {
+        let dir = user_themes().dir_of(name)?.to_path_buf();
+        Some((dir, embedded_by_name(name).is_some()))
     }
 
     /// The reader's theme files that could not be read, for the startup
@@ -378,6 +428,12 @@ mod tests {
         .unwrap();
         let both =
             super::UserThemes::load_dirs(&[dir.path().to_path_buf(), bat.path().to_path_buf()]);
+        assert_eq!(both.dir_of("Tokyo Night"), Some(dir.path()));
+        assert_eq!(both.dir_of("Only In Bat"), Some(bat.path()));
+        let groups = both.by_dir();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].1, vec!["Nameless", "Tokyo Night"]);
+        assert_eq!(groups[1].1, vec!["Only In Bat"]);
         let names: Vec<&str> = both.names().collect();
         assert_eq!(
             names,
