@@ -3,9 +3,9 @@
 Cosense(旧 Scrapbox)のページを端末で読み、編集する TUI クライアント。
 Cosense は Helpfeel 社の製品であり、cosentty は非公式のサードパーティ製ツールです。
 
-![cosentty でページを読む — 行カーソルで進み、リンク先へ渡って戻り、ソース表示とヘルプ](docs/demo-view.gif)
-
 ![cosentty でページを作る — 左の端末で名前を打って作成し本文を書くと、右のブラウザに行ごとに現れる](docs/demo-side.gif)
+
+![cosentty でページを読む — 行カーソルで進み、リンク先へ渡って戻り、ソース表示とヘルプ](docs/demo-view.gif)
 
 (撮り方は [examples/demo/README.md](examples/demo/README.md))
 
