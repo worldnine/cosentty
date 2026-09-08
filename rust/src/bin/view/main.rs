@@ -839,6 +839,9 @@ fn run(
     // 一覧の絞り込み行も同じ扱い——どれも日本語を打つ場所で、どれも
     // ハードウェアカーソルを置いている(IME の変換窓がそこに付く)。
     let mut was_editing = false;
+    // 前フレームで本文の上に何か(オーバーレイ・トースト・一覧)が
+    // 被さっていたか。消えた直後のフレームで全面再描画する。
+    let mut covered = false;
     loop {
         let editing = app.session.is_some()
             || app.composing.is_some()
@@ -913,6 +916,17 @@ fn run(
         app.expire_toast();
         app.drain_downloads();
         app.drain_uploads(ctx);
+        // 画像の上に何かが被さって消えた直後は画面を捨てて描き直す。
+        // kitty のプレースホルダ描画は行の先頭セルにだけ 1 行分の
+        // 記号を書き、残りのセルは差分比較をスキップする。設定画面や
+        // トーストがその途中のセルだけを塗り替えて閉じると、先頭セルが
+        // 変わらない行は再描画されず、上に書かれた文字が画像の上に
+        // 幽霊のように残る。一覧から本文へ戻るときも同じ。
+        let covered_now = app.overlay.is_some() || app.toast.is_some() || app.index.is_some();
+        if covered && !covered_now && !app.images.is_empty() {
+            terminal.clear()?;
+        }
+        covered = covered_now;
         terminal.draw(|f| ui(f, app, ctx))?;
         // Wait up to one tick for input (short, so arriving images refresh
         // promptly), then drain everything that queued up into ONE frame.
