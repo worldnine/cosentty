@@ -124,8 +124,17 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char('?'), false) => app.overlay = Some(Overlay::Help),
         // The listed project's settings (same rule for the filter line).
         (KeyCode::Char(','), false) => {
-            let project = app.index_project.clone();
-            open_settings(app, ctx, &project);
+            // The projects list names no project: nothing to open here
+            // (an empty slug would otherwise write `[project.""]`).
+            if app.index_project.is_empty() {
+                app.toast(t!(
+                    "プロジェクトを開いてから , で設定",
+                    "open a project first, then , for its settings"
+                ));
+            } else {
+                let project = app.index_project.clone();
+                open_settings(app, ctx, &project);
+            }
         }
         // `^o` again: one level up. Over a project's pages it lists the
         // projects; over the projects it fetches them again (the page

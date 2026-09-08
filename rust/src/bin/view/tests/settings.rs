@@ -228,3 +228,21 @@ fn the_index_opens_the_listed_projects_settings() {
     assert!(app.overlay.is_none());
     assert!(app.index.is_some(), "q closed the screen, not the index");
 }
+
+/// The projects list is above any one project: `,` there has nothing to
+/// open, and must not open a screen for the empty slug.
+#[test]
+fn the_projects_list_has_no_settings_to_open() {
+    let (ctx, dir) = settings_ctx();
+    let mut app = page(&["title"]);
+    app.index = Some(cosense::index::Index::new(
+        Vec::new(),
+        0,
+        cosense::index::SortKey::default(),
+    ));
+    app.index_project = String::new();
+    handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
+    assert!(app.overlay.is_none());
+    assert!(app.toast_text().contains("プロジェクトを開いてから"), "{}", app.toast_text());
+    assert_eq!(file(&dir), "");
+}
