@@ -3,6 +3,7 @@ use super::*;
 /// A single-line text input with a movable cursor (byte index, always on
 /// a char boundary). The composer used to be append-only; Japanese text
 /// especially needs mid-line correction without retyping everything.
+#[derive(Debug)]
 pub(crate) struct Input {
     pub(crate) buf: String,
     pub(crate) cur: usize,

@@ -36,6 +36,7 @@ pub(crate) fn test_ctx() -> Ctx {
         gyazo_personal_token: None,
         config: std::sync::Mutex::new(cosense::config::Config::default()),
         config_error: None,
+        config_path: None,
         send_target: SendTarget::None,
     }
 }

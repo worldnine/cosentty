@@ -10,6 +10,7 @@ mod mmd_text;
 mod nav;
 mod outline;
 mod session;
+mod settings;
 mod support;
 mod sync;
 mod toast;

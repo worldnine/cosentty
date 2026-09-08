@@ -32,6 +32,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // Esc goes back to it).
     if app.index.is_some() {
         draw_index(f, app, ctx, area);
+        if app.overlay.is_some() {
+            draw_overlay(f, app, area);
+        }
         draw_toast(f, app, ctx, area);
         return;
     }

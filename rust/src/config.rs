@@ -203,7 +203,9 @@ impl Config {
         value: Option<&str>,
     ) -> Result<String, String> {
         use toml_edit::{DocumentMut, Item, Table};
-        let mut doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| e.message().to_string())?;
+        let mut doc: DocumentMut = text
+            .parse()
+            .map_err(|e: toml_edit::TomlError| e.message().to_string())?;
         let root = doc.as_table_mut();
         match value {
             Some(v) => {
@@ -245,20 +247,19 @@ impl Config {
         Ok(doc.to_string())
     }
 
-    /// `with_project_key` applied to the file on disk (`Config::path`),
-    /// written through a temporary file and a rename so a crash mid-write
-    /// cannot leave an empty file. Returns the parsed result so the caller
-    /// can swap its in-memory copy. A file that does not parse is NOT
-    /// touched: the error names it.
+    /// `with_project_key` applied to the file at `path` (normally
+    /// `Config::path`; tests pass a scratch file), written through a
+    /// temporary file and a rename so a crash mid-write cannot leave an
+    /// empty file. Returns the parsed result so the caller can swap its
+    /// in-memory copy. A file that does not parse is NOT touched: the error
+    /// names it.
     pub fn save_project_key(
+        path: &std::path::Path,
         project: &str,
         key: ProjectKey,
         value: Option<&str>,
     ) -> Result<Config, String> {
-        let path = Self::path().ok_or_else(|| {
-            "no config path (neither $XDG_CONFIG_HOME nor $HOME is set)".to_string()
-        })?;
-        let text = match std::fs::read_to_string(&path) {
+        let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(format!("{}: {e}", path.display())),
@@ -273,9 +274,12 @@ impl Config {
             .parent()
             .ok_or_else(|| format!("{}: no parent directory", path.display()))?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        std::fs::write(tmp.path(), next.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
-        tmp.persist(&path).map_err(|e| format!("{}: {}", path.display(), e.error))?;
+        let tmp =
+            tempfile::NamedTempFile::new_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::write(tmp.path(), next.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        tmp.persist(path)
+            .map_err(|e| format!("{}: {}", path.display(), e.error))?;
         Ok(parsed)
     }
 }
@@ -349,8 +353,16 @@ gyazo_team = "new-org"
         )
         .unwrap();
         let acme = c.upload_choice("acme");
-        assert_eq!(acme.images.as_deref(), Some("gyazo"), "old table still read");
-        assert_eq!(acme.gyazo_team.as_deref(), Some("new-org"), "new table wins");
+        assert_eq!(
+            acme.images.as_deref(),
+            Some("gyazo"),
+            "old table still read"
+        );
+        assert_eq!(
+            acme.gyazo_team.as_deref(),
+            Some("new-org"),
+            "new table wins"
+        );
         assert_eq!(c.project_theme("acme").as_deref(), Some("paper-dark"));
         assert_eq!(c.project_display_name("acme").as_deref(), Some("ACME"));
         assert_eq!(c.project_theme("other"), None);
@@ -365,13 +377,20 @@ gyazo_team = "new-org"
         let text = "# my notes\n[upload]\nimages = \"gcs\" # default\n";
         let next = Config::with_project_key(text, "acme", ProjectKey::Theme, Some("blue")).unwrap();
         assert!(next.starts_with("# my notes\n[upload]\nimages = \"gcs\" # default\n"));
-        assert!(next.contains("[project.acme]\ntheme = \"blue\"\n"), "{next}");
-        assert!(!next.contains("\n[project]\n"), "no bare [project] header: {next}");
+        assert!(
+            next.contains("[project.acme]\ntheme = \"blue\"\n"),
+            "{next}"
+        );
+        assert!(
+            !next.contains("\n[project]\n"),
+            "no bare [project] header: {next}"
+        );
         let c = Config::parse(&next).unwrap();
         assert_eq!(c.project_theme("acme").as_deref(), Some("blue"));
 
         // A second key joins the same table; a changed value replaces.
-        let next = Config::with_project_key(&next, "acme", ProjectKey::DisplayName, Some("ACME")).unwrap();
+        let next =
+            Config::with_project_key(&next, "acme", ProjectKey::DisplayName, Some("ACME")).unwrap();
         let next = Config::with_project_key(&next, "acme", ProjectKey::Theme, Some("red")).unwrap();
         let c = Config::parse(&next).unwrap();
         assert_eq!(c.project_theme("acme").as_deref(), Some("red"));
@@ -389,14 +408,40 @@ gyazo_team = "new-org"
         assert_eq!(next.trim(), "", "nothing left: {next:?}");
         // Removing from a file that never had the key is a no-op, not an error.
         assert_eq!(
-            Config::with_project_key("[upload]\nimages = \"gcs\"\n", "x", ProjectKey::Theme, None).unwrap(),
+            Config::with_project_key("[upload]\nimages = \"gcs\"\n", "x", ProjectKey::Theme, None)
+                .unwrap(),
             "[upload]\nimages = \"gcs\"\n"
         );
     }
 
     #[test]
     fn a_broken_file_is_not_written() {
-        assert!(Config::with_project_key("[upload\n", "acme", ProjectKey::Theme, Some("blue")).is_err());
+        assert!(
+            Config::with_project_key("[upload\n", "acme", ProjectKey::Theme, Some("blue")).is_err()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[upload\n").unwrap();
+        assert!(Config::save_project_key(&path, "acme", ProjectKey::Theme, Some("blue")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[upload\n",
+            "left alone"
+        );
+    }
+
+    #[test]
+    fn saving_creates_the_file_and_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cosentty").join("config.toml");
+        let c = Config::save_project_key(&path, "acme", ProjectKey::Theme, Some("blue")).unwrap();
+        assert_eq!(c.project_theme("acme").as_deref(), Some("blue"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[project.acme]\ntheme = \"blue\"\n"
+        );
+        let c = Config::save_project_key(&path, "acme", ProjectKey::Theme, None).unwrap();
+        assert_eq!(c, Config::default());
     }
 
     #[test]

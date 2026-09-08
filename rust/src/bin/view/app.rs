@@ -623,6 +623,9 @@ pub(crate) enum Overlay {
     LineInfo,
     /// Key reference.
     Help,
+    /// The project's settings (`,`): theme, display name, upload
+    /// destination — each with where its value came from. See settings.rs.
+    Settings(SettingsView),
 }
 
 impl Overlay {}

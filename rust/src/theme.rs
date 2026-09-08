@@ -16,7 +16,7 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 /// Colors for rendering Scrapbox constructs, chosen per light/dark.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     /// Heading colors, BIGGEST first: index 0 = `[**** ]` and up, 3 = `[* ]`
     /// (see `heading_for`). A warm family, deliberately away from the link
@@ -1099,8 +1099,14 @@ mod tests {
     #[test]
     fn every_listed_theme_has_colours() {
         for t in super::COSENSE_THEMES {
-            assert!(super::cosense_link_colors(t).is_some(), "link colours for {t}");
-            assert!(super::cosense_telomere_tint(t).is_some(), "telomere for {t}");
+            assert!(
+                super::cosense_link_colors(t).is_some(),
+                "link colours for {t}"
+            );
+            assert!(
+                super::cosense_telomere_tint(t).is_some(),
+                "telomere for {t}"
+            );
         }
         assert!(super::cosense_link_colors("no-such-theme").is_none());
     }

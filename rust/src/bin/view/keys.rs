@@ -29,6 +29,15 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
 fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
     use cosense::index::Pane;
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    // The settings screen over the index takes every key while open
+    // (`^c` still quits, as everywhere).
+    if matches!(app.overlay, Some(Overlay::Settings(_))) {
+        if let (KeyCode::Char('c'), true) = (k.code, ctrl) {
+            return Action::Quit;
+        }
+        handle_overlay_key(app, ctx, k.code, k.modifiers);
+        return Action::Continue;
+    }
     let page_rows = app.index_list_rect.height.max(1) as i32;
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
     // ---- the sort menu, while it is open ------------------------------
@@ -113,6 +122,11 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         // Help opens here too (the filter line captures every key while
         // it is open, so `?` typed there stays a filter character).
         (KeyCode::Char('?'), false) => app.overlay = Some(Overlay::Help),
+        // The listed project's settings (same rule for the filter line).
+        (KeyCode::Char(','), false) => {
+            let project = app.index_project.clone();
+            open_settings(app, ctx, &project);
+        }
         // `^o` again: one level up. Over a project's pages it lists the
         // projects; over the projects it fetches them again (the page
         // list's `^o` refetches too).
@@ -712,6 +726,11 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             };
         }
         (KeyCode::Char('?'), false) => app.overlay = Some(Overlay::Help),
+        // The project's settings: theme, name, upload destination.
+        (KeyCode::Char(','), false) => {
+            let project = app.project.clone();
+            open_settings(app, ctx, &project);
+        }
 
         // Unbound: show what arrived. A NON-ASCII char here almost always
         // means the IME is on — say so in Japanese instead of a cryptic
@@ -758,6 +777,10 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         Up,
         Down,
         Activate,
+    }
+    // The settings screen has its own keys (pickers, a text field).
+    if handle_settings_key(app, ctx, code, mods) {
+        return;
     }
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let is_line_info = matches!(app.overlay, Some(Overlay::LineInfo));

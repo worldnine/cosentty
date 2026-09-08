@@ -318,6 +318,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         gyazo_personal_token,
         config: std::sync::Mutex::new(config),
         config_error,
+        config_path: cosense::config::Config::path(),
         send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
     let loaded = load_page(&ctx, &project, &title)?;
@@ -551,6 +552,10 @@ struct Ctx {
     /// every handler holds `&Ctx`.
     config: std::sync::Mutex<cosense::config::Config>,
     config_error: Option<String>,
+    /// Where the settings screen writes (`Config::path`). `None` — no
+    /// `$HOME` — makes every save an error it can name; tests point it at
+    /// a scratch file so a key press never touches the developer's own.
+    config_path: Option<std::path::PathBuf>,
     /// Where `s` delivers the comments (`--send-cmd`, else the herdr agent
     /// of this tab when running inside herdr, else nowhere). See handoff.rs.
     send_target: SendTarget,
@@ -560,10 +565,7 @@ impl Ctx {
     /// A copy of the settings file as last read or saved. Small and
     /// cloned per call so no lock is held across anything slow.
     fn config(&self) -> cosense::config::Config {
-        self.config
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_default()
+        self.config.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
     /// Replace the in-memory settings (after `Config::save_project_key`).
@@ -885,6 +887,9 @@ fn handle_paste(app: &mut App, ctx: &Ctx, data: &str) {
         app.laid_width = 0; // the bar grows with the text
         return;
     }
+    if settings_paste(app, &clean) {
+        return;
+    }
     // The index's filter is a text field too: pasting a title into it is
     // the fastest way to reach a page someone sent you. Only the first
     // line — a filter is one line by definition.
@@ -935,6 +940,8 @@ mod session;
 use session::*;
 mod keys;
 use keys::*;
+mod settings;
+use settings::*;
 mod ui;
 use ui::*;
 mod app;
