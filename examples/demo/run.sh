@@ -25,8 +25,8 @@ fi
 
 # 端末は暗い前提で撮る(プロジェクトの明色テーマに追従すると EDIT の下敷きが白くなる)
 opts=${COSENTTY_OPTS:---ime off --lang ja --dark}
-# VHS の端末(xterm.js)は sixel を描けないので、画像は半ブロック文字で描かせる
-export COSENSE_IMAGE=${COSENSE_IMAGE:-halfblocks}
+# VHS(xterm.js)で撮るときは画像を描けないので COSENSE_IMAGE=halfblocks を渡す。
+# WezTerm で撮るとき(record-terminal.mjs)は端末の kitty プロトコルに任せる
 scenario=${1:-view}
 shift || true
 
