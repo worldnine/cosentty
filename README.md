@@ -11,6 +11,8 @@ Cosense は Helpfeel 社の製品であり、cosentty は非公式のサード�
 
 ## インストール
 
+Rust 1.92 以上が必要です(古い場合は `rustup update stable`)。
+
 ```bash
 cargo install cosentty
 ```
