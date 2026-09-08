@@ -780,7 +780,11 @@ pub fn spawn_ws_sync(
                     // the push channel counts as live, so the only place the
                     // insurance poll is allowed to relax.
                     state(&tx, &project, &title, SyncState::Live);
-                    throttled_status(&tx, &mut last_status, &crate::t!("ws: 接続済み (push sync)", "ws: connected (push sync)"));
+                    throttled_status(
+                        &tx,
+                        &mut last_status,
+                        &crate::t!("ws: 接続済み (push sync)", "ws: connected (push sync)"),
+                    );
                 }
                 Err(e) => {
                     throttled_status(
@@ -813,7 +817,11 @@ pub fn spawn_ws_sync(
                 // Navigation: loop re-reads the target and rejoins there.
             } else {
                 state(&tx, &project, &title, SyncState::Reconnecting);
-                throttled_status(&tx, &mut last_status, &crate::t!("ws: 切断 — 再接続します", "ws: disconnected — reconnecting"));
+                throttled_status(
+                    &tx,
+                    &mut last_status,
+                    &crate::t!("ws: 切断 — 再接続します", "ws: disconnected — reconnecting"),
+                );
                 std::thread::sleep(backoff);
                 backoff = grow(backoff);
             }
@@ -869,7 +877,10 @@ fn room_loop(
                     throttled_status(
                         tx,
                         &mut last_resync_status,
-                        &crate::t!("ws: 再同期失敗 — 再試行します ({e})", "ws: resync failed — retrying ({e})"),
+                        &crate::t!(
+                            "ws: 再同期失敗 — 再試行します ({e})",
+                            "ws: resync failed — retrying ({e})"
+                        ),
                     );
                 }
             }

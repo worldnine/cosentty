@@ -230,7 +230,13 @@ fn related_sections_follow_the_index_sort_order_within_each_section() {
     );
 
     // The dim value after the title is the one being sorted on.
-    let secs = build_related(&facts, page.related.as_ref(), "proj", SortKey::Linked, &HashMap::new());
+    let secs = build_related(
+        &facts,
+        page.related.as_ref(),
+        "proj",
+        SortKey::Linked,
+        &HashMap::new(),
+    );
     assert_eq!(secs[0].entries[0].sort_meta(SortKey::Linked), "linked 9");
     assert!(
         secs[0].entries[0]
@@ -807,7 +813,11 @@ fn back_at_the_history_boundary_keeps_the_last_destination() {
 #[test]
 fn visits_stay_in_memory_without_a_path_and_persist_with_one() {
     assert_eq!(record_visit(None, "proj", "A", 10), None);
-    assert_eq!(record_visit(None, "proj", "A", 20), None, "nothing was kept");
+    assert_eq!(
+        record_visit(None, "proj", "A", 20),
+        None,
+        "nothing was kept"
+    );
     assert!(load_visits(None).is_empty());
 
     let dir = std::env::temp_dir().join(format!("cosentty-test-visits-{}", std::process::id()));

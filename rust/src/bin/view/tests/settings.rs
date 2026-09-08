@@ -243,6 +243,10 @@ fn the_projects_list_has_no_settings_to_open() {
     app.index_project = String::new();
     handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
     assert!(app.overlay.is_none());
-    assert!(app.toast_text().contains("プロジェクトを開いてから"), "{}", app.toast_text());
+    assert!(
+        app.toast_text().contains("プロジェクトを開いてから"),
+        "{}",
+        app.toast_text()
+    );
     assert_eq!(file(&dir), "");
 }

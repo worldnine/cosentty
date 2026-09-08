@@ -509,7 +509,11 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
     let meta = format!(
         " · {} ago{}",
         relative_age(entry.updated),
-        if entry.unread { ts!(" · 未読", " · unread") } else { "" }
+        if entry.unread {
+            ts!(" · 未読", " · unread")
+        } else {
+            ""
+        }
     );
     let show_meta = width > str_width(&meta) + 8;
     let title_width = if show_meta {

@@ -8,6 +8,15 @@
 //! written to.
 //!
 //! ```toml
+//! [view]                    # この端末の設定。起動オプション > 環境変数 > ここ > 既定
+//! lang = "ja"               # ja | en
+//! theme = "Solarized (dark)"  # --theme と同じ名前
+//! appearance = "auto"       # light | dark | auto
+//! preview = "auto"          # on | off | auto
+//! ime = "jp"                # jp | off
+//! download_dir = "~/Downloads"
+//! diagrams = "manual"       # off | manual | auto(COSENSE_WEB_RENDER と同じ)
+//!
 //! [upload]
 //! images = "gcs"            # gcs | gyazo   (unset: project setting → gcs)
 //! gyazo_team = "my-org"     # Gyazo Teams org, when images = "gyazo"
@@ -35,6 +44,11 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// `[view]`: this terminal's own preferences — what the flags and the
+    /// environment decide today, written down. A flag or a variable still
+    /// wins over the file (`ViewKey` names the table's keys).
+    #[serde(default)]
+    pub view: ViewSection,
     #[serde(default)]
     pub upload: UploadSection,
     /// `[project.<slug>]`: everything the viewer wants to know about one
@@ -61,29 +75,106 @@ pub struct ProjectSection {
     pub gyazo_team: Option<String>,
 }
 
+/// One `[view]` table. Every value is kept as the string written, and
+/// interpreted where the flag with the same name is (`main`): a value the
+/// file spells wrong falls back to the default there and is reported once,
+/// instead of failing the whole file here.
+#[derive(Debug, Default, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewSection {
+    pub lang: Option<String>,
+    pub theme: Option<String>,
+    pub appearance: Option<String>,
+    pub preview: Option<String>,
+    pub ime: Option<String>,
+    pub download_dir: Option<String>,
+    pub diagrams: Option<String>,
+}
+
+/// Which key of `[view]` a write names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKey {
+    Lang,
+    Theme,
+    Appearance,
+    Preview,
+    Ime,
+    DownloadDir,
+    Diagrams,
+}
+
+impl ViewKey {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ViewKey::Lang => "lang",
+            ViewKey::Theme => "theme",
+            ViewKey::Appearance => "appearance",
+            ViewKey::Preview => "preview",
+            ViewKey::Ime => "ime",
+            ViewKey::DownloadDir => "download_dir",
+            ViewKey::Diagrams => "diagrams",
+        }
+    }
+}
+
 /// Where a project-level value on screen came from. The settings screen
 /// shows it next to each value, so "gcs" alone never hides that the
 /// project's own setting was simply unreadable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
+    /// A command-line flag (`--lang`, `--theme`, …).
+    Flag,
+    /// An environment variable (`COSENSE_LANG`, `COSENSE_DOWNLOAD_DIR`, …).
+    Env,
     /// `/api/projects/<slug>` answered.
     Api,
     /// `config.toml` names it.
     File,
-    /// Neither: the built-in fallback.
+    /// Detected at startup (the terminal's background, say).
+    Auto,
+    /// None of the above: the built-in fallback.
     Default,
 }
 
 impl Origin {
-    /// The short tag the settings screen prints. Not translated: `api` /
-    /// `file` are the names the documentation uses.
+    /// The short tag the settings screen prints. Not translated: these
+    /// are the names the documentation uses.
     pub fn tag(self) -> &'static str {
         match self {
+            Origin::Flag => "flag",
+            Origin::Env => "env",
             Origin::Api => "api",
             Origin::File => "file",
+            Origin::Auto => "auto",
             Origin::Default => "-",
         }
     }
+
+    /// A value from here beats whatever the file says: the screen tells
+    /// the reader a file edit will not show until the next start without it.
+    pub fn beats_file(self) -> bool {
+        matches!(self, Origin::Flag | Origin::Env)
+    }
+}
+
+/// The first answer wins: flag, then environment, then the file, then the
+/// default — the precedence every `[view]` key follows.
+pub fn pick<T>(
+    flag: Option<T>,
+    env: Option<T>,
+    file: Option<T>,
+    default: (T, Origin),
+) -> (T, Origin) {
+    if let Some(v) = flag {
+        return (v, Origin::Flag);
+    }
+    if let Some(v) = env {
+        return (v, Origin::Env);
+    }
+    if let Some(v) = file {
+        return (v, Origin::File);
+    }
+    default
 }
 
 /// Which field of a `[project.<slug>]` table a write names.
@@ -190,16 +281,33 @@ impl Config {
             .filter(|t| !t.trim().is_empty())
     }
 
-    /// Set (or, with `None`, remove) one key of `[project.<slug>]` in the
-    /// file's TEXT, keeping every comment, every other table and the
-    /// author's order: a settings screen that rewrote the file from its
-    /// parsed form would throw away whatever it did not understand. A table
-    /// left empty is removed with its last key. Errors only for text that is
-    /// not TOML — the caller must not overwrite a broken file.
+    /// `with_key` on `[project.<slug>]`.
     pub fn with_project_key(
         text: &str,
         project: &str,
         key: ProjectKey,
+        value: Option<&str>,
+    ) -> Result<String, String> {
+        Self::with_key(text, &["project", project], key.as_str(), value)
+    }
+
+    /// `with_key` on `[view]`.
+    pub fn with_view_key(text: &str, key: ViewKey, value: Option<&str>) -> Result<String, String> {
+        Self::with_key(text, &["view"], key.as_str(), value)
+    }
+
+    /// Set (or, with `None`, remove) one key of the table at `path`
+    /// (`["view"]`, `["project", "<slug>"]`) in the file's TEXT, keeping
+    /// every comment, every other table and the author's order: a settings
+    /// screen that rewrote the file from its parsed form would throw away
+    /// whatever it did not understand. Intermediate tables that hold no
+    /// keys of their own stay implicit (no bare `[project]` header); a table
+    /// left empty is removed with its last key. Errors only for text that
+    /// is not TOML — the caller must not overwrite a broken file.
+    pub fn with_key(
+        text: &str,
+        path: &[&str],
+        key: &str,
         value: Option<&str>,
     ) -> Result<String, String> {
         use toml_edit::{DocumentMut, Item, Table};
@@ -209,39 +317,41 @@ impl Config {
         let root = doc.as_table_mut();
         match value {
             Some(v) => {
-                let projects = root
-                    .entry("project")
-                    .or_insert_with(|| {
-                        let mut t = Table::new();
-                        // `[project]` itself holds no keys: keep it out of the
-                        // text so the file starts at `[project.<slug>]`.
-                        t.set_implicit(true);
-                        Item::Table(t)
-                    })
-                    .as_table_mut()
-                    .ok_or_else(|| "`project` is not a table".to_string())?;
-                let sect = projects
-                    .entry(project)
-                    .or_insert_with(|| Item::Table(Table::new()))
-                    .as_table_mut()
-                    .ok_or_else(|| format!("`project.{project}` is not a table"))?;
-                sect[key.as_str()] = toml_edit::value(v);
+                let mut table = root;
+                for (i, seg) in path.iter().enumerate() {
+                    let last = i + 1 == path.len();
+                    table = table
+                        .entry(seg)
+                        .or_insert_with(|| {
+                            let mut t = Table::new();
+                            t.set_implicit(!last);
+                            Item::Table(t)
+                        })
+                        .as_table_mut()
+                        .ok_or_else(|| format!("`{}` is not a table", path[..=i].join(".")))?;
+                }
+                table[key] = toml_edit::value(v);
             }
             None => {
-                let Some(projects) = root.get_mut("project").and_then(Item::as_table_mut) else {
-                    return Ok(doc.to_string());
-                };
-                let mut drop_sect = false;
-                if let Some(sect) = projects.get_mut(project).and_then(Item::as_table_mut) {
-                    sect.remove(key.as_str());
-                    drop_sect = sect.is_empty();
+                // Walk down; if any table is missing there is nothing to remove.
+                fn remove_in(table: &mut Table, path: &[&str], key: &str) {
+                    match path.split_first() {
+                        None => {
+                            table.remove(key);
+                        }
+                        Some((seg, rest)) => {
+                            let mut drop = false;
+                            if let Some(t) = table.get_mut(seg).and_then(Item::as_table_mut) {
+                                remove_in(t, rest, key);
+                                drop = t.is_empty();
+                            }
+                            if drop {
+                                table.remove(seg);
+                            }
+                        }
+                    }
                 }
-                if drop_sect {
-                    projects.remove(project);
-                }
-                if projects.is_empty() {
-                    root.remove("project");
-                }
+                remove_in(root, path, key);
             }
         }
         Ok(doc.to_string())
@@ -259,6 +369,25 @@ impl Config {
         key: ProjectKey,
         value: Option<&str>,
     ) -> Result<Config, String> {
+        Self::save_key(path, &["project", project], key.as_str(), value)
+    }
+
+    /// `save_key` on `[view]`.
+    pub fn save_view_key(
+        path: &std::path::Path,
+        key: ViewKey,
+        value: Option<&str>,
+    ) -> Result<Config, String> {
+        Self::save_key(path, &["view"], key.as_str(), value)
+    }
+
+    /// `with_key` applied to the file at `path`: see `save_project_key`.
+    pub fn save_key(
+        path: &std::path::Path,
+        table: &[&str],
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<Config, String> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -267,7 +396,7 @@ impl Config {
         // Refuse to write over something we cannot read back: the typed
         // parse is the one the viewer trusts, so it is the gate.
         Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let next = Self::with_project_key(&text, project, key, value)
+        let next = Self::with_key(&text, table, key, value)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let parsed = Self::parse(&next).map_err(|e| format!("{}: {e}", path.display()))?;
         let dir = path
@@ -412,6 +541,52 @@ gyazo_team = "new-org"
                 .unwrap(),
             "[upload]\nimages = \"gcs\"\n"
         );
+    }
+
+    #[test]
+    fn the_view_table_reads_and_writes() {
+        let c = Config::parse("[view]\nlang = \"ja\"\nappearance = \"dark\"\n").unwrap();
+        assert_eq!(c.view.lang.as_deref(), Some("ja"));
+        assert_eq!(c.view.appearance.as_deref(), Some("dark"));
+        assert_eq!(c.view.theme, None);
+        assert!(
+            Config::parse("[view]\nlanguage = \"ja\"\n").is_err(),
+            "unknown key"
+        );
+
+        let text = "# notes\n[project.acme]\ntheme = \"blue\"\n";
+        let next = Config::with_view_key(text, ViewKey::Lang, Some("en")).unwrap();
+        assert!(next.starts_with("# notes\n"), "{next}");
+        assert!(next.contains("[view]\nlang = \"en\"\n"), "{next}");
+        assert!(
+            next.contains("[project.acme]\ntheme = \"blue\"\n"),
+            "{next}"
+        );
+        let next = Config::with_view_key(&next, ViewKey::Lang, None).unwrap();
+        assert!(!next.contains("[view]"), "empty table goes: {next}");
+        assert!(next.contains("[project.acme]"), "{next}");
+    }
+
+    #[test]
+    fn pick_follows_flag_env_file_default() {
+        assert_eq!(
+            pick(Some(1), Some(2), Some(3), (4, Origin::Default)),
+            (1, Origin::Flag)
+        );
+        assert_eq!(
+            pick(None, Some(2), Some(3), (4, Origin::Default)),
+            (2, Origin::Env)
+        );
+        assert_eq!(
+            pick(None, None, Some(3), (4, Origin::Default)),
+            (3, Origin::File)
+        );
+        assert_eq!(
+            pick::<i32>(None, None, None, (4, Origin::Auto)),
+            (4, Origin::Auto)
+        );
+        assert!(Origin::Flag.beats_file() && Origin::Env.beats_file());
+        assert!(!Origin::File.beats_file() && !Origin::Default.beats_file());
     }
 
     #[test]
