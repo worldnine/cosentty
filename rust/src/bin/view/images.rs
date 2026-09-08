@@ -136,21 +136,74 @@ pub(crate) fn decode_web_png(
 ///
 /// `COSENSE_IMAGE=halfblocks` — draw pictures as text cells
 /// `COSENSE_IMAGE=auto` (default) — the terminal's own protocol
+///
+/// The terminal is asked on this thread with a deadline
+/// (`cosense::image_probe`, `theme::query_tty`) rather than through
+/// ratatui-image's `from_query_stdio`, whose helper thread keeps reading
+/// stdin after ITS timeout and eats the first keypress in a terminal that
+/// never answers (tmux without `allow-passthrough`, some pty layers).
 pub(crate) fn image_picker() -> Result<Picker, Box<dyn Error>> {
     use ratatui_image::picker::ProtocolType;
-    let mut picker = Picker::from_query_stdio()?;
     let want = std::env::var("COSENSE_IMAGE").unwrap_or_default();
     let forced = match want.as_str() {
         "kitty" => Some(ProtocolType::Kitty),
         "iterm2" => Some(ProtocolType::Iterm2),
         "sixel" => Some(ProtocolType::Sixel),
         "halfblocks" => Some(ProtocolType::Halfblocks),
-        _ => None, // "auto" or unset: whatever the terminal answered
+        _ => None, // "auto" or unset: whatever the terminal answers
     };
-    if let Some(p) = forced {
+    let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());
+    // Half-blocks need no cell size and no protocol: nothing to ask.
+    let probe = if forced == Some(ProtocolType::Halfblocks) {
+        cosense::image_probe::Probe::default()
+    } else {
+        cosense::theme::query_tty(
+            &cosense::image_probe::query_bytes(in_tmux),
+            std::time::Duration::from_millis(400),
+            cosense::image_probe::complete,
+        )
+        .map(|r| cosense::image_probe::parse(&r))
+        .unwrap_or_default()
+    };
+    // `from_fontsize` is marked deprecated in favour of `from_query_stdio`
+    // — the very function this avoids (see above); it is the constructor
+    // for a picker built from an answer obtained elsewhere.
+    #[allow(deprecated)]
+    let mut picker = match probe.cell {
+        // ratatui-image's own rule: a pixel protocol needs the cell size;
+        // without one, half-blocks whatever the terminal claims.
+        Some((w, h)) => Picker::from_fontsize(ratatui_image::FontSize::new(w, h)),
+        None => Picker::halfblocks(),
+    };
+    let detected = cosense::image_probe::protocol(&probe)
+        .or_else(iterm2_from_env)
+        .filter(|_| probe.cell.is_some());
+    if let Some(p) = forced.or(detected) {
         picker.set_protocol_type(p);
     }
     Ok(picker)
+}
+
+/// Terminals that draw iTerm2 inline images but answer no query for it:
+/// the same hints ratatui-image reads.
+fn iterm2_from_env() -> Option<ratatui_image::picker::ProtocolType> {
+    use ratatui_image::picker::ProtocolType;
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let iterm = [
+        "iTerm",
+        "WezTerm",
+        "mintty",
+        "vscode",
+        "Tabby",
+        "Hyper",
+        "rio",
+        "Bobcat",
+        "WarpTerminal",
+    ]
+    .iter()
+    .any(|p| program.contains(p))
+        || std::env::var("LC_TERMINAL").is_ok_and(|v| v.contains("iTerm"));
+    iterm.then_some(ProtocolType::Iterm2)
 }
 
 /// The name of the picture protocol in use, for the status line. Which one

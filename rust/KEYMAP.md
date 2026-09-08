@@ -605,6 +605,13 @@ Markdown を開いたときと同じ見え方になる。テーマが書式を�
 重なりで困ったら、まず `image:` が何になっているかを見る。`iterm2` や `sixel` なら
 `COSENSE_IMAGE=kitty` を試す価値がある（端末が対応していれば画質はそのままで直る）。
 
+**端末への問い合わせは自前で行う**(`image_probe.rs` + `theme::query_tty`)。ratatui-image の
+`from_query_stdio` は応答を別スレッドで待ち、タイムアウト後もそのスレッドが stdin を読み続ける
+ので、応答しない端末(detach した tmux、`allow-passthrough off` の tmux、問い合わせを捨てる
+pty 層)では**最初に打ったキーを1打食べる**。cosentty は同じ問い合わせ(kitty / DA / セル寸法 /
+DSR)を書き、同じスレッドで `poll(2)` 期限 400ms まで読んで諦める。スレッドを作らないので
+何も食わない。`COSENSE_IMAGE=halfblocks` のときは問い合わせ自体を送らない(2026-09-08)。
+
 ## 画像読み込み
 
 画像は**バックグラウンドで並行ダウンロード・デコード・端末プロトコルへエンコード**される

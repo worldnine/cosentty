@@ -696,6 +696,23 @@ const OSC11_HEADER: &[u8] = b"\x1b]11;";
 /// (no tty or no OSC 11 answer). Call after entering raw mode / alt screen.
 #[cfg(unix)]
 pub fn detect_background() -> Option<(u8, u8, u8)> {
+    let resp = query_tty(OSC11_QUERY, Duration::from_millis(150), response_complete)?;
+    parse_osc11(&resp)
+}
+
+/// Write `query` to the terminal and read its answer from stdin until
+/// `complete` says so or `deadline` passes — on THIS thread, with
+/// `poll(2)`, so a terminal that never answers costs the deadline and
+/// nothing else. (A reader left blocking on stdin in a helper thread would
+/// swallow the first keys the user types; that is what this avoids.)
+/// `None` when stdin is not a terminal or nothing arrived. Call after
+/// entering raw mode.
+#[cfg(unix)]
+pub fn query_tty(
+    query: &[u8],
+    deadline: Duration,
+    complete: impl Fn(&[u8]) -> bool,
+) -> Option<Vec<u8>> {
     if !std::io::stdin().is_terminal() {
         return None;
     }
@@ -710,13 +727,13 @@ pub fn detect_background() -> Option<(u8, u8, u8)> {
                 .ok()?,
         )
     };
-    out.write_all(OSC11_QUERY).ok()?;
+    out.write_all(query).ok()?;
     out.flush().ok()?;
 
     let fd = std::io::stdin().as_raw_fd();
     let mut resp = Vec::new();
     let mut buf = [0u8; 64];
-    let deadline = std::time::Instant::now() + Duration::from_millis(150);
+    let deadline = std::time::Instant::now() + deadline;
     loop {
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -742,15 +759,24 @@ pub fn detect_background() -> Option<(u8, u8, u8)> {
             break;
         }
         resp.extend_from_slice(&buf[..n as usize]);
-        if response_complete(&resp) {
+        if complete(&resp) {
             break;
         }
     }
-    parse_osc11(&resp)
+    (!resp.is_empty()).then_some(resp)
 }
 
 #[cfg(not(unix))]
 pub fn detect_background() -> Option<(u8, u8, u8)> {
+    None
+}
+
+#[cfg(not(unix))]
+pub fn query_tty(
+    _query: &[u8],
+    _deadline: Duration,
+    _complete: impl Fn(&[u8]) -> bool,
+) -> Option<Vec<u8>> {
     None
 }
 

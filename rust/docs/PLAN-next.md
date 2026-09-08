@@ -27,6 +27,11 @@
   - 同 lib: CJK を含む `classDiagram` で panic
     (`byte index 4 is not a char boundary`、parser/class.rs:622。
     側は `catch_unwind` で画像へ縮退)
+  - `ratatui-image` 11.0.6: `Picker::from_query_stdio` の読み取りスレッドが
+    タイムアウト後も `stdin.read()` で生き残り、応答しない端末で最初のキー入力
+    (最大50バイト)を食う(picker.rs `query_with_timeout`)。cosentty は 2026-09-08 に
+    自前の期限付き問い合わせ(`image_probe.rs`)へ切り替えて回避。再現手順:
+    detach した tmux で起動し、任意の時刻に1キー送ると1打だけ消える
 - 改善案の P0〜P3 は済。P4(表示とナビゲーション)が主戦場
 - 改善案4 の項目は**このセッションで全部消化した**:
   行またぎドラッグのクラッシュ / 語・行クリック選択 / ソースモードの降格(`s`)/

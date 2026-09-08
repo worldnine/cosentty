@@ -7,6 +7,7 @@ pub mod config;
 pub mod editops;
 pub mod highlight;
 pub mod image_fetch;
+pub mod image_probe;
 pub mod ime;
 pub mod index;
 pub mod lang;
