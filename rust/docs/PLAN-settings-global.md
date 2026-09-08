@@ -231,4 +231,36 @@ htop の F2 と同じ live-apply で、保存は確定時に暗黙に行う(前�
 
 ## 実施記録
 
-(未着手)
+2026-09-08 実装(同日起案。ブランチ `settings-global`)。刻みは計画の 1〜8 を
+5コミットに集約(4 と 5〜7 をまとめた):
+
+1. 不具合修正: プロジェクト一覧で `,` はトースト → **後で上書き**(2段化で「上の節
+   だけ出す」に変えた。計画の項目1は最終形では「開くが下の節が無い」)。単独で main へ
+2. `config.rs`: `[view]`(`ViewSection`。値は文字列のまま)、`Origin` に flag / env /
+   auto、`pick`、`with_key` / `save_key` をテーブル一般に
+3. `view_settings.rs`(新規): `ViewSettings::resolve` と `recompute`、`ViewFlags`。
+   `Ctx` の `hl` / `palette` / `light` / `terminal_bg` / `ime_mode` / `preview` /
+   `download_dir` を `RwLock<ViewSettings>` とアクセサに置換。参照は機械的に
+   `ctx.x` → `ctx.x()`。`flags` と `default_download` を `ViewSettings` に持たせ、
+   保存後の `reresolve` で flag / env が引き続き勝つ
+4. `settings.rs` 書き直し: `SettingField` 10 種、`Target`(View / Project)、
+   `settings_items(view, width)` が幅に合わせて行を組む。配色テーマの流し見は
+   `Pick.revert` に開く前の file 値を持ち Esc で `preview_theme` に戻す。
+   `e` は `SettingsOutcome::EditConfig` → `Action::EditConfig` →
+   `config_editor_roundtrip`(paste.rs の `editor_roundtrip` と同じ手順)→
+   `reload_config_from`。`config_error` も Mutex にして直した後に保存できるように
+5. KEYMAP / ヘルプ / README / HANDOFF
+
+計画からの変更点:
+
+- IME の変更は「次回起動から完全反映」ではなく、入力欄を開くときの切替
+  (`ImeGuard::enter(ctx.ime_mode())`)は即時。セッション全体の IME 復元
+  (`SessionIme`)だけは起動時の値のまま(差し替えると保存した入力ソースの復元が
+  走るため触らない)
+- `appearance = auto` に戻したときは起動時の OSC 11 の値を使う(未決どおり)
+- 配色テーマのピッカーに絞り込みは付けていない(同梱テーマは 30 弱で足りた)
+- `pick_download_dir` は「名前が無いときの探索」にだけ残し、名前の解決は
+  `ViewSettings::resolve` 側に寄せた
+
+テスト: `cargo test --bin cosentty` 385 件 green(設定画面 13 件・解決順 1 件・
+config 11 件・highlight 1 件)。実機は tmux で `XDG_CONFIG_HOME` を scratch に向けて確認。

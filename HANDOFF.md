@@ -20,9 +20,11 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
   `COSENSE_WEB_RENDER=manual|auto` で有効にする。
   無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
   いなければ図はテキストかコードで出る)
-- 自前の設定ファイルは `~/.config/cosentty/config.toml`(`[upload]` と
+- 自前の設定ファイルは `~/.config/cosentty/config.toml`(`[view]` `[upload]`
   `[project.<slug>]`。書き方は `rust/KEYMAP.md` の「設定ファイルと設定画面」か
-  `rust/src/config.rs` 冒頭)。無くてよい。`,` の設定画面が書く
+  `rust/src/config.rs` 冒頭)。無くてよい。`,` の設定画面が書く。起動オプションは
+  `[view]` にも書け、優先は 起動オプション > 環境変数 > ファイル > 既定
+  (`view_settings.rs` の `ViewSettings::resolve`)
 - 主なフラグ: `--light`/`--dark`/`--theme`、`--preview`、`--ime jp|en`、`--lang`、`--download-dir`
 - キー一覧は `rust/KEYMAP.md`(READ で `?` でも引ける)
 
