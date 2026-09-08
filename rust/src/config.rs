@@ -236,7 +236,12 @@ impl Config {
         let Some(path) = Self::path() else {
             return Ok(Config::default());
         };
-        match std::fs::read_to_string(&path) {
+        Self::load_from(&path)
+    }
+
+    /// `load`, from a named file.
+    pub fn load_from(path: &std::path::Path) -> Result<Config, String> {
+        match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text).map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),

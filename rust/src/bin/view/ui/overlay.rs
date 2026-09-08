@@ -175,44 +175,68 @@ pub(crate) fn draw_overlay(f: &mut Frame, app: &App, area: Rect) {
     draw_menu_panel(f, area, &title, &items, cursor, footer);
 }
 
-/// The settings screen: notes on where the values come from, then the
-/// three rows; a picker or a text field replaces the rows while one value
-/// is being changed. The notes are items too (unmarked), so the cursor is
-/// offset by their count.
+/// The settings screen: the notes, then the sections and their rows; a
+/// picker or a text field replaces the rows while one value is being
+/// changed. The panel is the shared menu panel, so the rows are fitted to
+/// its width here.
 fn draw_settings(f: &mut Frame, view: &SettingsView, area: Rect) {
-    let title = t!("設定: {}", "settings: {}", view.project);
-    let notes = settings_notes(view);
-    let (mut items, cursor, footer) = match &view.mode {
-        SettingsMode::List => (
-            settings_lines(view),
-            view.cursor,
-            ts!(
-                " j/k 移動 · Enter 変更 · d 既定に戻す · Esc 閉じる ",
-                " j/k move · Enter change · d back to default · Esc close "
-            ),
-        ),
-        SettingsMode::Pick { items, cursor, .. } => (
-            items.clone(),
-            *cursor,
-            ts!(
-                " j/k 移動 · Enter 決定 · Esc 戻る ",
-                " j/k move · Enter choose · Esc back "
-            ),
-        ),
-        SettingsMode::Input { key, input } => {
-            let (before, after) = input.parts();
-            let label = match key {
-                cosense::config::ProjectKey::DisplayName => t!("表示名", "display name"),
-                cosense::config::ProjectKey::GyazoTeam => {
-                    t!(
-                        "Gyazo Teams の組織名（空なら gyazo.com）",
-                        "Gyazo Teams org (empty: gyazo.com)"
-                    )
-                }
-                other => other.as_str().to_string(),
-            };
+    let title = t!("設定", "settings");
+    // The same width `draw_menu_panel` will choose, less the marker.
+    let inner = area.width.saturating_sub(8).min(90).max(20) as usize - 2;
+    let (items, cursor, footer) = match &view.mode {
+        SettingsMode::List => {
+            let (items, cursor) = settings_items(view, inner);
             (
-                vec![format!("{label}: {before}▏{after}")],
+                items,
+                cursor,
+                ts!(
+                    " j/k 移動 · Enter 変更 · d 既定に戻す · e $EDITOR で開く · Esc 閉じる ",
+                    " j/k move · Enter change · d back to default · e open in $EDITOR · Esc close "
+                ),
+            )
+        }
+        SettingsMode::Pick {
+            items,
+            cursor,
+            field,
+            ..
+        } => {
+            let mut all = settings_notes(view);
+            let offset = all.len();
+            all.extend(items.iter().cloned());
+            let footer = if *field == SettingField::Theme {
+                ts!(
+                    " j/k で流し見 · Enter 決定 · Esc 元に戻す ",
+                    " j/k to try · Enter choose · Esc back to before "
+                )
+            } else {
+                ts!(
+                    " j/k 移動 · Enter 決定 · Esc 戻る ",
+                    " j/k move · Enter choose · Esc back "
+                )
+            };
+            (all, cursor + offset, footer)
+        }
+        SettingsMode::Input { target, input } => {
+            let (before, after) = input.parts();
+            let label = match target {
+                Target::Project(cosense::config::ProjectKey::DisplayName) => {
+                    t!("表示名", "display name")
+                }
+                Target::Project(cosense::config::ProjectKey::GyazoTeam) => t!(
+                    "Gyazo Teams の組織名（空なら gyazo.com）",
+                    "Gyazo Teams org (empty: gyazo.com)"
+                ),
+                Target::View(cosense::config::ViewKey::DownloadDir) => {
+                    t!("保存先（~ 可）", "downloads (~ allowed)")
+                }
+                Target::Project(k) => k.as_str().to_string(),
+                Target::View(k) => k.as_str().to_string(),
+            };
+            let mut all = settings_notes(view);
+            all.push(format!("{label}: {before}▏{after}"));
+            (
+                all,
                 usize::MAX,
                 ts!(
                     " Enter 保存 · Esc 取り消し（空にすると既定に戻る） ",
@@ -221,15 +245,7 @@ fn draw_settings(f: &mut Frame, view: &SettingsView, area: Rect) {
             )
         }
     };
-    let offset = notes.len();
-    let mut all = notes;
-    all.append(&mut items);
-    let cursor = if cursor == usize::MAX {
-        usize::MAX
-    } else {
-        cursor + offset
-    };
-    draw_menu_panel(f, area, &title, &all, cursor, footer);
+    draw_menu_panel(f, area, &title, &items, cursor, footer);
 }
 
 /// A centered menu panel: title bar, the items with a `▸` on the cursor,

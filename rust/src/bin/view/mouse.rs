@@ -36,10 +36,10 @@ pub(crate) fn handle_mouse(app: &mut App, ctx: &Ctx, m: MouseEvent) {
     if app.overlay.is_some() {
         match m.kind {
             MouseEventKind::ScrollDown => {
-                handle_overlay_key(app, ctx, KeyCode::Down, KeyModifiers::NONE)
+                let _ = handle_overlay_key(app, ctx, KeyCode::Down, KeyModifiers::NONE);
             }
             MouseEventKind::ScrollUp => {
-                handle_overlay_key(app, ctx, KeyCode::Up, KeyModifiers::NONE)
+                let _ = handle_overlay_key(app, ctx, KeyCode::Up, KeyModifiers::NONE);
             }
             _ => {}
         }

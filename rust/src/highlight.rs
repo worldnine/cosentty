@@ -49,6 +49,14 @@ pub struct Highlighter {
 }
 
 impl Highlighter {
+    /// Every embedded theme name `--theme` accepts, in two-face's order.
+    pub fn theme_names() -> Vec<&'static str> {
+        EmbeddedLazyThemeSet::theme_names()
+            .iter()
+            .map(|t| t.as_name())
+            .collect()
+    }
+
     /// Build from an optional theme name; unknown names fall back to the
     /// light/dark default.
     pub fn new(theme_name: Option<&str>, light: bool) -> Self {
@@ -147,6 +155,15 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_listed_theme_loads() {
+        let names = super::Highlighter::theme_names();
+        assert!(names.len() > 5, "{names:?}");
+        for n in &names {
+            assert!(super::theme_by_name(n).is_some(), "{n}");
+        }
+    }
+
     use super::*;
 
     #[test]

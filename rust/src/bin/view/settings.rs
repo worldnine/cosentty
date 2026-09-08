@@ -1,136 +1,286 @@
-//! The settings screen (`,`): what the viewer knows about the current
-//! project — its theme, its proper name, where pasted images go — and where
-//! each answer came from (`api` / `file` / the built-in default). Every
-//! change is written to `config.toml` at once (`[project.<slug>]`,
-//! `Config::save_project_key`) and takes effect on screen at once. See
-//! `docs/PLAN-settings-ui.md`.
+//! The settings screen (`,`), in two sections: this terminal's own
+//! settings (`config.toml [view]`: language, colour scheme, light/dark, the
+//! index's excerpt dock, IME, downloads, diagrams) and, when a project is on
+//! screen, that project's (`[project.<slug>]`: theme, display name, where
+//! pasted images go). Every row shows the value in force and where it came
+//! from (`flag` / `env` / `api` / `file` / `auto` / `-`). A change is written
+//! to config.toml at once and takes effect on screen at once; `e` opens the
+//! file in `$EDITOR` instead. See `docs/PLAN-settings-ui.md` and
+//! `docs/PLAN-settings-global.md`.
 
 use super::*;
-use cosense::config::{Origin, ProjectKey};
+use cosense::config::{Origin, ProjectKey, ViewKey};
 
-/// Which of the three rows a key press is about.
+/// One row of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingField {
+    // ---- [view] ----
+    Lang,
     Theme,
-    DisplayName,
-    Images,
+    Appearance,
+    Preview,
+    Ime,
+    DownloadDir,
+    Diagrams,
+    // ---- [project.<slug>] ----
+    ProjectTheme,
+    ProjectDisplayName,
+    ProjectImages,
 }
 
 impl SettingField {
-    const ALL: [SettingField; 3] = [
+    const VIEW: [SettingField; 7] = [
+        SettingField::Lang,
         SettingField::Theme,
-        SettingField::DisplayName,
-        SettingField::Images,
+        SettingField::Appearance,
+        SettingField::Preview,
+        SettingField::Ime,
+        SettingField::DownloadDir,
+        SettingField::Diagrams,
+    ];
+    const PROJECT: [SettingField; 3] = [
+        SettingField::ProjectTheme,
+        SettingField::ProjectDisplayName,
+        SettingField::ProjectImages,
     ];
 
     fn label(self) -> String {
         match self {
-            SettingField::Theme => t!("テーマ", "theme"),
-            SettingField::DisplayName => t!("表示名", "display name"),
-            SettingField::Images => t!("画像の保存先", "images go to"),
+            SettingField::Lang => t!("言語", "language"),
+            SettingField::Theme => t!("配色テーマ", "colour theme"),
+            SettingField::Appearance => t!("明暗", "appearance"),
+            SettingField::Preview => t!("一覧の抜粋", "index excerpt"),
+            SettingField::Ime => t!("IME", "IME"),
+            SettingField::DownloadDir => t!("保存先", "downloads"),
+            SettingField::Diagrams => t!("図の描画", "diagrams"),
+            SettingField::ProjectTheme => t!("テーマ", "theme"),
+            SettingField::ProjectDisplayName => t!("表示名", "display name"),
+            SettingField::ProjectImages => t!("画像の保存先", "images go to"),
         }
+    }
+
+    /// The `[view]` key this row writes, for the view rows.
+    fn view_key(self) -> Option<ViewKey> {
+        Some(match self {
+            SettingField::Lang => ViewKey::Lang,
+            SettingField::Theme => ViewKey::Theme,
+            SettingField::Appearance => ViewKey::Appearance,
+            SettingField::Preview => ViewKey::Preview,
+            SettingField::Ime => ViewKey::Ime,
+            SettingField::DownloadDir => ViewKey::DownloadDir,
+            SettingField::Diagrams => ViewKey::Diagrams,
+            _ => return None,
+        })
     }
 }
 
-/// One row of the screen: the value in force and where it came from.
+/// One row as shown: the value in force, where it came from, and a short
+/// remark when the reader should know more (a flag overrides the file, a
+/// change waits for the next start).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SettingRow {
     pub(crate) field: SettingField,
     pub(crate) value: String,
     pub(crate) origin: Origin,
+    pub(crate) note: Option<String>,
+}
+
+/// What a text field or a picker writes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Target {
+    View(ViewKey),
+    Project(ProjectKey),
 }
 
 /// What the screen is doing: showing the rows, or asking for one value.
 #[derive(Debug)]
 pub(crate) enum SettingsMode {
     List,
-    /// A short menu (theme names; gcs / gyazo). `items[0]` is always
-    /// "(unset)" — removing the file's value.
+    /// A short menu. `items[0]` is always "(unset)" — removing the file's
+    /// value. For the colour theme the cursor's choice is applied as a
+    /// preview; `revert` is the file value to go back to on Esc.
     Pick {
         field: SettingField,
         items: Vec<String>,
         cursor: usize,
+        revert: Option<Option<String>>,
     },
-    /// A one-line text field (display name; the Gyazo Teams org). Empty
-    /// text removes the file's value.
+    /// A one-line text field. Empty text removes the file's value.
     Input {
-        key: ProjectKey,
+        target: Target,
         input: Input,
     },
 }
 
 #[derive(Debug)]
 pub(crate) struct SettingsView {
-    pub(crate) project: String,
+    /// The project section's subject; `None` over the projects list.
+    pub(crate) project: Option<String>,
+    /// Index into `rows`.
     pub(crate) cursor: usize,
     pub(crate) rows: Vec<SettingRow>,
-    /// `/api/projects/<slug>` answered — the theme and name rows then show
-    /// the web's values and a file value would not be used.
+    /// `/api/projects/<slug>` answered — the project's theme and name
+    /// rows then show the web's values and a file value would not be used.
     pub(crate) api_readable: bool,
     /// The file exists and does not parse: nothing will be written over it.
     pub(crate) file_broken: bool,
     pub(crate) mode: SettingsMode,
 }
 
-/// Open the screen for `project` (the page's, or the index's).
-pub(crate) fn open_settings(app: &mut App, ctx: &Ctx, project: &str) {
+/// What a key press on the screen amounts to, for the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsOutcome {
+    /// No settings screen is open.
+    NotOurs,
+    Handled,
+    /// `e`: open config.toml in `$EDITOR` (needs the terminal).
+    EditConfig,
+}
+
+/// Open the screen for `project` (the page's, or the index's; `None` over
+/// the projects list, where only this terminal's section is shown).
+pub(crate) fn open_settings(app: &mut App, ctx: &Ctx, project: Option<&str>) {
     let mut view = SettingsView {
-        project: project.to_string(),
+        project: project.map(str::to_string),
         cursor: 0,
         rows: Vec::new(),
         api_readable: false,
-        file_broken: ctx.config_error.is_some(),
+        file_broken: ctx.config_error().is_some(),
         mode: SettingsMode::List,
     };
     refresh_rows(&mut view, ctx);
     app.overlay = Some(Overlay::Settings(view));
 }
 
-/// Recompute the rows from what the viewer now knows.
-fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
-    let project = view.project.as_str();
-    view.api_readable = ctx.project_settings(project).is_some();
-    let (theme, theme_from) = ctx.project_theme_with(project);
-    let (name, name_from) = ctx.project_display_with(project);
-    let (dest, decided) = cosense::upload::Destination::resolve_with(
-        &ctx.config(),
-        project,
-        ctx.project_settings(project).as_ref(),
-    );
-    let dest_from = match decided {
-        cosense::upload::Decided::File => Origin::File,
-        cosense::upload::Decided::Project => Origin::Api,
-        cosense::upload::Decided::Default => Origin::Default,
-    };
-    view.rows = vec![
-        SettingRow {
-            field: SettingField::Theme,
-            value: theme.unwrap_or_else(|| t!("(なし)", "(none)")),
-            origin: theme_from,
-        },
-        SettingRow {
-            field: SettingField::DisplayName,
-            value: name,
-            origin: name_from,
-        },
-        SettingRow {
-            field: SettingField::Images,
-            value: dest.label(),
-            origin: dest_from,
-        },
-    ];
+fn origin_note(origin: Origin) -> Option<String> {
+    match origin {
+        Origin::Flag => Some(t!("起動オプションが優先", "the flag wins")),
+        Origin::Env => Some(t!("環境変数が優先", "the variable wins")),
+        _ => None,
+    }
 }
 
-/// The lines the panel shows above the rows: where the values come from,
-/// and whether the file can be written. Exposed for the drawing code.
+/// Recompute the rows from what the viewer now knows.
+fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
+    let v = ctx.view();
+    let mut rows = vec![
+        SettingRow {
+            field: SettingField::Lang,
+            value: match v.lang.0 {
+                cosense::lang::Lang::Ja => "ja".into(),
+                cosense::lang::Lang::En => "en".into(),
+            },
+            origin: v.lang.1,
+            note: origin_note(v.lang.1),
+        },
+        SettingRow {
+            field: SettingField::Theme,
+            value: v
+                .theme
+                .0
+                .clone()
+                .unwrap_or_else(|| t!("(端末の配色)", "(terminal default)")),
+            origin: v.theme.1,
+            note: origin_note(v.theme.1),
+        },
+        SettingRow {
+            field: SettingField::Appearance,
+            value: match v.appearance.0 {
+                Appearance::Auto => format!("auto ({})", if v.light { "light" } else { "dark" }),
+                a => a.as_str().to_string(),
+            },
+            origin: v.appearance.1,
+            note: origin_note(v.appearance.1),
+        },
+        SettingRow {
+            field: SettingField::Preview,
+            value: match v.preview.0 {
+                cosense::index::PreviewMode::On => "on",
+                cosense::index::PreviewMode::Off => "off",
+                cosense::index::PreviewMode::Auto => "auto",
+            }
+            .into(),
+            origin: v.preview.1,
+            note: origin_note(v.preview.1),
+        },
+        SettingRow {
+            field: SettingField::Ime,
+            value: match v.ime.0 {
+                cosense::ime::ImeMode::Jp => "jp",
+                cosense::ime::ImeMode::Off => "off",
+                cosense::ime::ImeMode::Ascii => "ascii",
+            }
+            .into(),
+            origin: v.ime.1,
+            note: origin_note(v.ime.1),
+        },
+        SettingRow {
+            field: SettingField::DownloadDir,
+            value: v.download_dir.0.display().to_string(),
+            origin: v.download_dir.1,
+            note: origin_note(v.download_dir.1),
+        },
+        SettingRow {
+            field: SettingField::Diagrams,
+            value: v.diagrams.0.as_str().into(),
+            origin: v.diagrams.1,
+            note: origin_note(v.diagrams.1).or_else(|| {
+                Some(t!(
+                    "off からの変更は次回起動から",
+                    "leaving off takes a restart"
+                ))
+            }),
+        },
+    ];
+    if let Some(project) = view.project.as_deref() {
+        view.api_readable = ctx.project_settings(project).is_some();
+        let (theme, theme_from) = ctx.project_theme_with(project);
+        let (name, name_from) = ctx.project_display_with(project);
+        let (dest, decided) = cosense::upload::Destination::resolve_with(
+            &ctx.config(),
+            project,
+            ctx.project_settings(project).as_ref(),
+        );
+        let dest_from = match decided {
+            cosense::upload::Decided::File => Origin::File,
+            cosense::upload::Decided::Project => Origin::Api,
+            cosense::upload::Decided::Default => Origin::Default,
+        };
+        // A file value under an API one is not in force: say so on the row.
+        let shadowed = |from: Origin, file_has: bool| -> Option<String> {
+            (from == Origin::Api && file_has)
+                .then(|| t!("API が読める間は API が優先", "the API wins while readable"))
+        };
+        let cfg = ctx.config();
+        rows.extend([
+            SettingRow {
+                field: SettingField::ProjectTheme,
+                value: theme.unwrap_or_else(|| t!("(なし)", "(none)")),
+                origin: theme_from,
+                note: shadowed(theme_from, cfg.project_theme(project).is_some()),
+            },
+            SettingRow {
+                field: SettingField::ProjectDisplayName,
+                value: name,
+                origin: name_from,
+                note: shadowed(name_from, cfg.project_display_name(project).is_some()),
+            },
+            SettingRow {
+                field: SettingField::ProjectImages,
+                value: dest.label(),
+                origin: dest_from,
+                note: None,
+            },
+        ]);
+    }
+    view.rows = rows;
+    view.cursor = view.cursor.min(view.rows.len().saturating_sub(1));
+}
+
+/// The lines above the rows: only what the reader must know now.
 pub(crate) fn settings_notes(view: &SettingsView) -> Vec<String> {
     let mut notes = Vec::new();
-    if view.api_readable {
-        notes.push(t!(
-            "プロジェクト設定は API から読めています。テーマと表示名は API が優先されます",
-            "project settings are readable from the API; theme and name follow it"
-        ));
-    } else {
+    if view.project.is_some() && !view.api_readable {
         notes.push(t!(
             "プロジェクト設定を API から読めません（非公開・sid なし）。file の値を使います",
             "project settings unreadable from the API (private, no sid); file values are used"
@@ -138,42 +288,105 @@ pub(crate) fn settings_notes(view: &SettingsView) -> Vec<String> {
     }
     if view.file_broken {
         notes.push(t!(
-            "config.toml が読めないので保存しません（直してから）",
-            "config.toml does not parse; nothing will be saved until it is fixed"
+            "config.toml が読めないので保存しません（e で開いて直す）",
+            "config.toml does not parse; nothing is saved until it is fixed (e opens it)"
         ));
     }
     notes
 }
 
-/// The rows as the panel prints them: label, value, origin tag.
-pub(crate) fn settings_lines(view: &SettingsView) -> Vec<String> {
-    view.rows
-        .iter()
-        .map(|r| {
-            format!(
-                "{:<14} {:<24} ← {}",
-                r.field.label(),
-                r.value,
-                r.origin.tag()
-            )
-        })
-        .collect()
+/// The panel's items and which of them carries the cursor: the notes, then
+/// each section under a heading, the rows fitted to `width` cells (label,
+/// value, origin, remark — the remark goes first when space is short, then
+/// the value is shortened).
+pub(crate) fn settings_items(view: &SettingsView, width: usize) -> (Vec<String>, usize) {
+    let mut items = settings_notes(view);
+    let mut cursor_item = usize::MAX;
+    let heading = |s: String| format!("── {s} ──");
+    let mut push_section = |title: String, fields: &[SettingField], items: &mut Vec<String>| {
+        items.push(heading(title));
+        for f in fields {
+            let Some((i, row)) = view.rows.iter().enumerate().find(|(_, r)| r.field == *f) else {
+                continue;
+            };
+            if matches!(view.mode, SettingsMode::List) && i == view.cursor {
+                cursor_item = items.len();
+            }
+            items.push(format_row(row, width));
+        }
+    };
+    push_section(
+        t!(
+            "この端末 (config.toml [view])",
+            "this terminal (config.toml [view])"
+        ),
+        &SettingField::VIEW,
+        &mut items,
+    );
+    if let Some(p) = view.project.as_deref() {
+        push_section(
+            t!("プロジェクト: {p}", "project: {p}"),
+            &SettingField::PROJECT,
+            &mut items,
+        );
+    }
+    (items, cursor_item)
 }
 
-/// Keys while the screen is open. Returns whether the key was taken.
+/// `label  value  ← origin  remark`, fitted to `width` cells.
+fn format_row(row: &SettingRow, width: usize) -> String {
+    const LABEL: usize = 14;
+    let label = pad_to(&row.label_text(), LABEL);
+    let origin = format!("← {}", row.origin.tag());
+    // What is left for the value and the remark: label, two gaps, origin.
+    let rest = width.saturating_sub(LABEL + 2 + str_width(&origin) + 1);
+    let (value_w, note) = match &row.note {
+        Some(n) if rest >= 30 => {
+            // The remark gets what the value does not need, up to half.
+            let value_w = rest.saturating_sub(str_width(n) + 2).max(rest / 2).min(24);
+            (
+                value_w,
+                Some(truncate_width(n, rest.saturating_sub(value_w + 2))),
+            )
+        }
+        _ => (rest.clamp(8, 24), None),
+    };
+    let value = pad_to(&truncate_width(&row.value, value_w), value_w);
+    match note {
+        Some(n) => format!("{label} {value}  {origin}  {n}"),
+        None => format!("{label} {value}  {origin}"),
+    }
+}
+
+impl SettingRow {
+    fn label_text(&self) -> String {
+        self.field.label()
+    }
+}
+
+fn pad_to(s: &str, w: usize) -> String {
+    let mut out = s.to_string();
+    let used = str_width(s);
+    if used < w {
+        out.push_str(&" ".repeat(w - used));
+    }
+    out
+}
+
+/// Keys while the screen is open.
 pub(crate) fn handle_settings_key(
     app: &mut App,
     ctx: &Ctx,
     code: KeyCode,
     mods: KeyModifiers,
-) -> bool {
+) -> SettingsOutcome {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let Some(Overlay::Settings(view)) = app.overlay.as_mut() else {
-        return false;
+        return SettingsOutcome::NotOurs;
     };
     match &mut view.mode {
         SettingsMode::List => {
-            let last = SettingField::ALL.len() - 1;
+            let last = view.rows.len().saturating_sub(1);
             match code {
                 KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
                 KeyCode::Char('?') => app.overlay = Some(Overlay::Help),
@@ -181,21 +394,31 @@ pub(crate) fn handle_settings_key(
                 KeyCode::Char('n') if ctrl => view.cursor = (view.cursor + 1).min(last),
                 KeyCode::Up | KeyCode::Char('k') => view.cursor = view.cursor.saturating_sub(1),
                 KeyCode::Char('p') if ctrl => view.cursor = view.cursor.saturating_sub(1),
+                KeyCode::Char('e') => return SettingsOutcome::EditConfig,
                 KeyCode::Enter => {
-                    let field = SettingField::ALL[view.cursor.min(last)];
-                    begin_change(app, ctx, field);
+                    if let Some(field) = view.rows.get(view.cursor).map(|r| r.field) {
+                        begin_change(app, ctx, field);
+                    }
                 }
                 // `d`: back to the default (removes the file's value).
                 KeyCode::Char('d') => {
-                    let field = SettingField::ALL[view.cursor.min(last)];
-                    let project = view.project.clone();
-                    let keys: &[ProjectKey] = match field {
-                        SettingField::Theme => &[ProjectKey::Theme],
-                        SettingField::DisplayName => &[ProjectKey::DisplayName],
-                        SettingField::Images => &[ProjectKey::Images, ProjectKey::GyazoTeam],
+                    let Some(field) = view.rows.get(view.cursor).map(|r| r.field) else {
+                        return SettingsOutcome::Handled;
                     };
-                    for k in keys {
-                        if !save(app, ctx, &project, *k, None) {
+                    let project = view.project.clone();
+                    let targets: Vec<Target> = match field {
+                        SettingField::ProjectTheme => vec![Target::Project(ProjectKey::Theme)],
+                        SettingField::ProjectDisplayName => {
+                            vec![Target::Project(ProjectKey::DisplayName)]
+                        }
+                        SettingField::ProjectImages => vec![
+                            Target::Project(ProjectKey::Images),
+                            Target::Project(ProjectKey::GyazoTeam),
+                        ],
+                        f => f.view_key().map(Target::View).into_iter().collect(),
+                    };
+                    for t in targets {
+                        if !save(app, ctx, project.as_deref(), t, None) {
                             break;
                         }
                     }
@@ -207,73 +430,141 @@ pub(crate) fn handle_settings_key(
             field,
             items,
             cursor,
+            revert,
         } => {
             let last = items.len().saturating_sub(1);
+            let field = *field;
+            let moved = match code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *cursor = (*cursor + 1).min(last);
+                    true
+                }
+                KeyCode::Char('n') if ctrl => {
+                    *cursor = (*cursor + 1).min(last);
+                    true
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *cursor = cursor.saturating_sub(1);
+                    true
+                }
+                KeyCode::Char('p') if ctrl => {
+                    *cursor = cursor.saturating_sub(1);
+                    true
+                }
+                _ => false,
+            };
+            if moved {
+                // The colour theme is previewed live: what the cursor is
+                // on is what the page wears, until Enter or Esc decides.
+                if field == SettingField::Theme {
+                    let chosen = (*cursor > 0).then(|| items[*cursor].clone());
+                    preview_theme(app, ctx, chosen);
+                }
+                return SettingsOutcome::Handled;
+            }
             match code {
-                KeyCode::Esc | KeyCode::Char('q') => view.mode = SettingsMode::List,
-                KeyCode::Down | KeyCode::Char('j') => *cursor = (*cursor + 1).min(last),
-                KeyCode::Char('n') if ctrl => *cursor = (*cursor + 1).min(last),
-                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
-                KeyCode::Char('p') if ctrl => *cursor = cursor.saturating_sub(1),
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    let revert = revert.take();
+                    view.mode = SettingsMode::List;
+                    if let Some(back) = revert {
+                        preview_theme(app, ctx, back);
+                    }
+                }
                 KeyCode::Enter => {
-                    let field = *field;
-                    let chosen = if *cursor == 0 {
-                        None
-                    } else {
-                        items.get(*cursor).cloned()
-                    };
+                    let chosen = (*cursor > 0).then(|| items[*cursor].clone());
                     let project = view.project.clone();
                     view.mode = SettingsMode::List;
                     match field {
-                        SettingField::Theme => {
-                            save(app, ctx, &project, ProjectKey::Theme, chosen.as_deref());
+                        SettingField::ProjectTheme => {
+                            save(
+                                app,
+                                ctx,
+                                project.as_deref(),
+                                Target::Project(ProjectKey::Theme),
+                                chosen.as_deref(),
+                            );
                         }
-                        SettingField::Images => match chosen.as_deref() {
+                        SettingField::ProjectImages => match chosen.as_deref() {
                             None => {
-                                if save(app, ctx, &project, ProjectKey::Images, None) {
-                                    save(app, ctx, &project, ProjectKey::GyazoTeam, None);
+                                if save(
+                                    app,
+                                    ctx,
+                                    project.as_deref(),
+                                    Target::Project(ProjectKey::Images),
+                                    None,
+                                ) {
+                                    save(
+                                        app,
+                                        ctx,
+                                        project.as_deref(),
+                                        Target::Project(ProjectKey::GyazoTeam),
+                                        None,
+                                    );
                                 }
                             }
                             Some("gyazo") => {
-                                if save(app, ctx, &project, ProjectKey::Images, Some("gyazo")) {
+                                if save(
+                                    app,
+                                    ctx,
+                                    project.as_deref(),
+                                    Target::Project(ProjectKey::Images),
+                                    Some("gyazo"),
+                                ) {
                                     // …and which Gyazo: the org, or gyazo.com.
-                                    let current = ctx
-                                        .config()
-                                        .upload_choice(&project)
-                                        .gyazo_team
+                                    let current = project
+                                        .as_deref()
+                                        .map(|p| ctx.config().upload_choice(p))
+                                        .and_then(|c| c.gyazo_team)
                                         .unwrap_or_default();
-                                    begin_input(app, ctx, ProjectKey::GyazoTeam, current);
+                                    begin_input(
+                                        app,
+                                        ctx,
+                                        Target::Project(ProjectKey::GyazoTeam),
+                                        current,
+                                    );
                                 }
                             }
                             Some(k) => {
-                                if save(app, ctx, &project, ProjectKey::Images, Some(k)) {
-                                    save(app, ctx, &project, ProjectKey::GyazoTeam, None);
+                                if save(
+                                    app,
+                                    ctx,
+                                    project.as_deref(),
+                                    Target::Project(ProjectKey::Images),
+                                    Some(k),
+                                ) {
+                                    save(
+                                        app,
+                                        ctx,
+                                        project.as_deref(),
+                                        Target::Project(ProjectKey::GyazoTeam),
+                                        None,
+                                    );
                                 }
                             }
                         },
-                        SettingField::DisplayName => {}
+                        f => {
+                            if let Some(key) = f.view_key() {
+                                save(app, ctx, None, Target::View(key), chosen.as_deref());
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        SettingsMode::Input { key, input } => match (code, ctrl) {
+        SettingsMode::Input { target, input } => match (code, ctrl) {
             (KeyCode::Esc, _) => {
                 view.mode = SettingsMode::List;
                 app.ime_guard = None;
             }
             (KeyCode::Enter, _) => {
-                let key = *key;
+                let target = *target;
                 let text = input.buf.trim().to_string();
                 let project = view.project.clone();
                 view.mode = SettingsMode::List;
                 app.ime_guard = None;
-                let value = if text.is_empty() {
-                    None
-                } else {
-                    Some(text.as_str())
-                };
-                save(app, ctx, &project, key, value);
+                let value = (!text.is_empty()).then_some(text.as_str());
+                save(app, ctx, project.as_deref(), target, value);
             }
             (KeyCode::Backspace, _) => input.backspace(),
             (KeyCode::Delete, _) | (KeyCode::Char('d'), true) => input.delete(),
@@ -287,7 +578,7 @@ pub(crate) fn handle_settings_key(
             _ => {}
         },
     }
-    true
+    SettingsOutcome::Handled
 }
 
 /// Text pasted while a field is open goes into it (first line only).
@@ -305,66 +596,116 @@ pub(crate) fn settings_paste(app: &mut App, text: &str) -> bool {
     false
 }
 
-/// Enter on a row: a picker for the theme and the destination, a text
-/// field for the name.
+fn unset_label() -> String {
+    t!("(設定しない)", "(unset)")
+}
+
+/// Enter on a row: a picker for the enumerated values, a text field for
+/// the free ones.
 fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
     let Some(Overlay::Settings(view)) = app.overlay.as_mut() else {
         return;
     };
     let project = view.project.clone();
+    let cfg = ctx.config();
+    let pick = |items: Vec<String>, current: Option<String>| SettingsMode::Pick {
+        field,
+        cursor: current
+            .and_then(|c| items.iter().position(|i| *i == c))
+            .unwrap_or(0),
+        items,
+        revert: None,
+    };
+    let with_unset = |vals: &[&str]| -> Vec<String> {
+        std::iter::once(unset_label())
+            .chain(vals.iter().map(|s| s.to_string()))
+            .collect()
+    };
     match field {
+        SettingField::Lang => view.mode = pick(with_unset(&["ja", "en"]), cfg.view.lang.clone()),
         SettingField::Theme => {
-            let mut items = vec![t!("(設定しない)", "(unset)")];
+            let mut items = vec![unset_label()];
+            items.extend(Highlighter::theme_names().into_iter().map(str::to_string));
+            let mut mode = pick(items, cfg.view.theme.clone());
+            if let SettingsMode::Pick { revert, .. } = &mut mode {
+                *revert = Some(cfg.view.theme.clone());
+            }
+            view.mode = mode;
+        }
+        SettingField::Appearance => {
+            view.mode = pick(
+                with_unset(&["light", "dark", "auto"]),
+                cfg.view.appearance.clone(),
+            )
+        }
+        SettingField::Preview => {
+            view.mode = pick(with_unset(&["on", "off", "auto"]), cfg.view.preview.clone())
+        }
+        SettingField::Ime => view.mode = pick(with_unset(&["jp", "off"]), cfg.view.ime.clone()),
+        SettingField::Diagrams => {
+            view.mode = pick(
+                with_unset(&["off", "manual", "auto"]),
+                cfg.view.diagrams.clone(),
+            )
+        }
+        SettingField::DownloadDir => {
+            let current = cfg.view.download_dir.clone().unwrap_or_default();
+            begin_input(app, ctx, Target::View(ViewKey::DownloadDir), current);
+        }
+        SettingField::ProjectTheme => {
+            let mut items = vec![unset_label()];
             items.extend(cosense::theme::COSENSE_THEMES.iter().map(|t| t.to_string()));
-            let current = ctx.config().project_theme(&project);
-            let cursor = current
-                .and_then(|c| items.iter().position(|i| *i == c))
-                .unwrap_or(0);
-            view.mode = SettingsMode::Pick {
-                field,
-                items,
-                cursor,
-            };
+            let current = project.as_deref().and_then(|p| cfg.project_theme(p));
+            view.mode = pick(items, current);
         }
-        SettingField::Images => {
-            let items = vec![t!("(設定しない)", "(unset)"), "gcs".into(), "gyazo".into()];
-            let current = ctx.config().upload_choice(&project).images;
-            let cursor = current
-                .and_then(|c| items.iter().position(|i| *i == c))
-                .unwrap_or(0);
-            view.mode = SettingsMode::Pick {
-                field,
-                items,
-                cursor,
-            };
+        SettingField::ProjectImages => {
+            let current = project.as_deref().and_then(|p| cfg.upload_choice(p).images);
+            view.mode = pick(with_unset(&["gcs", "gyazo"]), current);
         }
-        SettingField::DisplayName => {
-            let current = ctx
-                .config()
-                .project_display_name(&project)
+        SettingField::ProjectDisplayName => {
+            let current = project
+                .as_deref()
+                .and_then(|p| cfg.project_display_name(p))
                 .unwrap_or_default();
-            begin_input(app, ctx, ProjectKey::DisplayName, current);
+            begin_input(app, ctx, Target::Project(ProjectKey::DisplayName), current);
         }
     }
 }
 
-fn begin_input(app: &mut App, ctx: &Ctx, key: ProjectKey, current: String) {
+fn begin_input(app: &mut App, ctx: &Ctx, target: Target, current: String) {
     if let Some(Overlay::Settings(view)) = app.overlay.as_mut() {
         view.mode = SettingsMode::Input {
-            key,
+            target,
             input: Input::new(current),
         };
         // A name is typed in Japanese as often as not: the input source
-        // switches for the field and returns to ASCII when it closes.
-        app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode()));
+        // switches for the field and returns to ASCII when it closes. A
+        // path is not, so that field stays in ASCII.
+        let japanese = matches!(target, Target::Project(ProjectKey::DisplayName));
+        app.ime_guard = japanese.then(|| cosense::ime::ImeGuard::enter(ctx.ime_mode()));
     }
+}
+
+/// Wear `theme` (a `--theme` name, or none) without writing anything.
+fn preview_theme(app: &mut App, ctx: &Ctx, theme: Option<String>) {
+    ctx.with_view(|v| {
+        v.theme = (theme, Origin::File);
+        v.recompute();
+    });
+    apply_view_change(app, ctx);
 }
 
 /// Write one key, swap the in-memory config, and bring the screen up to
 /// date — the settings rows AND the page or index behind them. Returns
 /// whether the write went through.
-fn save(app: &mut App, ctx: &Ctx, project: &str, key: ProjectKey, value: Option<&str>) -> bool {
-    if ctx.config_error.is_some() {
+fn save(
+    app: &mut App,
+    ctx: &Ctx,
+    project: Option<&str>,
+    target: Target,
+    value: Option<&str>,
+) -> bool {
+    if ctx.config_error().is_some() {
         app.toast_err(t!(
             "config.toml が読めないので保存できません",
             "config.toml does not parse; not saving"
@@ -378,14 +719,51 @@ fn save(app: &mut App, ctx: &Ctx, project: &str, key: ProjectKey, value: Option<
         ));
         return false;
     };
-    match cosense::config::Config::save_project_key(path, project, key, value) {
+    let (result, key_name) = match target {
+        Target::View(k) => (
+            cosense::config::Config::save_view_key(path, k, value),
+            k.as_str(),
+        ),
+        Target::Project(k) => match project {
+            Some(p) => (
+                cosense::config::Config::save_project_key(path, p, k, value),
+                k.as_str(),
+            ),
+            None => return false,
+        },
+    };
+    match result {
         Ok(next) => {
             ctx.set_config(next);
             app.note(match value {
-                Some(v) => t!("{} = {v} を保存しました", "saved {} = {v}", key.as_str()),
-                None => t!("{} を既定に戻しました", "{} back to default", key.as_str()),
+                Some(v) => t!("{key_name} = {v} を保存しました", "saved {key_name} = {v}"),
+                None => t!(
+                    "{key_name} を既定に戻しました",
+                    "{key_name} back to default"
+                ),
             });
-            apply_config_change(app, ctx, project);
+            match target {
+                Target::View(_) => {
+                    // The file changed: resolve again so a flag or a
+                    // variable still wins where it should.
+                    let cfg = ctx.config();
+                    let mut notes = Vec::new();
+                    let next = ctx.view().reresolve(&cfg.view, &mut notes);
+                    ctx.with_view(|v| *v = next);
+                    for n in notes {
+                        app.toast_err(n);
+                    }
+                    apply_view_change(app, ctx);
+                }
+                Target::Project(_) => {
+                    if let Some(p) = project {
+                        apply_project_change(app, ctx, p);
+                    }
+                }
+            }
+            if let Some(Overlay::Settings(view)) = app.overlay.as_mut() {
+                refresh_rows(view, ctx);
+            }
             true
         }
         Err(e) => {
@@ -395,28 +773,132 @@ fn save(app: &mut App, ctx: &Ctx, project: &str, key: ProjectKey, value: Option<
     }
 }
 
-/// The file changed for `project`: refresh what is on screen from it.
-fn apply_config_change(app: &mut App, ctx: &Ctx, project: &str) {
-    if let Some(Overlay::Settings(view)) = app.overlay.as_mut() {
-        if view.project == project {
-            refresh_rows(view, ctx);
-        }
+/// This terminal's settings changed: everything derived from them follows.
+fn apply_view_change(app: &mut App, ctx: &Ctx) {
+    let v = ctx.view();
+    cosense::lang::set(v.lang.0);
+    app.light = v.light;
+    app.web_dark = !v.light;
+    // Leaving `off` needs the backend and its worker, which only start at
+    // launch; the row says so. Everything else takes effect now.
+    if !(app.render_policy == capability::RenderPolicy::Off
+        && v.diagrams.0 != capability::RenderPolicy::Off)
+    {
+        app.render_policy = v.diagrams.0;
     }
+    repaint_page(app, ctx);
+}
+
+/// The file changed for `project`: refresh what is on screen from it.
+fn apply_project_change(app: &mut App, ctx: &Ctx, project: &str) {
     if app.index_project == project {
         app.index_display = ctx.project_display(project);
     }
     if app.project == project {
         app.project_display = ctx.project_display(project);
-        let theme = ctx.project_theme(project);
-        let (fg, bg) = cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg());
-        app.header_colors = HeaderColors { fg, bg };
-        app.telomere_tint = theme
-            .as_deref()
-            .and_then(cosense::theme::cosense_telomere_tint);
-        let palette = cosense::theme::tinted_page_palette(&ctx.palette(), theme.as_deref());
-        if palette != app.palette {
-            app.palette = palette;
-            rerender(app, ctx);
+        repaint_page(app, ctx);
+    }
+}
+
+/// Header colours, palette, telomere tint for the page on screen, from the
+/// current terminal settings and the page's project theme; the body is
+/// re-rendered only when its palette actually changed.
+fn repaint_page(app: &mut App, ctx: &Ctx) {
+    let theme = ctx.project_theme(&app.project);
+    let (fg, bg) = cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg());
+    app.header_colors = HeaderColors { fg, bg };
+    app.telomere_tint = theme
+        .as_deref()
+        .and_then(cosense::theme::cosense_telomere_tint);
+    let palette = cosense::theme::tinted_page_palette(&ctx.palette(), theme.as_deref());
+    if palette != app.palette {
+        app.palette = palette;
+        rerender(app, ctx);
+    }
+}
+
+/// `e` on the screen: config.toml in `$EDITOR`, then read it back. The
+/// file may have been broken and fixed, or fixed and broken; the screen
+/// says which.
+pub(crate) fn config_editor_roundtrip(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    ctx: &Ctx,
+) {
+    let Some(path) = ctx.config_path.clone() else {
+        app.toast_err(t!(
+            "設定ファイルの場所が決まりません（HOME が未設定）",
+            "no place for the settings file ($HOME is unset)"
+        ));
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
+    ratatui::restore();
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} '{}'", path.display()))
+        .status();
+    *terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    app.laid_width = 0;
+    if !matches!(status, Ok(s) if s.success()) {
+        app.toast_err(t!(
+            "エディタが中断しました（{editor}）",
+            "editor aborted ({editor})"
+        ));
+    }
+    reload_config(app, ctx);
+}
+
+/// Read config.toml again (after `e`) and apply it as a save would.
+pub(crate) fn reload_config(app: &mut App, ctx: &Ctx) {
+    let Some(path) = ctx.config_path.clone() else {
+        return;
+    };
+    reload_config_from(app, ctx, &path);
+}
+
+pub(crate) fn reload_config_from(app: &mut App, ctx: &Ctx, path: &std::path::Path) {
+    match cosense::config::Config::load_from(path) {
+        Ok(c) => {
+            ctx.set_config(c);
+            ctx.set_config_error(None);
+            let cfg = ctx.config();
+            let mut notes = Vec::new();
+            let next = ctx.view().reresolve(&cfg.view, &mut notes);
+            ctx.with_view(|v| *v = next);
+            for n in notes {
+                app.toast_err(n);
+            }
+            apply_view_change(app, ctx);
+            let project = app.project.clone();
+            apply_project_change(app, ctx, &project);
+            let index_project = app.index_project.clone();
+            if !index_project.is_empty() {
+                apply_project_change(app, ctx, &index_project);
+            }
+            app.note(t!("config.toml を読み直しました", "config.toml reloaded"));
         }
+        Err(e) => {
+            ctx.set_config_error(Some(e.clone()));
+            app.toast_err(t!(
+                "設定ファイルを読めませんでした: {e}",
+                "could not read the config file: {e}"
+            ));
+        }
+    }
+    if let Some(Overlay::Settings(view)) = app.overlay.as_mut() {
+        view.file_broken = ctx.config_error().is_some();
+        refresh_rows(view, ctx);
     }
 }

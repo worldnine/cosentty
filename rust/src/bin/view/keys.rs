@@ -35,8 +35,7 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         if let (KeyCode::Char('c'), true) = (k.code, ctrl) {
             return Action::Quit;
         }
-        handle_overlay_key(app, ctx, k.code, k.modifiers);
-        return Action::Continue;
+        return handle_overlay_key(app, ctx, k.code, k.modifiers);
     }
     let page_rows = app.index_list_rect.height.max(1) as i32;
     let preview_on = app.index_preview_rect.width > 0 && app.index_preview_rect.height > 0;
@@ -126,15 +125,11 @@ fn index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action {
         (KeyCode::Char(','), false) => {
             // The projects list names no project: nothing to open here
             // (an empty slug would otherwise write `[project.""]`).
-            if app.index_project.is_empty() {
-                app.toast(t!(
-                    "プロジェクトを開いてから , で設定",
-                    "open a project first, then , for its settings"
-                ));
-            } else {
-                let project = app.index_project.clone();
-                open_settings(app, ctx, &project);
-            }
+            // The projects list names no project: only this terminal's own
+            // settings are shown there (an empty slug would otherwise
+            // write `[project.""]`).
+            let project = app.index_project.clone();
+            open_settings(app, ctx, (!project.is_empty()).then_some(project.as_str()));
         }
         // `^o` again: one level up. Over a project's pages it lists the
         // projects; over the projects it fetches them again (the page
@@ -307,8 +302,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
 
     // Overlays capture keys while open.
     if app.overlay.is_some() {
-        handle_overlay_key(app, ctx, k.code, k.modifiers);
-        return Action::Continue;
+        return handle_overlay_key(app, ctx, k.code, k.modifiers);
     }
 
     // The sticky move mode owns the plain keys while it is up: h/j/k/l and
@@ -738,7 +732,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
         // The project's settings: theme, name, upload destination.
         (KeyCode::Char(','), false) => {
             let project = app.project.clone();
-            open_settings(app, ctx, &project);
+            open_settings(app, ctx, Some(&project));
         }
 
         // Unbound: show what arrived. A NON-ASCII char here almost always
@@ -779,7 +773,12 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
 /// The Pages picker is a filter box: printable keys type into the filter, so
 /// movement there uses arrows / ^n / ^p. The other overlays are plain lists
 /// and keep j/k.
-pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: KeyModifiers) {
+pub(crate) fn handle_overlay_key(
+    app: &mut App,
+    ctx: &Ctx,
+    code: KeyCode,
+    mods: KeyModifiers,
+) -> Action {
     enum Act {
         None,
         Close,
@@ -788,8 +787,10 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         Activate,
     }
     // The settings screen has its own keys (pickers, a text field).
-    if handle_settings_key(app, ctx, code, mods) {
-        return;
+    match handle_settings_key(app, ctx, code, mods) {
+        SettingsOutcome::NotOurs => {}
+        SettingsOutcome::Handled => return Action::Continue,
+        SettingsOutcome::EditConfig => return Action::EditConfig,
     }
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let is_line_info = matches!(app.overlay, Some(Overlay::LineInfo));
@@ -885,7 +886,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
                 if let Some(item) = item {
                     activate_link(app, ctx, item);
                 }
-                return;
+                return Action::Continue;
             }
             let create = false;
             let target: Option<(String, String, Option<usize>)> = match &app.overlay {
@@ -937,4 +938,5 @@ pub(crate) fn handle_overlay_key(app: &mut App, ctx: &Ctx, code: KeyCode, mods: 
         }
         Act::None => {}
     }
+    Action::Continue
 }

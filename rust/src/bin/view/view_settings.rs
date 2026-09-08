@@ -63,6 +63,11 @@ pub(crate) struct ViewSettings {
     /// The terminal's background as OSC 11 reported it at start, when it
     /// did. `Appearance::Auto` reads this; a forced mode ignores it.
     pub detected_bg: Option<(u8, u8, u8)>,
+    /// What the command line said — kept so a later re-resolution (after
+    /// the settings screen wrote the file) still lets the flags win.
+    pub flags: ViewFlags,
+    /// Where downloads go when nothing names a place.
+    pub default_download: std::path::PathBuf,
     // ---- derived: `recompute` keeps these in step with the above --------
     pub light: bool,
     pub terminal_bg: (u8, u8, u8),
@@ -173,7 +178,7 @@ impl ViewSettings {
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .map(dir_of),
-            (default_download, Origin::Auto),
+            (default_download.clone(), Origin::Auto),
         );
 
         let diag_file = file
@@ -203,6 +208,8 @@ impl ViewSettings {
             download_dir,
             diagrams,
             detected_bg,
+            flags: flags.clone(),
+            default_download,
             light: false,
             terminal_bg: (24, 24, 24),
             hl: Arc::new(Highlighter::new(None, false)),
@@ -210,6 +217,19 @@ impl ViewSettings {
         };
         v.recompute();
         v
+    }
+
+    /// Resolve again against a freshly saved file, keeping the flags, the
+    /// environment and the measured background as they were at start.
+    pub(crate) fn reresolve(&self, file: &ViewSection, notes: &mut Vec<String>) -> Self {
+        Self::resolve(
+            &self.flags,
+            &|k| std::env::var(k).ok(),
+            file,
+            self.detected_bg,
+            self.default_download.clone(),
+            notes,
+        )
     }
 
     /// The derived values from the chosen ones. Called after every change.
@@ -254,6 +274,8 @@ impl ViewSettings {
             download_dir: (std::env::temp_dir(), Origin::Default),
             diagrams: (capability::RenderPolicy::Off, Origin::Default),
             detected_bg: None,
+            flags: ViewFlags::default(),
+            default_download: std::env::temp_dir(),
             light: false,
             terminal_bg: (24, 24, 24),
             hl: Arc::new(Highlighter::new(None, false)),

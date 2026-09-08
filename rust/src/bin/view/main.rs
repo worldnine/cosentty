@@ -341,7 +341,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         gyazo_teams_token,
         gyazo_personal_token,
         config: std::sync::Mutex::new(config),
-        config_error,
+        config_error: std::sync::Mutex::new(config_error),
         config_path: cosense::config::Config::path(),
         send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
@@ -351,7 +351,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     app.light = ctx.light();
     app.render_policy = ctx.view().diagrams.0;
     app.visits_path = ctx.visits_path.clone();
-    if let Some(e) = ctx.config_error.as_ref() {
+    if let Some(e) = ctx.config_error() {
         app.toast_err(t!(
             "設定ファイルを読めませんでした: {e}",
             "could not read the config file: {e}"
@@ -572,7 +572,10 @@ struct Ctx {
     /// because the settings screen (`,`) replaces it after a save while
     /// every handler holds `&Ctx`.
     config: std::sync::Mutex<cosense::config::Config>,
-    config_error: Option<String>,
+    /// Why the file could not be read, when it could not. Behind a mutex
+    /// with `config`: `e` on the settings screen re-reads the file after
+    /// the editor and may clear (or set) this.
+    config_error: std::sync::Mutex<Option<String>>,
     /// Where the settings screen writes (`Config::path`). `None` — no
     /// `$HOME` — makes every save an error it can name; tests point it at
     /// a scratch file so a key press never touches the developer's own.
@@ -666,6 +669,17 @@ impl Ctx {
     fn set_config(&self, next: cosense::config::Config) {
         if let Ok(mut c) = self.config.lock() {
             *c = next;
+        }
+    }
+
+    /// Why the settings file could not be read, if it could not.
+    fn config_error(&self) -> Option<String> {
+        self.config_error.lock().map(|e| e.clone()).unwrap_or(None)
+    }
+
+    fn set_config_error(&self, e: Option<String>) {
+        if let Ok(mut slot) = self.config_error.lock() {
+            *slot = e;
         }
     }
 
@@ -782,6 +796,8 @@ enum Action {
     Continue,
     Quit,
     Editor,
+    /// `e` on the settings screen: config.toml in `$EDITOR`, then re-read.
+    EditConfig,
     /// Drop the screen and redraw whole: recovery from a garbled terminal.
     Repaint,
 }
@@ -905,6 +921,10 @@ fn run(
                         Action::Editor => {
                             editor_roundtrip(terminal, app, ctx);
                             break; // geometry may have changed — redraw first
+                        }
+                        Action::EditConfig => {
+                            config_editor_roundtrip(terminal, app, ctx);
+                            break;
                         }
                         Action::Repaint => {
                             terminal.clear()?;
