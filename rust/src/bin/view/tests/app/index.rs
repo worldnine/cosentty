@@ -662,7 +662,7 @@ fn the_index_draws_a_list_above_a_shallow_excerpt() {
         "first row: {:?}",
         rows[1]
     );
-    let layout = cosense::index::layout(ctx.preview, 100, 8);
+    let layout = cosense::index::layout(ctx.preview(), 100, 8);
     let excerpt_y = 1 + layout.list as usize + layout.gap as usize;
     assert!(
         flat(&rows[excerpt_y]).contains("改善案"),

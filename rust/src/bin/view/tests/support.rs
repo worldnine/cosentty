@@ -20,15 +20,9 @@ pub(crate) fn test_ctx() -> Ctx {
     };
     Ctx {
         client: Client::new(cfg).unwrap(),
-        hl: Highlighter::new(None, false),
-        palette: cosense::theme::Palette::for_light(false),
         picker: Picker::halfblocks(),
         fetcher: Arc::new(ImageFetcher::new(None, None).unwrap()),
-        light: false,
-        terminal_bg: (24, 24, 24),
-        ime_mode: cosense::ime::ImeMode::Off,
-        preview: cosense::index::PreviewMode::Auto,
-        download_dir: std::env::temp_dir(),
+        view: std::sync::RwLock::new(ViewSettings::for_tests()),
         visits_path: None,
         editability: Arc::new(std::sync::Mutex::new(HashMap::new())),
         project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),

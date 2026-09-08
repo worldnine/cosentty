@@ -356,7 +356,7 @@ fn begin_input(app: &mut App, ctx: &Ctx, key: ProjectKey, current: String) {
         };
         // A name is typed in Japanese as often as not: the input source
         // switches for the field and returns to ASCII when it closes.
-        app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+        app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode()));
     }
 }
 
@@ -408,12 +408,12 @@ fn apply_config_change(app: &mut App, ctx: &Ctx, project: &str) {
     if app.project == project {
         app.project_display = ctx.project_display(project);
         let theme = ctx.project_theme(project);
-        let (fg, bg) = cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg);
+        let (fg, bg) = cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg());
         app.header_colors = HeaderColors { fg, bg };
         app.telomere_tint = theme
             .as_deref()
             .and_then(cosense::theme::cosense_telomere_tint);
-        let palette = cosense::theme::tinted_page_palette(&ctx.palette, theme.as_deref());
+        let palette = cosense::theme::tinted_page_palette(&ctx.palette(), theme.as_deref());
         if palette != app.palette {
             app.palette = palette;
             rerender(app, ctx);

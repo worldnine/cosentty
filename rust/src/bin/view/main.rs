@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
 use cosense::capability::{self, RenderCapability, SyncState};
 use cosense::comment::{format_all, Comment, Selection};
+use cosense::config::Origin;
 use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
 use cosense::highlight::Highlighter;
 use cosense::image_fetch::ImageFetcher;
@@ -99,9 +100,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut positional: Vec<String> = Vec::new();
     let mut theme: Option<String> = None;
-    let mut force_light: Option<bool> = None;
-    let mut ime_mode = cosense::ime::ImeMode::Jp; // Japanese-first default
-    let mut preview = cosense::index::PreviewMode::Auto;
+    let mut force_light: Option<Appearance> = None;
+    let mut ime_mode: Option<cosense::ime::ImeMode> = None;
+    let mut preview: Option<cosense::index::PreviewMode> = None;
     let mut download_dir: Option<String> = None;
     let mut send_cmd: Option<String> = None;
     let mut lang: Option<String> = None;
@@ -109,27 +110,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--theme" => theme = it.next(),
-            "--light" => force_light = Some(true),
-            "--dark" => force_light = Some(false),
+            "--light" => force_light = Some(Appearance::Light),
+            "--dark" => force_light = Some(Appearance::Dark),
             "--ime" => {
-                ime_mode = cosense::ime::ImeMode::parse(&it.next().unwrap_or_default());
+                ime_mode = Some(cosense::ime::ImeMode::parse(&it.next().unwrap_or_default()));
             }
             s if s.starts_with("--ime=") => {
-                ime_mode = cosense::ime::ImeMode::parse(&s["--ime=".len()..]);
+                ime_mode = Some(cosense::ime::ImeMode::parse(&s["--ime=".len()..]));
             }
             s if s.starts_with("--theme=") => theme = Some(s["--theme=".len()..].to_string()),
             // The index's excerpt dock keeps ashiato's flag and threshold:
             // `auto` (default) shows it from 80 columns up.
             "--preview" => {
-                preview = it
-                    .next()
-                    .as_deref()
-                    .and_then(cosense::index::PreviewMode::parse)
-                    .unwrap_or_default();
+                preview = Some(
+                    it.next()
+                        .as_deref()
+                        .and_then(cosense::index::PreviewMode::parse)
+                        .unwrap_or_default(),
+                );
             }
             s if s.starts_with("--preview=") => {
-                preview = cosense::index::PreviewMode::parse(&s["--preview=".len()..])
-                    .unwrap_or_default();
+                preview = Some(
+                    cosense::index::PreviewMode::parse(&s["--preview=".len()..])
+                        .unwrap_or_default(),
+                );
             }
             "--lang" => lang = it.next(),
             s if s.starts_with("--lang=") => lang = Some(s["--lang=".len()..].to_string()),
@@ -144,10 +148,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             _ => positional.push(a),
         }
     }
-    // Before any message is built: the whole UI asks `lang` for its words.
-    cosense::lang::set(cosense::lang::Lang::detect(lang.as_deref(), &|k| {
-        std::env::var(k).ok()
-    }));
+    // The viewer's own settings file (upload destinations, `[view]`,
+    // `[project.*]`). A typo must not silently become the defaults, so the
+    // error is kept and shown once the screen is up. Read before the first
+    // message is built: `[view].lang` is one of the things it decides.
+    let (config, config_error) = match cosense::config::Config::load() {
+        Ok(c) => (c, None),
+        Err(e) => (cosense::config::Config::default(), Some(e)),
+    };
+    let flags = ViewFlags {
+        lang: lang.clone(),
+        theme: theme.clone(),
+        appearance: force_light,
+        preview,
+        ime: ime_mode,
+        download_dir: download_dir.clone(),
+    };
+    // Language first: the whole UI asks `lang` for its words, and the rest
+    // of the settings are re-resolved below once the terminal has been
+    // asked about its background.
+    let mut view_notes = Vec::new();
+    {
+        let early = ViewSettings::resolve(
+            &flags,
+            &|k| std::env::var(k).ok(),
+            &config.view,
+            None,
+            std::path::PathBuf::new(),
+            &mut Vec::new(),
+        );
+        cosense::lang::set(early.lang.0);
+    }
 
     let sid = std::env::var("COSENSE_SID").ok().filter(|s| !s.is_empty());
     let env_token = |name: &str| std::env::var(name).ok().filter(|s| !s.is_empty());
@@ -218,14 +249,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let fetcher = Arc::new(ImageFetcher::new(gyazo_token, user_cred)?);
-    // The viewer's own settings file (upload destinations; key bindings
-    // later). A typo must not silently become the defaults, so the error
-    // is kept and shown once the screen is up.
-    let (config, config_error) = match cosense::config::Config::load() {
-        Ok(c) => (c, None),
-        Err(e) => (cosense::config::Config::default(), Some(e)),
-    };
-
     let mut terminal = ratatui::init();
     // Wheel scrolling moves the viewport (akapen parity); failure to enable
     // mouse reporting only loses that, so it is not fatal. Bracketed paste
@@ -253,64 +276,65 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Detect the terminal's actual background after entering the alt screen.
     // A forced mode uses a representative base so translucent Cosense navbar
     // colors still compose predictably without a second OSC query.
-    let detected_bg = if force_light.is_none() {
-        cosense::theme::detect_background()
-    } else {
+    // Only asked when nothing forces a mode: the answer decides light/dark
+    // and is the base translucent Cosense colours are composed over.
+    let forced = force_light.is_some()
+        || matches!(
+            config
+                .view
+                .appearance
+                .as_deref()
+                .and_then(Appearance::parse),
+            Some(Appearance::Light | Appearance::Dark)
+        );
+    let detected_bg = if forced {
         None
+    } else {
+        cosense::theme::detect_background()
     };
-    let light = force_light.unwrap_or_else(|| {
-        detected_bg
-            .map(cosense::theme::background_is_light)
-            .unwrap_or(false)
-    });
-    let terminal_bg = detected_bg.unwrap_or(if light { (250, 250, 250) } else { (24, 24, 24) });
-    let hl = Highlighter::new(theme.as_deref(), light);
-    // One color scheme for the whole page: headings, links, quotes and
-    // code labels take the theme's markdown colors (akapen parity).
-    let palette = cosense::theme::Palette::from_theme(&hl, light);
-    let picker = image_picker()?;
-
-    // Where saved files land. A directory the user NAMED is created if it
-    // is missing; if that cannot be done, say so once at startup and fall
-    // back to the search, rather than failing at each download with a
-    // message about a path nobody remembers choosing.
+    // Where saved files land when nothing names a place: `XDG_DOWNLOAD_DIR`,
+    // then `~/Downloads`, then the current directory.
     let home = std::env::var("HOME").ok();
-    let env_download = std::env::var("COSENSE_DOWNLOAD_DIR").ok();
     let xdg_download = std::env::var("XDG_DOWNLOAD_DIR").ok();
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (mut download_dir, named) = pick_download_dir(
-        download_dir.as_deref(),
-        env_download.as_deref(),
+    let (default_download, _) = pick_download_dir(
+        None,
+        None,
         xdg_download.as_deref(),
         home.as_deref(),
         cwd.clone(),
     );
+    let mut view = ViewSettings::resolve(
+        &flags,
+        &|k| std::env::var(k).ok(),
+        &config.view,
+        detected_bg,
+        default_download.clone(),
+        &mut view_notes,
+    );
+    // A directory the user NAMED is created if it is missing; if that
+    // cannot be done, say so once at startup and fall back to the search,
+    // rather than failing at each download with a message about a path
+    // nobody remembers choosing.
     let mut download_note = None;
-    if named {
-        if let Err(e) = std::fs::create_dir_all(&download_dir) {
-            let (fallback, _) =
-                pick_download_dir(None, None, xdg_download.as_deref(), home.as_deref(), cwd);
+    if view.download_dir.1 != Origin::Auto {
+        if let Err(e) = std::fs::create_dir_all(&view.download_dir.0) {
             download_note = Some(t!(
                 "{} は使えません（{e}）。{} に保存します",
                 "{} is unusable ({e}); saving to {} instead",
-                download_dir.display(),
-                fallback.display()
+                view.download_dir.0.display(),
+                default_download.display()
             ));
-            download_dir = fallback;
+            view.download_dir = (default_download, Origin::Auto);
         }
     }
+    let picker = image_picker()?;
 
     let ctx = Ctx {
         client,
-        hl,
-        palette,
         picker,
         fetcher,
-        light,
-        terminal_bg,
-        ime_mode,
-        preview,
-        download_dir,
+        view: std::sync::RwLock::new(view),
         visits_path: nav::default_visits_path(),
         editability: Arc::new(std::sync::Mutex::new(HashMap::new())),
         project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -324,7 +348,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let loaded = load_page(&ctx, &project, &title)?;
 
     let mut app = App::new(project.clone());
-    app.light = ctx.light;
+    app.light = ctx.light();
+    app.render_policy = ctx.view().diagrams.0;
     app.visits_path = ctx.visits_path.clone();
     if let Some(e) = ctx.config_error.as_ref() {
         app.toast_err(t!(
@@ -332,7 +357,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             "could not read the config file: {e}"
         ));
     }
-    app.session_ime = cosense::ime::SessionIme::new(ime_mode);
+    for n in view_notes {
+        app.toast_err(n);
+    }
+    app.session_ime = cosense::ime::SessionIme::new(ctx.ime_mode());
     // The serial commit worker: owns its own Client clone and answers on
     // the outcome channel drained by the event loop.
     if let Some(jobs_rx) = app.commit_jobs_rx.take() {
@@ -509,22 +537,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// Shared, page-independent resources used to load pages on navigation.
 struct Ctx {
     client: Client,
-    hl: Highlighter,
-    palette: cosense::theme::Palette,
     picker: Picker,
     /// Shared with background download threads.
     fetcher: Arc<ImageFetcher>,
-    /// Terminal background is light (drives telomere/palette shades).
-    light: bool,
-    /// Actual OSC 11 background when available, otherwise a light/dark
-    /// estimate. Cosense's translucent navbar colors are composed over it.
-    terminal_bg: (u8, u8, u8),
-    /// Input-source policy around the composer (`--ime`, default jp).
-    ime_mode: cosense::ime::ImeMode,
-    /// Whether the index's excerpt dock is drawn (`--preview`).
-    preview: cosense::index::PreviewMode,
-    /// Where saved files land (`--download-dir`, see `pick_download_dir`).
-    download_dir: std::path::PathBuf,
+    /// This terminal's settings (language, colours, light/dark, the
+    /// excerpt dock, IME, downloads, diagrams) and what they derive:
+    /// highlighter, palette, background. Behind a lock because the settings
+    /// screen (`,`) changes them while every handler holds `&Ctx`. Read
+    /// through the accessors below; each takes a short read lock and copies.
+    view: std::sync::RwLock<ViewSettings>,
     /// Where this viewer's own visit times persist (`nav::default_visits_path`).
     /// `None` keeps everything in memory — that is what tests run with.
     visits_path: Option<std::path::PathBuf>,
@@ -562,6 +583,79 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// A copy of this terminal's settings.
+    fn view(&self) -> ViewSettings {
+        self.view
+            .read()
+            .map(|v| v.clone())
+            .unwrap_or_else(|p| p.into_inner().clone())
+    }
+
+    /// Change the settings in place (`recompute` is the caller's job when
+    /// a chosen value moved).
+    fn with_view(&self, f: impl FnOnce(&mut ViewSettings)) {
+        if let Ok(mut v) = self.view.write() {
+            f(&mut v);
+        }
+    }
+
+    /// The code/markdown highlighter for the current theme.
+    fn hl(&self) -> Arc<Highlighter> {
+        self.view
+            .read()
+            .map(|v| Arc::clone(&v.hl))
+            .unwrap_or_else(|p| Arc::clone(&p.into_inner().hl))
+    }
+
+    /// The body palette for the current theme (before project tinting).
+    fn palette(&self) -> cosense::theme::Palette {
+        self.view
+            .read()
+            .map(|v| v.palette)
+            .unwrap_or_else(|p| p.into_inner().palette)
+    }
+
+    /// Terminal background is light (drives telomere/palette shades).
+    fn light(&self) -> bool {
+        self.view
+            .read()
+            .map(|v| v.light)
+            .unwrap_or_else(|p| p.into_inner().light)
+    }
+
+    /// Actual OSC 11 background when available, otherwise a light/dark
+    /// estimate. Cosense's translucent navbar colors are composed over it.
+    fn terminal_bg(&self) -> (u8, u8, u8) {
+        self.view
+            .read()
+            .map(|v| v.terminal_bg)
+            .unwrap_or_else(|p| p.into_inner().terminal_bg)
+    }
+
+    /// Input-source policy around the composer (`--ime`, default jp).
+    fn ime_mode(&self) -> cosense::ime::ImeMode {
+        self.view
+            .read()
+            .map(|v| v.ime.0)
+            .unwrap_or_else(|p| p.into_inner().ime.0)
+    }
+
+    /// Whether the index's excerpt dock is drawn (`--preview`).
+    fn preview(&self) -> cosense::index::PreviewMode {
+        self.view
+            .read()
+            .map(|v| v.preview.0)
+            .unwrap_or_else(|p| p.into_inner().preview.0)
+    }
+
+    /// Where saved files land (`--download-dir`, see `pick_download_dir`).
+    fn download_dir(&self) -> std::path::PathBuf {
+        self.view
+            .read()
+            .map(|v| v.download_dir.0.clone())
+            .unwrap_or_else(|p| p.into_inner().download_dir.0.clone())
+    }
+
     /// A copy of the settings file as last read or saved. Small and
     /// cloned per call so no lock is held across anything slow.
     fn config(&self) -> cosense::config::Config {
@@ -942,6 +1036,8 @@ mod keys;
 use keys::*;
 mod settings;
 use settings::*;
+mod view_settings;
+use view_settings::*;
 mod ui;
 use ui::*;
 mod app;

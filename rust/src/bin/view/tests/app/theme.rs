@@ -8,7 +8,7 @@ fn set_page_carries_the_page_palette() {
     let mut app = page(&["t"]);
     // A themed project's tinted palette arrives with the page; from then
     // on every re-render of THIS page keeps it.
-    let mut tinted = ctx.palette;
+    let mut tinted = ctx.palette();
     tinted.link = Color::Rgb(1, 2, 3);
     app.set_page(
         Loaded {
@@ -95,7 +95,8 @@ fn the_index_excerpt_wears_the_listed_projects_theme() {
     let lines = index_preview_lines(&app, &ctx, 60);
     let (green, _) = cosense::theme::cosense_link_colors("green").unwrap();
     assert_ne!(
-        green, ctx.palette.link,
+        green,
+        ctx.palette().link,
         "a themed link is a different colour"
     );
     assert!(
@@ -126,7 +127,7 @@ fn the_index_header_wears_the_listed_projects_theme() {
     });
     // The list answers to ITS project: green's navbar, not the page the
     // reader came from.
-    let want = cosense::theme::project_header_colors(Some("green"), ctx.terminal_bg);
+    let want = cosense::theme::project_header_colors(Some("green"), ctx.terminal_bg());
     let got = app.chrome_colors(&ctx);
     assert_eq!(got.bg, want.1);
     // The page's own colours are untouched under the list.

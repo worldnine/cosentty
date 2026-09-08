@@ -327,7 +327,7 @@ pub(crate) fn shimmer(
         .map(|s| {
             Span::styled(
                 s.content.clone(),
-                cosense::theme::shimmer_style(s.style, ctx.terminal_bg, level),
+                cosense::theme::shimmer_style(s.style, ctx.terminal_bg(), level),
             )
         })
         .collect();
@@ -354,7 +354,7 @@ pub(crate) fn shimmer_across(line: &Line<'static>, app: &App, ctx: &Ctx) -> Line
             let level = cosense::theme::shimmer_level_across(col, len, elapsed);
             spans.push(Span::styled(
                 ch.to_string(),
-                cosense::theme::shimmer_style(s.style, ctx.terminal_bg, level),
+                cosense::theme::shimmer_style(s.style, ctx.terminal_bg(), level),
             ));
             col += str_width(&ch.to_string()) as u16;
         }

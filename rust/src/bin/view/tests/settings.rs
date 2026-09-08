@@ -250,3 +250,71 @@ fn the_projects_list_has_no_settings_to_open() {
     );
     assert_eq!(file(&dir), "");
 }
+
+/// `[view]` is resolved flag > env > file > default, and a file value that
+/// does not parse is reported and dropped rather than failing the file.
+#[test]
+fn view_settings_follow_flag_env_file_default() {
+    use cosense::config::{Config, Origin};
+    let file = Config::parse(
+        "[view]\nlang = \"ja\"\ntheme = \"Nord\"\nappearance = \"light\"\npreview = \"off\"\nime = \"off\"\ndownload_dir = \"~/dl\"\ndiagrams = \"bogus\"\n",
+    )
+    .unwrap()
+    .view;
+    let env = |k: &str| match k {
+        "HOME" => Some("/home/me".to_string()),
+        "COSENSE_LANG" => Some("en".to_string()),
+        _ => None,
+    };
+    let mut notes = Vec::new();
+    let flags = ViewFlags {
+        theme: Some("Dracula".into()),
+        ..ViewFlags::default()
+    };
+    let v = ViewSettings::resolve(&flags, &env, &file, None, "/tmp".into(), &mut notes);
+    assert_eq!(
+        v.lang,
+        (cosense::lang::Lang::En, Origin::Env),
+        "env beats file"
+    );
+    assert_eq!(
+        v.theme,
+        (Some("Dracula".into()), Origin::Flag),
+        "flag beats file"
+    );
+    assert_eq!(v.appearance, (Appearance::Light, Origin::File));
+    assert!(v.light);
+    assert_eq!(v.preview, (cosense::index::PreviewMode::Off, Origin::File));
+    assert_eq!(v.ime, (cosense::ime::ImeMode::Off, Origin::File));
+    assert_eq!(
+        v.download_dir,
+        (std::path::PathBuf::from("/home/me/dl"), Origin::File),
+        "~ is expanded"
+    );
+    assert_eq!(
+        v.diagrams,
+        (capability::RenderPolicy::Off, Origin::Default),
+        "a bad file value falls back"
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("diagrams") && notes[0].contains("bogus"),
+        "{notes:?}"
+    );
+
+    // Nothing anywhere: the defaults, and the detected background decides.
+    let none = |_: &str| None;
+    let v = ViewSettings::resolve(
+        &ViewFlags::default(),
+        &none,
+        &Default::default(),
+        Some((250, 250, 250)),
+        "/tmp".into(),
+        &mut Vec::new(),
+    );
+    assert_eq!(v.lang.1, Origin::Default);
+    assert_eq!(v.appearance, (Appearance::Auto, Origin::Default));
+    assert!(v.light, "auto follows the terminal");
+    assert_eq!(v.terminal_bg, (250, 250, 250));
+    assert_eq!(v.download_dir, ("/tmp".into(), Origin::Auto));
+}

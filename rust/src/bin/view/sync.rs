@@ -824,10 +824,15 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     // known for NOW, so an old revision says nothing about it. Links still
     // wear the project theme's colours (cached lookup, not a fetch).
     let palette = cosense::theme::tinted_page_palette(
-        &ctx.palette,
+        &ctx.palette(),
         ctx.project_theme(&app.project).as_deref(),
     );
-    let rendered = render_lines_with(&texts, Some(&ctx.hl), &palette, &LinkTruth::default());
+    let rendered = render_lines_with(
+        &texts,
+        Some(ctx.hl().as_ref()),
+        &palette,
+        &LinkTruth::default(),
+    );
     app.lines = snap.lines;
     app.blocks = rendered.blocks;
     app.srcs = rendered.srcs;

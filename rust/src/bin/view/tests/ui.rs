@@ -11,7 +11,7 @@ fn the_matched_word_wears_a_wash_and_the_rest_of_the_title_does_not() {
     let mut app = page(&["title", "one"]);
     app.project = "proj".into();
     let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
-    let wash = cosense::theme::match_wash(ctx.terminal_bg);
+    let wash = cosense::theme::match_wash(ctx.terminal_bg());
 
     let mut ix = cosense::index::Index::new(
         vec![cosense::index::Entry {
@@ -277,7 +277,7 @@ fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
             open_stamp: 0,
             editable: true,
             links: LinkTruth::default(),
-            palette: ctx.palette,
+            palette: ctx.palette(),
             telomere_tint: None,
         },
         &ctx,
@@ -319,7 +319,7 @@ fn moving_to_another_project_forgets_the_old_one_s_verdict() {
             open_stamp: 0,
             editable: true,
             links: LinkTruth::default(),
-            palette: ctx.palette,
+            palette: ctx.palette(),
             telomere_tint: None,
         },
         &ctx,
@@ -357,7 +357,7 @@ fn set_page_clears_the_state_a_dropped_job_would_have_answered() {
             related: Vec::new(),
             facts: PageFacts::default(),
             links: LinkTruth::default(),
-            palette: ctx.palette,
+            palette: ctx.palette(),
             telomere_tint: None,
         },
         &ctx,
@@ -456,7 +456,7 @@ fn edit_lays_a_darker_backdrop_and_says_so_in_the_header() {
     let ctx = test_ctx();
     let mut app = page(&["title", "one", "two"]);
     let mut term = Terminal::new(TestBackend::new(40, 10)).unwrap();
-    let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg);
+    let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg());
 
     let bg_of = |buf: &ratatui::buffer::Buffer, needle: &str| -> Color {
         for y in 0..buf.area.height {
@@ -644,7 +644,7 @@ fn a_cross_line_selection_reverses_its_characters_on_every_line() {
     );
 
     // READ の選択色はどこにも出ない: EDIT の帯はグレー一色。
-    let sel = selection_bg(ctx.terminal_bg);
+    let sel = selection_bg(ctx.terminal_bg());
     for y in 0..buf.area.height {
         for x in 0..buf.area.width {
             assert_ne!(
@@ -674,7 +674,7 @@ fn the_grabbed_block_is_marked_like_a_selection() {
         (0..buf.area.height)
             .filter(|&y| {
                 buf.cell((x, y))
-                    .map(|cell| cell.bg == selection_bg(ctx.terminal_bg))
+                    .map(|cell| cell.bg == selection_bg(ctx.terminal_bg()))
                     .unwrap_or(false)
             })
             .count()
@@ -775,7 +775,7 @@ fn the_waiting_box_is_sized_like_the_pictures_it_stands_in_for() {
 fn the_code_wash_starts_at_the_content_column() {
     use ratatui::{backend::TestBackend, Terminal};
     let ctx = test_ctx();
-    let wash = cosense::theme::code_wash(ctx.terminal_bg);
+    let wash = cosense::theme::code_wash(ctx.terminal_bg());
     let mut app = page(&["t", " 箇条", " code:go", "  x := 1"]);
     app.rebuild(40);
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -1070,7 +1070,7 @@ fn page_chrome_separates_caret_telomere_pad_and_top_scrollbar() {
     );
     assert_eq!(
         buf.cell((41, 3)).unwrap().bg,
-        cosense::theme::edit_backdrop(ctx.terminal_bg),
+        cosense::theme::edit_backdrop(ctx.terminal_bg()),
         "the backdrop reaches the edge"
     );
 }
@@ -1190,7 +1190,7 @@ fn the_header_date_slides_from_now_into_history_and_the_chrome_turns_purple() {
         "one snapshot + NOW = 2; the oldest is 1: {h:?}"
     );
     assert!(!h.contains('⏪'), "no emoji arrows");
-    let (_, purple) = cosense::theme::history_header_colors(ctx.terminal_bg);
+    let (_, purple) = cosense::theme::history_header_colors(ctx.terminal_bg());
     let buf = term.backend().buffer();
     assert_eq!(
         buf.cell((0, 0)).unwrap().style().bg,

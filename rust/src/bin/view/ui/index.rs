@@ -19,7 +19,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let Some(ix) = app.index.as_mut() else { return };
     use unicode_width::UnicodeWidthStr;
     let body_h = area.height.saturating_sub(2); // header + footer
-    let layout = cosense::index::layout(ctx.preview, area.width, body_h);
+    let layout = cosense::index::layout(ctx.preview(), area.width, body_h);
     if layout.preview.is_none() {
         // A resize may remove the excerpt while it owns focus. Hand the
         // keys back to the visible list rather than leaving them attached
@@ -173,7 +173,7 @@ pub(crate) fn draw_index(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     // Why this row is here: the words the search matched on it, or what was
     // typed to narrow the list. Marked with a background wash, so the
     // colours the row already uses (blue = unread) survive underneath.
-    let wash = cosense::theme::match_wash(ctx.terminal_bg);
+    let wash = cosense::theme::match_wash(ctx.terminal_bg());
     let terms_of = |e: &cosense::index::Entry| -> Vec<String> {
         ix_terms.get(&e.title).cloned().unwrap_or_default()
     };
@@ -527,12 +527,12 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
         .into_iter()
         .map(str::to_string)
         .collect();
-    let wash = cosense::theme::match_wash(ctx.terminal_bg);
+    let wash = cosense::theme::match_wash(ctx.terminal_bg());
     let mut heading = marked_spans(
         &title,
         &terms,
         Style::default()
-            .fg(ctx.palette.title)
+            .fg(ctx.palette().title)
             .add_modifier(Modifier::BOLD),
         wash,
     );
@@ -556,8 +556,13 @@ pub(crate) fn index_preview_lines(app: &App, ctx: &Ctx, width: usize) -> Vec<Lin
         &app.project
     };
     let palette =
-        cosense::theme::tinted_page_palette(&ctx.palette, ctx.project_theme(listed).as_deref());
-    let out = render_lines_with(&texts, Some(&ctx.hl), &palette, &LinkTruth::default());
+        cosense::theme::tinted_page_palette(&ctx.palette(), ctx.project_theme(listed).as_deref());
+    let out = render_lines_with(
+        &texts,
+        Some(ctx.hl().as_ref()),
+        &palette,
+        &LinkTruth::default(),
+    );
     for block in out.blocks.iter().skip(1) {
         match block {
             Block::Text(line) => {

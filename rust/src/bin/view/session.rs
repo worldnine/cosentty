@@ -119,7 +119,7 @@ pub(crate) fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize)
     app.selection = None;
     app.follow = true;
     app.laid_width = 0;
-    app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+    app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode()));
     // The footer's EDIT badge and key hint say the rest; a stale READ
     // status (a selection hint) must not ride along into the session.
     app.status.clear();

@@ -518,7 +518,7 @@ pub(crate) fn activate_link(app: &mut App, ctx: &Ctx, item: LinkItem) {
         LinkItem::File { label, url } => app.start_download(ctx, label, url),
         LinkItem::Export { label, src, csv } => {
             let body = block_export_body(&app.lines, src, csv);
-            let dest = download_path_in(&ctx.download_dir, &label, "");
+            let dest = download_path_in(&ctx.download_dir(), &label, "");
             match std::fs::write(&dest, body) {
                 Ok(()) => {
                     let shown = dest.display().to_string();
@@ -883,7 +883,7 @@ impl App {
     /// the result lands in `file_rx` and is reported (and opened) by the
     /// event loop.
     pub(crate) fn start_download(&mut self, ctx: &Ctx, label: String, url: String) {
-        let dest = download_path_in(&ctx.download_dir, &label, &url);
+        let dest = download_path_in(&ctx.download_dir(), &label, &url);
         let tx = self.file_tx.clone();
         let fetcher = Arc::clone(&ctx.fetcher);
         self.status = t!("ダウンロード中 {label}…", "downloading {label}…");

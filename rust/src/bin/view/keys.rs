@@ -18,7 +18,7 @@ pub(crate) fn handle_index_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> 
     let editing = app.index.as_ref().is_some_and(|ix| ix.filter_editing);
     match (editing, app.ime_guard.is_some()) {
         (true, false) => {
-            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode()));
         }
         (false, true) => app.ime_guard = None,
         _ => {}
@@ -630,7 +630,7 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             let editing = existing.is_some();
             app.composing = Some(Input::new(existing.unwrap_or_default()));
             app.laid_width = 0; // the bar opens under the range
-            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode));
+            app.ime_guard = Some(cosense::ime::ImeGuard::enter(ctx.ime_mode()));
             app.status = if editing {
                 t!(
                     "コメントを編集 · Enter 置き換え · S-Enter/^j 改行 · Esc 取消",

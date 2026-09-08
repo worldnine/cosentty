@@ -261,7 +261,7 @@ pub(crate) fn draw_toast(f: &mut Frame, app: &mut App, ctx: &Ctx, area: Rect) {
     let Some(rect) = toast_rect(area, &t.text) else {
         return;
     };
-    let bg = cosense::theme::toast_bg(ctx.terminal_bg);
+    let bg = cosense::theme::toast_bg(ctx.terminal_bg());
     let fg = if t.error { Color::Red } else { Color::Yellow };
     let text = clip_to_width(&t.text, rect.width.saturating_sub(2) as usize);
     f.render_widget(Clear, rect);

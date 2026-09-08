@@ -871,11 +871,11 @@ pub(crate) fn finish_load(
     // Links wear the project theme's own colours (web's --page-link-color),
     // not the terminal scheme's — the header already answers to the theme.
     let site_theme = ctx.project_theme(project);
-    let palette = cosense::theme::tinted_page_palette(&ctx.palette, site_theme.as_deref());
+    let palette = cosense::theme::tinted_page_palette(&ctx.palette(), site_theme.as_deref());
     let telomere_tint = site_theme
         .as_deref()
         .and_then(cosense::theme::cosense_telomere_tint);
-    let rendered = render_lines_with(&texts, Some(&ctx.hl), &palette, &links);
+    let rendered = render_lines_with(&texts, Some(ctx.hl().as_ref()), &palette, &links);
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
     let now = now_secs();
@@ -885,7 +885,7 @@ pub(crate) fn finish_load(
         (a, b) => a.or(b),
     };
     let (header_fg, header_bg) =
-        cosense::theme::project_header_colors(site_theme.as_deref(), ctx.terminal_bg);
+        cosense::theme::project_header_colors(site_theme.as_deref(), ctx.terminal_bg());
     Loaded {
         project: project.to_string(),
         title: title.to_string(),
@@ -1396,7 +1396,7 @@ impl App {
         self.cursor = 0;
         self.selection = None;
         self.follow = true;
-        self.web_dark = !ctx.light;
+        self.web_dark = !ctx.light();
         self.start_image_loads(ctx);
         self.start_web_renders(capability::Trigger::Auto);
         self.start_related_load(ctx);

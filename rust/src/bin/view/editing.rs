@@ -273,7 +273,7 @@ pub(crate) fn rerender(app: &mut App, ctx: &Ctx) {
     // THE PAGE's palette (theme-tinted at load), not ctx's: the terminal
     // scheme would repaint the links mid-page — the colour of a page the
     // reader just left.
-    let r = render_lines_with(&texts, Some(&ctx.hl), &app.palette, &app.links);
+    let r = render_lines_with(&texts, Some(ctx.hl().as_ref()), &app.palette, &app.links);
     app.blocks = r.blocks;
     app.srcs = r.srcs;
     app.hits = r.hits;

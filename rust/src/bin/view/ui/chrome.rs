@@ -55,7 +55,7 @@ impl App {
     /// of the page rather than in a word.
     pub(crate) fn chrome_colors(&self, ctx: &Ctx) -> HeaderColors {
         if self.time.is_some() {
-            let (fg, bg) = cosense::theme::history_header_colors(ctx.terminal_bg);
+            let (fg, bg) = cosense::theme::history_header_colors(ctx.terminal_bg());
             HeaderColors { fg, bg }
         } else if let Some(ix) = self.index.as_ref() {
             // A list belongs to its LISTED project: the header answers to
@@ -70,7 +70,7 @@ impl App {
             } else {
                 let theme = ctx.project_theme(&self.index_project);
                 let (fg, bg) =
-                    cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg);
+                    cosense::theme::project_header_colors(theme.as_deref(), ctx.terminal_bg());
                 HeaderColors { fg, bg }
             }
         } else {

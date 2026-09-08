@@ -76,7 +76,7 @@ fn the_banner_sits_above_the_footer_and_fits_the_screen() {
 fn the_toast_is_painted_on_its_own_row_over_page_and_index_alike() {
     use ratatui::{backend::TestBackend, Terminal};
     let ctx = test_ctx();
-    let bg = cosense::theme::toast_bg(ctx.terminal_bg);
+    let bg = cosense::theme::toast_bg(ctx.terminal_bg());
     // 全角は1セル+続きの空セル。続きのセルは飛ばして文字列にする。
     let row_text = |term: &Terminal<TestBackend>, y: u16| -> String {
         use unicode_width::UnicodeWidthStr;

@@ -245,7 +245,7 @@ fn a_word_this_page_shares_is_asked_about_again_after_navigating() {
             related: Vec::new(),
             facts: PageFacts::default(),
             links: LinkTruth::default(),
-            palette: ctx.palette,
+            palette: ctx.palette(),
             telomere_tint: None,
         },
         &ctx,

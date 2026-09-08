@@ -1230,7 +1230,7 @@ fn move_mode_screen_dump() {
             let cell = buf.cell((x, y)).unwrap();
             row.push_str(cell.symbol());
         }
-        let sel_bg = selection_bg(ctx.terminal_bg);
+        let sel_bg = selection_bg(ctx.terminal_bg());
         let held =
             (0..buf.area.width).any(|x| buf.cell((x, y)).map(|c| c.bg == sel_bg).unwrap_or(false));
         // "HELD" marks the rows carrying the grabbed block's highlight.

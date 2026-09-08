@@ -97,10 +97,28 @@ pub enum RenderPolicy {
 
 impl RenderPolicy {
     pub fn from_env() -> Self {
-        match std::env::var("COSENSE_WEB_RENDER").ok().as_deref() {
-            Some("manual") => RenderPolicy::Manual,
-            Some("auto") => RenderPolicy::Auto,
-            _ => RenderPolicy::Off,
+        std::env::var("COSENSE_WEB_RENDER")
+            .ok()
+            .as_deref()
+            .and_then(Self::parse)
+            .unwrap_or_default()
+    }
+
+    /// `off` / `manual` / `auto`; `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "off" => Some(RenderPolicy::Off),
+            "manual" => Some(RenderPolicy::Manual),
+            "auto" => Some(RenderPolicy::Auto),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RenderPolicy::Off => "off",
+            RenderPolicy::Manual => "manual",
+            RenderPolicy::Auto => "auto",
         }
     }
 }

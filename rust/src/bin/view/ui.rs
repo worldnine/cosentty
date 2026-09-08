@@ -206,7 +206,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                                                           // 敷く。読む画面と書く画面で「紙の色」が変わるのが持続的なモード
                                                           // サイン。行の帯(CURSOR_BG)はこの上に明るく浮く。
     if app.session.is_some() {
-        let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg);
+        let backdrop = cosense::theme::edit_backdrop(ctx.terminal_bg());
         let buf = f.buffer_mut();
         for y in band_top..=band_bot {
             for x in body.x..body.x + body.width {
@@ -345,8 +345,8 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     // rows carry a wash. Computed once per frame from the text the screen
     // is showing (the caret line included, uncommitted and all).
     let code_flags = cosense::render::code_line_flags(&app.source_texts());
-    let wash = cosense::theme::code_wash(ctx.terminal_bg);
-    let sel_bg = selection_bg(ctx.terminal_bg);
+    let wash = cosense::theme::code_wash(ctx.terminal_bg());
+    let sel_bg = selection_bg(ctx.terminal_bg());
 
     let mut y = 0i32;
     for row in app.rows.iter() {
@@ -462,7 +462,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 let y = text.y as i32 + sy;
                 if y >= band_top && y <= band_bot {
                     // The tint is this page's project's (web's --telomere-*).
-                    let (glyph, mut style) = gutter_cell(age, ctx.light, app.telomere_tint);
+                    let (glyph, mut style) = gutter_cell(age, ctx.light(), app.telomere_tint);
                     // EDIT の帯は本文領域だけ(上のコメント参照)なので、
                     // テロメアには帯の色を継がせない。
                     if let Some(bg) = base.bg {
@@ -767,7 +767,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
     for (sy, x) in image_bullets {
         if let Some(c) = buf.cell_mut((x, sy)) {
             c.set_symbol(BULLET);
-            c.set_style(Style::default().fg(ctx.palette.bullet));
+            c.set_style(Style::default().fg(ctx.palette().bullet));
         }
     }
     for (sy, style) in carets {
