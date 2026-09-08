@@ -1,6 +1,6 @@
 [package]
 name = "cosentty"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # 依存(mermaid-text / ascii-dag)が 1.92 を要求する。古い rustc では cargo が
 # ビルド前に分かりやすく止まるよう明示しておく
