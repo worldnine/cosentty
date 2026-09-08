@@ -60,6 +60,9 @@ pub(crate) struct ViewSettings {
     /// below is the usable path.
     pub download_dir: (std::path::PathBuf, Origin),
     pub diagrams: (capability::RenderPolicy, Origin),
+    /// `theme` names something neither embedded nor in the reader's themes
+    /// directory: the default is in use, and the screen says so.
+    pub theme_missing: bool,
     /// The terminal's background as OSC 11 reported it at start, when it
     /// did. `Appearance::Auto` reads this; a forced mode ignores it.
     pub detected_bg: Option<(u8, u8, u8)>,
@@ -124,6 +127,22 @@ impl ViewSettings {
             file.theme.clone().filter(|t| !t.is_empty()).map(Some),
             (None, Origin::Default),
         );
+        // A name nothing answers to falls back silently in the highlighter;
+        // it must not fall back silently on the reader.
+        let theme_missing = theme
+            .0
+            .as_deref()
+            .is_some_and(|n| !Highlighter::theme_exists(n));
+        let mut late_notes = Vec::new();
+        if let (Some(n), true) = (theme.0.as_deref(), theme_missing) {
+            let dir = cosense::highlight::user_themes_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "~/.config/cosentty/themes".into());
+            late_notes.push(t!(
+                "テーマ「{n}」は見つかりません（同梱にも {dir} にも無い）。既定の配色を使います",
+                "theme \"{n}\" not found (neither embedded nor in {dir}); using the default"
+            ));
+        }
 
         let app_file = file.appearance.as_deref().and_then(Appearance::parse);
         file_parsed(
@@ -207,6 +226,7 @@ impl ViewSettings {
             ime,
             download_dir,
             diagrams,
+            theme_missing,
             detected_bg,
             flags: flags.clone(),
             default_download,
@@ -216,6 +236,7 @@ impl ViewSettings {
             palette: cosense::theme::Palette::for_light(false),
         };
         v.recompute();
+        notes.append(&mut late_notes);
         v
     }
 
@@ -273,6 +294,7 @@ impl ViewSettings {
             ime: (cosense::ime::ImeMode::Off, Origin::Default),
             download_dir: (std::env::temp_dir(), Origin::Default),
             diagrams: (capability::RenderPolicy::Off, Origin::Default),
+            theme_missing: false,
             detected_bg: None,
             flags: ViewFlags::default(),
             default_download: std::env::temp_dir(),

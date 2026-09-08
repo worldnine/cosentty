@@ -181,7 +181,11 @@ fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
                 .clone()
                 .unwrap_or_else(|| t!("(端末の配色)", "(terminal default)")),
             origin: v.theme.1,
-            note: origin_note(v.theme.1),
+            note: if v.theme_missing {
+                Some(t!("見つからず既定を使用", "not found; default in use"))
+            } else {
+                origin_note(v.theme.1)
+            },
         },
         SettingRow {
             field: SettingField::Appearance,
@@ -625,7 +629,7 @@ fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
         SettingField::Lang => view.mode = pick(with_unset(&["ja", "en"]), cfg.view.lang.clone()),
         SettingField::Theme => {
             let mut items = vec![unset_label()];
-            items.extend(Highlighter::theme_names().into_iter().map(str::to_string));
+            items.extend(Highlighter::theme_names());
             let mut mode = pick(items, cfg.view.theme.clone());
             if let SettingsMode::Pick { revert, .. } = &mut mode {
                 *revert = Some(cfg.view.theme.clone());

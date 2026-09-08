@@ -508,3 +508,55 @@ fn view_settings_follow_flag_env_file_default() {
     assert_eq!(v.terminal_bg, (250, 250, 250));
     assert_eq!(v.download_dir, ("/tmp".into(), Origin::Auto));
 }
+
+/// A theme name nothing answers to is not swallowed: the resolution says
+/// so, and the row says the default is in use.
+#[test]
+fn an_unknown_theme_name_is_reported_not_swallowed() {
+    let (ctx, _dir) = settings_ctx();
+    let mut notes = Vec::new();
+    let flags = ViewFlags {
+        theme: Some("Tokyo Night Storm".into()),
+        ..ViewFlags::default()
+    };
+    let v = ViewSettings::resolve(
+        &flags,
+        &|_| None,
+        &Default::default(),
+        None,
+        "/tmp".into(),
+        &mut notes,
+    );
+    assert!(v.theme_missing);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("Tokyo Night Storm") && notes[0].contains("themes"),
+        "{notes:?}"
+    );
+    ctx.with_view(|cur| *cur = v);
+
+    let mut app = page(&["title"]);
+    handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
+    let r = row(&app, SettingField::Theme);
+    assert_eq!(r.value, "Tokyo Night Storm");
+    assert_eq!(r.origin, Origin::Flag);
+    assert!(
+        r.note.as_deref().unwrap_or("").contains("見つからず"),
+        "{:?}",
+        r.note
+    );
+
+    // A known one clears it.
+    let v = ViewSettings::resolve(
+        &ViewFlags {
+            theme: Some("Nord".into()),
+            ..ViewFlags::default()
+        },
+        &|_| None,
+        &Default::default(),
+        None,
+        "/tmp".into(),
+        &mut Vec::new(),
+    );
+    assert!(!v.theme_missing);
+}

@@ -4,11 +4,12 @@
 //! language/extension, tokenize the whole block once (cross-line context like
 //! strings/comments needs it), and return ratatui spans per line.
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::Theme;
+use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedLazyThemeSet;
@@ -36,7 +37,7 @@ fn embedded_themes() -> &'static EmbeddedLazyThemeSet {
     T.get_or_init(two_face::theme::extra)
 }
 
-fn theme_by_name(name: &str) -> Option<Theme> {
+fn embedded_by_name(name: &str) -> Option<Theme> {
     EmbeddedLazyThemeSet::theme_names()
         .iter()
         .copied()
@@ -44,17 +45,114 @@ fn theme_by_name(name: &str) -> Option<Theme> {
         .map(|t| embedded_themes().get(t).clone())
 }
 
+/// The reader's own `.tmTheme` files (`~/.config/cosentty/themes/`), read
+/// once. A theme is known by its `name` entry, or its file name without the
+/// extension when it has none; one that shares a name with an embedded
+/// theme replaces it (bat's rule). Files that do not parse are kept as
+/// messages, said once at startup, and skipped.
+pub struct UserThemes {
+    themes: Vec<(String, Theme)>,
+    pub errors: Vec<String>,
+}
+
+impl UserThemes {
+    /// Read every `*.tmTheme` in `dir`, in name order. A missing directory
+    /// is simply no themes.
+    pub fn load(dir: &Path) -> Self {
+        let mut themes = Vec::new();
+        let mut errors = Vec::new();
+        let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension()
+                        .and_then(|x| x.to_str())
+                        .is_some_and(|x| x.eq_ignore_ascii_case("tmTheme"))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        files.sort();
+        for path in files {
+            match ThemeSet::get_theme(&path) {
+                Ok(theme) => {
+                    let name = theme
+                        .name
+                        .clone()
+                        .filter(|n| !n.trim().is_empty())
+                        .or_else(|| {
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| path.display().to_string());
+                    themes.push((name, theme));
+                }
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+        Self { themes, errors }
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.themes.iter().map(|(n, _)| n.as_str())
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Theme> {
+        self.themes.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+    }
+}
+
+/// Where the reader's themes live: next to config.toml.
+pub fn user_themes_dir() -> Option<PathBuf> {
+    crate::config::Config::path().and_then(|p| p.parent().map(|d| d.join("themes")))
+}
+
+fn user_themes() -> &'static UserThemes {
+    static U: OnceLock<UserThemes> = OnceLock::new();
+    U.get_or_init(|| match user_themes_dir() {
+        Some(dir) => UserThemes::load(&dir),
+        None => UserThemes {
+            themes: Vec::new(),
+            errors: Vec::new(),
+        },
+    })
+}
+
+fn theme_by_name(name: &str) -> Option<Theme> {
+    user_themes()
+        .get(name)
+        .cloned()
+        .or_else(|| embedded_by_name(name))
+}
+
 pub struct Highlighter {
     theme: Theme,
 }
 
 impl Highlighter {
-    /// Every embedded theme name `--theme` accepts, in two-face's order.
-    pub fn theme_names() -> Vec<&'static str> {
-        EmbeddedLazyThemeSet::theme_names()
-            .iter()
-            .map(|t| t.as_name())
-            .collect()
+    /// Every theme name `--theme` accepts: the reader's own first, then the
+    /// embedded ones in two-face's order.
+    pub fn theme_names() -> Vec<String> {
+        let mut names: Vec<String> = user_themes().names().map(str::to_string).collect();
+        for t in EmbeddedLazyThemeSet::theme_names() {
+            let n = t.as_name();
+            if !names.iter().any(|u| u == n) {
+                names.push(n.to_string());
+            }
+        }
+        names
+    }
+
+    /// Is `name` a theme `new` would actually use (rather than fall back)?
+    pub fn theme_exists(name: &str) -> bool {
+        theme_by_name(name).is_some()
+    }
+
+    /// The reader's theme files that could not be read, for the startup
+    /// notice.
+    pub fn user_theme_errors() -> Vec<String> {
+        user_themes().errors.clone()
     }
 
     /// Build from an optional theme name; unknown names fall back to the
@@ -66,7 +164,7 @@ impl Highlighter {
             } else {
                 DEFAULT_THEME
             };
-            theme_by_name(name).expect("default theme is embedded")
+            embedded_by_name(name).expect("default theme is embedded")
         });
         Self { theme }
     }
@@ -162,6 +260,59 @@ mod tests {
         for n in &names {
             assert!(super::theme_by_name(n).is_some(), "{n}");
         }
+        assert!(!super::Highlighter::theme_exists("No Such Theme"));
+    }
+
+    const TINY: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>name</key><string>NAME</string>
+  <key>settings</key><array>
+    <dict><key>settings</key><dict>
+      <key>foreground</key><string>#7aa2f7</string>
+      <key>background</key><string>#1a1b26</string>
+    </dict></dict>
+    <dict><key>scope</key><string>markup.heading</string>
+      <key>settings</key><dict><key>foreground</key><string>#ff9e64</string></dict></dict>
+  </array>
+</dict></plist>"##;
+
+    /// A `.tmTheme` in the themes directory is known by its `name`, or by
+    /// its file name when it has none; a broken file is reported, not fatal.
+    #[test]
+    fn user_themes_are_read_by_name_or_file_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tokyo.tmTheme"),
+            TINY.replace("NAME", "Tokyo Night"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Nameless.tmTheme"),
+            TINY.replace("<key>name</key><string>NAME</string>", ""),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("broken.tmTheme"), "<plist>nope").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
+        let u = super::UserThemes::load(dir.path());
+        let names: Vec<&str> = u.names().collect();
+        assert_eq!(
+            names,
+            vec!["Nameless", "Tokyo Night"],
+            "file order, named by content or stem"
+        );
+        assert_eq!(u.errors.len(), 1, "{:?}", u.errors);
+        assert!(u.errors[0].contains("broken.tmTheme"), "{:?}", u.errors);
+        let t = u.get("Tokyo Night").unwrap();
+        assert_eq!(
+            t.settings.foreground.map(|c| (c.r, c.g, c.b)),
+            Some((0x7a, 0xa2, 0xf7))
+        );
+        assert!(u.get("nope").is_none());
+        // A missing directory is no themes and no error.
+        let none = super::UserThemes::load(&dir.path().join("absent"));
+        assert_eq!(none.names().count(), 0);
+        assert!(none.errors.is_empty());
     }
 
     use super::*;

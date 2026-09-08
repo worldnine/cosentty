@@ -360,6 +360,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     for n in view_notes {
         app.toast_err(n);
     }
+    for e in Highlighter::user_theme_errors() {
+        app.toast_err(t!("テーマを読めません: {e}", "cannot read theme: {e}"));
+    }
     app.session_ime = cosense::ime::SessionIme::new(ctx.ime_mode());
     // The serial commit worker: owns its own Client clone and answers on
     // the outcome channel drained by the event loop.

@@ -262,5 +262,18 @@ htop の F2 と同じ live-apply で、保存は確定時に暗黙に行う(前�
 - `pick_download_dir` は「名前が無いときの探索」にだけ残し、名前の解決は
   `ViewSettings::resolve` 側に寄せた
 
-テスト: `cargo test --bin cosentty` 385 件 green(設定画面 13 件・解決順 1 件・
+追記(同日、実装後の指摘から): 配色テーマの候補は依存クレート two-face(bat の
+テーマ集)の 32 種で、選別はしていない。Tokyo Night は bat に無いので入っていない。
+また `--theme` は昔から名前を検証せず、未知の名前は**黙って**既定に落ちていた。
+両方を直した(コミット「ユーザー定義テーマ」):
+
+- `highlight::UserThemes`: `~/.config/cosentty/themes/*.tmTheme` を起動時に1度読む。
+  名前は `name` かファイル名、同梱と同名ならユーザー側が勝つ。読めないファイルは
+  `user_theme_errors()` に集めて起動時に1度トースト
+- `Highlighter::theme_names()` はユーザー→同梱の順、`theme_exists(name)` を追加
+- `ViewSettings.theme_missing`: 名前が無いとき `resolve` が注記を返し、設定画面の
+  テーマ行に「見つからず既定を使用」と出る。値は書いた名前のまま見せる
+  (何を書いたかが分かるように)。Tokyo Night の同梱は見送り(ユーザー定義で足りる)
+
+テスト: `cargo test --bin cosentty` 386 件 green(設定画面 13 件・解決順 1 件・
 config 11 件・highlight 1 件)。実機は tmux で `XDG_CONFIG_HOME` を scratch に向けて確認。
