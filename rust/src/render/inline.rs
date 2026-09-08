@@ -393,6 +393,29 @@ pub(super) fn star_style(stars: usize, pal: &Palette) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// Cosense の米印は 10 個まで効き、1 個ごとに 1.2 倍ずつ文字が大きくなる。
+/// ここに大きさの概念は無い。
+const MAX_STARS: usize = 10;
+
+/// 米印 5 個以上に添える `*N` の印。
+///
+/// テーマの見出し書式は 4 段までで、5 個以上は最上位に丸められて見分けが
+/// つかなかった(web では `[***** ]` と `[********** ]` は 2.5 倍と 6 倍で
+/// 別物)。端末に文字の大きさは無いので、記法そのものの延長として個数を
+/// 添える。閲覧時だけの印で、編集中の行は生テキストなので米印が直接見える。
+/// 4 個以下はテーマの書式で足りているので何も添えない。
+pub(super) fn star_level_marker(stars: usize, pal: &Palette) -> Option<Span<'static>> {
+    if stars <= 4 {
+        return None;
+    }
+    Some(Span::styled(
+        format!(" *{}", stars.min(MAX_STARS)),
+        Style::default()
+            .fg(pal.heading_for(stars))
+            .add_modifier(Modifier::DIM),
+    ))
+}
+
 /// Byte index of the `]` that closes the `[` at `open`, counting nesting./// Byte index of the `]` that closes the `[` at `open`, counting nesting.
 ///
 /// Taking the FIRST `]` cuts `[* [改善案]]` at `[改善案`, and the link
@@ -476,6 +499,7 @@ pub(super) fn decorate_bracket(
             for sp in inner {
                 spans.push(Span::styled(sp.content, style.patch(sp.style)));
             }
+            spans.extend(star_level_marker(stars, pal));
             return;
         }
         if flags.contains('-') {
@@ -485,6 +509,7 @@ pub(super) fn decorate_bracket(
             style = style.add_modifier(Modifier::UNDERLINED);
         }
         spans.push(Span::styled(body.to_string(), style));
+        spans.extend(star_level_marker(stars, pal));
         return;
     }
     // icon: [name.icon]

@@ -114,8 +114,8 @@ fn headings_take_the_palettes_level_style_by_star_count() {
     let got: Vec<String> = out.blocks.iter().map(plain).collect();
     assert_eq!(
         &got[1..],
-        ["one", "two", "three", "four", "five"],
-        "no lead-in marks"
+        ["one", "two", "three", "four", "five *5"],
+        "no lead-in marks; five+ stars carry the count as a trailing mark"
     );
     let style_of = |b: &Block| match b {
         Block::Text(l) => l.spans[0].style,
@@ -143,6 +143,56 @@ fn headings_take_the_palettes_level_style_by_star_count() {
         );
     }
     assert_ne!(style_of(&out.blocks[1]), style_of(&out.blocks[4]));
+}
+
+/// テーマの見出し書式は 4 段で飽和する。web では米印 5 個と 10 個は
+/// 2.5 倍と 6 倍で別物なので、5 個以上は個数を `*N` として末尾に添える。
+/// 4 個以下は書式で見分けがつくので添えない。
+#[test]
+fn five_or_more_stars_append_the_count_as_a_dim_mark() {
+    let pal = Palette::for_light(false);
+    let lines: Vec<String> = [
+        "title",
+        "[**** four]",
+        "[***** five]",
+        "[********** ten]",
+        "文中の [****** 強調] も同じ",
+        "[******* [リンク]]",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let out = render_lines(&lines);
+    let got: Vec<String> = out.blocks.iter().map(plain).collect();
+    assert_eq!(
+        &got[1..],
+        [
+            "four",
+            "five *5",
+            "ten *10",
+            "文中の 強調 *6 も同じ",
+            "リンク *7",
+        ]
+    );
+    let spans = |b: &Block| match b {
+        Block::Text(l) => l.spans.clone(),
+        _ => unreachable!(),
+    };
+    let mark = spans(&out.blocks[2]).last().unwrap().clone();
+    assert_eq!(mark.content, " *5");
+    assert!(
+        mark.style.add_modifier.contains(Modifier::DIM),
+        "印は控えめに"
+    );
+    assert!(
+        !mark.style.add_modifier.contains(Modifier::BOLD),
+        "印は見出し本文ではない"
+    );
+    assert_eq!(mark.style.fg, Some(pal.heading_for(5)), "色は見出しのもの");
+    // 印はリンクのヒット範囲に入らない(ヒットはリンクのスパンだけを指す)
+    let link_line = spans(&out.blocks[5]);
+    assert_eq!(link_line[0].content, "リンク");
+    assert_eq!(link_line.last().unwrap().content, " *7");
 }
 
 #[test]

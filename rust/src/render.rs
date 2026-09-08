@@ -923,12 +923,13 @@ fn parse_heading(
     // A heading is still ordinary notation inside: `[* [page]]` has to
     // stay a followable link, not become the letters of one.
     let style = star_style(stars, pal);
-    Some(
-        decorate_inline(text, links, images, pal, known, hits)
-            .into_iter()
-            .map(|sp| Span::styled(sp.content, style.patch(sp.style)))
-            .collect(),
-    )
+    let mut spans: Vec<Span<'static>> = decorate_inline(text, links, images, pal, known, hits)
+        .into_iter()
+        .map(|sp| Span::styled(sp.content, style.patch(sp.style)))
+        .collect();
+    // 5 個以上は書式が最上位で飽和するので、個数の印を末尾に添える
+    spans.extend(star_level_marker(stars, pal));
+    Some(spans)
 }
 
 #[cfg(test)]
