@@ -218,7 +218,7 @@ EDITからは`Esc`で抜けて`m`と押す。修飾キーなし2打で届く。`
 ```toml
 [view]                      # この端末の設定。起動オプション > 環境変数 > ここ > 既定
 lang = "ja"                 # ja | en（環境変数は COSENSE_LANG → LC_ALL → LC_MESSAGES → LANG）
-theme = "Solarized (dark)"  # --theme と同じ名前（同梱 32 種 + ~/.config/cosentty/themes/*.tmTheme。ピッカーで一覧できる）
+theme = "Solarized (dark)"  # --theme と同じ名前（同梱 32 種 + ~/.config/cosentty/themes/ と bat の themes/ の .tmTheme）
 appearance = "auto"         # light | dark | auto（auto は OSC 11 で端末の背景を見る）
 preview = "auto"            # on | off | auto
 ime = "jp"                  # jp | off
@@ -238,10 +238,14 @@ gyazo_team = "my-org"
 
 **配色テーマの出どころ**は2つ。同梱(依存クレート two-face = bat 0.26 のテーマ集。
 Catppuccin 4種・Dracula・Nord・gruvbox・Solarized・OneHalf・Monokai など 32 種)と、
-`~/.config/cosentty/themes/*.tmTheme`(`$XDG_CONFIG_HOME` があればその下)。後者は
-起動時に読み、ファイル内の `name` があればその名前、無ければファイル名で呼ぶ。同梱と
-同名なら**ユーザー側が勝つ**(bat と同じ)。Tokyo Night のように同梱に無いテーマは
-bat 向けに配布されている `.tmTheme` をここに置けば使える。**知らない名前を `--theme`
+ユーザー定義の `.tmTheme`。後者は **`~/.config/cosentty/themes/`**(`$XDG_CONFIG_HOME`
+があればその下)と、**bat のテーマディレクトリ**(`$BAT_CONFIG_DIR/themes` →
+`$XDG_CONFIG_HOME/bat/themes` → `~/.config/bat/themes` → macOS は
+`~/Library/Application Support/bat/themes` も)を起動時に読む。bat や delta のために
+置いたテーマがそのまま使える(`bat cache --build` は要らない)。ファイル内の `name` が
+あればその名前、無ければファイル名で呼ぶ。同梱と同名なら**ユーザー側が勝ち**、
+cosentty の themes/ が bat の themes/ より先。Tokyo Night のように同梱に無いテーマは
+bat 向けに配布されている `.tmTheme` をどちらかに置けば使える。**知らない名前を `--theme`
 や `[view].theme` に書くと既定(暗: Catppuccin Mocha、明: Solarized (light))に落ちる**が、
 黙ってはいない: 起動時に1度トーストし、設定画面の行にも「見つからず既定を使用」と出る。
 読めない `.tmTheme` も起動時に1度言って飛ばす。

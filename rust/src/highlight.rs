@@ -45,11 +45,13 @@ fn embedded_by_name(name: &str) -> Option<Theme> {
         .map(|t| embedded_themes().get(t).clone())
 }
 
-/// The reader's own `.tmTheme` files (`~/.config/cosentty/themes/`), read
-/// once. A theme is known by its `name` entry, or its file name without the
-/// extension when it has none; one that shares a name with an embedded
-/// theme replaces it (bat's rule). Files that do not parse are kept as
-/// messages, said once at startup, and skipped.
+/// The reader's own `.tmTheme` files, read once from every directory
+/// `theme_dirs` names (cosentty's own, then bat's — where people already
+/// keep these). A theme is known by its `name` entry, or its file name
+/// without the extension when it has none; one that shares a name with an
+/// embedded theme replaces it (bat's rule), and an earlier directory beats
+/// a later one. Files that do not parse are kept as messages, said once at
+/// startup, and skipped.
 pub struct UserThemes {
     themes: Vec<(String, Theme)>,
     pub errors: Vec<String>,
@@ -94,6 +96,25 @@ impl UserThemes {
         Self { themes, errors }
     }
 
+    /// `load` over several directories; the first directory to name a
+    /// theme keeps it.
+    pub fn load_dirs(dirs: &[PathBuf]) -> Self {
+        let mut all = Self {
+            themes: Vec::new(),
+            errors: Vec::new(),
+        };
+        for dir in dirs {
+            let one = Self::load(dir);
+            for (name, theme) in one.themes {
+                if all.get(&name).is_none() {
+                    all.themes.push((name, theme));
+                }
+            }
+            all.errors.extend(one.errors);
+        }
+        all
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.themes.iter().map(|(n, _)| n.as_str())
     }
@@ -103,20 +124,51 @@ impl UserThemes {
     }
 }
 
-/// Where the reader's themes live: next to config.toml.
-pub fn user_themes_dir() -> Option<PathBuf> {
-    crate::config::Config::path().and_then(|p| p.parent().map(|d| d.join("themes")))
+/// Where the reader's themes live: cosentty's own directory (next to
+/// config.toml), then bat's, since that is where `.tmTheme` files are
+/// already kept by anyone who uses bat or delta. Only directories that
+/// exist are listed, so the startup notice can name real places.
+pub fn theme_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(own) =
+        crate::config::Config::path().and_then(|p| p.parent().map(|d| d.join("themes")))
+    {
+        dirs.push(own);
+    }
+    dirs.extend(bat_theme_dirs(&|k| std::env::var_os(k).map(PathBuf::from)));
+    dirs
+}
+
+/// bat's `themes/` candidates, in bat's own order of preference:
+/// `$BAT_CONFIG_DIR`, then `$XDG_CONFIG_HOME/bat`, then `~/.config/bat`,
+/// and on macOS also `~/Library/Application Support/bat` (bat's default
+/// there). `env` is looked up by name so tests can feed their own.
+pub fn bat_theme_dirs(env: &dyn Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(d) = env("BAT_CONFIG_DIR").filter(|p| !p.as_os_str().is_empty()) {
+        dirs.push(d.join("themes"));
+    }
+    if let Some(x) = env("XDG_CONFIG_HOME").filter(|p| !p.as_os_str().is_empty()) {
+        dirs.push(x.join("bat").join("themes"));
+    }
+    if let Some(home) = env("HOME").filter(|p| !p.as_os_str().is_empty()) {
+        dirs.push(home.join(".config").join("bat").join("themes"));
+        if cfg!(target_os = "macos") {
+            dirs.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("bat")
+                    .join("themes"),
+            );
+        }
+    }
+    dirs.dedup();
+    dirs
 }
 
 fn user_themes() -> &'static UserThemes {
     static U: OnceLock<UserThemes> = OnceLock::new();
-    U.get_or_init(|| match user_themes_dir() {
-        Some(dir) => UserThemes::load(&dir),
-        None => UserThemes {
-            themes: Vec::new(),
-            errors: Vec::new(),
-        },
-    })
+    U.get_or_init(|| UserThemes::load_dirs(&theme_dirs()))
 }
 
 fn theme_by_name(name: &str) -> Option<Theme> {
@@ -313,6 +365,61 @@ mod tests {
         let none = super::UserThemes::load(&dir.path().join("absent"));
         assert_eq!(none.names().count(), 0);
         assert!(none.errors.is_empty());
+
+        // Several directories: the first to name a theme keeps it.
+        let bat = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bat.path().join("tn.tmTheme"),
+            TINY.replace("NAME", "Tokyo Night")
+                .replace("#7aa2f7", "#000000"),
+        )
+        .unwrap();
+        std::fs::write(
+            bat.path().join("x.tmTheme"),
+            TINY.replace("NAME", "Only In Bat"),
+        )
+        .unwrap();
+        let both =
+            super::UserThemes::load_dirs(&[dir.path().to_path_buf(), bat.path().to_path_buf()]);
+        let names: Vec<&str> = both.names().collect();
+        assert_eq!(names, vec!["Nameless", "Tokyo Night", "Only In Bat"]);
+        assert_eq!(
+            both.get("Tokyo Night")
+                .unwrap()
+                .settings
+                .foreground
+                .map(|c| c.r),
+            Some(0x7a),
+            "cosentty's own copy wins over bat's"
+        );
+        assert_eq!(both.errors.len(), 1);
+    }
+
+    /// bat's directory is found the way bat finds it, so a theme placed
+    /// there for bat is found here too.
+    #[test]
+    fn bat_theme_dirs_follow_bats_precedence() {
+        use std::path::PathBuf;
+        let env = |k: &str| -> Option<PathBuf> {
+            match k {
+                "BAT_CONFIG_DIR" => Some("/b".into()),
+                "XDG_CONFIG_HOME" => Some("/x".into()),
+                "HOME" => Some("/h".into()),
+                _ => None,
+            }
+        };
+        let dirs = super::bat_theme_dirs(&env);
+        assert_eq!(dirs[0], PathBuf::from("/b/themes"));
+        assert_eq!(dirs[1], PathBuf::from("/x/bat/themes"));
+        assert_eq!(dirs[2], PathBuf::from("/h/.config/bat/themes"));
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                dirs[3],
+                PathBuf::from("/h/Library/Application Support/bat/themes")
+            );
+        }
+        let none = |_: &str| -> Option<PathBuf> { None };
+        assert!(super::bat_theme_dirs(&none).is_empty());
     }
 
     use super::*;

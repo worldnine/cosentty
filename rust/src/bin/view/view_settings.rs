@@ -135,12 +135,14 @@ impl ViewSettings {
             .is_some_and(|n| !Highlighter::theme_exists(n));
         let mut late_notes = Vec::new();
         if let (Some(n), true) = (theme.0.as_deref(), theme_missing) {
-            let dir = cosense::highlight::user_themes_dir()
+            let dirs = cosense::highlight::theme_dirs();
+            let dir = dirs
+                .first()
                 .map(|d| d.display().to_string())
                 .unwrap_or_else(|| "~/.config/cosentty/themes".into());
             late_notes.push(t!(
-                "テーマ「{n}」は見つかりません（同梱にも {dir} にも無い）。既定の配色を使います",
-                "theme \"{n}\" not found (neither embedded nor in {dir}); using the default"
+                "テーマ「{n}」は見つかりません（同梱にも {dir} にも bat の themes/ にも無い）。既定の配色を使います",
+                "theme \"{n}\" not found (not embedded, not in {dir}, not in bat's themes/); using the default"
             ));
         }
 

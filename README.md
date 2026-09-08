@@ -46,8 +46,8 @@ cosentty                                      # 引数なし: 参加プロジェ
   `,` で開く設定画面から `~/.config/cosentty/config.toml` に書いておけます
 - 言語・配色・明暗などの起動オプションも同じファイルの `[view]` に書けます
   (優先は 起動オプション > 環境変数 > ファイル。設定画面の上の節で変えられます)
-- 配色テーマは同梱の 32 種に加え、`~/.config/cosentty/themes/` に置いた
-  `.tmTheme` も使えます(Tokyo Night など)
+- 配色テーマは同梱の 32 種に加え、`~/.config/cosentty/themes/` か bat の
+  `themes/` に置いた `.tmTheme` も使えます(Tokyo Night など。bat 用に入れたものがそのまま効きます)
 
 ## 開発
 
