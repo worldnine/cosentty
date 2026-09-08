@@ -490,24 +490,45 @@ pub(crate) fn handle_settings_key(
             if moved {
                 // The colour theme is previewed live: what the cursor is
                 // on is what the page wears, until Enter or Esc decides.
-                if field == SettingField::Theme {
-                    let chosen = (*cursor > 0).then(|| items[*cursor].clone());
-                    preview_theme(app, ctx, chosen);
+                let chosen = (*cursor > 0).then(|| items[*cursor].clone());
+                match field {
+                    SettingField::Theme => preview_theme(app, ctx, chosen),
+                    // The project's theme too: header, links and telomere
+                    // take the cursor's choice until Enter or Esc decides.
+                    SettingField::ProjectTheme => {
+                        if let Some(p) = view.project.clone() {
+                            ctx.set_project_theme_preview(Some((p.clone(), chosen)));
+                            apply_project_change(app, ctx, &p);
+                        }
+                    }
+                    _ => {}
                 }
                 return SettingsOutcome::Handled;
             }
             match code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     let revert = revert.take();
+                    let project = view.project.clone();
                     view.mode = SettingsMode::List;
                     if let Some(back) = revert {
                         preview_theme(app, ctx, back);
+                    }
+                    if field == SettingField::ProjectTheme {
+                        ctx.set_project_theme_preview(None);
+                        if let Some(p) = project {
+                            apply_project_change(app, ctx, &p);
+                            if let Some(Overlay::Settings(view)) = app.overlay.as_mut() {
+                                refresh_rows(view, ctx);
+                            }
+                        }
                     }
                 }
                 KeyCode::Enter => {
                     let chosen = (*cursor > 0).then(|| items[*cursor].clone());
                     let project = view.project.clone();
                     view.mode = SettingsMode::List;
+                    // The save below decides from the file, not the preview.
+                    ctx.set_project_theme_preview(None);
                     match field {
                         SettingField::ProjectTheme => {
                             save(

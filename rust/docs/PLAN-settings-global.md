@@ -286,6 +286,8 @@ day / moon)が全部 `TokyoNight` で衝突して1つしか出なかったので
 出どころの明示は「全行に印」ではなく、ピッカーの**節見出し**(ディレクトリ名 /
 同梱)と、**同梱と同名のときだけ**の行注記にした(`Pick.headings` で見出しを飛ぶ。
 `Highlighter::theme_groups` / `user_theme_source`)。読めたテーマの数は起動時に言わない。
+プロジェクトのテーマも流し見にした(`Ctx.project_theme_preview`: ピッカーが開いている間
+だけ `project_theme_with` が返す値。Esc で消して実値に戻し、Enter は消してから保存)。
 
 テスト: `cargo test --bin cosentty` 386 件 green(設定画面 13 件・解決順 1 件・
 config 11 件・highlight 1 件)。実機は tmux で `XDG_CONFIG_HOME` を scratch に向けて確認。

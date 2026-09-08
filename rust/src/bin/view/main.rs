@@ -343,6 +343,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         config: std::sync::Mutex::new(config),
         config_error: std::sync::Mutex::new(config_error),
         config_path: cosense::config::Config::path(),
+        project_theme_preview: std::sync::Mutex::new(None),
         send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
     let loaded = load_page(&ctx, &project, &title)?;
@@ -579,6 +580,10 @@ struct Ctx {
     /// with `config`: `e` on the settings screen re-reads the file after
     /// the editor and may clear (or set) this.
     config_error: std::sync::Mutex<Option<String>>,
+    /// The project theme the settings screen is trying out (project,
+    /// theme or none) — worn by the page while its picker is open, written
+    /// nowhere. Cleared on Enter (the save takes over) and on Esc.
+    project_theme_preview: std::sync::Mutex<Option<(String, Option<String>)>>,
     /// Where the settings screen writes (`Config::path`). `None` — no
     /// `$HOME` — makes every save an error it can name; tests point it at
     /// a scratch file so a key press never touches the developer's own.
@@ -698,6 +703,15 @@ impl Ctx {
     /// `project_theme`, with where the answer came from.
     fn project_theme_with(&self, project: &str) -> (Option<String>, cosense::config::Origin) {
         use cosense::config::Origin;
+        // A preview stands in for everything while it lasts: the picker
+        // shows what the page WOULD wear, whatever the API says now.
+        if let Ok(p) = self.project_theme_preview.lock() {
+            if let Some((proj, theme)) = p.as_ref() {
+                if proj == project {
+                    return (theme.clone(), Origin::File);
+                }
+            }
+        }
         if let Some(t) = self
             .project_settings(project)
             .and_then(|s| s.theme)
@@ -708,6 +722,14 @@ impl Ctx {
         match self.config().project_theme(project) {
             Some(t) => (Some(t), Origin::File),
             None => (None, Origin::Default),
+        }
+    }
+
+    /// Try `theme` on `project` (see `project_theme_preview`); `None`
+    /// clears the preview.
+    fn set_project_theme_preview(&self, preview: Option<(String, Option<String>)>) {
+        if let Ok(mut p) = self.project_theme_preview.lock() {
+            *p = preview;
         }
     }
 

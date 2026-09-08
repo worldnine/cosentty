@@ -31,6 +31,7 @@ pub(crate) fn test_ctx() -> Ctx {
         config: std::sync::Mutex::new(cosense::config::Config::default()),
         config_error: std::sync::Mutex::new(None),
         config_path: None,
+        project_theme_preview: std::sync::Mutex::new(None),
         send_target: SendTarget::None,
     }
 }

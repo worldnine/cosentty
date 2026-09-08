@@ -204,7 +204,7 @@ fn draw_settings(f: &mut Frame, view: &SettingsView, area: Rect) {
             let mut all = settings_notes(view);
             let offset = all.len();
             all.extend(items.iter().cloned());
-            let footer = if *field == SettingField::Theme {
+            let footer = if matches!(field, SettingField::Theme | SettingField::ProjectTheme) {
                 ts!(
                     " j/k で流し見 · Enter 決定 · Esc 元に戻す ",
                     " j/k to try · Enter choose · Esc back to before "

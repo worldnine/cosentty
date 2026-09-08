@@ -599,3 +599,33 @@ fn the_theme_picker_groups_by_source_and_skips_headings() {
     assert_eq!(picker_items(&app).1, 0, "stays at the top");
     handle_key(&mut app, &ctx, key(KeyCode::Esc));
 }
+
+/// The project's theme is tried live too: the header and links take the
+/// cursor's choice; Esc puts back what was in force; Enter writes it.
+#[test]
+fn the_project_theme_is_previewed_and_esc_reverts() {
+    let (ctx, dir) = settings_ctx();
+    let mut app = page(&["title", "[link]"]);
+    let plain = (app.palette, app.header_colors);
+    handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
+    goto(&mut app, &ctx, SettingField::ProjectTheme);
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    pick(&mut app, &ctx, "green");
+    assert_ne!((app.palette, app.header_colors), plain, "worn while trying");
+    assert_eq!(ctx.project_theme("proj").as_deref(), Some("green"));
+    assert_eq!(file(&dir), "", "nothing written yet");
+    handle_key(&mut app, &ctx, key(KeyCode::Esc));
+    assert_eq!((app.palette, app.header_colors), plain, "Esc puts it back");
+    assert_eq!(ctx.project_theme("proj"), None);
+    assert_eq!(
+        row(&app, SettingField::ProjectTheme).origin,
+        Origin::Default
+    );
+
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    pick(&mut app, &ctx, "green");
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    assert_eq!(file(&dir), "[project.proj]\ntheme = \"green\"\n");
+    assert_ne!((app.palette, app.header_colors), plain);
+    assert_eq!(row(&app, SettingField::ProjectTheme).origin, Origin::File);
+}
