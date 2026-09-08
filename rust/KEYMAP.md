@@ -242,8 +242,9 @@ Catppuccin 4種・Dracula・Nord・gruvbox・Solarized・OneHalf・Monokai な�
 があればその下)と、**bat のテーマディレクトリ**(`$BAT_CONFIG_DIR/themes` →
 `$XDG_CONFIG_HOME/bat/themes` → `~/.config/bat/themes` → macOS は
 `~/Library/Application Support/bat/themes` も)を起動時に読む。bat や delta のために
-置いたテーマがそのまま使える(`bat cache --build` は要らない)。ファイル内の `name` が
-あればその名前、無ければファイル名で呼ぶ。同梱と同名なら**ユーザー側が勝ち**、
+置いたテーマがそのまま使える(`bat cache --build` は要らない)。名前は**ファイル名
+(拡張子抜き)**で、`bat --theme` に渡す名前と同じ(ファイル内の `name` は見ない。
+Tokyo Night の4変種はどれも `TokyoNight` と書いてあり区別できないため)。同梱と同名なら**ユーザー側が勝ち**、
 cosentty の themes/ が bat の themes/ より先。Tokyo Night のように同梱に無いテーマは
 bat 向けに配布されている `.tmTheme` をどちらかに置けば使える。**知らない名前を `--theme`
 や `[view].theme` に書くと既定(暗: Catppuccin Mocha、明: Solarized (light))に落ちる**が、

@@ -47,10 +47,11 @@ fn embedded_by_name(name: &str) -> Option<Theme> {
 
 /// The reader's own `.tmTheme` files, read once from every directory
 /// `theme_dirs` names (cosentty's own, then bat's — where people already
-/// keep these). A theme is known by its `name` entry, or its file name
-/// without the extension when it has none; one that shares a name with an
-/// embedded theme replaces it (bat's rule), and an earlier directory beats
-/// a later one. Files that do not parse are kept as messages, said once at
+/// keep these). A theme is known by its FILE name without the extension —
+/// bat's rule, and the name `bat --theme` takes — not by the `name` entry
+/// inside, which a family of variants often shares (every Tokyo Night file
+/// says `TokyoNight`). One that shares a name with an embedded theme
+/// replaces it, and an earlier directory beats a later one. Files that do not parse are kept as messages, said once at
 /// startup, and skipped.
 pub struct UserThemes {
     themes: Vec<(String, Theme)>,
@@ -78,15 +79,10 @@ impl UserThemes {
         for path in files {
             match ThemeSet::get_theme(&path) {
                 Ok(theme) => {
-                    let name = theme
-                        .name
-                        .clone()
-                        .filter(|n| !n.trim().is_empty())
-                        .or_else(|| {
-                            path.file_stem()
-                                .and_then(|s| s.to_str())
-                                .map(str::to_string)
-                        })
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
                         .unwrap_or_else(|| path.display().to_string());
                     themes.push((name, theme));
                 }
@@ -329,14 +325,15 @@ mod tests {
   </array>
 </dict></plist>"##;
 
-    /// A `.tmTheme` in the themes directory is known by its `name`, or by
-    /// its file name when it has none; a broken file is reported, not fatal.
+    /// A `.tmTheme` in the themes directory is known by its file name (as
+    /// bat names it), whatever its `name` entry says — variants of one
+    /// theme share that entry; a broken file is reported, not fatal.
     #[test]
-    fn user_themes_are_read_by_name_or_file_name() {
+    fn user_themes_are_read_by_file_name() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("tokyo.tmTheme"),
-            TINY.replace("NAME", "Tokyo Night"),
+            dir.path().join("Tokyo Night.tmTheme"),
+            TINY.replace("NAME", "TokyoNight"),
         )
         .unwrap();
         std::fs::write(
@@ -351,7 +348,7 @@ mod tests {
         assert_eq!(
             names,
             vec!["Nameless", "Tokyo Night"],
-            "file order, named by content or stem"
+            "file order, named by stem"
         );
         assert_eq!(u.errors.len(), 1, "{:?}", u.errors);
         assert!(u.errors[0].contains("broken.tmTheme"), "{:?}", u.errors);
@@ -369,20 +366,24 @@ mod tests {
         // Several directories: the first to name a theme keeps it.
         let bat = tempfile::tempdir().unwrap();
         std::fs::write(
-            bat.path().join("tn.tmTheme"),
+            bat.path().join("Tokyo Night.tmTheme"),
             TINY.replace("NAME", "Tokyo Night")
                 .replace("#7aa2f7", "#000000"),
         )
         .unwrap();
         std::fs::write(
-            bat.path().join("x.tmTheme"),
+            bat.path().join("Only In Bat.tmTheme"),
             TINY.replace("NAME", "Only In Bat"),
         )
         .unwrap();
         let both =
             super::UserThemes::load_dirs(&[dir.path().to_path_buf(), bat.path().to_path_buf()]);
         let names: Vec<&str> = both.names().collect();
-        assert_eq!(names, vec!["Nameless", "Tokyo Night", "Only In Bat"]);
+        assert_eq!(
+            names,
+            vec!["Nameless", "Tokyo Night", "Only In Bat"],
+            "stems; the first dir keeps a name"
+        );
         assert_eq!(
             both.get("Tokyo Night")
                 .unwrap()

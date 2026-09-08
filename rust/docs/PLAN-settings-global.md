@@ -280,6 +280,9 @@ htop の F2 と同じ live-apply で、保存は確定時に暗黙に行う(前�
 `highlight::theme_dirs()` で cosentty の themes/ → bat の themes/(`$BAT_CONFIG_DIR` →
 `$XDG_CONFIG_HOME/bat` → `~/.config/bat` → macOS は `~/Library/Application Support/bat`)
 の順に読み、先のディレクトリが同名で勝つ。`bat` コマンドの有無は問わない。
+名前は当初ファイル内の `name` を優先していたが、Tokyo Night の4変種(night / storm /
+day / moon)が全部 `TokyoNight` で衝突して1つしか出なかったので、**ファイル名**に
+統一した(bat と同じ。`bat --theme tokyonight_night` の名前がそのまま使える)。
 
 テスト: `cargo test --bin cosentty` 386 件 green(設定画面 13 件・解決順 1 件・
 config 11 件・highlight 1 件)。実機は tmux で `XDG_CONFIG_HOME` を scratch に向けて確認。
