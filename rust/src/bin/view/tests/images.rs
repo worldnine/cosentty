@@ -356,3 +356,50 @@ fn a_waiting_picture_names_itself_in_the_box_it_reserved() {
         "and it wears the band: {fg:?}"
     );
 }
+
+/// kitty のプレースホルダ行: 先頭セルに記号、右はスキップセル。
+fn skip_row(buf: &mut ratatui::buffer::Buffer, y: u16, x0: u16, w: u16, marker: &str) {
+    use ratatui::buffer::CellDiffOption;
+    buf[(x0, y)].set_symbol(marker);
+    for x in x0 + 1..x0 + w {
+        buf[(x, y)].set_diff_option(CellDiffOption::Skip);
+    }
+}
+
+fn blank(w: u16, h: u16) -> ratatui::buffer::Buffer {
+    ratatui::buffer::Buffer::empty(Rect::new(0, 0, w, h))
+}
+
+#[test]
+fn text_that_was_over_an_unchanged_image_row_is_a_ghost() {
+    // 前: 画像の行の途中にオーバーレイの文字。今: 覆いが退いて画像だけ。
+    let mut prev = blank(20, 3);
+    skip_row(&mut prev, 1, 0, 10, "P1");
+    // オーバーレイは Clear でセルをリセットしてから文字を置く。
+    prev[(5, 1)].reset();
+    prev[(5, 1)].set_symbol("設");
+    let mut next = blank(20, 3);
+    skip_row(&mut next, 1, 0, 10, "P1");
+    assert!(image_ghost_remains(&prev, &next));
+}
+
+#[test]
+fn a_row_whose_anchor_changed_is_repainted_by_the_diff_itself() {
+    // 画像がスクロールして先頭セルの記号が変わる行は ratatui が描き直す。
+    let mut prev = blank(20, 3);
+    prev[(5, 1)].set_symbol("文");
+    let mut next = blank(20, 3);
+    skip_row(&mut next, 1, 0, 10, "P2");
+    assert!(!image_ghost_remains(&prev, &next));
+}
+
+#[test]
+fn nothing_is_a_ghost_without_skip_cells_or_after_a_resize() {
+    let prev = blank(20, 3);
+    let mut next = blank(20, 3);
+    next[(5, 1)].set_symbol("文");
+    assert!(!image_ghost_remains(&prev, &next));
+    let mut wide = blank(30, 3);
+    skip_row(&mut wide, 1, 0, 10, "P1");
+    assert!(!image_ghost_remains(&prev, &wide));
+}

@@ -299,3 +299,49 @@ impl App {
         changed
     }
 }
+
+/// 前フレームと比べて、画像の下に前フレームの文字が幽霊のように残る行が
+/// あるか。
+///
+/// kitty のプレースホルダ描画は、画像の各行で先頭セルにだけ 1 行分の記号
+/// を書き、残りのセルは差分比較をスキップする。オーバーレイやトーストが
+/// その途中のセルだけを塗り替えて閉じると、先頭セルが前フレームと同じ行は
+/// 差分に上がらず、上に書かれた文字が画像の上に残る。設定画面の行一覧が
+/// 入力欄に置き換わるように、覆いが消えずに形だけ変わる場合も同じ。
+///
+/// 判定は「今スキップセルで、前フレームは普通のセルだった」セルについて、
+/// その行で左に辿った最初の非スキップセル(プレースホルダの先頭)が前後で
+/// 同じなら幽霊が出る、というもの。見つかったら呼び手が画面を捨てて全面を
+/// 描き直す。ハーフブロック描画にはスキップセルがないので、常に false。
+pub(crate) fn image_ghost_remains(
+    prev: &ratatui::buffer::Buffer,
+    next: &ratatui::buffer::Buffer,
+) -> bool {
+    use ratatui::buffer::CellDiffOption;
+    if prev.area != next.area {
+        return false; // リサイズ直後は ratatui 自身が全面を描き直す
+    }
+    let area = next.area;
+    let is_skip = |b: &ratatui::buffer::Buffer, x: u16, y: u16| {
+        b.cell((x, y))
+            .is_some_and(|c| matches!(c.diff_option, CellDiffOption::Skip))
+    };
+    for y in area.top()..area.bottom() {
+        // 行の先頭セル(左に辿った最初の非スキップセル)を覚えながら走る。
+        let mut anchor: Option<u16> = None;
+        for x in area.left()..area.right() {
+            if !is_skip(next, x, y) {
+                anchor = Some(x);
+                continue;
+            }
+            if is_skip(prev, x, y) {
+                continue; // 前フレームも画像の下だった
+            }
+            let Some(ax) = anchor else { continue };
+            if prev.cell((ax, y)) == next.cell((ax, y)) {
+                return true;
+            }
+        }
+    }
+    false
+}
