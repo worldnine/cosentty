@@ -12,14 +12,17 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
 - 引数なしは認証ユーザーのプロジェクト一覧。取得できなければ `help-jp` の索引を開く
 - 非公開プロジェクトの読み・書き・検索は `cosense login` の PAT / Service Account
   で完結する。保存先は `~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」を参照。
-  `COSENSE_SID` の connect.sid が要るのは **ws push 同期**と**プロジェクト設定の
-  読み取り**に必要。テーマと画像のアップロード先が対象になる。
+  `COSENSE_SID` の connect.sid が**どうしても要る**のは **ws push 同期**だけ
+  (websocket は cookie 認証しか通らない。`NOTE-websocket-sync.md`)。
+  **プロジェクト設定の読み取り**(テーマ・表示名・アップロード先)も sid か
+  Service Account が要るが、`,` の設定画面で `config.toml` に書けば代替できる。
   **既定でオフの web レンダラ**も非公開ページには SID を使う。
   `COSENSE_WEB_RENDER=manual|auto` で有効にする。
   無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
   いなければ図はテキストかコードで出る)
-- 自前の設定ファイルは `~/.config/cosentty/config.toml`(画像のアップロード先の
-  上書き。書き方は `rust/src/config.rs` 冒頭)。無くてよい
+- 自前の設定ファイルは `~/.config/cosentty/config.toml`(`[upload]` と
+  `[project.<slug>]`。書き方は `rust/KEYMAP.md` の「設定ファイルと設定画面」か
+  `rust/src/config.rs` 冒頭)。無くてよい。`,` の設定画面が書く
 - 主なフラグ: `--light`/`--dark`/`--theme`、`--preview`、`--ime jp|en`、`--lang`、`--download-dir`
 - キー一覧は `rust/KEYMAP.md`(READ で `?` でも引ける)
 

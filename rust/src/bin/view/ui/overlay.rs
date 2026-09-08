@@ -32,8 +32,8 @@ pub(crate) fn help_keys(app: &App) -> Vec<String> {
             "mouse       click link/open · click row/move · drag/select · wheel/scroll"
         ),
         t!(
-            "表示        z ソース · w ブラウザ · t 行の詳細",
-            "view        z source · w browser · t line detail"
+            "表示        z ソース · w ブラウザ · t 行の詳細 · , プロジェクトの設定",
+            "view        z source · w browser · t line detail · , project settings"
         ),
         t!(
             "履歴        ← 古い版 · → 新しい版 · Esc 最新へ（履歴中は読むだけ）",

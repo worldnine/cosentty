@@ -170,4 +170,30 @@ doc コメントに残す。
 
 ## 実施記録
 
-(未着手)
+2026-09-08 実装(同日起案。ブランチ `settings-ui`)。刻みは計画どおり4コミット
+に集約:
+
+1. `config.rs`: `[project.<slug>]`(theme / display_name / images / gyazo_team)、
+   `upload_choice` の解決順に1段追加、`Origin` 列挙、`with_project_key`(文字列→
+   文字列、`toml_edit`)と `save_project_key`(一時ファイル→rename、壊れたファイルは
+   拒否)。読みと書きは同じファイルの関心事なので1コミットにまとめた
+2. `theme.rs`: `COSENSE_THEMES`(23件)。全名が色テーブルに答えることをテスト
+3. `Ctx`: `config` を `Mutex` に、`project_theme_with` / `project_display_with` が
+   `Origin` を返す。`config_path` を Ctx に持たせ、テストは scratch ファイルへ書く
+   (`visits_path` と同じ流儀)
+4. `settings.rs`(新規): `Overlay::Settings(SettingsView)`。List / Pick / Input の
+   3モード。`,` は READ と一覧の両方。保存は `save()` 1か所で、成功時に
+   `apply_config_change` がヘッダ色・パレット・テロメア色・表示名を更新し、
+   パレットが変わったときだけ `rerender`
+
+計画からの変更点:
+
+- 「既存の `[upload.project.<slug>]` を設定画面が書き換えたとき」は、読むだけ・
+  書くのは `[project.<slug>]` で確定。両方に値があれば新テーブルが勝つので
+  紛らわしさは出ない。古い方を消す処理は入れていない
+- `,` は一覧画面でも開けるようにした。副産物として、一覧の上にオーバーレイを
+  描く経路ができた(従来は一覧で `?` を押しても Help が描かれなかった)
+- `display_name` の `[file]` 印はヘッダに出さない(設定画面の出どころ列で足りる)
+
+テスト: `cargo test --bin cosentty` 378 件 green(設定画面 6 件・Ctx 1 件・
+config 5 件を追加)。

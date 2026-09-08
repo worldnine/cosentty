@@ -42,6 +42,8 @@ cosentty                                      # 引数なし: 参加プロジェ
   が保存する `~/.cosense/settings.json`(PAT / Service Account)を自動で使います
 - `COSENSE_SID` 環境変数(ブラウザの `connect.sid`)はフォールバックで、
   ws push 同期・web レンダラ(mermaid)・プロジェクト設定の読み取りにだけ必要です
+- 非公開プロジェクトのテーマ・表示名・画像の保存先は、`COSENSE_SID` が無くても
+  `,` で開く設定画面から `~/.config/cosentty/config.toml` に書いておけます
 
 ## 開発
 
