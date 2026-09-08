@@ -255,6 +255,37 @@ pub struct TelomereTint {
     pub updated: Color,
 }
 
+/// Every theme name Cosense's settings page offers, in the order of its
+/// picker (`app.css`, 2026-09-06). The settings screen (`,`) lists these;
+/// the colour tables below answer for each of them. Regenerate with
+/// `scripts/cosense-theme-vars.py` when the web side changes — do not add
+/// names by hand.
+pub const COSENSE_THEMES: &[&str] = &[
+    "default",
+    "default-dark",
+    "default-minimal",
+    "paper-light",
+    "paper-dark",
+    "paper-dark-dark",
+    "blue",
+    "purple",
+    "green",
+    "orange",
+    "red",
+    "spring",
+    "kyoto",
+    "newyork",
+    "paris",
+    "summer",
+    "tropical",
+    "autumn",
+    "winter",
+    "hacker1",
+    "hacker2",
+    "lgreen",
+    "mred",
+];
+
 pub fn cosense_telomere_tint(theme: &str) -> Option<TelomereTint> {
     let (ur, ug, ub, pr, pg, pb) = match theme {
         // 旧系(Hacker より下): 緑の未読/ロード後更新
@@ -1065,6 +1096,15 @@ pub fn shimmer_style(base: Style, terminal_bg: (u8, u8, u8), level: f32) -> Styl
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_listed_theme_has_colours() {
+        for t in super::COSENSE_THEMES {
+            assert!(super::cosense_link_colors(t).is_some(), "link colours for {t}");
+            assert!(super::cosense_telomere_tint(t).is_some(), "telomere for {t}");
+        }
+        assert!(super::cosense_link_colors("no-such-theme").is_none());
+    }
+
     use super::*;
     use crate::highlight::Highlighter;
 
