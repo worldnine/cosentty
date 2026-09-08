@@ -34,7 +34,7 @@ pub(crate) fn test_ctx() -> Ctx {
         project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         gyazo_teams_token: None,
         gyazo_personal_token: None,
-        config: cosense::config::Config::default(),
+        config: std::sync::Mutex::new(cosense::config::Config::default()),
         config_error: None,
         send_target: SendTarget::None,
     }

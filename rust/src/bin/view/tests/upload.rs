@@ -205,7 +205,7 @@ fn uploads_are_refused_with_a_reason_when_they_cannot_happen() {
 fn a_gyazo_destination_wants_the_matching_token() {
     let mut ctx = test_ctx();
     ctx.gyazo_teams_token = Some("teams".into());
-    ctx.config = cosense::config::Config::parse("[upload]\nimages = \"gyazo\"\n").unwrap();
+    ctx.set_config(cosense::config::Config::parse("[upload]\nimages = \"gyazo\"\n").unwrap());
     let mut app = page(&["title", "one"]);
     app.rebuild(40);
     enter_session(&mut app, &ctx, 1, 0);
@@ -219,9 +219,10 @@ fn a_gyazo_destination_wants_the_matching_token() {
         app.toast_text()
     );
 
-    ctx.config =
+    ctx.set_config(
         cosense::config::Config::parse("[upload]\nimages = \"gyazo\"\ngyazo_team = \"org\"\n")
-            .unwrap();
+            .unwrap(),
+    );
     app.start_upload(&ctx, &png);
     assert!(
         app.status.contains("org.gyazo.com") && app.status.contains("アップロード中"),

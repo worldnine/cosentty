@@ -147,3 +147,52 @@ fn the_projects_list_header_is_a_menu_not_a_project() {
     assert_eq!(c.fg, Color::Black);
     assert_eq!(c.bg, CHROME_ACCENT);
 }
+
+/// With the server unreadable, `[project.<slug>]` in config.toml stands in
+/// for the theme and the display name — and says so.
+#[test]
+fn the_file_stands_in_for_unreadable_project_settings() {
+    use cosense::config::Origin;
+    let ctx = offline_ctx();
+    // The cache says "asked, nothing there" so no fetch is attempted.
+    ctx.project_settings
+        .lock()
+        .unwrap()
+        .insert("acme".into(), None);
+    assert_eq!(ctx.project_theme_with("acme"), (None, Origin::Default));
+    assert_eq!(
+        ctx.project_display_with("acme"),
+        ("acme".to_string(), Origin::Default)
+    );
+
+    ctx.set_config(
+        cosense::config::Config::parse(
+            "[project.acme]\ntheme = \"paper-dark\"\ndisplay_name = \"ACME\"\n",
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        ctx.project_theme_with("acme"),
+        (Some("paper-dark".into()), Origin::File)
+    );
+    assert_eq!(
+        ctx.project_display_with("acme"),
+        ("ACME".to_string(), Origin::File)
+    );
+
+    // The API, once it answers, wins over the file.
+    ctx.project_settings.lock().unwrap().insert(
+        "acme".into(),
+        Some(cosense::api::ProjectSettings {
+            display_name: "Acme Corp".into(),
+            theme: Some("blue".into()),
+            upload_image_to: None,
+            gyazo_teams_name: None,
+        }),
+    );
+    assert_eq!(
+        ctx.project_theme_with("acme"),
+        (Some("blue".into()), Origin::Api)
+    );
+    assert_eq!(ctx.project_display("acme"), "Acme Corp");
+}

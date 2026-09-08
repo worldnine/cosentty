@@ -61,6 +61,31 @@ pub struct ProjectSection {
     pub gyazo_team: Option<String>,
 }
 
+/// Where a project-level value on screen came from. The settings screen
+/// shows it next to each value, so "gcs" alone never hides that the
+/// project's own setting was simply unreadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `/api/projects/<slug>` answered.
+    Api,
+    /// `config.toml` names it.
+    File,
+    /// Neither: the built-in fallback.
+    Default,
+}
+
+impl Origin {
+    /// The short tag the settings screen prints. Not translated: `api` /
+    /// `file` are the names the documentation uses.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Origin::Api => "api",
+            Origin::File => "file",
+            Origin::Default => "-",
+        }
+    }
+}
+
 /// Which field of a `[project.<slug>]` table a write names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectKey {

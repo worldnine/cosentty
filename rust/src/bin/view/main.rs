@@ -316,7 +316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         project_settings: Arc::new(std::sync::Mutex::new(HashMap::new())),
         gyazo_teams_token,
         gyazo_personal_token,
-        config,
+        config: std::sync::Mutex::new(config),
         config_error,
         send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
@@ -546,8 +546,10 @@ struct Ctx {
     gyazo_personal_token: Option<String>,
     /// `~/.config/cosentty/config.toml`, or the defaults when there is
     /// none. A file that failed to parse is the defaults too, and
-    /// `config_error` says so once on the status line.
-    config: cosense::config::Config,
+    /// `config_error` says so once on the status line. Behind a mutex
+    /// because the settings screen (`,`) replaces it after a save while
+    /// every handler holds `&Ctx`.
+    config: std::sync::Mutex<cosense::config::Config>,
     config_error: Option<String>,
     /// Where `s` delivers the comments (`--send-cmd`, else the herdr agent
     /// of this tab when running inside herdr, else nowhere). See handoff.rs.
@@ -555,17 +557,64 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn project_theme(&self, project: &str) -> Option<String> {
-        self.project_settings(project).and_then(|s| s.theme)
+    /// A copy of the settings file as last read or saved. Small and
+    /// cloned per call so no lock is held across anything slow.
+    fn config(&self) -> cosense::config::Config {
+        self.config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
     }
 
-    /// The project's proper name for the header, or the slug when the
-    /// settings are unreadable (a private project without a sid): the URL
-    /// slug is at least always true.
+    /// Replace the in-memory settings (after `Config::save_project_key`).
+    fn set_config(&self, next: cosense::config::Config) {
+        if let Ok(mut c) = self.config.lock() {
+            *c = next;
+        }
+    }
+
+    /// The project's site theme. The web setting is the truth, so the API
+    /// wins whenever it answered with one; `[project.<slug>].theme` in
+    /// config.toml stands in when it did not (a private project without a
+    /// sid). Compare `upload::Destination::resolve`, where the FILE wins:
+    /// a destination is the reader's own choice, a theme is the project's.
+    fn project_theme(&self, project: &str) -> Option<String> {
+        self.project_theme_with(project).0
+    }
+
+    /// `project_theme`, with where the answer came from.
+    fn project_theme_with(&self, project: &str) -> (Option<String>, cosense::config::Origin) {
+        use cosense::config::Origin;
+        if let Some(t) = self
+            .project_settings(project)
+            .and_then(|s| s.theme)
+            .filter(|t| !t.is_empty())
+        {
+            return (Some(t), Origin::Api);
+        }
+        match self.config().project_theme(project) {
+            Some(t) => (Some(t), Origin::File),
+            None => (None, Origin::Default),
+        }
+    }
+
+    /// The project's proper name for the header: the API's, else the
+    /// file's, else the slug — which is at least always true.
     fn project_display(&self, project: &str) -> String {
-        match self.project_settings(project) {
-            Some(s) if !s.display_name.trim().is_empty() => s.display_name,
-            _ => project.to_string(),
+        self.project_display_with(project).0
+    }
+
+    /// `project_display`, with where the answer came from.
+    fn project_display_with(&self, project: &str) -> (String, cosense::config::Origin) {
+        use cosense::config::Origin;
+        if let Some(s) = self.project_settings(project) {
+            if !s.display_name.trim().is_empty() {
+                return (s.display_name, Origin::Api);
+            }
+        }
+        match self.config().project_display_name(project) {
+            Some(n) => (n, Origin::File),
+            None => (project.to_string(), Origin::Default),
         }
     }
 

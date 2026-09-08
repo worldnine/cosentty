@@ -130,7 +130,7 @@ impl App {
             return;
         }
         let (dest, decided) = Destination::resolve_with(
-            &ctx.config,
+            &ctx.config(),
             &self.project,
             ctx.project_settings(&self.project).as_ref(),
         );
