@@ -23,7 +23,8 @@ else
     exit 1
 fi
 
-opts=${COSENTTY_OPTS:---ime off --lang ja}
+# 端末は暗い前提で撮る(プロジェクトの明色テーマに追従すると EDIT の下敷きが白くなる)
+opts=${COSENTTY_OPTS:---ime off --lang ja --dark}
 # VHS の端末(xterm.js)は sixel を描けないので、画像は半ブロック文字で描かせる
 export COSENSE_IMAGE=${COSENSE_IMAGE:-halfblocks}
 scenario=${1:-view}

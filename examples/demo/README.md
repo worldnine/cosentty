@@ -14,9 +14,12 @@ COSENTTY_PROJECT=<sandbox> vhs examples/demo/edit.tape        # ページを作�
 
 ```bash
 cd examples/demo && npm install && cd ../..         # Playwright(初回だけ)
-COSENTTY_PROJECT=<sandbox> COSENSE_SID=... node examples/demo/side-by-side.mjs
+COSENTTY_PROJECT=cosentty COSENSE_SID=... node examples/demo/side-by-side.mjs
 ```
 
+- README のものは公開プロジェクト `cosentty` で撮っている(個人プロジェクトの一覧が映らないように)。
+  撮ったあとの `cosentty demo` ページは消す
+- 端末は `--dark` で撮る(`run.sh` の既定)。プロジェクトの明色テーマに追従すると EDIT の下敷きが白く浮く
 - 素の Chromium(拡張・ブックマーク無し、1280x800、ヘッドレス)を Playwright で録画し、
   同じスクリプトから `edit.tape` を VHS で走らせ、ffmpeg で左右に並べて `out/side.mp4` / `out/side.gif` を書く
 - ブラウザはプロジェクトのトップで待ち、API でページができたのを見てからそのページへ移る。
