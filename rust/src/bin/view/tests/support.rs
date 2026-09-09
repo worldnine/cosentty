@@ -140,6 +140,9 @@ pub(crate) fn page(texts: &[&str]) -> App {
     // which holds every commit back until the create lands.
     app.page_id = "pid".into();
     app.editable = true;
+    // Typing saves at once here; the debounce has tests of its own.
+    app.live_debounce = Duration::ZERO;
+    app.live_max_wait = Duration::ZERO;
     // Most tests predate the capability split and care about the render
     // pipeline, not the gate: give them a session that may draw. The
     // gate's own behaviour is tested explicitly further down.

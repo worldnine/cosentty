@@ -456,8 +456,12 @@ pub(crate) fn do_edit(
     }
     app.redo_stack.clear();
     // Any edit ends the open typing run; `session_commit_dirty` reopens it
-    // for its own replace right after this returns.
+    // for its own replace right after this returns. A save that was
+    // waiting for quiet is moot too: a structural edit carries the caret
+    // line's text itself, and `flush_live_edit` keeps a dirty line from
+    // sitting longer than `live_max_wait` in any case.
     app.live_undo = None;
+    app.live_due = None;
     // A fresh edit starts a fresh lineage: an older drop no longer
     // explains anything.
     app.history_dropped = false;

@@ -211,8 +211,8 @@ pub(crate) fn handle_session_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -
             reset_col(app);
         }
     }
-    // Whatever the key did to the caret line goes up now (a no-op when
-    // the text is unchanged) — see `session_commit_dirty`.
-    session_commit_dirty(app, ctx);
+    // Whatever the key did to the caret line goes up — now, or after a
+    // short quiet (see `session_live_commit`).
+    session_live_commit(app, ctx);
     Action::Continue
 }

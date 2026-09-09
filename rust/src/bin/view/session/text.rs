@@ -544,6 +544,7 @@ pub(crate) fn session_move_line(app: &mut App, ctx: &Ctx, delta: i32) {
     // Crossing into another line: commit what is here first, as before.
     session_commit_dirty(app, ctx);
     app.live_undo = None; // leaving the line ends its typing run
+    app.live_last_sent = None;
     let cur_line = line as i32;
     let last = app.lines.len().saturating_sub(1) as i32;
     let target = (cur_line + delta).clamp(0, last);

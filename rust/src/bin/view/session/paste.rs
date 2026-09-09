@@ -26,7 +26,7 @@ pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
             }
         }
         app.laid_width = 0;
-        session_commit_dirty(app, ctx);
+        session_live_commit(app, ctx);
         return;
     }
     // Multi-line: a live selection goes first — the paste replaces it,

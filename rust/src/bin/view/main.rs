@@ -875,6 +875,8 @@ fn run(
         while let Ok(outcome) = app.commit_res_rx.try_recv() {
             handle_commit_outcome(app, ctx, outcome);
         }
+        // A pause in typing saves the caret line (the keystroke deferred it).
+        flush_live_edit(app, ctx);
         // A commit-chain gap (or the first event after a fresh join) asks
         // the ws thread to refetch the page in the background — no network
         // I/O on the UI thread; the result arrives as a Resynced event.

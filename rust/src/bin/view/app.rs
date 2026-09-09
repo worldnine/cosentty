@@ -429,6 +429,18 @@ pub(crate) struct App {
     /// The newest live-typing job still assumed queued, by line id. The
     /// next keystroke on that line supersedes it (see `live_superseded`).
     pub(crate) live_pending: Option<(String, CommitJobId)>,
+    /// Quiet time after a keystroke before the caret line is saved, and
+    /// the longest a run of continuous typing may go unsaved. Saving on
+    /// every key tripped the API's burst limit (a 429 costs 1+2+4 s of
+    /// sleep in the serial worker, which looks like sync stopping), so
+    /// keystrokes are batched: a pause saves, and a long run saves every
+    /// `live_max_wait` regardless. Tests set the debounce to zero.
+    pub(crate) live_debounce: Duration,
+    pub(crate) live_max_wait: Duration,
+    /// When the caret line's text last went to the queue (None: not since
+    /// the run started), and the deferred save waiting for quiet.
+    pub(crate) live_last_sent: Option<Instant>,
+    pub(crate) live_due: Option<Instant>,
     /// The line whose newest undo entry is an open typing run: further
     /// live commits on it fold into that entry instead of stacking one
     /// per keystroke. Cleared by anything else that touches the history.
@@ -779,6 +791,10 @@ impl App {
             commit_origins: HashMap::new(),
             live_superseded: Arc::new(std::sync::Mutex::new(HashSet::new())),
             live_pending: None,
+            live_debounce: Duration::from_millis(800),
+            live_max_wait: Duration::from_secs(3),
+            live_last_sent: None,
+            live_due: None,
             live_undo: None,
             own_commits: std::collections::VecDeque::new(),
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),

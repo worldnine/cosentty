@@ -2016,3 +2016,58 @@ fn the_worker_skips_a_superseded_job_without_sending_it() {
         "the mark is consumed"
     );
 }
+
+/// Saving on every key tripped the API's burst limit, so keystrokes are
+/// batched: the first change of a run goes up at once, the rest wait for
+/// a pause (or the max wait) and go up from the event loop's tick — and a
+/// structural key still flushes at once, in order.
+#[test]
+fn live_typing_is_debounced_but_a_structural_key_flushes_at_once() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "one", "two"]);
+    app.live_debounce = Duration::from_millis(800);
+    app.live_max_wait = Duration::from_secs(3);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 3);
+    type_str(&mut app, &ctx, "a");
+    assert_eq!(
+        drain_jobs(&mut app).len(),
+        1,
+        "the first change goes up at once"
+    );
+    type_str(&mut app, &ctx, "bc");
+    assert!(drain_jobs(&mut app).is_empty(), "the rest wait for quiet");
+    assert_eq!(
+        app.session.as_ref().unwrap().input.buf,
+        "oneabc",
+        "the caret line shows it all meanwhile"
+    );
+    let due = app.live_due.expect("a save is pending");
+    flush_live_edit_at(&mut app, &ctx, due - Duration::from_millis(1));
+    assert!(drain_jobs(&mut app).is_empty(), "not yet");
+    flush_live_edit_at(&mut app, &ctx, due);
+    let jobs = drain_jobs(&mut app);
+    assert!(
+        matches!(jobs.as_slice(), [(_, ops)] if matches!(ops.as_slice(), [EditOp::Replace { text, .. }] if text == "oneabc"))
+    );
+    assert!(app.live_due.is_none());
+
+    // Enter carries the deferred text in the split itself: nothing waits.
+    type_str(&mut app, &ctx, "d");
+    assert!(drain_jobs(&mut app).is_empty());
+    handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+    let jobs = drain_jobs(&mut app);
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "oneabcd"));
+    assert!(matches!(&jobs[0].1[1], EditOp::Insert { .. }));
+    assert!(app.live_due.is_none(), "nothing left waiting");
+    // The split counted as a send, so the new line's first keys wait
+    // for quiet like any other; Esc flushes whatever is still waiting.
+    type_str(&mut app, &ctx, "xy");
+    assert!(drain_jobs(&mut app).is_empty());
+    assert!(app.live_due.is_some());
+    handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
+    assert!(
+        matches!(drain_jobs(&mut app).as_slice(), [(_, ops)] if matches!(ops.as_slice(), [EditOp::Replace { text, .. }] if text == "xy"))
+    );
+}
