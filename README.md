@@ -40,8 +40,11 @@ cosentty                                      # 引数なし: 参加プロジェ
 
 - 非公開プロジェクトの読み書きは、公式 CLI の [`cosense login`](https://www.npmjs.com/package/@helpfeel/cosense-cli)
   が保存する `~/.cosense/settings.json`(PAT / Service Account)を自動で使います
-- `COSENSE_SID` 環境変数(ブラウザの `connect.sid`)はフォールバックで、
-  ws push 同期・web レンダラ(mermaid)・プロジェクト設定の読み取りにだけ必要です
+- `COSENSE_SID` 環境変数(ブラウザの `connect.sid`)は任意です。編集はこれが無くても
+  完結し、端末で打った文字は打っている途中からブラウザにリアルタイムに現れます。
+  sid が効くのは逆方向だけで、ブラウザや他の人の編集が端末に届くのが 3 秒ポーリングから
+  サブ秒の websocket になります。ひとりで書いているときは差が出ません。
+  ほかに sid を使うのは web レンダラ(mermaid)とプロジェクト設定の読み取りです
 - 非公開プロジェクトのテーマ・表示名・画像の保存先は、`COSENSE_SID` が無くても
   `,` で開く設定画面から `~/.config/cosentty/config.toml` に書いておけます
 - 言語・配色・明暗などの起動オプションも同じファイルの `[view]` に書けます

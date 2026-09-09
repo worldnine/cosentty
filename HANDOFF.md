@@ -13,7 +13,10 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
 - 非公開プロジェクトの読み・書き・検索は `cosense login` の PAT / Service Account
   で完結する。保存先は `~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」を参照。
   `COSENSE_SID` の connect.sid が**どうしても要る**のは **ws push 同期**だけ
-  (websocket は cookie 認証しか通らない。`NOTE-websocket-sync.md`)。
+  (websocket は cookie 認証しか通らない。`NOTE-websocket-sync.md`)。それも
+  効くのは**ブラウザ→端末の向き**だけで(3 秒ポーリング→サブ秒)、端末で打った
+  文字がブラウザに出る向きは PAT だけで入力中からリアルタイムに動く
+  (`PLAN-live-edit.md`)。ひとりで書く用途なら sid は要らない、が現在の位置づけ。
   **プロジェクト設定の読み取り**(テーマ・表示名・アップロード先)も sid か
   Service Account が要るが、`,` の設定画面で `config.toml` に書けば代替できる。
   **既定でオフの web レンダラ**も非公開ページには SID を使う。
