@@ -401,6 +401,10 @@ pub(crate) struct App {
     /// A server refresh threw away history that could no longer be
     /// replayed. Only used to explain an empty stack instead of shrugging.
     pub(crate) history_dropped: bool,
+    /// Undo/redo retained per page while navigating away. Entries are
+    /// restored only when the same page is opened again.
+    pub(crate) page_histories:
+        HashMap<String, (Vec<(String, Vec<EditOp>)>, Vec<(String, Vec<EditOp>)>, bool)>,
     /// Where an uncreated page stands with the server (see `CreateState`).
     pub(crate) create_state: CreateState,
     /// Commit queue into the serial worker, and its outcomes back.
@@ -753,6 +757,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             history_dropped: false,
+            page_histories: HashMap::new(),
             create_state: CreateState::Idle,
             commit_tx,
             commit_res_rx,

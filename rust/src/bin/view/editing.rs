@@ -190,15 +190,52 @@ pub(crate) fn spawn_commit_worker(
     gen: Arc<std::sync::atomic::AtomicU64>,
 ) {
     std::thread::spawn(move || {
+        let mut failed_pages = std::collections::HashMap::new();
+        debug_log(format!(
+            "worker start pid={} revision=undo-target-check-v1",
+            std::process::id()
+        ));
         while let Ok(job) = jobs.recv() {
             let id = job.id;
+            let page_key = (job.project.clone(), job.page_id.clone());
+            if failed_pages
+                .get(&page_key)
+                .is_some_and(|failed_gen| job.gen <= *failed_gen)
+            {
+                debug_log(format!(
+                    "commit blocked job={id} reason=preceding-save-failed"
+                ));
+                let _ = out.send(CommitOutcome::Skipped { job: id });
+                continue;
+            }
             if job.gen < gen.load(std::sync::atomic::Ordering::SeqCst) {
                 let _ = out.send(CommitOutcome::Skipped { job: id });
                 continue;
             }
+            let summary: Vec<String> = job
+                .ops
+                .iter()
+                .map(|op| match op {
+                    EditOp::Delete { id } => format!("delete:{id}"),
+                    EditOp::Replace { id, .. } => format!("replace:{id}"),
+                    EditOp::Insert { anchor, lines } => format!(
+                        "insert:anchor={anchor}:ids={:?}",
+                        lines.iter().map(|(id, _)| id).collect::<Vec<_>>()
+                    ),
+                })
+                .collect();
+            debug_log(format!(
+                "commit send pid={} job={id} ops={summary:?}",
+                std::process::id()
+            ));
             let res = client
                 .preview_edit(&job.project, &job.page_id, &job.ops)
                 .and_then(|p| client.submit_edit(&job.project, &p.preview_id));
+            // Later jobs were built on this optimistic edit. Once it fails,
+            // their IDs and anchors cannot be trusted until a reload.
+            if res.is_err() {
+                failed_pages.insert(page_key, job.gen);
+            }
             let outcome = match res {
                 Ok(c) => CommitOutcome::Done {
                     job: id,
@@ -284,6 +321,54 @@ pub(crate) fn rerender(app: &mut App, ctx: &Ctx) {
 
 /// Can these ops still be applied to the page as it now stands? Every id
 /// they name has to be there — `_end` always is.
+fn history_targets_exist(app: &App, ops: &[EditOp]) -> bool {
+    replay_result(&app.lines, ops).is_some()
+}
+
+fn replay_result(lines: &[PageLine], ops: &[EditOp]) -> Option<Vec<PageLine>> {
+    let mut lines = lines.to_vec();
+    for op in ops {
+        let live = lines.iter().map(|line| line.id.as_str()).collect();
+        if !ops_replayable(std::slice::from_ref(op), &live) {
+            return None;
+        }
+        apply_ops(&mut lines, std::slice::from_ref(op));
+    }
+    Some(lines)
+}
+
+fn rebind_history(app: &mut App, ops: &[EditOp], inverse: &[EditOp]) {
+    let mut restored = app.lines.clone();
+    apply_ops(&mut restored, ops);
+    apply_ops(&mut restored, inverse);
+    if restored.len() != app.lines.len()
+        || restored
+            .iter()
+            .zip(&app.lines)
+            .any(|(a, b)| a.text != b.text)
+    {
+        return;
+    }
+    let ids: std::collections::HashMap<_, _> = app
+        .lines
+        .iter()
+        .zip(&restored)
+        .filter(|(a, b)| a.id != b.id)
+        .map(|(a, b)| (a.id.clone(), b.id.clone()))
+        .collect();
+    for (_, ops) in app.undo_stack.iter_mut().chain(app.redo_stack.iter_mut()) {
+        for op in ops {
+            let id = match op {
+                EditOp::Insert { anchor, .. } => anchor,
+                EditOp::Replace { id, .. } | EditOp::Delete { id } => id,
+            };
+            if let Some(new) = ids.get(id) {
+                *id = new.clone();
+            }
+        }
+    }
+}
+
 pub(crate) fn ops_replayable(ops: &[EditOp], live: &std::collections::HashSet<&str>) -> bool {
     ops.iter().all(|op| match op {
         EditOp::Insert { anchor, .. } => anchor == "_end" || live.contains(anchor.as_str()),
@@ -302,10 +387,8 @@ pub(crate) fn retain_replayable_history(
     let mut simulated = live_lines.to_vec();
     let mut keep = vec![false; stack.len()];
     for index in (0..stack.len()).rev() {
-        let live: std::collections::HashSet<&str> =
-            simulated.iter().map(|line| line.id.as_str()).collect();
-        if ops_replayable(&stack[index].1, &live) {
-            apply_ops(&mut simulated, &stack[index].1);
+        if let Some(next) = replay_result(&simulated, &stack[index].1) {
+            simulated = next;
             keep[index] = true;
         }
     }
@@ -345,6 +428,7 @@ pub(crate) fn do_edit(
         return None;
     }
     let inverse = invert_ops(&app.lines, &ops);
+    rebind_history(app, &ops, &inverse);
     let move_rebase = prepare_move_rebase(app, &ops);
     apply_ops(&mut app.lines, &ops);
     if let Some(rebase) = move_rebase {
@@ -571,6 +655,13 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
+    if !history_targets_exist(app, next_ops) {
+        app.toast_err(t!(
+            "履歴の参照先の行がありません。取り消しを停止しました",
+            "undo stopped: history refers to missing lines"
+        ));
+        return false;
+    }
     // Capture the pre-action model before either the page or its history
     // changes. An ordinary commit in flight is no obstacle: the gate below
     // waits for this action's own job id.
@@ -578,6 +669,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
 
     let (label, ops) = app.undo_stack.pop().expect("history was checked above");
     let redo = invert_ops(&app.lines, &ops);
+    rebind_history(app, &ops, &redo);
     let before: Vec<(String, String)> = app
         .lines
         .iter()
@@ -654,11 +746,19 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
         return false;
     };
     let structural = move_shape(app, next_ops).is_some();
+    if !history_targets_exist(app, next_ops) {
+        app.toast_err(t!(
+            "履歴の参照先の行がありません。やり直しを停止しました",
+            "redo stopped: history refers to missing lines"
+        ));
+        return false;
+    }
     // As in `undo`: snapshot first, gate on this action's own job id.
     let snapshot = structural.then(|| outline_snapshot(app));
 
     let (label, ops) = app.redo_stack.pop().expect("history was checked above");
     let undo_ops = invert_ops(&app.lines, &ops);
+    rebind_history(app, &ops, &undo_ops);
     let before: Vec<(String, String)> = app
         .lines
         .iter()

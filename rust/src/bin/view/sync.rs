@@ -1,7 +1,40 @@
 use super::*;
 
+/// Optional diagnostic trace for reproducing sync/undo failures. It is off
+/// by default; set `COSENTTY_DEBUG_LOG=/path/to/file` to enable it.
+pub(crate) fn debug_log(message: impl AsRef<str>) {
+    let Some(path) = std::env::var_os("COSENTTY_DEBUG_LOG") else {
+        return;
+    };
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{} {}", chrono_like_timestamp(), message.as_ref());
+    }
+}
+
+fn chrono_like_timestamp() -> String {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs().to_string(),
+        Err(_) => "0".into(),
+    }
+}
+
 /// A commit came back from the worker (drained per frame).
 pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOutcome) {
+    match &outcome {
+        CommitOutcome::Done { job, label, .. } => {
+            debug_log(format!("commit done job={job} label={label}"))
+        }
+        CommitOutcome::Conflict { job } => debug_log(format!("commit conflict job={job}")),
+        CommitOutcome::Skipped { job } => debug_log(format!("commit skipped job={job}")),
+        CommitOutcome::Failed { job, label, msg } => {
+            debug_log(format!("commit failed job={job} label={label} error={msg}"));
+        }
+    }
     app.inflight = app.inflight.saturating_sub(1);
     let origin = app.commit_origins.remove(&outcome.job());
     // Take the structural gate only for the job it is actually waiting on.
@@ -131,10 +164,16 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     ),
                 );
             } else {
-                app.toast_err(t!(
+                let failure = t!(
                     "コミットに失敗しました: {label} — {msg}",
                     "commit failed: {label} — {msg}"
-                ));
+                );
+                // Keep the exact server response in the standing footer as
+                // well as the short-lived toast. A failed optimistic edit
+                // can otherwise look like a successful undo after the toast
+                // disappears, while the local model is already desynced.
+                app.status = failure.clone();
+                app.toast_err(failure);
                 app.mark_desynced();
                 if app.create_state == CreateState::Sent && page_is_uncreated(app) {
                     // The page was never made. Let the next edit try again
@@ -656,6 +695,13 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
 /// exits back to NOW (live page, refetched). The timeline is fetched once
 /// per visit and snapshots are cached, so scrubbing is instant.
 pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
+    // Timeline navigation must never run underneath the modeless editor.
+    // Keeping the session alive while swapping in a snapshot makes an undo
+    // look like it entered page history and can leave the next commit
+    // targeting the wrong revision.
+    if app.session.is_some() {
+        return;
+    }
     if app.time.is_none() {
         if dir > 0 {
             app.toast(t!("すでに最新です", "already at NOW"));

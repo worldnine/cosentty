@@ -2,6 +2,76 @@ use super::support::*;
 use crate::*;
 
 #[test]
+fn edit_delete_restore_keeps_older_history_across_redo_cycles() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "body", ""]);
+    do_edit(
+        &mut app,
+        &ctx,
+        "edit",
+        vec![EditOp::Replace {
+            id: "id1".into(),
+            text: "changed".into(),
+        }],
+    );
+    do_edit(
+        &mut app,
+        &ctx,
+        "delete",
+        vec![EditOp::Delete { id: "id1".into() }],
+    );
+    for _ in 0..3 {
+        undo(&mut app, &ctx);
+        assert_eq!(app.lines[1].text, "changed");
+        assert_ne!(app.lines[1].id, "id1");
+        undo(&mut app, &ctx);
+        assert_eq!(app.lines[1].text, "body");
+        redo(&mut app, &ctx);
+        assert_eq!(app.lines[1].text, "changed");
+        redo(&mut app, &ctx);
+        assert_eq!(app.lines.len(), 2);
+    }
+}
+
+#[test]
+fn stale_history_is_not_applied_or_queued() {
+    let ctx = test_ctx();
+    for back in [true, false] {
+        for op in [
+            EditOp::Delete {
+                id: "missing".into(),
+            },
+            EditOp::Replace {
+                id: "missing".into(),
+                text: "changed".into(),
+            },
+            EditOp::Insert {
+                anchor: "missing".into(),
+                lines: vec![("fresh".into(), "restored".into())],
+            },
+        ] {
+            let mut app = page(&["title", "body"]);
+            let entry = ("stale".into(), vec![op]);
+            if back {
+                app.undo_stack.push(entry);
+            } else {
+                app.redo_stack.push(entry);
+            }
+            let next_job = app.next_job_id;
+            assert!(!if back {
+                undo(&mut app, &ctx)
+            } else {
+                redo(&mut app, &ctx)
+            });
+            assert_eq!(app.next_job_id, next_job);
+            assert_eq!(app.lines.len(), 2);
+            assert_eq!(app.lines[1].text, "body");
+            assert_eq!(app.undo_stack.len() + app.redo_stack.len(), 1);
+        }
+    }
+}
+
+#[test]
 fn a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved() {
     // 409 means our ops did not land: local and server disagree. If the
     // recovery fetch then fails too, we are STILL divergent — rendering

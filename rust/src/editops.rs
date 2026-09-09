@@ -278,30 +278,109 @@ fn invert_move(lines: &[PageLine], ops: &[EditOp]) -> Option<Vec<EditOp>> {
 
 /// The inverse of `ops` against the state `lines` (BEFORE applying), such
 /// that `apply(apply(lines, ops), invert_ops(lines, ops)) == lines` —
-/// textually; re-inserted lines get fresh ids, which is harmless.
+/// textually; re-inserted lines get fresh ids. Callers retaining older
+/// history must rebind its references to those restoration ids.
 ///
 /// Vertical moves are inverted as moves of the same logical source. Other
-/// edits use `diff_to_ops(after, before)`, the same LCS engine that powers
-/// `^e`. Lines whose text survives keep their ids; in particular a replace
+/// edits reverse the original operations by identity. In particular a replace
 /// undoes to a replace on the SAME id, so permalinks survive undo. Redo is
 /// simply the inverse of the inverse.
 pub fn invert_ops(lines: &[PageLine], ops: &[EditOp]) -> Vec<EditOp> {
     if let Some(inverse) = invert_move(lines, ops) {
         return inverse;
     }
-    let before_texts: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
-    let mut after = lines.to_vec();
-    apply_ops(&mut after, ops);
-    let after_pairs: Vec<(String, String)> = after
+    // Invert identities, not an LCS of text: repeated blank lines must not
+    // cause undo to delete a different line with the same contents.
+    let mut current = lines.to_vec();
+    let mut groups = Vec::new();
+    for op in ops {
+        let inverse = match op {
+            EditOp::Insert { lines, .. } => lines
+                .iter()
+                .map(|(id, _)| EditOp::Delete { id: id.clone() })
+                .collect(),
+            EditOp::Replace { id, .. } => current
+                .iter()
+                .find(|l| l.id == *id)
+                .map(|l| {
+                    vec![EditOp::Replace {
+                        id: id.clone(),
+                        text: l.text.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
+            EditOp::Delete { id } => current
+                .iter()
+                .position(|l| l.id == *id)
+                .map(|i| {
+                    vec![EditOp::insert(
+                        current.get(i + 1).map(|l| l.id.as_str()).unwrap_or("_end"),
+                        &current[i].text,
+                    )]
+                })
+                .unwrap_or_default(),
+        };
+        groups.push(inverse);
+        apply_ops(&mut current, std::slice::from_ref(op));
+    }
+    let mut inverse: Vec<EditOp> = groups.into_iter().rev().flatten().collect();
+    // Earlier deletions can anchor to a line restored by a later deletion.
+    let deleted: Vec<_> = ops
         .iter()
-        .map(|l| (l.id.clone(), l.text.clone()))
+        .filter_map(|op| {
+            if let EditOp::Delete { id } = op {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .rev()
         .collect();
-    diff_to_ops(&after_pairs, &before_texts)
+    let restored: Vec<_> = inverse
+        .iter()
+        .filter_map(|op| {
+            if let EditOp::Insert { lines, .. } = op {
+                Some(lines[0].0.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for op in &mut inverse {
+        let target = match op {
+            EditOp::Insert { anchor, .. } => anchor,
+            EditOp::Replace { id, .. } | EditOp::Delete { id } => id,
+        };
+        if let Some(new) = deleted
+            .iter()
+            .position(|id| *id == target)
+            .and_then(|i| restored.get(i))
+        {
+            *target = new.clone();
+        }
+    }
+    inverse
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_blank_insert_deletes_only_the_inserted_identity() {
+        let lines: Vec<PageLine> = serde_json::from_value(serde_json::json!([
+            {"id":"title","text":"title"}, {"id":"old","text":""}
+        ]))
+        .unwrap();
+        let ops = vec![EditOp::Insert {
+            anchor: "old".into(),
+            lines: vec![("new".into(), "".into())],
+        }];
+        assert_eq!(
+            invert_ops(&lines, &ops),
+            vec![EditOp::Delete { id: "new".into() }]
+        );
+    }
 
     fn old(lines: &[&str]) -> Vec<(String, String)> {
         lines

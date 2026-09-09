@@ -1310,6 +1310,31 @@ impl App {
     /// downloads. Loading is folded in here so no navigation path can forget
     /// it (back/forward included).
     pub(crate) fn set_page(&mut self, l: Loaded, ctx: &Ctx) {
+        // Keep this page's local lineage while navigation visits another
+        // page. It is safe to reuse only on the same page id; all other
+        // page changes still start with an empty history.
+        if !self.page_id.is_empty() && (!self.undo_stack.is_empty() || !self.redo_stack.is_empty())
+        {
+            let history_key = format!("{}\0{}", self.project, self.page_id);
+            self.page_histories.insert(
+                history_key,
+                (
+                    self.undo_stack.clone(),
+                    self.redo_stack.clone(),
+                    self.history_dropped,
+                ),
+            );
+            // Navigation history is a convenience cache, not a second
+            // database. Keep the newest 32 pages so a long browsing session
+            // cannot grow memory without bound.
+            while self.page_histories.len() > 32 {
+                if let Some(key) = self.page_histories.keys().next().cloned() {
+                    self.page_histories.remove(&key);
+                } else {
+                    break;
+                }
+            }
+        }
         self.bump_server_epoch();
         self.time = None; // installing a live page always exits history
         self.present_ids = None;
@@ -1339,6 +1364,12 @@ impl App {
         self.header_colors = l.header_colors;
         self.project_display = l.project_display;
         self.page_id = l.page_id;
+        let history_key = format!("{}\0{}", self.project, self.page_id);
+        if let Some((undo, redo, dropped)) = self.page_histories.remove(&history_key) {
+            self.undo_stack = undo;
+            self.redo_stack = redo;
+            self.history_dropped = dropped;
+        }
         self.web_gen
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Navigating leaves the joined room. Until the thread has re-joined
@@ -1347,6 +1378,11 @@ impl App {
         // once on the way down rather than waiting out a 60 s nap.
         self.set_sync_state(SyncState::Polling);
         self.lines = l.lines;
+        if !self.undo_stack.is_empty() || !self.redo_stack.is_empty() {
+            let dropped_now = retain_replayable_history(&mut self.undo_stack, &self.lines)
+                + retain_replayable_history(&mut self.redo_stack, &self.lines);
+            self.history_dropped |= dropped_now != 0;
+        }
         self.blocks = l.blocks;
         self.srcs = l.srcs;
         self.hits = l.hits;

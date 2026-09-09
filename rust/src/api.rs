@@ -15,6 +15,7 @@ use std::time::Duration;
 /// not an error. Any other status comes back as it is.
 pub trait SendPolite {
     fn send_polite(self) -> reqwest::Result<reqwest::blocking::Response>;
+    fn send_edit_polite(self) -> reqwest::Result<reqwest::blocking::Response>;
 }
 
 /// How long to wait before attempt `attempt` (1-based) after a 429, given
@@ -40,27 +41,39 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl SendPolite for reqwest::blocking::RequestBuilder {
     fn send_polite(self) -> reqwest::Result<reqwest::blocking::Response> {
-        let mut req = self;
-        for attempt in 1..=POLITE_ATTEMPTS {
-            // A body that cannot be cloned (a stream) can only be sent once.
-            let Some(again) = req.try_clone() else {
-                return req.send();
-            };
-            let res = req.send()?;
-            if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == POLITE_ATTEMPTS
-            {
-                return Ok(res);
-            }
-            let after = res
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-            std::thread::sleep(retry_backoff(after.as_deref(), attempt));
-            req = again;
-        }
-        unreachable!("the loop returns on its last attempt")
+        send_with_attempts(self, POLITE_ATTEMPTS)
     }
+
+    fn send_edit_polite(self) -> reqwest::Result<reqwest::blocking::Response> {
+        // Keep the serial edit queue on this exact request through a burst
+        // limit. In particular, retry submit with the SAME preview token.
+        send_with_attempts(self, 12)
+    }
+}
+
+fn send_with_attempts(
+    req: reqwest::blocking::RequestBuilder,
+    attempts: u32,
+) -> reqwest::Result<reqwest::blocking::Response> {
+    let mut req = req;
+    for attempt in 1..=attempts {
+        // A body that cannot be cloned (a stream) can only be sent once.
+        let Some(again) = req.try_clone() else {
+            return req.send();
+        };
+        let res = req.send()?;
+        if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == attempts {
+            return Ok(res);
+        }
+        let after = res
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        std::thread::sleep(retry_backoff(after.as_deref(), attempt));
+        req = again;
+    }
+    unreachable!("the loop returns on its last attempt")
 }
 
 /// One way to authenticate a request, and the header that carries it.
@@ -1141,7 +1154,7 @@ impl Client {
             req = req.header(name, value);
         }
         let res = req
-            .send_polite()
+            .send_edit_polite()
             .map_err(|e| EditError::Other(e.to_string()))?;
         let status = res.status();
         let text = res.text().map_err(|e| EditError::Other(e.to_string()))?;
