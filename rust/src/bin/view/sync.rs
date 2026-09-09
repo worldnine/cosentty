@@ -1006,6 +1006,11 @@ impl App {
                     "編集中の行を待っています",
                     "waiting on the line being edited"
                 )
+            } else if self.inflight > 0 {
+                // Typing saves as it goes, so while the keys keep coming
+                // there is always a save on its way; remote edits queue
+                // behind it and land the moment the queue drains.
+                ts!("保存を待っています", "waiting on the save")
             } else {
                 ts!("適用待ち", "waiting to apply")
             };

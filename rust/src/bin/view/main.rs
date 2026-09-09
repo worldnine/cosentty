@@ -374,6 +374,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             jobs_rx,
             app.commit_res_tx.clone(),
             Arc::clone(&app.gen),
+            Arc::clone(&app.live_superseded),
         );
     }
     // The web renderer: headless Chrome when one can be found, otherwise a

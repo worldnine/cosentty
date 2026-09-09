@@ -979,9 +979,13 @@ fn session_undo_takes_back_the_typing_and_keeps_editing() {
     assert_eq!(app.session.as_ref().unwrap().input.buf, "one!!");
 
     let labels: Vec<String> = drain_jobs(&mut app).into_iter().map(|j| j.0).collect();
-    assert_eq!(labels.len(), 3, "typing, undo and redo each committed");
-    assert!(labels[1].starts_with("undo"));
-    assert!(labels[2].starts_with("redo"));
+    assert_eq!(
+        labels.len(),
+        4,
+        "each keystroke, then undo and redo, committed: {labels:?}"
+    );
+    assert!(labels[2].starts_with("undo"));
+    assert!(labels[3].starts_with("redo"));
 }
 
 /// Undo held down: past the point where the caret line was created,

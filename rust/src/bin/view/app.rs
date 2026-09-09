@@ -422,6 +422,17 @@ pub(crate) struct App {
     pub(crate) next_job_id: CommitJobId,
     /// Outstanding save ownership; navigation must not clear this map.
     pub(crate) commit_origins: HashMap<CommitJobId, CommitOrigin>,
+    /// Live-typing jobs the worker may skip: a newer replace of the same
+    /// line has been queued behind them, so their text is already stale.
+    /// Shared with the worker, which consults it when it takes a job.
+    pub(crate) live_superseded: Arc<std::sync::Mutex<HashSet<CommitJobId>>>,
+    /// The newest live-typing job still assumed queued, by line id. The
+    /// next keystroke on that line supersedes it (see `live_superseded`).
+    pub(crate) live_pending: Option<(String, CommitJobId)>,
+    /// The line whose newest undo entry is an open typing run: further
+    /// live commits on it fold into that entry instead of stacking one
+    /// per keystroke. Cleared by anything else that touches the history.
+    pub(crate) live_undo: Option<String>,
     /// Commit ids this viewer wrote, newest last. Their websocket echoes
     /// carry ops we have already applied locally — and may arrive AFTER we
     /// have edited past them, in which case applying the ops again would
@@ -766,6 +777,9 @@ impl App {
             inflight: 0,
             next_job_id: 1,
             commit_origins: HashMap::new(),
+            live_superseded: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            live_pending: None,
+            live_undo: None,
             own_commits: std::collections::VecDeque::new(),
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),

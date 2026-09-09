@@ -582,7 +582,7 @@ fn ws_dirty_caret_line_buffers_the_commit() {
     app.ws_head = Some("c0".into());
     let pid = app.page_id.clone();
     enter_session(&mut app, &ctx, 1, 3);
-    type_str(&mut app, &ctx, "!"); // dirty caret line — gate up
+    type_str(&mut app, &ctx, "!"); // saved at once — the save in flight is the gate
     ws_on_commit(
         &mut app,
         &ctx,
@@ -597,9 +597,9 @@ fn ws_dirty_caret_line_buffers_the_commit() {
             }],
         ),
     );
-    assert_eq!(app.lines[1].text, "one", "buffered, not applied");
+    assert_eq!(app.lines[1].text, "one!", "buffered, not applied");
     assert_eq!(app.ws_pending.len(), 1);
-    // leaving the line commits it and drops the gate; flush applies
+    // the save comes back and drops the gate; flush applies
     handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
     let _ = drain_jobs(&mut app);
     app.inflight = 0; // the queued commit is "done" in this test harness

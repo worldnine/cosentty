@@ -113,18 +113,15 @@ fn session_edits_many_lines_without_leaving() {
     enter_session(&mut app, &ctx, 1, end);
     type_str(&mut app, &ctx, "!");
     assert_eq!(app.session.as_ref().unwrap().input.buf, "one!");
+    assert_eq!(app.lines[1].text, "one!", "typing applies locally at once");
+    let jobs = drain_jobs(&mut app);
+    assert_eq!(jobs.len(), 1, "and saves as it goes");
+    assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "one!"));
+    handle_session_key(&mut app, &ctx, key(KeyCode::Down));
     assert!(
         drain_jobs(&mut app).is_empty(),
-        "typing alone commits nothing"
+        "leaving a clean line commits nothing more"
     );
-    handle_session_key(&mut app, &ctx, key(KeyCode::Down));
-    assert_eq!(
-        app.lines[1].text, "one!",
-        "leaving the line applied it locally"
-    );
-    let jobs = drain_jobs(&mut app);
-    assert_eq!(jobs.len(), 1);
-    assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "one!"));
 
     // session continued on line 2: Enter at EOL creates line 3 and
     // KEEPS the session going; type there; Esc commits the text
@@ -138,10 +135,11 @@ fn session_edits_many_lines_without_leaving() {
     assert!(app.session.is_none());
     assert_eq!(app.lines[3].text, "three");
     let jobs = drain_jobs(&mut app);
-    // split (replace+insert) then the final text replace
-    assert_eq!(jobs.len(), 2);
+    // split (replace+insert) then one replace per keystroke, the
+    // last carrying the whole text
+    assert_eq!(jobs.len(), 1 + "three".len());
     assert!(matches!(&jobs[0].1[1], EditOp::Insert { .. }));
-    assert!(matches!(&jobs[1].1[0], EditOp::Replace { text, .. } if text == "three"));
+    assert!(matches!(&jobs[5].1[0], EditOp::Replace { text, .. } if text == "three"));
     // ids: the insert's id is the line's id — client-generated, stable
     if let EditOp::Insert { lines, .. } = &jobs[0].1[1] {
         assert_eq!(lines[0].0, app.lines[3].id);
@@ -396,9 +394,15 @@ fn the_footer_says_why_the_page_is_not_the_newest_state() {
     assert!(held.contains('1'), "how many: {held}");
     assert!(held.contains("適用待ち"), "{held}");
 
-    // With an unsaved caret line, that IS the reason — say so.
+    // Typing saves as it goes, so the save in flight IS the reason.
     enter_session(&mut app, &ctx, 1, 0);
     type_str(&mut app, &ctx, "!");
+    assert!(app.inflight > 0);
+    let held = app.sync_notice().unwrap_or_default();
+    assert!(held.contains("保存を待"), "{held}");
+    // A line that could not be saved yet (an uncreated page) is the other.
+    app.inflight = 0;
+    app.session.as_mut().unwrap().orig.clear();
     let held = app.sync_notice().unwrap_or_default();
     assert!(held.contains("編集中の行"), "{held}");
 }
@@ -1062,8 +1066,8 @@ fn shift_arrows_type_and_backspace_act_on_a_character_selection() {
     handle_session_key(&mut app, &ctx, key(KeyCode::Backspace));
     assert_eq!(app.session.as_ref().unwrap().input.buf, "Xf");
     assert_eq!(
-        app.lines[1].text, "abcdef",
-        "still uncommitted — it is just typing"
+        app.lines[1].text, "Xf",
+        "typing lands in the page as it goes"
     );
 
     // Moving without shift drops it.
@@ -1432,9 +1436,9 @@ fn remote_edits_never_touch_a_dirty_caret_line() {
     let mut app = page(&["t", "one"]);
     app.rebuild(40);
     enter_session(&mut app, &ctx, 1, 3);
-    type_str(&mut app, &ctx, "!"); // dirty
+    type_str(&mut app, &ctx, "!"); // committed at once, save in flight
     apply_remote(&mut app, &ctx, polled(&[("id0", "t"), ("id1", "REMOTE")]));
-    assert_eq!(app.lines[1].text, "one", "deferred while dirty");
+    assert_eq!(app.lines[1].text, "one!", "deferred while the save is out");
     assert_eq!(app.session.as_ref().unwrap().input.buf, "one!");
     // …but a CLEAN session re-anchors and picks up the remote text
     handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
@@ -1878,4 +1882,137 @@ fn read_line_selection_never_reaches_the_related_rows() {
     read_select_line(&mut app, false);
     assert!(app.selection.is_none());
     assert_eq!(app.cursor, 2);
+}
+
+/// Typing saves as it goes, the way cosense web does. Every keystroke
+/// queues a replace of the caret line, but the queue does not grow a
+/// request per key: each new replace marks the previous still-queued one
+/// as superseded, so the worker sends only the newest text.
+#[test]
+fn live_typing_saves_each_keystroke_and_supersedes_the_older_ones() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "one"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 3);
+    type_str(&mut app, &ctx, "abc");
+    assert_eq!(app.lines[1].text, "oneabc");
+
+    let rx = app.commit_jobs_rx.as_ref().unwrap();
+    let jobs: Vec<CommitJob> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let texts: Vec<&str> = jobs
+        .iter()
+        .map(|j| match j.ops.as_slice() {
+            [EditOp::Replace { id, text }] if id == "id1" => text.as_str(),
+            other => panic!("not a replace of the caret line: {other:?}"),
+        })
+        .collect();
+    assert_eq!(texts, ["onea", "oneab", "oneabc"]);
+    let superseded = app.live_superseded.lock().unwrap();
+    assert!(superseded.contains(&jobs[0].id), "the first is stale");
+    assert!(superseded.contains(&jobs[1].id), "so is the second");
+    assert!(
+        !superseded.contains(&jobs[2].id),
+        "the newest is the one to send"
+    );
+    drop(superseded);
+    assert_eq!(app.inflight, 3, "every job still answers, skipped or sent");
+
+    // One typing run on one line is ONE undo step, as when the line
+    // committed on leaving it.
+    assert_eq!(app.undo_stack.len(), 1);
+    handle_session_key(&mut app, &ctx, ctrl('z'));
+    assert_eq!(app.lines[1].text, "one", "^z takes back the whole run");
+}
+
+/// Enter in the middle of typing: the keystrokes before it are already
+/// queued as replaces, the split follows them in order, and typing on
+/// the new line starts a run of its own. Nothing is lost or reordered.
+#[test]
+fn live_typing_keeps_order_across_a_split_and_a_line_change() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "one", "two"]);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 3);
+    type_str(&mut app, &ctx, "!");
+    handle_session_key(&mut app, &ctx, key(KeyCode::Enter));
+    type_str(&mut app, &ctx, "new");
+    handle_session_key(&mut app, &ctx, key(KeyCode::Up));
+    type_str(&mut app, &ctx, "?");
+    assert_eq!(texts(&app), ["title", "one?!", "new", "two"]);
+
+    let jobs = drain_jobs(&mut app);
+    let shapes: Vec<String> = jobs
+        .iter()
+        .map(|(_, ops)| {
+            ops.iter()
+                .map(|op| match op {
+                    EditOp::Replace { text, .. } => format!("r:{text}"),
+                    EditOp::Insert { .. } => "insert".to_string(),
+                    EditOp::Delete { .. } => "delete".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        ["r:one!", "r:one!+insert", "r:n", "r:ne", "r:new", "r:one?!"]
+    );
+    // Only same-line replaces fold: the split and the runs on other
+    // lines stand on their own.
+    let superseded = app.live_superseded.lock().unwrap();
+    assert_eq!(
+        superseded.len(),
+        2,
+        "n and ne gave way to new: {superseded:?}"
+    );
+
+    // Three undo steps: the second run, the split, the first run.
+    assert_eq!(app.undo_stack.len(), 4, "run, split, run, run");
+}
+
+/// The worker honours the supersede mark: a job marked stale before it is
+/// taken is answered as skipped without any request, and the mark is
+/// consumed. Only the newest text of a typing run reaches the network.
+#[test]
+fn the_worker_skips_a_superseded_job_without_sending_it() {
+    let ctx = offline_ctx();
+    let mut app = page(&["title", "one"]);
+    let jobs_rx = app.commit_jobs_rx.take().unwrap();
+    let (res_tx, res_rx) = mpsc::channel();
+    spawn_commit_worker(
+        ctx.client.clone(),
+        jobs_rx,
+        res_tx,
+        Arc::clone(&app.gen),
+        Arc::clone(&app.live_superseded),
+    );
+    // The mark lands before the job is queued, as it does in real life
+    // (the next keystroke marks the previous job, then queues its own).
+    let job = app.next_job_id;
+    app.live_superseded.lock().unwrap().insert(job);
+    let queued = queue_commit(
+        &mut app,
+        "line 2",
+        vec![EditOp::Replace {
+            id: "id1".into(),
+            text: "onea".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(queued, job);
+    let outcome = res_rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the worker answers");
+    match outcome {
+        CommitOutcome::Skipped { job: j } => assert_eq!(j, job),
+        CommitOutcome::Failed { msg, .. } => {
+            panic!("the job was sent instead of skipped: {msg}")
+        }
+        _ => panic!("unexpected outcome"),
+    }
+    assert!(
+        app.live_superseded.lock().unwrap().is_empty(),
+        "the mark is consumed"
+    );
 }

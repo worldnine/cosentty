@@ -125,8 +125,21 @@ pub(crate) fn enter_session(app: &mut App, ctx: &Ctx, line: usize, caret: usize)
     app.status.clear();
 }
 
-/// Commit the caret line's text if it changed (called whenever the caret
-/// leaves the line, and on Esc).
+/// Commit the caret line's text if it changed. This runs after EVERY key
+/// the session handles (and after a paste), so typing reaches the server
+/// while it is still going on — the way cosense web saves — and it is
+/// also the forced flush the structural edits and the caret's line changes
+/// call before they act.
+///
+/// Two things keep "a commit per keystroke" from meaning "a request and an
+/// undo step per keystroke":
+///
+/// * the previous still-queued replace of the same line is marked
+///   superseded, so the worker skips it and sends only the newest text
+///   (one request per round trip while typing continues);
+/// * the undo entries of one typing run on one line fold into the first,
+///   so `^z` takes back the run — what "undo what I just typed" meant when
+///   the line committed only on leaving it.
 pub(crate) fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
     let Some(s) = app.session.as_ref() else {
         return;
@@ -137,15 +150,38 @@ pub(crate) fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
     let (line, buf) = (s.line, s.input.buf.clone());
     let id = app.lines[line].id.clone();
     let label = format!("line {}", line + 1);
-    do_edit(
+    let fold_undo = app.live_undo.as_deref() == Some(id.as_str())
+        && app.redo_stack.is_empty()
+        && matches!(
+            app.undo_stack.last(),
+            Some((_, ops)) if matches!(ops.as_slice(), [EditOp::Replace { id: prev, .. }] if *prev == id)
+        );
+    let depth = app.undo_stack.len();
+    let job = do_edit(
         app,
         ctx,
         &label,
         vec![EditOp::Replace {
-            id,
+            id: id.clone(),
             text: buf.clone(),
         }],
     );
+    if fold_undo && app.undo_stack.len() == depth + 1 {
+        // The older inverse already restores the text from before the
+        // run; the one just pushed only restores the previous keystroke.
+        app.undo_stack.pop();
+    }
+    app.live_undo = Some(id.clone());
+    if let Some(job) = job {
+        if let Some((prev_id, prev_job)) = app.live_pending.take() {
+            if prev_id == id {
+                if let Ok(mut set) = app.live_superseded.lock() {
+                    set.insert(prev_job);
+                }
+            }
+        }
+        app.live_pending = Some((id, job));
+    }
     if let Some(s) = app.session.as_mut() {
         s.orig = buf;
     }
@@ -155,6 +191,7 @@ pub(crate) fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
 /// callers decide what to do with the dirty line first.
 pub(crate) fn close_session(app: &mut App) {
     app.session = None;
+    app.live_undo = None;
     app.ime_guard = None;
     app.laid_width = 0;
 }
@@ -239,6 +276,7 @@ pub(crate) fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
         return;
     }
     session_commit_dirty(app, ctx);
+    app.live_undo = None; // leaving the line ends its typing run
     let text = app.lines[line].text.clone();
     if let Some(s) = app.session.as_mut() {
         s.line = line;

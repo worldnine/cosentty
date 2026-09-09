@@ -188,6 +188,7 @@ pub(crate) fn spawn_commit_worker(
     jobs: mpsc::Receiver<CommitJob>,
     out: mpsc::Sender<CommitOutcome>,
     gen: Arc<std::sync::atomic::AtomicU64>,
+    superseded: Arc<std::sync::Mutex<HashSet<CommitJobId>>>,
 ) {
     std::thread::spawn(move || {
         let mut failed_pages = std::collections::HashMap::new();
@@ -209,6 +210,21 @@ pub(crate) fn spawn_commit_worker(
                 continue;
             }
             if job.gen < gen.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = out.send(CommitOutcome::Skipped { job: id });
+                continue;
+            }
+            // Live typing queues one replace per keystroke; a later one
+            // for the same line makes this text stale before it is sent.
+            // Skipping it is what keeps the queue at one request per
+            // round trip instead of one per key. The check sits right
+            // before the send: a supersede that lands after it only means
+            // the older text goes up first and the newer one right after,
+            // which is the plain queue order anyway.
+            if superseded
+                .lock()
+                .map(|mut s| s.remove(&id))
+                .unwrap_or(false)
+            {
                 let _ = out.send(CommitOutcome::Skipped { job: id });
                 continue;
             }
@@ -439,6 +455,9 @@ pub(crate) fn do_edit(
         app.undo_stack.remove(0);
     }
     app.redo_stack.clear();
+    // Any edit ends the open typing run; `session_commit_dirty` reopens it
+    // for its own replace right after this returns.
+    app.live_undo = None;
     // A fresh edit starts a fresh lineage: an older drop no longer
     // explains anything.
     app.history_dropped = false;
@@ -668,6 +687,7 @@ pub(crate) fn undo(app: &mut App, ctx: &Ctx) -> bool {
     let snapshot = structural.then(|| outline_snapshot(app));
 
     let (label, ops) = app.undo_stack.pop().expect("history was checked above");
+    app.live_undo = None;
     let redo = invert_ops(&app.lines, &ops);
     rebind_history(app, &ops, &redo);
     let before: Vec<(String, String)> = app
@@ -757,6 +777,7 @@ pub(crate) fn redo(app: &mut App, ctx: &Ctx) -> bool {
     let snapshot = structural.then(|| outline_snapshot(app));
 
     let (label, ops) = app.redo_stack.pop().expect("history was checked above");
+    app.live_undo = None;
     let undo_ops = invert_ops(&app.lines, &ops);
     rebind_history(app, &ops, &undo_ops);
     let before: Vec<(String, String)> = app
