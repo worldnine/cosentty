@@ -430,16 +430,18 @@ pub(crate) struct App {
     /// next keystroke on that line supersedes it (see `live_superseded`).
     pub(crate) live_pending: Option<(String, CommitJobId)>,
     /// Quiet time after a keystroke before the caret line is saved, and
-    /// the longest a run of continuous typing may go unsaved. Saving on
-    /// every key tripped the API's burst limit (a 429 costs 1+2+4 s of
-    /// sleep in the serial worker, which looks like sync stopping), so
-    /// keystrokes are batched: a pause saves, and a long run saves every
-    /// `live_max_wait` regardless. Tests set the debounce to zero.
+    /// the longest typed text may go unsaved while the keys keep coming.
+    /// Saving on every key tripped the API's burst limit (a 429 costs
+    /// 1+2+4 s of sleep in the serial worker, which looks like sync
+    /// stopping), so keystrokes are batched: a pause saves, and a long run
+    /// saves every `live_max_wait`. No key goes up alone: the first change
+    /// waits like the rest, so a short sentence lands in one piece. Tests
+    /// set both to zero.
     pub(crate) live_debounce: Duration,
     pub(crate) live_max_wait: Duration,
-    /// When the caret line's text last went to the queue (None: not since
-    /// the run started), and the deferred save waiting for quiet.
-    pub(crate) live_last_sent: Option<Instant>,
+    /// When the caret line first became dirty after its last save (the
+    /// max wait counts from here), and the deferred save waiting for quiet.
+    pub(crate) live_dirty_since: Option<Instant>,
     pub(crate) live_due: Option<Instant>,
     /// The line whose newest undo entry is an open typing run: further
     /// live commits on it fold into that entry instead of stacking one
@@ -792,8 +794,8 @@ impl App {
             live_superseded: Arc::new(std::sync::Mutex::new(HashSet::new())),
             live_pending: None,
             live_debounce: Duration::from_millis(800),
-            live_max_wait: Duration::from_secs(3),
-            live_last_sent: None,
+            live_max_wait: Duration::from_millis(1500),
+            live_dirty_since: None,
             live_due: None,
             live_undo: None,
             own_commits: std::collections::VecDeque::new(),

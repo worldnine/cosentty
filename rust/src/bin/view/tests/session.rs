@@ -2018,25 +2018,22 @@ fn the_worker_skips_a_superseded_job_without_sending_it() {
 }
 
 /// Saving on every key tripped the API's burst limit, so keystrokes are
-/// batched: the first change of a run goes up at once, the rest wait for
-/// a pause (or the max wait) and go up from the event loop's tick — and a
-/// structural key still flushes at once, in order.
+/// batched: they wait for a pause (or the max wait) and go up from the
+/// event loop's tick, nothing goes up alone — and a structural key still
+/// flushes at once, in order.
 #[test]
 fn live_typing_is_debounced_but_a_structural_key_flushes_at_once() {
     let ctx = test_ctx();
     let mut app = page(&["title", "one", "two"]);
     app.live_debounce = Duration::from_millis(800);
-    app.live_max_wait = Duration::from_secs(3);
+    app.live_max_wait = Duration::from_millis(1500);
     app.rebuild(40);
     enter_session(&mut app, &ctx, 1, 3);
-    type_str(&mut app, &ctx, "a");
-    assert_eq!(
-        drain_jobs(&mut app).len(),
-        1,
-        "the first change goes up at once"
-    );
-    type_str(&mut app, &ctx, "bc");
-    assert!(drain_jobs(&mut app).is_empty(), "the rest wait for quiet");
+    type_str(&mut app, &ctx, "abc");
+    assert!(drain_jobs(&mut app).is_empty(), "keys wait for quiet");
+    let since = app.live_dirty_since.expect("the run has a start");
+    let due = app.live_due.unwrap();
+    assert!(since < due && due <= since + Duration::from_millis(1500));
     assert_eq!(
         app.session.as_ref().unwrap().input.buf,
         "oneabc",
@@ -2061,13 +2058,44 @@ fn live_typing_is_debounced_but_a_structural_key_flushes_at_once() {
     assert!(matches!(&jobs[0].1[0], EditOp::Replace { text, .. } if text == "oneabcd"));
     assert!(matches!(&jobs[0].1[1], EditOp::Insert { .. }));
     assert!(app.live_due.is_none(), "nothing left waiting");
-    // The split counted as a send, so the new line's first keys wait
-    // for quiet like any other; Esc flushes whatever is still waiting.
+    // Esc flushes whatever is still waiting.
     type_str(&mut app, &ctx, "xy");
     assert!(drain_jobs(&mut app).is_empty());
     assert!(app.live_due.is_some());
     handle_session_key(&mut app, &ctx, key(KeyCode::Esc));
     assert!(
         matches!(drain_jobs(&mut app).as_slice(), [(_, ops)] if matches!(ops.as_slice(), [EditOp::Replace { text, .. }] if text == "xy"))
+    );
+}
+
+/// While the keys keep coming, the text still goes up every max wait,
+/// counted from when the line first became dirty — a long sentence lands
+/// in pieces that far apart instead of waiting for the writer to stop.
+#[test]
+fn continuous_typing_saves_every_max_wait() {
+    let ctx = test_ctx();
+    let mut app = page(&["title", "one"]);
+    app.live_debounce = Duration::from_millis(800);
+    app.live_max_wait = Duration::from_millis(1500);
+    app.rebuild(40);
+    enter_session(&mut app, &ctx, 1, 3);
+    type_str(&mut app, &ctx, "a");
+    let since = app.live_dirty_since.unwrap();
+    // Keys arrive faster than the debounce: the due date keeps sliding
+    // forward but never past the max wait.
+    app.live_dirty_since = Some(since - Duration::from_millis(1400));
+    type_str(&mut app, &ctx, "b");
+    let due = app.live_due.unwrap();
+    assert!(
+        due <= since + Duration::from_millis(100),
+        "capped by the max wait"
+    );
+    flush_live_edit_at(&mut app, &ctx, due);
+    assert!(
+        matches!(drain_jobs(&mut app).as_slice(), [(_, ops)] if matches!(ops.as_slice(), [EditOp::Replace { text, .. }] if text == "oneab"))
+    );
+    assert!(
+        app.live_dirty_since.is_none(),
+        "the clock restarts with the next key"
     );
 }

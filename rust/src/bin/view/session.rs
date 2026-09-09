@@ -172,7 +172,7 @@ pub(crate) fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
         app.undo_stack.pop();
     }
     app.live_undo = Some(id.clone());
-    app.live_last_sent = Some(Instant::now());
+    app.live_dirty_since = None;
     app.live_due = None;
     if let Some(job) = job {
         if let Some((prev_id, prev_job)) = app.live_pending.take() {
@@ -190,20 +190,19 @@ pub(crate) fn session_commit_dirty(app: &mut App, ctx: &Ctx) {
 }
 
 /// The keystroke's way to save: like `session_commit_dirty`, but batched.
-/// The first change of a run goes up at once; the ones that follow wait
-/// for `live_debounce` of quiet, or for `live_max_wait` since the last
-/// send while the typing keeps coming — whichever is first. The deferred
-/// save is made by `flush_live_edit` on the event loop's tick, so a
-/// pause saves without another key being pressed.
+/// The text waits for `live_debounce` of quiet, or for `live_max_wait`
+/// since it first became dirty while the typing keeps coming — whichever
+/// is first. Nothing goes up alone: a short sentence lands in one piece,
+/// a long one in pieces `live_max_wait` apart. The deferred save is made
+/// by `flush_live_edit` on the event loop's tick, so a pause saves without
+/// another key being pressed.
 pub(crate) fn session_live_commit(app: &mut App, ctx: &Ctx) {
     if !app.session.as_ref().is_some_and(|s| s.input.buf != s.orig) {
         return;
     }
     let now = Instant::now();
-    let due = match app.live_last_sent {
-        None => now,
-        Some(sent) => (now + app.live_debounce).min(sent + app.live_max_wait),
-    };
+    let since = *app.live_dirty_since.get_or_insert(now);
+    let due = (now + app.live_debounce).min(since + app.live_max_wait);
     if due <= now {
         session_commit_dirty(app, ctx);
     } else {
@@ -227,7 +226,7 @@ pub(crate) fn flush_live_edit_at(app: &mut App, ctx: &Ctx, now: Instant) {
     // cleared it) still goes up within the max wait.
     let due = app
         .live_due
-        .or_else(|| app.live_last_sent.map(|sent| sent + app.live_max_wait))
+        .or_else(|| app.live_dirty_since.map(|since| since + app.live_max_wait))
         .unwrap_or(now);
     if due <= now {
         session_commit_dirty(app, ctx);
@@ -241,7 +240,7 @@ pub(crate) fn close_session(app: &mut App) {
     app.session = None;
     app.live_undo = None;
     app.live_due = None;
-    app.live_last_sent = None;
+    app.live_dirty_since = None;
     app.ime_guard = None;
     app.laid_width = 0;
 }
@@ -327,7 +326,7 @@ pub(crate) fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
     }
     session_commit_dirty(app, ctx);
     app.live_undo = None; // leaving the line ends its typing run
-    app.live_last_sent = None;
+    app.live_dirty_since = None;
     let text = app.lines[line].text.clone();
     if let Some(s) = app.session.as_mut() {
         s.line = line;
