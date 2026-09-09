@@ -88,6 +88,35 @@ pub(crate) fn session_paste(app: &mut App, ctx: &Ctx, clean: &str) {
 /// commit — undo (`u`) is the safety net. The editor is the user's own
 /// environment — multi-line editing, their keybindings, their IME
 /// settings — which makes this the most natural way to write a lot.
+/// Hand the terminal to another program: leave the alt screen and raw
+/// mode, and undo every mode the viewer switched on — mouse reporting,
+/// bracketed paste and, when the terminal took it, the kitty keyboard
+/// protocol. Left pushed, the last one turns the editor's Ctrl+Q into a
+/// `CSI u` sequence it cannot read (micro shows it and stays open).
+pub(crate) fn suspend_tui(ctx: &Ctx) {
+    if ctx.keyboard_enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
+    ratatui::restore();
+}
+
+/// Take the terminal back after `suspend_tui`.
+pub(crate) fn resume_tui(terminal: &mut ratatui::DefaultTerminal, ctx: &Ctx) {
+    *terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    if ctx.keyboard_enhanced {
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+}
+
 pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mut App, ctx: &Ctx) {
     let original: String = app
         .lines
@@ -106,18 +135,12 @@ pub(crate) fn editor_roundtrip(terminal: &mut ratatui::DefaultTerminal, app: &mu
         .unwrap_or_else(|_| "vi".into());
 
     // Suspend the TUI for the editor, restore it after — whatever happens.
-    let _ = execute!(
-        std::io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste
-    );
-    ratatui::restore();
+    suspend_tui(ctx);
     let status = Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} '{}'", path.display()))
         .status();
-    *terminal = ratatui::init();
-    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    resume_tui(terminal, ctx);
     app.laid_width = 0; // re-lay out on the next frame
 
     let ok = matches!(status, Ok(s) if s.success());

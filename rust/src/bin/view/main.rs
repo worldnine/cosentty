@@ -343,6 +343,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         config: std::sync::Mutex::new(config),
         config_error: std::sync::Mutex::new(config_error),
         config_path: cosense::config::Config::path(),
+        keyboard_enhanced,
         project_theme_preview: std::sync::Mutex::new(None),
         send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
@@ -515,7 +516,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   3. `Stop` ends the worker loop, and the join makes "no browser and
     //      no worker outlive this process" a fact rather than a hope.
     web_backend.shutdown();
-    if keyboard_enhanced {
+    if ctx.keyboard_enhanced {
         let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(
@@ -584,6 +585,11 @@ struct Ctx {
     /// theme or none) — worn by the page while its picker is open, written
     /// nowhere. Cleared on Enter (the save takes over) and on Esc.
     project_theme_preview: std::sync::Mutex<Option<(String, Option<String>)>>,
+    /// The terminal accepted the kitty keyboard protocol at start. The
+    /// flags must be POPPED while another program has the terminal (`e`,
+    /// `^e`: `$EDITOR`) — a Ctrl+Q that arrives as `CSI 113;5 u` is not
+    /// one micro or vi can act on — and pushed again after.
+    keyboard_enhanced: bool,
     /// Where the settings screen writes (`Config::path`). `None` — no
     /// `$HOME` — makes every save an error it can name; tests point it at
     /// a scratch file so a key press never touches the developer's own.

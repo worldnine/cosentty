@@ -917,18 +917,12 @@ pub(crate) fn config_editor_roundtrip(
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".into());
-    let _ = execute!(
-        std::io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste
-    );
-    ratatui::restore();
+    suspend_tui(ctx);
     let status = Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} '{}'", path.display()))
         .status();
-    *terminal = ratatui::init();
-    let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    resume_tui(terminal, ctx);
     app.laid_width = 0;
     if !matches!(status, Ok(s) if s.success()) {
         app.toast_err(t!(
