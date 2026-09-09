@@ -8,6 +8,10 @@
 
 ## 現在地
 
+- 2026-09-09: **入力中の保存(リアルタイム反映)を main にマージ**(`PLAN-live-edit.md`
+  が正本。実施記録あり)。端末→ブラウザは PAT だけで動き、sid は任意という位置づけに
+  文書を揃えた。派生の未着手計画: `PLAN-remote-cursors.md`(他の人のカーソル表示。
+  sid が実質必須になる最初の用途)
 - 2026-09-06: **テロメアの web 対応・テーマ色の反映・パーサの web パリティを
   master にマージ**(タスク6〜10が正本)。正本ドキュメント:
   `SPEC-telomere-web-parity.md`(テロメア)、`NOTE-scrapbox-parser.md`
