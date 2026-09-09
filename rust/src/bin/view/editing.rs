@@ -166,6 +166,11 @@ pub(crate) enum CommitOutcome {
         job: CommitJobId,
         label: String,
         msg: String,
+        /// The job inserted or deleted lines. Later jobs were built on
+        /// those ids and anchors, so the page has to be re-based before
+        /// any of them can be trusted (a plain replace leaves nothing
+        /// behind to distrust).
+        structural: bool,
     },
 }
 
@@ -247,9 +252,17 @@ pub(crate) fn spawn_commit_worker(
             let res = client
                 .preview_edit(&job.project, &job.page_id, &job.ops)
                 .and_then(|p| client.submit_edit(&job.project, &p.preview_id));
-            // Later jobs were built on this optimistic edit. Once it fails,
-            // their IDs and anchors cannot be trusted until a reload.
-            if res.is_err() {
+            // Later jobs were built on this optimistic edit. Once a job that
+            // made or removed lines fails, their ids and anchors cannot be
+            // trusted until a reload — so they are held back until the UI
+            // re-bases the page (which bumps `gen`). A failed replace leaves
+            // nothing to distrust: the jobs behind it go on as before, and
+            // typing keeps saving.
+            let structural = job
+                .ops
+                .iter()
+                .any(|op| !matches!(op, EditOp::Replace { .. }));
+            if res.is_err() && structural {
                 failed_pages.insert(page_key, job.gen);
             }
             let outcome = match res {
@@ -263,6 +276,7 @@ pub(crate) fn spawn_commit_worker(
                 Err(e) => CommitOutcome::Failed {
                     job: id,
                     label: job.label,
+                    structural,
                     msg: e.to_string(),
                 },
             };

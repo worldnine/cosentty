@@ -901,6 +901,7 @@ fn failed_and_conflicting_outline_commits_restore_the_pre_action_page() {
         } else {
             CommitOutcome::Failed {
                 job,
+                structural: false,
                 label: "outline move".into(),
                 msg: "500".into(),
             }
@@ -987,6 +988,7 @@ fn structural_outline_history_is_gated_and_uses_outline_recovery() {
             } else {
                 CommitOutcome::Failed {
                     job,
+                    structural: false,
                     label: if back {
                         "undo outline".into()
                     } else {

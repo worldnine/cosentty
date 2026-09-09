@@ -76,6 +76,7 @@ fn an_undo_that_restores_agreement_lets_diagrams_render_again() {
         &ctx,
         CommitOutcome::Failed {
             job: UNRELATED_JOB,
+            structural: false,
             label: "line 2".into(),
             msg: "500".into(),
         },
@@ -932,6 +933,7 @@ fn ordinary_commit_outcomes_never_mutate_the_page_opened_after_queueing() {
             },
             "failed" => CommitOutcome::Failed {
                 job,
+                structural: false,
                 label: "old".into(),
                 msg: "offline".into(),
             },

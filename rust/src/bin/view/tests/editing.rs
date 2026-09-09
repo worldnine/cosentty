@@ -210,6 +210,7 @@ fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_sour
         &ctx,
         CommitOutcome::Failed {
             job: UNRELATED_JOB,
+            structural: false,
             label: "line 4".into(),
             msg: "500".into(),
         },
@@ -391,6 +392,7 @@ fn a_refused_drag_restores_the_pre_mode_page() {
         } else {
             CommitOutcome::Failed {
                 job,
+                structural: false,
                 label: "outline move".into(),
                 msg: "500".into(),
             }
@@ -466,6 +468,7 @@ fn an_unrelated_failure_under_the_gate_keeps_its_own_handling() {
         &ctx,
         CommitOutcome::Failed {
             job: earlier,
+            structural: false,
             label: "earlier edit".into(),
             msg: "500".into(),
         },
@@ -825,6 +828,7 @@ fn a_failed_create_can_be_retried_by_the_next_edit() {
         &ctx,
         CommitOutcome::Failed {
             job: UNRELATED_JOB,
+            structural: false,
             label: "ページの作成".into(),
             msg: "500".into(),
         },
@@ -1019,4 +1023,124 @@ fn repeated_session_undo_never_ejects_you_from_edit() {
     handle_session_key(&mut app, &ctx, ctrl('z'));
     assert!(app.session.is_some());
     assert_eq!(app.toast_text(), "取り消せる編集がありません");
+}
+
+/// A failed save of a plain replace must not stop the saves behind it:
+/// typing keeps saving after a network blip. Only a failed INSERT/DELETE
+/// holds the queue, because the jobs behind it name lines the server
+/// never got — and that hold ends when the UI re-bases the page (`gen`).
+#[test]
+fn only_a_failed_structural_save_holds_the_jobs_behind_it() {
+    let ctx = offline_ctx();
+    let mut app = page(&["title", "one", "two"]);
+    let jobs_rx = app.commit_jobs_rx.take().unwrap();
+    let (res_tx, res_rx) = mpsc::channel();
+    spawn_commit_worker(
+        ctx.client.clone(),
+        jobs_rx,
+        res_tx,
+        Arc::clone(&app.gen),
+        Arc::clone(&app.live_superseded),
+    );
+    let replace = |text: &str| {
+        vec![EditOp::Replace {
+            id: "id1".into(),
+            text: text.into(),
+        }]
+    };
+    let wait = || std::time::Duration::from_secs(30);
+    let j1 = queue_commit(&mut app, "line 2", replace("a")).unwrap();
+    let j2 = queue_commit(&mut app, "line 2", replace("ab")).unwrap();
+    for expected in [j1, j2] {
+        match res_rx.recv_timeout(wait()).expect("answered") {
+            CommitOutcome::Failed {
+                job, structural, ..
+            } => {
+                assert_eq!(job, expected);
+                assert!(!structural);
+            }
+            _ => panic!("a replace that fails is reported as failed, not skipped"),
+        }
+    }
+    // A failed split holds the next job; a new gen releases the one after.
+    let j3 = queue_commit(
+        &mut app,
+        "split",
+        vec![
+            EditOp::Replace {
+                id: "id1".into(),
+                text: "o".into(),
+            },
+            EditOp::insert("id2", "ne"),
+        ],
+    )
+    .unwrap();
+    let j4 = queue_commit(&mut app, "line 2", replace("x")).unwrap();
+    app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let j5 = queue_commit(&mut app, "line 2", replace("y")).unwrap();
+    match res_rx.recv_timeout(wait()).expect("answered") {
+        CommitOutcome::Failed {
+            job, structural, ..
+        } => {
+            assert_eq!(job, j3);
+            assert!(structural);
+        }
+        _ => panic!("the split fails"),
+    }
+    assert!(matches!(
+        res_rx.recv_timeout(wait()).expect("answered"),
+        CommitOutcome::Skipped { job } if job == j4
+    ));
+    assert!(matches!(
+        res_rx.recv_timeout(wait()).expect("answered"),
+        CommitOutcome::Failed { job, .. } if job == j5
+    ));
+}
+
+/// The UI's half of the same story: a failed structural save re-bases the
+/// page on the server's copy (new `gen`, reload), which is what releases
+/// the worker's hold. A failed replace only reports and marks desynced.
+#[test]
+fn a_failed_structural_save_rebases_the_page() {
+    let ctx = offline_ctx();
+    let mut app = page(&["title", "one"]);
+    app.rebuild(40);
+    let gen0 = app.gen.load(std::sync::atomic::Ordering::SeqCst);
+    app.inflight = 2;
+    handle_commit_outcome(
+        &mut app,
+        &ctx,
+        CommitOutcome::Failed {
+            job: UNRELATED_JOB,
+            structural: false,
+            label: "line 2".into(),
+            msg: "boom".into(),
+        },
+    );
+    assert_eq!(
+        app.gen.load(std::sync::atomic::Ordering::SeqCst),
+        gen0,
+        "a failed replace leaves the queue alone"
+    );
+    assert!(app.web_unsynced);
+    handle_commit_outcome(
+        &mut app,
+        &ctx,
+        CommitOutcome::Failed {
+            job: UNRELATED_JOB,
+            structural: true,
+            label: "split".into(),
+            msg: "boom".into(),
+        },
+    );
+    assert_eq!(
+        app.gen.load(std::sync::atomic::Ordering::SeqCst),
+        gen0 + 1,
+        "a failed split invalidates the jobs built on it and reloads"
+    );
+    assert!(
+        app.toast_text().contains("読み直しに失敗"),
+        "offline, the reload says so: {}",
+        app.toast_text()
+    );
 }

@@ -31,7 +31,9 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
         }
         CommitOutcome::Conflict { job } => debug_log(format!("commit conflict job={job}")),
         CommitOutcome::Skipped { job } => debug_log(format!("commit skipped job={job}")),
-        CommitOutcome::Failed { job, label, msg } => {
+        CommitOutcome::Failed {
+            job, label, msg, ..
+        } => {
             debug_log(format!("commit failed job={job} label={label} error={msg}"));
         }
     }
@@ -152,7 +154,12 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                 recover_outline_action(app, ctx, pending, t!("処理が失効", "invalidated"));
             }
         }
-        CommitOutcome::Failed { job: _, label, msg } => {
+        CommitOutcome::Failed {
+            job: _,
+            label,
+            msg,
+            structural,
+        } => {
             if let Some(pending) = outline {
                 recover_outline_action(
                     app,
@@ -179,6 +186,14 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     // The page was never made. Let the next edit try again
                     // rather than retrying in a loop against a dead network.
                     app.create_state = CreateState::Idle;
+                } else if structural {
+                    // Lines this job made or removed never reached the
+                    // server, and every job queued behind it names them.
+                    // The worker is holding those back; re-basing on the
+                    // server's page (new `gen`) is what lets saving resume.
+                    // Without this, one failed split left the page unable
+                    // to save anything more until a 409 happened along.
+                    recover_by_reload(app, ctx, Rebase::FailedSave);
                 }
             }
         }
@@ -622,6 +637,21 @@ pub(crate) fn ws_send_resync_request(app: &mut App) {
 /// caret text is NEVER lost: if its line is gone, it becomes a fresh line
 /// at the end and the session continues there.
 pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
+    recover_by_reload(app, ctx, Rebase::Conflict);
+}
+
+/// Why the page is being re-based on the server's copy: the wording of
+/// the toast is the only difference.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Rebase {
+    /// 409: someone else moved the page under our edit.
+    Conflict,
+    /// A structural save failed, so the local lines it made are not on
+    /// the server and the queue behind it cannot be trusted.
+    FailedSave,
+}
+
+pub(crate) fn recover_by_reload(app: &mut App, ctx: &Ctx, why: Rebase) {
     app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // 409 means the server moved and our ops did not land: local and server
     // disagree from this moment. Marked BEFORE the reload, because if the
@@ -645,12 +675,16 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
         return;
     }
     // set_page cleared session + undo lineage and marked us synced again.
+    let changed = match why {
+        Rebase::Conflict => t!(
+            "他の人がページを更新しました",
+            "page changed by someone else"
+        ),
+        Rebase::FailedSave => t!("保存に失敗しました", "a save failed"),
+    };
     match stash {
         None => {
-            app.toast(t!(
-                "他の人がページを更新しました — 読み直しました",
-                "page changed by someone else — reloaded"
-            ));
+            app.toast(t!("{changed} — 読み直しました", "{changed} — reloaded"));
         }
         Some((id, buf, caret)) => {
             if let Some(idx) = app.lines.iter().position(|l| l.id == id) {
@@ -662,8 +696,8 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
                     };
                 }
                 app.toast(t!(
-                    "他の人がページを更新しました — 読み直し、編集中の行はそのままです",
-                    "page changed by someone else — reloaded, your line kept"
+                    "{changed} — 読み直し、編集中の行はそのままです",
+                    "{changed} — reloaded, your line kept"
                 ));
             } else if !buf.trim().is_empty() {
                 // The line is gone: rescue the text as a fresh last line.
@@ -676,15 +710,18 @@ pub(crate) fn recover_conflict(app: &mut App, ctx: &Ctx) {
                 if let Some(idx) = app.lines.iter().position(|l| l.id == new_id) {
                     enter_session(app, ctx, idx, buf.len());
                 }
-                app.toast(t!(
-                    "編集中の行が他の人に削除されました — 内容はページ末尾に退避しました",
-                    "your line was deleted by someone else — text rescued at the end"
-                ));
+                app.toast(match why {
+                    Rebase::Conflict => t!(
+                        "編集中の行が他の人に削除されました — 内容はページ末尾に退避しました",
+                        "your line was deleted by someone else — text rescued at the end"
+                    ),
+                    Rebase::FailedSave => t!(
+                        "編集中の行はサーバーに届いていませんでした — 内容はページ末尾に退避しました",
+                        "your line never reached the server — text rescued at the end"
+                    ),
+                });
             } else {
-                app.toast(t!(
-                    "他の人がページを更新しました — 読み直しました",
-                    "page changed by someone else — reloaded"
-                ));
+                app.toast(t!("{changed} — 読み直しました", "{changed} — reloaded"));
             }
         }
     }
