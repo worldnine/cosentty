@@ -78,21 +78,20 @@ impl SyncState {
     }
 }
 
-/// When diagrams may be drawn. `COSENSE_WEB_RENDER`, default `manual`.
+/// How a diagram block is shown. `[view] diagrams` / `COSENSE_WEB_RENDER`,
+/// default `text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderPolicy {
-    /// No worker, no backend, no cache I/O — code blocks, always. This is
-    /// the default: the text tier is the mainline, and the browser is a
-    /// special-purpose tool the reader raises when they want it
-    /// (`COSENSE_WEB_RENDER=manual|auto`). It also keeps a session without
-    /// a `connect.sid` at full strength — rendering was one of the two
-    /// things only the sid could do.
+    /// The text tier draws what it can, the rest stays source. No browser
+    /// is ever launched and no cache is read or written, so a session
+    /// without a `connect.sid` is at full strength. This is the default.
     #[default]
-    Off,
-    /// Page load consults the disk cache only; `R` renders the rest.
-    Manual,
-    /// Every renderable miss is drawn as the page loads.
-    Auto,
+    Text,
+    /// The browser's own picture, for every block it can draw: the disk
+    /// cache first, a headless Chrome for the misses, as the page loads.
+    /// Until a picture lands (and whenever one fails) the block shows the
+    /// text tier, so nothing is ever blank. `R` retries the failures.
+    Image,
 }
 
 impl RenderPolicy {
@@ -104,21 +103,23 @@ impl RenderPolicy {
             .unwrap_or_default()
     }
 
-    /// `off` / `manual` / `auto`; `None` for anything else.
+    /// `text` / `image`; `None` for anything else. The old three values
+    /// are still read so an existing config.toml or environment keeps
+    /// working: `off` meant text, `manual` and `auto` both meant "a
+    /// picture, please" — the only difference was when it was fetched,
+    /// and `manual` is gone.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "off" => Some(RenderPolicy::Off),
-            "manual" => Some(RenderPolicy::Manual),
-            "auto" => Some(RenderPolicy::Auto),
+            "text" | "off" => Some(RenderPolicy::Text),
+            "image" | "manual" | "auto" => Some(RenderPolicy::Image),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            RenderPolicy::Off => "off",
-            RenderPolicy::Manual => "manual",
-            RenderPolicy::Auto => "auto",
+            RenderPolicy::Text => "text",
+            RenderPolicy::Image => "image",
         }
     }
 }
@@ -217,13 +218,8 @@ impl Capabilities {
 
 /// The whole policy in one place. Pure — the caller supplies the state.
 pub fn decide(caps: &Capabilities, policy: RenderPolicy, trigger: Trigger) -> Decision {
-    if policy == RenderPolicy::Off {
+    if policy == RenderPolicy::Text {
         return Decision::Nothing;
-    }
-    // Manual is the default because a browser launch is the most expensive
-    // thing this app can do. A page load may still SHOW what it has.
-    if policy == RenderPolicy::Manual && trigger == Trigger::Auto {
-        return Decision::CacheOnly { notice: None };
     }
     if caps.browser_denied {
         return Decision::CacheOnly { notice: None };
@@ -329,24 +325,32 @@ mod tests {
     }
 
     #[test]
-    fn off_touches_nothing_at_all() {
+    fn text_touches_nothing_at_all() {
         for trigger in [Trigger::Auto, Trigger::Manual] {
-            let d = decide(&caps(true, Visibility::Public), RenderPolicy::Off, trigger);
+            let d = decide(&caps(true, Visibility::Public), RenderPolicy::Text, trigger);
             assert_eq!(d, Decision::Nothing);
         }
     }
 
     #[test]
-    fn manual_shows_what_it_has_and_draws_only_when_asked() {
+    fn image_draws_on_load_and_on_request_alike() {
         let c = caps(true, Visibility::Private);
-        assert_eq!(
-            decide(&c, RenderPolicy::Manual, Trigger::Auto),
-            Decision::CacheOnly { notice: None }
-        );
-        assert_eq!(
-            decide(&c, RenderPolicy::Manual, Trigger::Manual),
-            Decision::Render(RenderCapability::Authenticated)
-        );
+        for trigger in [Trigger::Auto, Trigger::Manual] {
+            assert_eq!(
+                decide(&c, RenderPolicy::Image, trigger),
+                Decision::Render(RenderCapability::Authenticated)
+            );
+        }
+    }
+
+    #[test]
+    fn the_old_policy_names_still_read() {
+        assert_eq!(RenderPolicy::parse("off"), Some(RenderPolicy::Text));
+        assert_eq!(RenderPolicy::parse("manual"), Some(RenderPolicy::Image));
+        assert_eq!(RenderPolicy::parse("auto"), Some(RenderPolicy::Image));
+        assert_eq!(RenderPolicy::parse("text"), Some(RenderPolicy::Text));
+        assert_eq!(RenderPolicy::parse("image"), Some(RenderPolicy::Image));
+        assert_eq!(RenderPolicy::parse("bogus"), None);
     }
 
     #[test]
@@ -354,7 +358,7 @@ mod tests {
         assert_eq!(
             decide(
                 &caps(false, Visibility::Public),
-                RenderPolicy::Auto,
+                RenderPolicy::Image,
                 Trigger::Auto
             ),
             Decision::Render(RenderCapability::Anonymous)
@@ -365,7 +369,7 @@ mod tests {
     fn no_sid_on_a_private_project_falls_back_to_source_and_says_why() {
         let d = decide(
             &caps(false, Visibility::Private),
-            RenderPolicy::Auto,
+            RenderPolicy::Image,
             Trigger::Auto,
         );
         assert_eq!(
@@ -382,11 +386,11 @@ mod tests {
     fn unknown_visibility_is_automatic_only_when_explicitly_asked() {
         let c = caps(false, Visibility::Unknown);
         assert_eq!(
-            decide(&c, RenderPolicy::Auto, Trigger::Auto),
+            decide(&c, RenderPolicy::Image, Trigger::Auto),
             Decision::CacheOnly { notice: None }
         );
         assert_eq!(
-            decide(&c, RenderPolicy::Auto, Trigger::Manual),
+            decide(&c, RenderPolicy::Image, Trigger::Manual),
             Decision::Render(RenderCapability::Anonymous)
         );
         // ...and only once.
@@ -395,7 +399,7 @@ mod tests {
             ..c
         };
         assert_eq!(
-            decide(&spent, RenderPolicy::Auto, Trigger::Manual),
+            decide(&spent, RenderPolicy::Image, Trigger::Manual),
             Decision::CacheOnly { notice: None }
         );
     }
@@ -407,7 +411,7 @@ mod tests {
             ..caps(true, Visibility::Public)
         };
         assert_eq!(
-            decide(&c, RenderPolicy::Auto, Trigger::Manual),
+            decide(&c, RenderPolicy::Image, Trigger::Manual),
             Decision::CacheOnly { notice: None }
         );
     }
@@ -421,7 +425,7 @@ mod tests {
             ..caps(true, Visibility::Public)
         };
         assert_eq!(
-            decide(&c, RenderPolicy::Auto, Trigger::Manual),
+            decide(&c, RenderPolicy::Image, Trigger::Manual),
             Decision::Render(RenderCapability::Anonymous)
         );
         // On a private project there is nothing anonymous can do, and the
@@ -431,7 +435,7 @@ mod tests {
             ..caps(true, Visibility::Private)
         };
         assert_eq!(
-            decide(&p, RenderPolicy::Auto, Trigger::Manual),
+            decide(&p, RenderPolicy::Image, Trigger::Manual),
             Decision::CacheOnly {
                 notice: Some(sid_rejected())
             }

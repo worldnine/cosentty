@@ -50,10 +50,37 @@ pub(crate) fn text_tier_off() -> bool {
     std::env::var("COSENSE_MERMAID").unwrap_or_default() == "off"
 }
 
-/// `COSENSE_MERMAID=ascii`: 罫線なし端末・欠字フォント用。lib の
-/// ASCII 変換(`+ - | > < v ^ * o x` のみ)で出す。
-pub(crate) fn ascii_mode() -> bool {
-    std::env::var("COSENSE_MERMAID").unwrap_or_default() == "ascii"
+/// テキスト段の字種。`[view] diagram_text` / `COSENSE_MERMAID=ascii`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DiagramText {
+    /// 罫線グリフ(`┌ ─ │ ▸`)。既定。
+    #[default]
+    Box,
+    /// 罫線なし端末・欠字フォント用。lib の ASCII 変換(`+ - | > < v ^ * o x` のみ)。
+    Ascii,
+}
+
+impl DiagramText {
+    /// `box` / `ascii`; `None` for anything else.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "box" => Some(DiagramText::Box),
+            "ascii" => Some(DiagramText::Ascii),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DiagramText::Box => "box",
+            DiagramText::Ascii => "ascii",
+        }
+    }
+}
+
+/// `COSENSE_MERMAID=ascii`: 環境変数だけの旧い指定。設定の解決で Env として拾う。
+pub(crate) fn ascii_from_env(env: &dyn Fn(&str) -> Option<String>) -> Option<DiagramText> {
+    (env("COSENSE_MERMAID").as_deref() == Some("ascii")).then_some(DiagramText::Ascii)
 }
 
 /// lib の `Grid` は表示セルを `Vec<char>` で持つ。CJK文字は幅2として
@@ -102,22 +129,22 @@ pub(crate) enum TextOutcome {
 }
 
 /// lib に描かせる。失敗・panic・幅超過は `None` で縮退せよ。
-pub(crate) fn render_text(code: &str, width: usize) -> Option<Vec<String>> {
-    match render_text_outcome(code, width) {
+pub(crate) fn render_text(code: &str, width: usize, glyphs: DiagramText) -> Option<Vec<String>> {
+    match render_text_outcome(code, width, glyphs) {
         TextOutcome::Drawn(lines) => Some(lines),
         _ => None,
     }
 }
 
 /// `render_text` の理由付き版。幅不足だけは「何桁あれば描けたか」を添える。
-pub(crate) fn render_text_outcome(code: &str, width: usize) -> TextOutcome {
+pub(crate) fn render_text_outcome(code: &str, width: usize, glyphs: DiagramText) -> TextOutcome {
     if !supported(code) {
         return TextOutcome::Declined;
     }
     // Mermaidパーサは入力を受ける境界。既知のCJK classDiagramを含め、
     // lib内panicをviewer全体の終了にしない。
     let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if ascii_mode() {
+        if glyphs == DiagramText::Ascii {
             mermaid_text::render_ascii_with_width(code, Some(width.max(1)))
         } else {
             mermaid_text::render_with_width(code, Some(width.max(1)))
@@ -165,7 +192,7 @@ mod tests {
             "timeline\n title T\n S : E",
             "xychart-beta\n title T\n x-axis [a]\n bar [1]",
         ] {
-            assert!(render_text(code, 80).is_some(), "{code:?}");
+            assert!(render_text(code, 80, DiagramText::Box).is_some(), "{code:?}");
         }
     }
 
@@ -177,7 +204,7 @@ mod tests {
             "flowchart TB\n A[開始]-->B{判断?}",
             "pie title 予算\n \"開発\" : 1",
         ] {
-            let lines = render_text(code, 60).expect(code);
+            let lines = render_text(code, 60, DiagramText::Box).expect(code);
             for l in &lines {
                 assert!(str_width(l) <= 60, "too wide: {l}");
             }
@@ -190,7 +217,7 @@ mod tests {
             remove_wide_continuation_cells("│ 開 始  │\n╔═[alt]══[成═功═]══╗"),
             "│ 開始 │\n╔═[alt]══[成功]══╗"
         );
-        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60).expect("flowchart draws");
+        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60, DiagramText::Box).expect("flowchart draws");
         let joined = out.join("\n");
         assert!(joined.contains("開始"), "phantom cell remains: {joined}");
         assert!(!joined.contains("開 始"), "phantom cell remains: {joined}");
@@ -204,6 +231,7 @@ mod tests {
         let out = render_text(
             "sequenceDiagram\n A->>B: 要件定義書\n alt 成功\n B->>A: 承認\n end",
             60,
+            DiagramText::Box,
         )
         .expect("sequence draws")
         .join("\n");
@@ -234,23 +262,23 @@ mod tests {
     fn too_narrow_reports_needed_width() {
         // 3 ノード横並びは 20 桁には入らない。理由と必要幅が返る。
         let code = "flowchart LR\n A[開始する]-->B[判断する]-->C[終了する]";
-        match render_text_outcome(code, 20) {
+        match render_text_outcome(code, 20, DiagramText::Box) {
             TextOutcome::TooNarrow { needed } => assert!(needed > 20, "{needed}"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(render_text(code, 20), None);
+        assert_eq!(render_text(code, 20, DiagramText::Box), None);
         // 十分な幅なら描ける。
         assert!(matches!(
-            render_text_outcome(code, 200),
+            render_text_outcome(code, 200, DiagramText::Box),
             TextOutcome::Drawn(_)
         ));
         // 未知の型は幅不足ではなく Declined。
-        assert_eq!(render_text_outcome("foobar\n x", 20), TextOutcome::Declined);
+        assert_eq!(render_text_outcome("foobar\n x", 20, DiagramText::Box), TextOutcome::Declined);
     }
 
     #[test]
     fn unknown_types_decline() {
-        assert_eq!(render_text("foobar\n x", 60), None);
-        assert_eq!(render_text("", 60), None);
+        assert_eq!(render_text("foobar\n x", 60, DiagramText::Box), None);
+        assert_eq!(render_text("", 60, DiagramText::Box), None);
     }
 }

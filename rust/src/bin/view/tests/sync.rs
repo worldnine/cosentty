@@ -5,7 +5,7 @@ use crate::*;
 fn a_failed_reload_at_the_newest_snapshot_also_stays_put() {
     let ctx = offline_ctx();
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     in_history(&mut app);
     app.rebuild(80);
     // Right from the newest snapshot is the other way out of history.

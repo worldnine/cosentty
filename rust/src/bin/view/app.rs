@@ -474,10 +474,12 @@ pub(crate) struct App {
     /// project visibility, and whatever the renderer has been refused.
     /// Never a single "authenticated" flag — see `cosense::capability`.
     pub(crate) caps: capability::Capabilities,
-    /// When diagrams may be drawn (`COSENSE_WEB_RENDER`).
+    /// How diagram blocks are shown (`[view] diagrams` / `COSENSE_WEB_RENDER`).
     pub(crate) render_policy: capability::RenderPolicy,
     /// lib 検証 spike 用のテキスト段旗。手書き分支と同名・同意味。
     pub(crate) mermaid_text: bool,
+    /// テキスト段の字種(`[view] diagram_text`)。起動時と設定変更時に入る。
+    pub(crate) diagram_text: mmd_text::DiagramText,
     /// 数式のテキスト段旗(`COSENSE_MATH=off` で降ろす)。図とは別の
     /// ライブラリ・別のフォント事情なので、旗も分けて持つ。
     pub(crate) math_text: bool,
@@ -808,6 +810,7 @@ impl App {
             caps: capability::Capabilities::default(),
             render_policy: capability::RenderPolicy::from_env(),
             mermaid_text: !mmd_text::text_tier_off(),
+            diagram_text: mmd_text::DiagramText::default(),
             math_text: !cosense::math::text_tier_off(),
             vis_rx,
             vis_tx,

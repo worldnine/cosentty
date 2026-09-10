@@ -215,6 +215,25 @@ impl App {
                         ArtifactKind::Mermaid => self.mermaid_text,
                         ArtifactKind::Math => self.math_text,
                     };
+                    // `image`: the browser's picture, when it has landed,
+                    // stands in for the text drawing. Until then (and when
+                    // the render failed) the text tier below still shows.
+                    let picture = if editing_here || self.render_policy != capability::RenderPolicy::Image {
+                        None
+                    } else {
+                        key.as_ref()
+                            .and_then(|k| self.images.get(k).map(|i| (k, i)))
+                    };
+                    if let Some((k, info)) = picture {
+                        content.push(Row::Image {
+                            url: k.clone(),
+                            height: info.cells_h.max(1),
+                            src: *last_src,
+                            indent: *indent,
+                            item: false,
+                        });
+                        continue;
+                    }
                     // 幅不足で描けなかったときだけ理由を持ち越し、コード行の
                     // 上に注記を出す(画像に落ちた場合は注記しない)。
                     let mut too_narrow: Option<usize> = None;
@@ -222,7 +241,7 @@ impl App {
                         let draw_w = text_w.saturating_sub(*indent);
                         let drawn = match kind {
                             ArtifactKind::Mermaid => {
-                                match mmd_text::render_text_outcome(code, draw_w) {
+                                match mmd_text::render_text_outcome(code, draw_w, self.diagram_text) {
                                     mmd_text::TextOutcome::Drawn(lines) => Some(lines),
                                     mmd_text::TextOutcome::TooNarrow { needed } => {
                                         too_narrow = Some(needed);
@@ -326,7 +345,7 @@ impl App {
                     }) {
                         let w = text_w.saturating_sub(*indent + 2);
                         let drawn = match kind {
-                            ArtifactKind::Mermaid => mmd_text::render_text(&code, w),
+                            ArtifactKind::Mermaid => mmd_text::render_text(&code, w, self.diagram_text),
                             ArtifactKind::Math => cosense::math::render_text(&code, w),
                         };
                         if let Some(lines) = drawn {

@@ -40,8 +40,8 @@ pub(crate) fn help_keys(app: &App) -> Vec<String> {
             "history     ← older · → newer · Esc NOW (read-only back there)"
         ),
         t!(
-            "図          code:mmd は罫線・表で描く（テキスト優先）· R で未生成分を描く",
-            "diagram     code:mmd draws as text first · R renders the missing ones"
+            "図          code:mmd は罫線で描く · 設定 diagrams=image で画像に · R で描き直す",
+            "diagram     code:mmd draws as text · diagrams=image shows the browser's picture · R retries"
         ),
         t!(
             "出力        y カーソル行/選択をコピー · Y ページ全体",

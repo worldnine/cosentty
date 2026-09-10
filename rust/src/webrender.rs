@@ -351,6 +351,9 @@ impl WebBackend for FakeBackend {
 #[derive(Clone)]
 pub struct ArtifactCache {
     dir: PathBuf,
+    /// Set once the directory exists, is hardened and swept. `deferred`
+    /// leaves it unset so a viewer that never renders never touches disk.
+    ready: std::sync::Arc<std::sync::OnceLock<()>>,
 }
 
 /// Temp files live in the cache directory (rename is only atomic within a
@@ -365,11 +368,32 @@ impl ArtifactCache {
     /// A cache rooted anywhere — tests point it at a scratch directory so a
     /// run never reads or writes the user's real cache.
     pub fn at(dir: PathBuf) -> Self {
-        std::fs::create_dir_all(&dir).ok();
-        let cache = Self { dir };
-        cache.harden_dir();
-        cache.sweep();
+        let cache = Self::deferred_at(dir);
+        cache.ensure();
         cache
+    }
+
+    /// The user's cache, but nothing on disk until the first `get`/`put`.
+    /// The render worker waits from launch whatever the diagram policy
+    /// says, and a `text` session should leave no directory behind.
+    pub fn deferred() -> Self {
+        Self::deferred_at(cache_root().join("cosentty").join("webrender"))
+    }
+
+    fn deferred_at(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            ready: std::sync::Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Create, harden and sweep the directory — once per cache, on first use.
+    fn ensure(&self) {
+        self.ready.get_or_init(|| {
+            std::fs::create_dir_all(&self.dir).ok();
+            self.harden_dir();
+            self.sweep();
+        });
     }
 
     pub fn dir(&self) -> &Path {
@@ -439,6 +463,7 @@ impl ArtifactCache {
     /// The cached PNG, if there is a fresh one. An entry past the TTL is
     /// removed and reported as a miss, so the caller re-renders it.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        self.ensure();
         let path = self.path(key);
         let meta = std::fs::metadata(&path).ok()?;
         if meta.len() == 0 {
@@ -472,6 +497,7 @@ impl ArtifactCache {
         if png.is_empty() {
             return;
         }
+        self.ensure();
         let Some((tmp, mut file)) = self.open_tmp() else {
             return;
         };

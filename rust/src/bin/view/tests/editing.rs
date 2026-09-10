@@ -78,7 +78,7 @@ fn a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved() {
     // would screenshot the server's text and file it under ours.
     let ctx = offline_ctx();
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     app.inflight = 1;
     handle_commit_outcome(
@@ -107,7 +107,7 @@ fn a_render_whose_source_moved_is_never_filed_under_the_old_hash() {
     // a picture of something else.
     let ctx = test_ctx();
     let mut app = web_tier_page();
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let key_a = app
         .web_request(

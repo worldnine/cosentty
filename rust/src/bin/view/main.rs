@@ -352,6 +352,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(project.clone());
     app.light = ctx.light();
     app.render_policy = ctx.view().diagrams.0;
+    app.diagram_text = ctx.view().diagram_text.0;
     app.visits_path = ctx.visits_path.clone();
     if let Some(e) = ctx.config_error() {
         app.toast_err(t!(
@@ -378,36 +379,31 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     // The web renderer: headless Chrome when one can be found, otherwise a
-    // backend that fails every request so diagrams simply stay code blocks.
+    // backend that fails every request so diagrams simply stay text.
     // The session's `connect.sid` (never the PAT) is what a browser can use,
     // and it is handed to the backend here and nowhere else.
-    // `COSENSE_WEB_RENDER=off` means OFF: no backend, no worker thread, and
-    // no cache directory is created or swept. Diagrams are code blocks, and
-    // nothing on disk is touched.
-    let renderer_off = app.render_policy == capability::RenderPolicy::Off;
-    let web_backend: Arc<dyn WebBackend> = if renderer_off {
-        Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser))
-    } else {
+    // The worker waits from launch whatever `diagrams` says, so switching
+    // to `image` on the settings screen takes effect without a restart.
+    // Waiting costs nothing: `detect` only looks for the executable, the
+    // browser is launched by the first job, and the cache directory is
+    // created by the first read or write — a `text` session touches
+    // nothing on disk.
+    let web_backend: Arc<dyn WebBackend> =
         match cosense::chrome::ChromeBackend::detect(ctx.client.sid().map(str::to_string)) {
             Some(b) => Arc::new(b),
             None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
-        }
-    };
-    let web_worker = app
-        .web_jobs_rx
-        .take()
-        .filter(|_| !renderer_off)
-        .map(|jobs_rx| {
-            spawn_web_worker(
-                jobs_rx,
-                app.web_tx.clone(),
-                Arc::clone(&web_backend),
-                ctx.picker.clone(),
-                ArtifactCache::new(),
-                Arc::clone(&app.web_gen),
-                Arc::clone(&app.src_epoch),
-            )
-        });
+        };
+    let web_worker = app.web_jobs_rx.take().map(|jobs_rx| {
+        spawn_web_worker(
+            jobs_rx,
+            app.web_tx.clone(),
+            Arc::clone(&web_backend),
+            ctx.picker.clone(),
+            ArtifactCache::deferred(),
+            Arc::clone(&app.web_gen),
+            Arc::clone(&app.src_epoch),
+        )
+    });
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
     // PAT while the push channel only accepts the sid), polling otherwise.

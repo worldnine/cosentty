@@ -15,7 +15,8 @@
 //! preview = "auto"          # on | off | auto
 //! ime = "jp"                # jp | off
 //! download_dir = "~/Downloads"
-//! diagrams = "manual"       # off | manual | auto(COSENSE_WEB_RENDER と同じ)
+//! diagrams = "text"        # text | image(COSENSE_WEB_RENDER と同じ。image は非公開ページに sid が要る)
+//! diagram_text = "box"      # box | ascii(罫線グリフが無いフォント向け。COSENSE_MERMAID=ascii と同じ)
 //!
 //! [upload]
 //! images = "gcs"            # gcs | gyazo   (unset: project setting → gcs)
@@ -89,6 +90,7 @@ pub struct ViewSection {
     pub ime: Option<String>,
     pub download_dir: Option<String>,
     pub diagrams: Option<String>,
+    pub diagram_text: Option<String>,
 }
 
 /// Which key of `[view]` a write names.
@@ -101,6 +103,7 @@ pub enum ViewKey {
     Ime,
     DownloadDir,
     Diagrams,
+    DiagramText,
 }
 
 impl ViewKey {
@@ -113,6 +116,7 @@ impl ViewKey {
             ViewKey::Ime => "ime",
             ViewKey::DownloadDir => "download_dir",
             ViewKey::Diagrams => "diagrams",
+            ViewKey::DiagramText => "diagram_text",
         }
     }
 }

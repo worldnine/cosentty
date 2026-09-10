@@ -229,13 +229,14 @@ set for the rest of the session (per project) once the renderer has been refused
 
 | policy | trigger | sid | visibility | decision |
 |---|---|---|---|---|
-| `off` | — | — | — | `Nothing` (no worker, no cache I/O, always source) |
-| `manual` | Auto | — | — | `CacheOnly` (hit shows, miss stays source, no notice) |
-| `manual` | Manual | — | — | ↓ as `auto` |
-| `auto` | Auto/Manual | yes (accepted) | any | `Render(Authenticated)` |
-| `auto` | Auto/Manual | no | Public | `Render(Anonymous)` |
-| `auto` | Auto/Manual | no | Private | `CacheOnly` + notice「非公開の図を描画するには connect.sid が必要です」(once per page) |
-| `auto` | Auto | no | Unknown | `CacheOnly`, silent — conservative |
+| `text` | — | — | — | `Nothing` (no cache I/O, the text tier / source) |
+| `image` | Auto/Manual | yes (accepted) | any | `Render(Authenticated)` |
+| `image` | Auto/Manual | no | Public | `Render(Anonymous)` |
+| `image` | Auto/Manual | no | Private | `CacheOnly` + notice「非公開の図を描画するには connect.sid が必要です」(once per page) |
+| `image` | Auto | no | Unknown | `CacheOnly`, silent — conservative |
+
+(2026-09-11: the policy became `text | image`; `off` reads as `text`, `manual` and
+`auto` as `image`. The `manual` rows — cache-only on load, browser on `R` — are gone.)
 | `auto` | Manual | no | Unknown | `Render(Anonymous)`, one attempt |
 | `auto` | Auto/Manual | yes (**rejected**) | Public | `Render(Anonymous)` — a rejected cookie counts as none |
 | `auto` | Auto/Manual | yes (**rejected**) | Private | `CacheOnly` + notice「connect.sid が失効しています」 |
@@ -543,13 +544,13 @@ Launching Chrome is by a wide margin the most expensive thing this viewer does
 (~1.4 s of startup, ~250 MB resident, 8–17 s for a page of diagrams). Doing that on
 every page load, for a reader who may only be passing through, is not a good trade.
 
-`COSENSE_WEB_RENDER`, default **`manual`**:
+`[view] diagrams` / `COSENSE_WEB_RENDER`, default **`text`** (2026-09-11; was
+`off | manual | auto`, still read as aliases):
 
 | value | page load / source update | `R` |
 |---|---|---|
-| `manual` | disk cache only — hits display, misses stay source, no browser, no notice | renders every missing web artifact in **one** batch |
-| `auto` | renders every renderable miss | same |
-| `off` | nothing: no worker thread, no backend, no cache directory is created or swept | says the renderer is off |
+| `image` | renders every renderable miss in **one** batch; the text tier shows until the picture lands, and whenever it failed | clears the failures and renders again |
+| `text` | nothing: no browser, no cache directory is created or swept. The worker thread still waits, so switching to `image` on the settings screen needs no restart | points at the setting |
 
 `R` means **Render**, not Mermaid. It is shared by every `WebKind`, so future TeX,
 `.icon` and ProjectCSS-backed artifacts do not need notation-specific keys. Uppercase

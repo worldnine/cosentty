@@ -60,6 +60,7 @@ pub(crate) struct ViewSettings {
     /// below is the usable path.
     pub download_dir: (std::path::PathBuf, Origin),
     pub diagrams: (capability::RenderPolicy, Origin),
+    pub diagram_text: (mmd_text::DiagramText, Origin),
     /// `theme` names something neither embedded nor in the reader's themes
     /// directory: the default is in use, and the screen says so.
     pub theme_missing: bool,
@@ -217,7 +218,23 @@ impl ViewSettings {
                 .as_deref()
                 .and_then(capability::RenderPolicy::parse),
             diag_file,
-            (capability::RenderPolicy::Off, Origin::Default),
+            (capability::RenderPolicy::Text, Origin::Default),
+        );
+
+        let dtext_file = file
+            .diagram_text
+            .as_deref()
+            .and_then(mmd_text::DiagramText::parse);
+        file_parsed(
+            "diagram_text",
+            &file.diagram_text,
+            dtext_file.is_some() || file.diagram_text.is_none(),
+        );
+        let diagram_text = pick(
+            None,
+            mmd_text::ascii_from_env(env),
+            dtext_file,
+            (mmd_text::DiagramText::Box, Origin::Default),
         );
 
         let mut v = ViewSettings {
@@ -228,6 +245,7 @@ impl ViewSettings {
             ime,
             download_dir,
             diagrams,
+            diagram_text,
             theme_missing,
             detected_bg,
             flags: flags.clone(),
@@ -295,7 +313,8 @@ impl ViewSettings {
             preview: (cosense::index::PreviewMode::Auto, Origin::Default),
             ime: (cosense::ime::ImeMode::Off, Origin::Default),
             download_dir: (std::env::temp_dir(), Origin::Default),
-            diagrams: (capability::RenderPolicy::Off, Origin::Default),
+            diagrams: (capability::RenderPolicy::Text, Origin::Default),
+            diagram_text: (mmd_text::DiagramText::Box, Origin::Default),
             theme_missing: false,
             detected_bg: None,
             flags: ViewFlags::default(),

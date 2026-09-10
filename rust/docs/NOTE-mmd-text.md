@@ -125,3 +125,32 @@ Unicode 範囲)。`COSENSE_MERMAID=ascii` の罫線は `- | + > v` で、ラベ�
 なお lib の `needed` は要求幅によって揺れる(60 桁要求で 83、120 桁要求で 110
 など。compaction の結果がそのときの配置に依る)。注記の数字は「その幅で組んだ
 ときの最大幅」であり、厳密な下限ではない。
+
+## 実施記録: `diagrams = text | image`(2026-09-11)
+
+「設定に図の描画があるのに効いていない」という指摘から。原因は縮退順が
+テキスト段 → 画像で固定だったこと——`COSENSE_WEB_RENDER=manual|auto` で
+Chrome が PNG を描いても、テキスト段が描ける型では画面が変わらなかった。
+加えて off からの切り替えは再起動が要り、`R` の案内は環境変数しか指していなかった。
+
+直し方は設定を「いつ描くか」から**「何を見せるか」**に作り替えること:
+
+- `[view] diagrams = text | image`(`capability::RenderPolicy::{Text, Image}`)。
+  既定 `text`。旧値は `off` → text、`manual` / `auto` → image と読む(`manual` は廃止。
+  絵を選んだ人に毎ページ `R` を押させる意味が薄く、状態が 3 つあると「設定したのに
+  出ない」の原因が増える)
+- `image` では縮退順の 3 と 4 が入れ替わる: 画像 artifact があれば `Row::Image`、
+  無ければ(届くまで・失敗したとき)テキスト段、それも無理ならコード行。
+  `text` では画像を一切見ない(手元に PNG があっても)。`ui/content.rs` の `picture`
+- `image` ではテキスト段が描ける図も取りに行く(`drawn_as_text` による自動パスの
+  スキップを撤去)。`text` は `decide` が `Nothing` を返すので何も出ない
+- `R` は「描き直し」: `web_errors` を空にしてから要求する
+- ワーカーは設定に関わらず起動時から待機(`main.rs`)。`ArtifactCache::deferred` で
+  ディレクトリの作成・sweep を最初の読み書きまで遅らせるので、`text` の会話は
+  ディスクを触らない約束はそのまま。これで設定画面の切り替えが即時に効く
+  (`settings::apply_view_change` が rerender と `start_web_renders(Auto)` を呼ぶ)
+- 設定行の注記に前提を出す: Chrome が無い(`COSENSE_CHROME`)、sid が無い
+  (`COSENSE_SID`。非公開の図は描けない)
+- `[view] diagram_text = box | ascii` を追加(`mmd_text::DiagramText`)。
+  `COSENSE_MERMAID=ascii` は Env 由来として同じ値に解決する。テキスト段の呼び出しは
+  引数で受け取り、環境変数を描画時に読まない

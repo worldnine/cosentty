@@ -94,7 +94,7 @@ fn comma_opens_both_sections_with_the_defaults_named_as_such() {
     assert_eq!(v.project.as_deref(), Some("proj"));
     assert!(!v.api_readable);
     assert!(!v.file_broken);
-    assert_eq!(v.rows.len(), 10, "seven view rows, three project rows");
+    assert_eq!(v.rows.len(), 11, "eight view rows, three project rows");
     assert!(
         v.rows
             .iter()
@@ -300,7 +300,7 @@ fn the_projects_list_shows_only_the_terminal_section() {
     app.index_project = String::new();
     handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
     assert_eq!(view(&app).project, None);
-    assert_eq!(view(&app).rows.len(), 7);
+    assert_eq!(view(&app).rows.len(), 8);
     let (items, _) = settings_items(view(&app), 80);
     assert!(
         !items.iter().any(|i| i.contains("── プロジェクト")),
@@ -350,6 +350,45 @@ fn the_colour_theme_is_previewed_and_esc_reverts() {
     handle_key(&mut app, &ctx, key(KeyCode::Char('d')));
     assert_eq!(file(&dir).trim(), "");
     assert_eq!(ctx.view().theme.1, Origin::Default);
+}
+
+/// `diagrams = image` chosen on the screen takes effect at once: the render
+/// worker has been waiting since launch, so the page's blocks are requested
+/// without a restart. Back to `text`, nothing is requested any more.
+#[test]
+fn picking_image_starts_rendering_without_a_restart() {
+    let (ctx, dir) = settings_ctx();
+    let mut app = page(&["title", "code:mmd", " flowchart LR", "  A-->B"]);
+    app.page_id = "PAGE".into();
+    app.caps.sid = true;
+    // The fixture raises `image` for the render tests; this one starts
+    // where a fresh install does.
+    app.render_policy = capability::RenderPolicy::Text;
+    handle_key(&mut app, &ctx, key(KeyCode::Char(',')));
+    goto(&mut app, &ctx, SettingField::Diagrams);
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    pick(&mut app, &ctx, "image");
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    assert_eq!(file(&dir), "[view]\ndiagrams = \"image\"\n");
+    assert_eq!(app.render_policy, capability::RenderPolicy::Image);
+    let job = app
+        .web_jobs_rx
+        .as_ref()
+        .unwrap()
+        .try_recv()
+        .expect("the switch itself asks for the page's diagrams");
+    let WebJob::Render { auth, .. } = job else {
+        panic!("expected a render job")
+    };
+    assert!(auth.is_some(), "with a sid the browser may draw");
+
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    pick(&mut app, &ctx, "text");
+    handle_key(&mut app, &ctx, key(KeyCode::Enter));
+    assert_eq!(app.render_policy, capability::RenderPolicy::Text);
+    while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
+    app.rebuild(80);
+    assert!(!app.start_web_renders(capability::Trigger::Manual));
 }
 
 /// A flag keeps winning after the file is written: the row says so and
@@ -487,7 +526,7 @@ fn view_settings_follow_flag_env_file_default() {
     );
     assert_eq!(
         v.diagrams,
-        (capability::RenderPolicy::Off, Origin::Default),
+        (capability::RenderPolicy::Text, Origin::Default),
         "a bad file value falls back"
     );
     assert_eq!(notes.len(), 1, "{notes:?}");

@@ -146,7 +146,7 @@ pub(crate) fn page(texts: &[&str]) -> App {
     // Most tests predate the capability split and care about the render
     // pipeline, not the gate: give them a session that may draw. The
     // gate's own behaviour is tested explicitly further down.
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.caps.sid = true;
     app.caps.visibility = capability::Visibility::Private;
     app.lines = texts

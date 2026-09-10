@@ -19,8 +19,8 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
   (`PLAN-live-edit.md`)。ひとりで書く用途なら sid は要らない、が現在の位置づけ。
   **プロジェクト設定の読み取り**(テーマ・表示名・アップロード先)も sid か
   Service Account が要るが、`,` の設定画面で `config.toml` に書けば代替できる。
-  **既定でオフの web レンダラ**も非公開ページには SID を使う。
-  `COSENSE_WEB_RENDER=manual|auto` で有効にする。
+  **図をブラウザの画像で出す `diagrams = image`**(既定は `text`)も非公開ページには
+  SID を使う。設定画面 `,` か `COSENSE_WEB_RENDER=image` で有効にする。
   無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
   いなければ図はテキストかコードで出る)
 - 自前の設定ファイルは `~/.config/cosentty/config.toml`(`[view]` `[upload]`

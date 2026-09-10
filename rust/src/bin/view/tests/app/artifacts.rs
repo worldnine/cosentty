@@ -63,7 +63,7 @@ fn a_snapshot_never_renders_diagrams() {
     // screenshot of the live page would be filed under the snapshot's
     // source hash.
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     in_history(&mut app);
     app.rebuild(80);
     assert!(!app.start_web_renders(capability::Trigger::Auto));
@@ -76,7 +76,7 @@ fn a_snapshot_never_renders_diagrams() {
 fn a_failed_reload_keeps_the_reader_in_history() {
     let ctx = offline_ctx();
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     in_history(&mut app);
     app.rebuild(80);
     // Esc asks for NOW. The fetch fails, so there is no NOW to show.
@@ -400,18 +400,17 @@ fn an_artifact_replaces_the_code_block_and_edit_puts_it_back() {
 // ---------------------------------------------------------------
 // Render policy: when a browser is allowed to start at all.
 // ---------------------------------------------------------------
-/// The default policy is OFF: no worker, no backend, no cache I/O, and
-/// nothing automatic asks the browser for anything. The text tier is
-/// the mainline; the browser is a tool the reader raises when they want
-/// it (`COSENSE_WEB_RENDER=manual|auto`) — and a session without a
+/// The default policy is TEXT: no cache I/O, and nothing — not even `R` —
+/// asks the browser for anything. The text tier is the mainline; the
+/// picture is what `diagrams = image` buys — and a session without a
 /// `connect.sid` stays at full strength.
 #[test]
-fn the_default_policy_is_off_and_touches_nothing() {
+fn the_default_policy_is_text_and_touches_nothing() {
     let mut app = web_tier_page();
-    // The fixture raises Auto for the render-pipeline tests; the DEFAULT
+    // The fixture raises Image for the render-pipeline tests; the DEFAULT
     // is whatever the environment says, which here is nothing.
     app.render_policy = capability::RenderPolicy::from_env();
-    assert_eq!(app.render_policy, capability::RenderPolicy::Off);
+    assert_eq!(app.render_policy, capability::RenderPolicy::Text);
     app.rebuild(80);
     assert!(!app.start_web_renders(capability::Trigger::Auto));
     assert!(!app.start_web_renders(capability::Trigger::Manual));
@@ -419,51 +418,36 @@ fn the_default_policy_is_off_and_touches_nothing() {
         app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
         "no job was ever queued"
     );
-    // The note names the way out.
+    // The note names the way out: the setting, not an environment variable.
     handle_key(&mut app, &test_ctx(), key(KeyCode::Char('R')));
     assert!(
-        app.note
-            .as_ref()
-            .is_some_and(|n| n.0.contains("COSENSE_WEB_RENDER")),
+        app.note.as_ref().is_some_and(|n| n.0.contains("image")),
         "R says why: {:?}",
         app.note
     );
 }
 
+/// `image`: the page load itself draws every miss, in ONE browser batch.
 #[test]
-fn a_manual_page_load_shows_cached_diagrams_and_starts_no_browser() {
+fn an_image_page_load_draws_the_misses_in_one_batch() {
     let mut app = web_tier_page();
-    app.render_policy = capability::RenderPolicy::Manual;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
-    let backend = run_pass(&mut app, capability::Trigger::Auto);
-    let n = diagram_keys(&app).len();
-    settle(&mut app, n);
-    assert_eq!(
-        backend.calls.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "the default page load must never launch a browser"
-    );
-    // Both are misses, and misses are not failures.
-    assert_eq!(app.web_missing.len(), n);
-    assert!(app.web_errors.is_empty());
-    assert!(app.web_pending.is_empty());
-    assert!(app.note.is_none(), "an empty cache is not worth a notice");
-}
-
-#[test]
-fn r_renders_the_artifacts_the_page_load_could_not() {
-    let mut app = web_tier_page();
-    app.render_policy = capability::RenderPolicy::Manual;
-    app.rebuild(80);
-    let backend = run_pass(&mut app, capability::Trigger::Auto);
     let keys = diagram_keys(&app);
-    settle(&mut app, keys.len());
-    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    // The reader presses `R`.
+    let backend = Arc::new(cosense::webrender::FakeBackend::new());
     for k in &keys {
         backend.answer(k, Ok(tiny_png()));
     }
-    handle_key(&mut app, &test_ctx(), key(KeyCode::Char('R')));
+    spawn_web_worker(
+        app.web_jobs_rx.take().unwrap(),
+        app.web_tx.clone(),
+        Arc::clone(&backend) as Arc<dyn WebBackend>,
+        Picker::halfblocks(),
+        scratch_cache(),
+        Arc::clone(&app.web_gen),
+        Arc::clone(&app.src_epoch),
+    );
+    assert!(app.start_web_renders(capability::Trigger::Auto));
     settle(&mut app, keys.len());
     assert_eq!(
         backend.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -471,20 +455,48 @@ fn r_renders_the_artifacts_the_page_load_could_not() {
         "one batch, not one browser per diagram"
     );
     assert!(keys.iter().all(|k| app.images.contains_key(k)));
-    assert!(app.web_missing.is_empty(), "they are no longer missing");
+    assert!(app.web_missing.is_empty());
+    assert!(app.web_errors.is_empty());
+    assert!(app.web_pending.is_empty());
+}
+
+/// A block whose render failed shows text, and `R` asks for it again
+/// rather than leaving it text for the rest of the visit.
+#[test]
+fn r_retries_the_artifacts_the_page_load_could_not() {
+    let mut app = web_tier_page();
+    app.render_policy = capability::RenderPolicy::Image;
+    app.rebuild(80);
+    let backend = run_pass(&mut app, capability::Trigger::Auto);
+    let keys = diagram_keys(&app);
+    for k in &keys {
+        backend.answer(k, Err(WebError::Timeout { seconds: 1 }));
+    }
+    settle(&mut app, keys.len());
+    assert_eq!(app.web_errors.len(), keys.len(), "every block failed");
+    assert!(keys.iter().all(|k| !app.images.contains_key(k)));
+    // The browser is back; the reader presses `R`.
+    for k in &keys {
+        backend.answer(k, Ok(tiny_png()));
+    }
+    handle_key(&mut app, &test_ctx(), key(KeyCode::Char('R')));
+    settle(&mut app, keys.len());
+    assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(keys.iter().all(|k| app.images.contains_key(k)));
+    assert!(app.web_errors.is_empty(), "they are no longer failures");
 }
 
 #[test]
 fn auto_draws_on_load_and_off_draws_never() {
     let mut app = web_tier_page();
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     app.start_web_renders(capability::Trigger::Auto);
     let (_, reqs) = render_job(app.web_jobs_rx.as_ref().unwrap().recv().unwrap());
     assert_eq!(reqs.len(), 2, "auto renders both on load");
 
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Off;
+    app.render_policy = capability::RenderPolicy::Text;
     app.rebuild(80);
     app.start_web_renders(capability::Trigger::Auto);
     app.start_web_renders(capability::Trigger::Manual);
@@ -504,7 +516,7 @@ fn no_sid_on_a_public_project_renders_anonymously_and_leaves_rest_alone() {
         visibility: capability::Visibility::Public,
         ..Default::default()
     };
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let backend = run_pass(&mut app, capability::Trigger::Auto);
     let n = diagram_keys(&app).len();
@@ -525,7 +537,7 @@ fn the_private_notice_is_said_once_per_page_not_once_per_diagram() {
     let mut app = mermaid_page();
     app.caps.sid = false;
     app.caps.visibility = capability::Visibility::Private;
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     app.start_web_renders(capability::Trigger::Auto);
     assert!(app.web_notice_shown);
@@ -540,7 +552,7 @@ fn unknown_visibility_waits_for_an_explicit_r() {
     let mut app = web_tier_page();
     app.caps.sid = false;
     app.caps.visibility = capability::Visibility::Unknown;
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let backend = run_pass(&mut app, capability::Trigger::Auto);
     let n = diagram_keys(&app).len();

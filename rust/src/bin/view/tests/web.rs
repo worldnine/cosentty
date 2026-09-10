@@ -75,65 +75,36 @@ fn a_result_for_an_older_page_generation_is_dropped() {
 }
 
 #[test]
-fn editing_a_drawn_artifact_in_manual_mode_waits_for_explicit_render() {
+fn editing_a_drawn_artifact_under_image_renders_the_new_source() {
     let ctx = test_ctx();
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Manual;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let before = diagram_keys(&app);
     let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
     app.images.insert(before[0].clone(), info);
-    // The initial cache-only pass has already established that the other
-    // current artifacts are absent.
-    app.web_missing.extend(before.iter().cloned());
 
-    // Editing changes the artifact key. Manual mode may probe the cache,
-    // but it must not launch Chrome just because the old picture existed.
+    // Editing changes the artifact key: the old picture no longer shows,
+    // the text drawing takes its place, and the new source is rendered —
+    // browser allowed, since the reader chose pictures.
     app.lines[3].text = "   A-->C".into();
     rerender(&mut app, &ctx);
     let after = diagram_keys(&app);
     assert_ne!(after[0], before[0]);
     assert!(
-        !app.images.contains_key(&after[0]),
-        "the changed source falls back to source"
+        !app.rows.iter().any(|r| matches!(r, Row::Image { .. })),
+        "the stale picture is not shown for the new source"
     );
     let job = app
         .web_jobs_rx
         .as_ref()
         .unwrap()
         .try_recv()
-        .expect("cache probe");
+        .expect("a render for the new source");
     let WebJob::Render { reqs, auth, .. } = job else {
         panic!("expected a render job")
     };
-    assert!(auth.is_none(), "manual edits never start Chrome implicitly");
-    assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
-
-    // A cache miss keeps the source visible until the explicit render key.
-    for req in reqs {
-        app.web_tx
-            .send(WebMsg {
-                gen: app.gen_now(),
-                key: req.cache_key(),
-                rescale: false,
-                attempted: None,
-                res: WebOutcome::Missing,
-            })
-            .unwrap();
-    }
-    app.drain_web_renders();
-    assert!(!app.images.contains_key(&after[0]));
-    handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
-    let job = app
-        .web_jobs_rx
-        .as_ref()
-        .unwrap()
-        .try_recv()
-        .expect("explicit render");
-    let WebJob::Render { reqs, auth, .. } = job else {
-        panic!("expected a render job")
-    };
-    assert!(auth.is_some(), "R permits the browser in manual mode");
+    assert!(auth.is_some(), "image renders edits without being asked");
     assert!(reqs.iter().any(|r| r.cache_key() == after[0]));
 }
 
@@ -141,7 +112,7 @@ fn editing_a_drawn_artifact_in_manual_mode_waits_for_explicit_render() {
 fn r_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
     let ctx = test_ctx();
     let mut app = web_tier_page();
-    app.render_policy = capability::RenderPolicy::Manual;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let keys = diagram_keys(&app);
     // The page-load probe is in flight and owns both keys.
@@ -196,7 +167,7 @@ fn r_pressed_while_the_cache_probe_is_out_is_served_when_it_answers() {
 #[test]
 fn a_cache_miss_never_blocks_the_later_r() {
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Manual;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let keys = diagram_keys(&app);
     // A miss is recorded...
@@ -230,7 +201,7 @@ fn no_sid_on_a_private_project_serves_the_cache_and_never_launches_a_browser() {
         visibility: capability::Visibility::Private,
         ..Default::default()
     };
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let keys = diagram_keys(&app);
     // One diagram is already on disk from an earlier, authenticated
@@ -276,7 +247,7 @@ fn a_stale_cookie_on_a_public_page_retries_without_it() {
         visibility: capability::Visibility::Public,
         ..Default::default()
     };
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let keys = diagram_keys(&app);
     app.web_pending.insert(keys[0].clone());
@@ -411,7 +382,7 @@ fn a_whole_refused_batch_is_retried_anonymously_in_one_go() {
         visibility: capability::Visibility::Public,
         ..Default::default()
     };
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let keys = diagram_keys(&app);
     assert_eq!(
@@ -494,7 +465,7 @@ fn a_refused_private_render_falls_back_to_source_without_disabling_edits() {
         visibility: capability::Visibility::Private,
         ..Default::default()
     };
-    app.render_policy = capability::RenderPolicy::Auto;
+    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     let keys = diagram_keys(&app);
     app.web_pending.insert(keys[0].clone());
