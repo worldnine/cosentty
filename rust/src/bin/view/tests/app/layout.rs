@@ -376,6 +376,32 @@ fn a_link_typed_now_is_asked_about_once_the_caret_leaves_its_line() {
     assert_eq!(app.links.exists("よそで聞いた"), Some(true));
 }
 
+/// A `code:` block's body is text the renderer draws verbatim: no link in
+/// it is ever painted, so no question about one is worth a request. A
+/// pasted Markdown sample made the viewer ask the server about pages
+/// named `#` and `##` — two requests each, on every page install.
+#[test]
+fn links_inside_a_code_block_are_not_asked_about() {
+    let mut app = page(&[
+        "t",
+        "code:markdown.md",
+        " # テスト",
+        " ## テスト",
+        " [ブロックの中のリンク]",
+        "",
+        "[ブロックの外のリンク]",
+    ]);
+    let (tx, rx) = mpsc::channel();
+    app.link_probe_tx = Some(tx);
+    app.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
+    app.probe_unknown_links();
+
+    let asked: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|p| p.title)
+        .collect();
+    assert_eq!(asked, vec!["ブロックの外のリンク".to_string()]);
+}
+
 /// Mouse capture asks the terminal for any-event tracking, so bare
 /// pointer motion reaches the handler. A trackpad brushed in passing
 /// must not commit a half-finished drag; a button still lets go.

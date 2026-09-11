@@ -797,8 +797,15 @@ impl App {
         self.link_scan_key = key;
         self.link_scan_at = Instant::now();
         let editing = self.session.as_ref().map(|s| s.line);
+        // A `code:` block's body is TEXT, not notation — the renderer
+        // draws it verbatim and paints no links there. Scanning it anyway
+        // turned a pasted Markdown sample into questions about pages named
+        // `#` and `##` (from its `## heading` lines): two requests each,
+        // on every page install, for answers that could never be drawn.
+        let texts: Vec<&str> = self.lines.iter().map(|l| l.text.as_str()).collect();
+        let in_code = cosense::render::code_line_flags(&texts);
         for (i, line) in self.lines.iter().enumerate() {
-            if Some(i) == editing {
+            if Some(i) == editing || in_code.get(i).copied().unwrap_or(false) {
                 continue;
             }
             for item in links_on_line(&mask_inline_code(&line.text)) {
