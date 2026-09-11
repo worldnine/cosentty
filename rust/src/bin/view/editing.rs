@@ -346,7 +346,6 @@ pub(crate) fn rerender(app: &mut App, ctx: &Ctx) {
     app.hits = r.hits;
     app.laid_width = 0;
     app.start_image_loads(ctx);
-    app.start_web_renders(capability::Trigger::Auto);
 }
 
 /// Can these ops still be applied to the page as it now stands? Every id

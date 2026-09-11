@@ -20,11 +20,8 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
   (`PLAN-live-edit.md`)。ひとりで書く用途なら sid は要らない、が現在の位置づけ。
   **プロジェクト設定の読み取り**(テーマ・表示名・アップロード先)も sid か
   Service Account が要るが、`,` の設定画面で `config.toml` に書けば代替できる。
-  **図をブラウザの画像で出す `diagrams = image`**(既定は `text`)も非公開ページには
-  SID を使う。設定画面 `,` か `COSENSE_WEB_RENDER=image` で有効にする。
   無ければ 3 秒から最大 60 秒へ伸びるポーリング・アップロード先 `gcs` に
-  縮退する(レンダラを上げて
-  いなければ図はテキストかコードで出る)
+  縮退する。図はテキスト描画のみ(ブラウザ画像の経路は 2026-09-12 に撤去)
 - 自前の設定ファイルは `~/.config/cosentty/config.toml`(`[view]` `[upload]`
   `[project.<slug>]`。書き方は `rust/KEYMAP.md` の「設定ファイルと設定画面」か
   `rust/src/config.rs` 冒頭)。無くてよい。`,` の設定画面が書く。起動オプションは
@@ -35,8 +32,7 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
 
 ## コード構成
 
-- lib(`cosense`): `api` `render` `wrap` `theme` `ws` `webrender` `chrome`
-  `capability` `outline` `editops` `comment` `index`(一覧の状態・並び順・
+- lib(`cosense`): `api` `render` `wrap` `theme` `ws` `capability` `outline` `editops` `comment` `index`(一覧の状態・並び順・
   絞り込み/検索の一致) `highlight`(コードブロックの syntect。検索語の
   ハイライトとは別物) `math`(数式の組図: `code:tex` ブロックとインライン
   `[$ ... ]` の共通部) ほか
@@ -85,10 +81,8 @@ RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" \
 - `rust/docs/PLAN-mode-ux.md` — モード体系・カーソル表現の再設計(実施済み・記録)
 - `rust/KEYMAP.md` — キー体系(akapen 対応表つき)
 - `rust/docs/SPEC-edit-session.md` — EDIT セッションの仕様
-- `rust/docs/NOTE-webrender-handoff.md` — web レンダラ(mmd 描画)MVP の詳細設計・
-  調査記録(旧 HANDOFF.md の全文)
-- `rust/docs/NOTE-mmd-text.md` — Mermaid のテキスト描画(本流。ブラウザ描画は
-  既定でオフ)
+- `rust/docs/NOTE-mmd-text.md` — Mermaid のテキスト描画(ブラウザ描画は
+  2026-09-12 に撤去。経緯は同 NOTE の実施記録)
 - `rust/docs/NOTE-math-text.md` — 数式のテキスト描画。`code:tex` とインライン数式を扱う
 - `rust/docs/NOTE-websocket-sync.md` / `rust/docs/NOTE-outline-editing.md` /
   `rust/docs/NOTE-edit-selection.md` — 各機能の設計メモ

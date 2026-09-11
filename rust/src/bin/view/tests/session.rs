@@ -11,9 +11,8 @@ fn r_is_an_ordinary_character_while_editing() {
     let s = app.session.as_ref().expect("still editing");
     assert!(
         s.input.buf.contains('R'),
-        "R typed a character, not a render"
+        "R typed a character, not a command"
     );
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
 }
 
 #[test]

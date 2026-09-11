@@ -342,15 +342,6 @@ pub(crate) fn session_move_to_line(app: &mut App, ctx: &Ctx, line: usize) {
 }
 
 impl App {
-    /// Is the edit session's caret on one of these source lines? Such a
-    /// line is being typed into, so `app.lines` still holds the committed
-    /// text while the session's buffer holds the reader's — the block is not
-    /// renderable until the caret leaves and the commit lands.
-    pub(crate) fn caret_is_inside(&self, rows: &[(usize, Line<'static>)]) -> bool {
-        let Some(s) = &self.session else { return false };
-        rows.iter().any(|(src, _)| *src == s.line)
-    }
-
     /// Put the caret on an edit's own location (see `edit_focus`). The
     /// session moves with it, so undo/redo show what changed instead of
     /// leaving the caret wherever it happened to be. Returns whether the

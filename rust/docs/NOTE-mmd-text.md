@@ -1,9 +1,8 @@
 # NOTE-mmd-text: Mermaid の TUI テキスト描画(lib 方式)
 
-正本。ブラウザ描画(`webrender` + headless Chrome)を置き換えるのではなく、
-その手前に「テキスト描画」の段を足す。描けなければ今まで通り
-画像 → 素のコード行に落ちる。`master` へのマージは完成・チェック後に
-まとめて行う(途中マージなし)。
+正本。当初はブラウザ描画(`webrender` + headless Chrome)の手前に「テキスト描画」
+の段を足す位置づけだったが、**ブラウザ描画は 2026-09-12 に撤去した**(末尾の実施記録)。
+いまは テキスト描画 → 素のコード行 の2段。以下の本文は当時の記述のまま残す。
 
 ## 方式: `mermaid-text` に任せる
 
@@ -154,3 +153,33 @@ Chrome が PNG を描いても、テキスト段が描ける型では画面が�
 - `[view] diagram_text = box | ascii` を追加(`mmd_text::DiagramText`)。
   `COSENSE_MERMAID=ascii` は Env 由来として同じ値に解決する。テキスト段の呼び出しは
   引数で受け取り、環境変数を描画時に読まない
+
+## 実施記録: ブラウザ描画(`diagrams = image`)の撤去(2026-09-12)
+
+sid の位置づけを「ws 受信を速くするだけ」に絞る整理の一環で、headless Chrome に
+よる画像描画の経路をまるごと外した。既定はもともと `text` で、`image` は非公開
+ページに sid が要る隠れ機能だった。後方互換は取らない(ユーザーがまだ少ないため。
+作者判断)。`config.toml` に `diagrams = …` が残っていても無視される(未知のキーは
+読み飛ばす)。
+
+消したもの:
+
+- lib: `chrome.rs`(CDP クライアント・ブラウザ検出・cookie 注入)、`webrender.rs`
+  (要求・成果物・ディスクキャッシュ・FakeBackend)、`capability.rs` の
+  `RenderPolicy` / `Visibility` / `Capabilities` / `decide`(残ったのは `SyncState` と
+  ポーリング間隔の定数だけ)、`Client::probe_visibility`、`ArtifactKind::web`
+- viewer: `web.rs` の描画ワーカーと `App` の `web_*` 状態(`web_unsynced` はヘッダの
+  `未同期` 表示に使うので残し、`web_gen` はページ設置の世代として `install_gen` に改名)。
+  ポーリング側(`PollCadence` / `spawn_web_poller`)は `poll.rs` に移した。
+  `R`(描き直し)のキー、設定画面の「図の表示」行、`[view] diagrams` キー、
+  `COSENSE_WEB_RENDER` / `COSENSE_CHROME` / `COSENSE_WEB_TIMEOUT` / `COSENSE_WEB_DEBUG`
+- dev-tools: `web_smoke`、`outline_probe`(Chrome で本家のアウトライン操作の wire を
+  覗く道具。成果は `NOTE-outline-editing.md` と実装に落ちている)
+- 文書: `NOTE-webrender-handoff.md`(git 履歴には残る)。KEYMAP の「Mermaid の描画の
+  仕組み」節
+- 図の描画中に流していた縦の明るさの帯(`shimmer`)。画像ダウンロード待ちの横の帯
+  (`shimmer_across`)は残る
+
+残したもの: `Block::Artifact` と `last_src`(テキスト描画の帰属行に使う)、
+`diagram_text = box | ascii`、`COSENSE_MERMAID` / `COSENSE_MATH`。
+`~/.cache/cosentty/webrender/` は消さないので、不要なら手で消す。

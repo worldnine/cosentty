@@ -217,58 +217,6 @@ fn e_on_a_drawn_diagram_switches_the_block_to_its_source() {
 }
 
 #[test]
-fn e_on_a_browser_image_of_a_diagram_switches_the_block_too() {
-    // テキスト段が降りた(ペインが狭い等)とき、ブロックはブラウザ画像で
-    // 出る。その画像の行はブロックの最終行(空行)に帰属するので、そこで
-    // e を押したらやはりソースに切り替わらなくてはならない。
-    let ctx = test_ctx();
-    let mut app = page(&[
-        "t",
-        "code::test.mmd",
-        " flowchart LR",
-        " TUI-- CDP -->Chrome",
-        " TUI-- ワイワイ -->おじさん",
-        " ",
-    ]);
-    app.page_id = "PAGE".into();
-    app.mermaid_text = false; // テキスト段なし → 画像の器だけが残る
-    app.rebuild(80);
-    let key = app
-        .blocks
-        .iter()
-        .find_map(|b| match b {
-            Block::Artifact {
-                kind,
-                code,
-                last_src,
-                ..
-            } => kind.web().and_then(|k| app.web_request(k, code, *last_src)),
-            _ => None,
-        })
-        .map(|r| r.cache_key())
-        .expect("a browser key exists");
-    let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-    app.images.insert(key, info);
-    app.rebuild(80);
-    assert!(
-        app.rows.iter().any(|r| matches!(r, Row::Image { .. })),
-        "the block shows its picture"
-    );
-
-    enter_session(&mut app, &ctx, 5, 1); // 画像の帰属行 = 末尾の空行
-    app.rebuild(80);
-    let text = text_rows(&app);
-    assert!(
-        text.iter().any(|t| t.contains("flowchart LR")),
-        "the picture makes way for the source: {text:?}"
-    );
-    assert!(
-        !app.rows.iter().any(|r| matches!(r, Row::Image { .. })),
-        "no picture while editing"
-    );
-}
-
-#[test]
 fn diagrams_nest_twice_without_bullets() {
     for (header, body, edge, indent) in [
         ("　code:mmd", "  flowchart LR", "   A-->B", 2),
@@ -336,75 +284,6 @@ fn a_diagram_dims_its_rules_and_leaves_its_words_alone() {
         }
     }
     assert!(saw_rule && saw_word, "both layers are on screen");
-}
-
-#[test]
-fn text_never_asks_for_a_picture_and_image_asks_for_every_block() {
-    // `text`(既定): 端末で描けている図のために Chrome を起こさない。
-    // 描けない図もソースのまま——ブラウザは一切関わらない。
-    let mut app = page(&["t", "code:mmd", " flowchart LR", "  A-->B"]);
-    app.page_id = "PAGE".into();
-    app.render_policy = capability::RenderPolicy::Text;
-    app.rebuild(80);
-    for trigger in [capability::Trigger::Auto, capability::Trigger::Manual] {
-        assert!(!app.start_web_renders(trigger), "text queues nothing");
-    }
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
-
-    // `image`: テキスト段が描ける図でも、読者は絵を選んだのだから取りに行く。
-    app.render_policy = capability::RenderPolicy::Image;
-    app.rebuild(80);
-    assert!(
-        app.start_web_renders(capability::Trigger::Auto),
-        "image fetches even a drawn block"
-    );
-}
-
-#[test]
-fn a_landed_picture_replaces_the_drawing_only_under_image() {
-    // 絵が届いている同じブロックを、text は罫線で、image は画像で出す。
-    let mut app = page(&["t", "code:mmd", " flowchart LR", "  A-->B"]);
-    app.page_id = "PAGE".into();
-    app.render_policy = capability::RenderPolicy::Image;
-    app.rebuild(80);
-    let key = diagram_keys(&app).remove(0);
-    let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-    app.images.insert(key, info);
-    app.rebuild(80);
-    assert!(
-        app.rows.iter().any(|r| matches!(r, Row::Image { .. })),
-        "image shows the picture"
-    );
-    assert!(
-        !text_rows(&app).iter().any(|t| t.contains('┌') || t.contains('╭')),
-        "and not the drawing too"
-    );
-
-    app.render_policy = capability::RenderPolicy::Text;
-    app.rebuild(80);
-    assert!(
-        !app.rows.iter().any(|r| matches!(r, Row::Image { .. })),
-        "text ignores the picture it happens to hold"
-    );
-    assert!(
-        text_rows(&app).iter().any(|t| t.contains('┌') || t.contains('╭')),
-        "the drawing is back"
-    );
-}
-
-#[test]
-fn a_failed_render_falls_back_to_the_drawing() {
-    let mut app = page(&["t", "code:mmd", " flowchart LR", "  A-->B"]);
-    app.page_id = "PAGE".into();
-    app.render_policy = capability::RenderPolicy::Image;
-    app.rebuild(80);
-    let key = diagram_keys(&app).remove(0);
-    app.web_errors.insert(key, "boom".into());
-    app.rebuild(80);
-    assert!(
-        text_rows(&app).iter().any(|t| t.contains('┌') || t.contains('╭')),
-        "a failure is drawn as text, never as bare source"
-    );
 }
 
 #[test]

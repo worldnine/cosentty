@@ -72,13 +72,12 @@ fn stale_history_is_not_applied_or_queued() {
 }
 
 #[test]
-fn a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved() {
+fn a_conflict_whose_reload_fails_keeps_the_page_marked_unsynced() {
     // 409 means our ops did not land: local and server disagree. If the
-    // recovery fetch then fails too, we are STILL divergent — rendering
-    // would screenshot the server's text and file it under ours.
+    // recovery fetch then fails too, we are STILL divergent, and the
+    // header's `未同期` has to keep saying so.
     let ctx = offline_ctx();
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Image;
     app.rebuild(80);
     app.inflight = 1;
     handle_commit_outcome(
@@ -92,118 +91,18 @@ fn a_conflict_whose_reload_fails_stops_rendering_until_it_is_resolved() {
         "the real reason is not overwritten: {}",
         app.toast_text()
     );
-    while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
-    assert!(!app.start_web_renders(capability::Trigger::Manual));
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
-    assert!(app.web_pending.is_empty());
 }
 
 #[test]
-fn a_render_whose_source_moved_is_never_filed_under_the_old_hash() {
-    // A page of diagrams takes seconds to draw. If a commit lands in
-    // that window, the browser screenshots the NEW text — but the job
-    // is keyed on the old hash, and the artifact cache keeps what it is
-    // given for a week. The next reader of the old text would be served
-    // a picture of something else.
-    let ctx = test_ctx();
-    let mut app = web_tier_page();
-    app.render_policy = capability::RenderPolicy::Image;
-    app.rebuild(80);
-    let key_a = app
-        .web_request(
-            cosense::webrender::WebKind::Mermaid,
-            "flowchart LR\n  A-->B",
-            3,
-        )
-        .unwrap()
-        .cache_key();
-    let backend = Arc::new(cosense::webrender::FakeBackend::new());
-    backend.answer(&key_a, Ok(tiny_png()));
-    let cache = scratch_cache();
-    spawn_web_worker(
-        app.web_jobs_rx.take().unwrap(),
-        app.web_tx.clone(),
-        Arc::clone(&backend) as Arc<dyn WebBackend>,
-        Picker::halfblocks(),
-        cache.clone(),
-        Arc::clone(&app.web_gen),
-        Arc::clone(&app.src_epoch),
-    );
-
-    // Pin the backend so the job is provably still mid-render...
-    let held = backend.gate.lock().unwrap();
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(app.web_pending.contains(&key_a));
-    // ...and commit B underneath it.
-    app.lines[3].text = "   A-->C".into();
-    rerender(&mut app, &ctx);
-    drop(held);
-
-    // Every request still gets exactly one reply, so nothing pulses on.
-    let mut replies = 0;
-    while replies < 2 {
-        let msg = app
-            .web_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("an accepted request is always answered");
-        app.web_tx.send(msg).unwrap();
-        replies += 1;
-    }
-    app.drain_web_renders();
-
-    assert!(
-        cache.get(&key_a).is_none(),
-        "B's picture must never be written under A's hash"
-    );
-    assert!(!app.images.contains_key(&key_a));
-    // Stale is not a failure and not a miss: B is simply asked for.
-    assert!(app.web_errors.is_empty());
-    assert!(!app.web_missing.contains(&key_a));
-    assert!(
-        !app.web_pending.contains(&key_a),
-        "the abandoned key stopped pulsing"
-    );
-
-    // ...and B is what gets asked for instead.
-    let key_b = app
-        .web_request(
-            cosense::webrender::WebKind::Mermaid,
-            "flowchart LR\n  A-->C",
-            3,
-        )
-        .unwrap()
-        .cache_key();
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(
-        app.web_pending.contains(&key_b),
-        "the new source is what gets rendered next"
-    );
-}
-
-#[test]
-fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_source() {
+fn a_failed_commit_marks_the_page_unsynced_until_a_whole_page_arrives() {
     let ctx = test_ctx();
     let mut app = mermaid_page();
     app.rebuild(80);
-    // The reader changes the diagram A -> B locally. The key follows
-    // the LOCAL text…
+    // The reader changes a line locally…
     app.lines[3].text = "   A-->C".into();
     rerender(&mut app, &ctx);
     app.rebuild(80);
-    let key_b = app
-        .web_request(
-            cosense::webrender::WebKind::Mermaid,
-            "flowchart LR\n  A-->C",
-            3,
-        )
-        .unwrap()
-        .cache_key();
-    // Clear whatever the re-render already queued, and forget it was
-    // ever pending: the question is what happens from here on.
-    while app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok() {}
-    app.web_pending.clear();
-    // …but the commit is refused, so the SERVER still has A. Rendering
-    // now would screenshot A and store it under B's key.
+    // …but the commit is refused, so the SERVER still has the old text.
     app.inflight = 1;
     handle_commit_outcome(
         &mut app,
@@ -217,13 +116,6 @@ fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_sour
     );
     assert_eq!(app.inflight, 0, "the job is no longer in flight…");
     assert!(app.web_unsynced, "…but the page is known to have drifted");
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(
-        app.web_jobs_rx.as_ref().unwrap().try_recv().is_err(),
-        "inflight == 0 is not enough: nothing may be rendered while desynced",
-    );
-    assert!(!app.images.contains_key(&key_b));
-    assert!(app.web_pending.is_empty());
 
     // A later commit succeeding says nothing about the one that failed.
     app.inflight = 1;
@@ -241,8 +133,6 @@ fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_sour
         app.web_unsynced,
         "one success does not prove the page agrees"
     );
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
 
     // Only a whole page from the server settles it.
     let mut page = cosense::api::Page {
@@ -275,12 +165,6 @@ fn a_failed_commit_stops_the_server_s_old_diagram_being_filed_under_the_new_sour
         !app.web_unsynced,
         "an authoritative install resolves the drift"
     );
-    app.rebuild(80);
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(
-        app.web_jobs_rx.as_ref().unwrap().try_recv().is_ok(),
-        "rendering resumes"
-    );
 }
 
 #[test]
@@ -292,8 +176,6 @@ fn an_edit_that_never_reached_the_commit_worker_also_desyncs() {
     queue_commit(&mut app, "line 4", vec![]);
     assert_eq!(app.inflight, 0, "nothing is in flight — it never left");
     assert!(app.web_unsynced);
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
 }
 
 /// Inside the mode nothing leaves the machine: the same line values are

@@ -313,37 +313,12 @@ pub(crate) fn reverse_cols(line: Line<'static>, from: usize, to: usize) -> Line<
     line
 }
 
-pub(crate) fn shimmer(
-    line: &Line<'static>,
-    pos: u16,
-    len: u16,
-    app: &App,
-    ctx: &Ctx,
-) -> Line<'static> {
-    let level = cosense::theme::shimmer_level(pos, len, app.web_anim.elapsed().as_secs_f32());
-    let spans: Vec<Span<'static>> = line
-        .spans
-        .iter()
-        .map(|s| {
-            Span::styled(
-                s.content.clone(),
-                cosense::theme::shimmer_style(s.style, ctx.terminal_bg(), level),
-            )
-        })
-        .collect();
-    Line::from(spans)
-}
-
-/// `shimmer` turned sideways: the band runs ALONG a single row, character
-/// by character, for the rows that are one line tall (a picture's `[URL]`
-/// while it downloads, and the box a mixed line reserves for one).
-///
-/// Two things differ from the vertical band beyond the direction, and both
-/// are the reason this row used to look dead: it animates against the
-/// pictures' own clock, and `shimmer_level_across` times the sweep instead
-/// of counting cells per second, so a sixty-cell URL crosses in the same
-/// moment a twenty-cell one does. Same brightness floor and ceiling, so the
-/// two still read as one signal.
+/// A band of brightness running ALONG a single row, character by
+/// character, for the rows that are one line tall (a picture's `[URL]`
+/// while it downloads, and the box a mixed line reserves for one). It
+/// animates against the pictures' own clock, and `shimmer_level_across`
+/// times the sweep instead of counting cells per second, so a sixty-cell
+/// URL crosses in the same moment a twenty-cell one does.
 pub(crate) fn shimmer_across(line: &Line<'static>, app: &App, ctx: &Ctx) -> Line<'static> {
     let elapsed = app.image_anim.elapsed().as_secs_f32();
     let len = str_width(&line.to_string()) as u16;

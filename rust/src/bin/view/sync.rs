@@ -962,8 +962,6 @@ pub(crate) fn show_snapshot(app: &mut App, ctx: &Ctx, idx: usize) {
     app.images.clear();
     app.image_errors.clear();
     app.pending.clear();
-    app.web_pending.clear();
-    app.web_errors.clear();
     app.selection = None;
     app.laid_width = 0; // rebuild (clamps the cursor)
     app.follow = true;
@@ -1149,6 +1147,6 @@ impl App {
     }
 
     pub(crate) fn gen_now(&self) -> u64 {
-        self.web_gen.load(std::sync::atomic::Ordering::SeqCst)
+        self.install_gen.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

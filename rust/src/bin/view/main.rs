@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cosense::api::{new_line_id, AuthStore, Client, Config, EditError, EditOp, PageLine};
-use cosense::capability::{self, RenderCapability, SyncState};
+use cosense::capability::{self, SyncState};
 use cosense::comment::{format_all, Comment, Selection};
 use cosense::config::Origin;
 use cosense::editops::{apply_ops, diff_to_ops, invert_ops};
@@ -60,7 +60,6 @@ use cosense::render::{
     bullet_indent_width, file_name_of_url, gyazo_permalink, is_scrapbox_file_url,
     render_lines_with, ArtifactKind, Block, CodeSpan, LinkTruth,
 };
-use cosense::webrender::{ArtifactCache, WebBackend, WebError, WebRequest};
 use cosense::wrap::{hanging_prefix, wrap_line, wrap_line_parts};
 use cosense::ws::{self, RemoteCommit, WsEvent};
 use cosense::{t, ts};
@@ -368,7 +367,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut app = App::new(project.clone());
     app.light = ctx.light();
-    app.render_policy = ctx.view().diagrams.0;
     app.diagram_text = ctx.view().diagram_text.0;
     app.visits_path = ctx.visits_path.clone();
     if let Some(e) = ctx.config_error() {
@@ -395,32 +393,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             Arc::clone(&app.live_superseded),
         );
     }
-    // The web renderer: headless Chrome when one can be found, otherwise a
-    // backend that fails every request so diagrams simply stay text.
-    // The session's `connect.sid` (never the PAT) is what a browser can use,
-    // and it is handed to the backend here and nowhere else.
-    // The worker waits from launch whatever `diagrams` says, so switching
-    // to `image` on the settings screen takes effect without a restart.
-    // Waiting costs nothing: `detect` only looks for the executable, the
-    // browser is launched by the first job, and the cache directory is
-    // created by the first read or write — a `text` session touches
-    // nothing on disk.
-    let web_backend: Arc<dyn WebBackend> =
-        match cosense::chrome::ChromeBackend::detect(ctx.client.sid().map(str::to_string)) {
-            Some(b) => Arc::new(b),
-            None => Arc::new(cosense::webrender::UnavailableBackend(WebError::NoBrowser)),
-        };
-    let web_worker = app.web_jobs_rx.take().map(|jobs_rx| {
-        spawn_web_worker(
-            jobs_rx,
-            app.web_tx.clone(),
-            Arc::clone(&web_backend),
-            ctx.picker.clone(),
-            ArtifactCache::deferred(),
-            Arc::clone(&app.web_gen),
-            Arc::clone(&app.src_epoch),
-        )
-    });
     // Live web edits: websocket push when the session has a `connect.sid`
     // (regardless of the project credential — REST may well resolve to a
     // PAT while the push channel only accepts the sid), polling otherwise.
@@ -431,7 +403,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // A sid is one capability among several: it enables push sync and lets
     // the browser see private pages. It is NOT what makes the app usable —
     // a PAT session without one still reads, edits and commits.
-    app.caps.sid = sid.is_some();
+    app.has_sid = sid.is_some();
     let (ws_active, initial_state) = cosense::ws::initial_plan(sid.is_some());
     app.ws_attempted = ws_active;
     app.sync_state = initial_state;
@@ -548,7 +520,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     //   2. give the terminal back, so a slow reap is never a black screen.
     //   3. `Stop` ends the worker loop, and the join makes "no browser and
     //      no worker outlive this process" a fact rather than a hope.
-    web_backend.shutdown();
     if ctx.keyboard_enhanced {
         let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
@@ -559,10 +530,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         DisableBracketedPaste
     );
     ratatui::restore();
-    if let Some(worker) = web_worker {
-        let _ = app.web_job_tx.send(WebJob::Stop);
-        let _ = worker.join();
-    }
     drop(app.ime_guard.take());
 
     // Unsent comments are NOT printed here: text appearing after the
@@ -931,7 +898,7 @@ fn run(
         // A page typed into existence goes up as soon as the queue is free.
         dispatch_create(app);
         // Install any images that finished downloading, then draw.
-        if app.drain_images() | app.drain_web_renders() {
+        if app.drain_images() {
             app.laid_width = 0; // heights changed — rebuild layout
         }
         // The related-pages block came back: sections below the page, and
@@ -945,13 +912,6 @@ fn run(
             rerender(app, ctx);
         }
         app.probe_unknown_links();
-        // Both are no-ops on most frames: a diagram is only requested when
-        // its own source changed, and only re-encoded when the pane crossed
-        // the column cap it was built for.
-        app.ensure_visibility(ctx);
-        app.drain_visibility();
-        app.start_web_renders(capability::Trigger::Auto);
-        app.rescale_diagrams();
         app.expire_note();
         app.expire_toast();
         app.drain_downloads();
@@ -974,11 +934,11 @@ fn run(
         // dozens of mouse events; a redraw per event (images included)
         // made scrolling crawl. akapen's event_loop does the same.
         // Idle: one wake-up per 120ms is enough to slot in arriving images.
-        // While a diagram renders, the shimmer wants smoother frames — but
-        // only then, so an idle viewer still costs ~8 wake-ups a second.
-        // The same goes for a picture on its way: its `[URL]` row pulses.
-        // A toast fades at both ends, so it wants the smoother rate too.
-        let tick = if app.web_shimmer.is_empty() && app.pending.is_empty() && app.toast.is_none() {
+        // While a picture is on its way its `[URL]` row pulses and wants
+        // smoother frames — but only then, so an idle viewer still costs
+        // ~8 wake-ups a second. A toast fades at both ends, so it wants the
+        // smoother rate too.
+        let tick = if app.pending.is_empty() && app.toast.is_none() {
             120
         } else {
             60
@@ -1117,8 +1077,8 @@ mod mmd_text;
 use links::*;
 mod upload;
 use upload::*;
-mod web;
-use web::*;
+mod poll;
+use poll::*;
 mod nav;
 use nav::*;
 mod sync;

@@ -1,62 +1,6 @@
 use super::support::*;
 use crate::*;
 
-#[test]
-fn a_send_to_a_dead_worker_stops_the_pulse_instead_of_hanging_it() {
-    let mut app = mermaid_page();
-    app.rebuild(80);
-    // No worker was ever spawned and the receiver is dropped: every
-    // send fails, exactly as it does once the worker has stopped.
-    drop(app.web_jobs_rx.take());
-    app.start_web_renders(capability::Trigger::Auto);
-    assert!(
-        app.web_pending.is_empty(),
-        "nothing waits on a reply that cannot come"
-    );
-    app.rebuild(80);
-    assert!(app.web_shimmer.is_empty(), "so nothing pulses");
-
-    // Same for a resize.
-    let key = app
-        .web_request(
-            cosense::webrender::WebKind::Mermaid,
-            "flowchart LR\n  A-->B",
-            3,
-        )
-        .unwrap()
-        .cache_key();
-    let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-    app.images.insert(key.clone(), info);
-    app.laid_width = 0;
-    app.rebuild(30);
-    app.rescale_diagrams();
-    assert!(app.web_rescaling.is_empty());
-}
-
-#[test]
-fn a_diagram_is_never_encoded_wider_than_the_pane() {
-    // The cap itself: the pane wins while it is narrower than the
-    // image ceiling, and never goes to zero.
-    assert_eq!(diagram_max_cols(120), IMAGE_MAX_COLS);
-    assert_eq!(diagram_max_cols(IMAGE_MAX_COLS), IMAGE_MAX_COLS);
-    assert_eq!(diagram_max_cols(35), 35);
-    assert_eq!(diagram_max_cols(14), 14);
-    assert_eq!(diagram_max_cols(0), 1);
-
-    // …and the encoder honours it for an image far wider than any pane.
-    let picker = Picker::halfblocks();
-    for cap in [IMAGE_MAX_COLS, 35, 14, 5, 1] {
-        let info = decode_web_png(&picker, &wide_png(), cap).unwrap();
-        assert!(
-            info.cells_w <= cap,
-            "cap {cap} produced {} cells wide",
-            info.cells_w
-        );
-        assert_eq!(info.built_for, cap);
-        assert!(info.cells_h >= 1);
-    }
-}
-
 /// A picture is measured in whole rows and capped in height: the first
 /// so a baseline lands level with its bottom edge, the second so one
 /// tall screenshot cannot take the whole screen.

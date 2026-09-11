@@ -2,14 +2,14 @@ use super::support::*;
 use crate::*;
 
 #[test]
-fn a_diagram_note_never_hides_or_erases_a_commit_or_auth_message() {
+fn a_note_never_hides_or_erases_a_commit_or_auth_message() {
     let mut app = mermaid_page();
     // Live sync keeps the footer quiet, so this test sees only the
     // status-vs-note ordering it is about.
     app.sync_state = capability::SyncState::Live;
     // Something the reader must not miss is already on the status line.
     app.status = "コミットに失敗しました: line 4 — 500".into();
-    app.note_web_failure("diagram: Chrome が見つかりません（ソースを表示します）".into());
+    app.note("diagram: Chrome が見つかりません（ソースを表示します）");
     assert_eq!(
         app.hint_text(&[]),
         "diagram: Chrome が見つかりません（ソースを表示します）",
@@ -26,7 +26,7 @@ fn a_diagram_note_never_hides_or_erases_a_commit_or_auth_message() {
     assert_eq!(app.hint_text(&[]), "コミットに失敗しました: line 4 — 500");
 
     // And with the status line free, the note would have shown.
-    app.note_web_failure("diagram: ブラウザがタイムアウトしました（ソースを表示します）".into());
+    app.note("diagram: ブラウザがタイムアウトしました（ソースを表示します）");
     app.status.clear();
     assert!(app.hint_text(&[]).contains("ブラウザがタイムアウト"));
     // The note overlays even the cursor links' prompt for its seconds;
@@ -236,9 +236,6 @@ fn base64_for_osc52_matches_the_standard() {
     assert_eq!(b64_encode(b"foo"), "Zm9v");
     assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
     assert_eq!(b64_encode("あ".as_bytes()), "44GC");
-    // Round-trips through the decoder the browser side already uses.
-    let round = cosense::chrome::b64_decode(&b64_encode("行 の コピー".as_bytes())).unwrap();
-    assert_eq!(String::from_utf8(round).unwrap(), "行 の コピー");
 }
 
 #[test]

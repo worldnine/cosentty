@@ -542,13 +542,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App, ctx: &Ctx) {
                 hang,
             } => {
                 if let Some(r) = one_row(screen_y) {
-                    // A diagram being rendered dims its code and lets a band
-                    // of brightness run down it: the reader sees the work
-                    // happening without the text moving under them.
-                    let painted = match app.web_shimmer.get(src) {
-                        Some((pos, len)) => shimmer(line, *pos, *len, app, ctx),
-                        None => line.clone(),
-                    };
+                    let painted = line.clone();
                     // EDIT の行またぎ文字選択: キャレット行以外も選択された
                     // 文字そのものを反転する。遠端の行は境界の文字から
                     // (または境界の文字まで)、間の行は本文の全文字。境界の

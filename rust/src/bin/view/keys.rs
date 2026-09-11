@@ -549,39 +549,6 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             enter_move_mode(app, ctx)
         }
 
-        // ---- render this page's missing web artifacts ----
-        // Rendering is manual by default: a page load only shows artifacts
-        // it already has on disk, because launching a browser is by far the
-        // most expensive thing this viewer does. Uppercase `R` is generic:
-        // Mermaid today, and TeX / icons / ProjectCSS-backed views later.
-        (KeyCode::Char('R'), false) => {
-            // `R` is "try again": a block whose render failed is asked for
-            // once more, instead of staying text for the rest of the visit.
-            app.web_errors.clear();
-            if app.start_web_renders(capability::Trigger::Manual) {
-                // Drawing; the blocks pulse and say the rest themselves.
-            } else if app.web_pending.iter().any(|k| !app.images.contains_key(k)) {
-                // The page-load cache probe still owns these keys, so the
-                // request cannot be queued yet. Remember it and serve it the
-                // moment the probe reports its misses — pressing `R` twice
-                // should not be part of the interface.
-                app.web_manual_wanted = true;
-            } else if app.note.is_none() {
-                app.note_web_failure(match app.render_policy {
-                    capability::RenderPolicy::Text => {
-                        t!(
-                            "diagram: 図の表示は text です。設定画面 (,) で image にすると描きます",
-                            "diagram: diagrams are shown as text; pick image in settings (,) to draw them"
-                        )
-                    }
-                    _ => t!(
-                        "diagram: 描画するものはありません",
-                        "diagram: nothing to draw"
-                    ),
-                });
-            }
-        }
-
         // ---- open in browser (moved from `e`: **w**eb) ----
         (KeyCode::Char('w'), false) => {
             let url = app.cursor_url();

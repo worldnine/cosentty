@@ -15,7 +15,6 @@
 //! preview = "auto"          # on | off | auto
 //! ime = "jp"                # jp | off
 //! download_dir = "~/Downloads"
-//! diagrams = "text"        # text | image(COSENSE_WEB_RENDER と同じ。image は非公開ページに sid が要る)
 //! diagram_text = "box"      # box | ascii(罫線グリフが無いフォント向け。COSENSE_MERMAID=ascii と同じ)
 //!
 //! [upload]
@@ -89,7 +88,6 @@ pub struct ViewSection {
     pub preview: Option<String>,
     pub ime: Option<String>,
     pub download_dir: Option<String>,
-    pub diagrams: Option<String>,
     pub diagram_text: Option<String>,
 }
 
@@ -102,7 +100,6 @@ pub enum ViewKey {
     Preview,
     Ime,
     DownloadDir,
-    Diagrams,
     DiagramText,
 }
 
@@ -115,7 +112,6 @@ impl ViewKey {
             ViewKey::Preview => "preview",
             ViewKey::Ime => "ime",
             ViewKey::DownloadDir => "download_dir",
-            ViewKey::Diagrams => "diagrams",
             ViewKey::DiagramText => "diagram_text",
         }
     }

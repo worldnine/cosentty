@@ -54,19 +54,6 @@ fn a_tex_block_draws_as_a_formula() {
 }
 
 #[test]
-fn a_formula_never_asks_the_browser() {
-    // Cosense は KaTeX で数式を描くが、その要素は特定できていない。
-    // 見当違いの場所を撮るくらいなら、テキストとソースで止める。
-    let mut app = math_page("code:tex", &[r"\frac{a}{b}"]);
-    app.rebuild(80);
-    assert!(
-        !app.start_web_renders(capability::Trigger::Auto),
-        "no job queued"
-    );
-    assert!(diagram_keys(&app).is_empty(), "no cache key for math");
-}
-
-#[test]
 fn editing_a_formula_shows_its_source() {
     let mut app = math_page("code:tex", &[r"\frac{a}{b}"]);
     app.session = Some(EditSession {

@@ -633,10 +633,10 @@ pub struct Page {
     #[serde(default)]
     pub persistent: bool,
     pub title: String,
-    /// The page's current commit. Reported by the `web_smoke` binary as
-    /// page metadata. NOT part of any diagram's cache key: Cosense commits
-    /// on every keystroke-level edit, so keying on it re-rendered every
-    /// diagram on a page whenever any line was touched (see NOTE-webrender-handoff.md §2).
+    /// The page's current commit: the `parent` the next websocket commit
+    /// will name, which is how the push channel continues from a page it
+    /// fetched (see NOTE-websocket-sync.md). Moves on every keystroke-level
+    /// edit, so it is no key for anything derived from a single block.
     #[serde(default, rename = "commitId")]
     pub commit_id: String,
     #[serde(default)]
@@ -1292,29 +1292,6 @@ impl Client {
         res.json::<Verified>()?
             .embed_url
             .ok_or_else(|| "verify: no embedUrl in response".into())
-    }
-
-    /// Whether the project can be read with no credential at all.
-    ///
-    /// Deliberately ANONYMOUS: no cookie, no PAT, no service account. The
-    /// question is "what would a browser with no session see", so attaching
-    /// one of our credentials would answer a different question — and would
-    /// hand a credential to a call that has no need of it.
-    ///
-    /// Measured against the live API: 200 on a public project, 401 on a
-    /// private one, 404 for a name that is not there. 404 and transport
-    /// failures both stay `Unknown`, which every caller treats as "do not
-    /// assume".
-    pub fn probe_visibility(&self, project: &str) -> crate::capability::Visibility {
-        let url = format!("{}/projects/{}", self.cfg.base(), urlencoding(project));
-        let status = self
-            .http
-            .get(&url)
-            .header("Accept", "application/json")
-            .send_polite()
-            .ok()
-            .map(|r| r.status().as_u16());
-        crate::capability::Visibility::from_anonymous_status(status)
     }
 
     /// The project's immutable id, for the websocket room (the page API's

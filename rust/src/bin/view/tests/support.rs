@@ -153,12 +153,6 @@ pub(crate) fn page(texts: &[&str]) -> App {
     // Typing saves at once here; the debounce has tests of its own.
     app.live_debounce = Duration::ZERO;
     app.live_max_wait = Duration::ZERO;
-    // Most tests predate the capability split and care about the render
-    // pipeline, not the gate: give them a session that may draw. The
-    // gate's own behaviour is tested explicitly further down.
-    app.render_policy = capability::RenderPolicy::Image;
-    app.caps.sid = true;
-    app.caps.visibility = capability::Visibility::Private;
     app.lines = texts
         .iter()
         .enumerate()
@@ -183,49 +177,12 @@ pub(crate) fn page(texts: &[&str]) -> App {
     app
 }
 
-/// `mermaid_page` with the first block's picture installed, so that
-/// block collapses to a single image row.
-pub(crate) fn drawn_mermaid_page() -> App {
-    let mut app = mermaid_page();
-    let key = app
-        .web_request(
-            cosense::webrender::WebKind::Mermaid,
-            "flowchart LR\n  A-->B",
-            3,
-        )
-        .unwrap()
-        .cache_key();
-    let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), IMAGE_MAX_COLS).unwrap();
-    app.images.insert(key, info);
-    app
-}
-
 /// A 4×4 PNG — the smallest thing `image` will decode for us.
 pub(crate) fn tiny_png() -> Vec<u8> {
     let img = image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4));
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
     buf.into_inner()
-}
-
-pub(crate) fn scratch_cache() -> cosense::webrender::ArtifactCache {
-    let dir = std::env::temp_dir().join(format!(
-        "cosentty-test-webcache-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
-    cosense::webrender::ArtifactCache::at(dir)
-}
-
-/// The `(gen, reqs)` of a queued render job — tests only ever queue
-/// render jobs, and a rescale would be a test bug.
-pub(crate) fn render_job(job: WebJob) -> (u64, Vec<WebRequest>) {
-    match job {
-        WebJob::Render { gen, reqs, .. } => (gen, reqs),
-        WebJob::Rescale { key, .. } => panic!("expected a render job, got a rescale of {key}"),
-        WebJob::Stop => panic!("expected a render job, got Stop"),
-    }
 }
 
 /// A page with two Mermaid blocks and one ordinary code block.
@@ -244,39 +201,6 @@ pub(crate) fn mermaid_page() -> App {
     app
 }
 
-/// The same page, seen by a reader whose text tier cannot draw it — an
-/// unknown diagram type, a pane too narrow, `COSENSE_MERMAID=off`. This
-/// is the fixture for the BROWSER tier: since the text tier became the
-/// mainline, nothing automatic asks for a picture of a block the
-/// terminal already drew, so a test about pictures has to be about the
-/// blocks that need one.
-pub(crate) fn web_tier_page() -> App {
-    let mut app = mermaid_page();
-    app.mermaid_text = false;
-    app.math_text = false;
-    app
-}
-
-/// Wire a page to a worker and a fake backend, and run one pass.
-/// Returns the backend so the test can count what it was asked to do.
-pub(crate) fn run_pass(
-    app: &mut App,
-    trigger: capability::Trigger,
-) -> Arc<cosense::webrender::FakeBackend> {
-    let backend = Arc::new(cosense::webrender::FakeBackend::new());
-    spawn_web_worker(
-        app.web_jobs_rx.take().unwrap(),
-        app.web_tx.clone(),
-        Arc::clone(&backend) as Arc<dyn WebBackend>,
-        Picker::halfblocks(),
-        scratch_cache(),
-        Arc::clone(&app.web_gen),
-        Arc::clone(&app.src_epoch),
-    );
-    app.start_web_renders(trigger);
-    backend
-}
-
 /// The page's rendered text rows, for "the source is still on screen".
 pub(crate) fn text_rows(app: &App) -> Vec<String> {
     app.rows
@@ -291,87 +215,6 @@ pub(crate) fn text_rows(app: &App) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-/// Every key this page's diagrams will be filed under.
-pub(crate) fn diagram_keys(app: &App) -> Vec<String> {
-    let mut out = Vec::new();
-    for b in &app.blocks {
-        if let Block::Artifact {
-            kind,
-            code,
-            last_src,
-            ..
-        } = b
-        {
-            if let Some(r) = kind.web().and_then(|k| app.web_request(k, code, *last_src)) {
-                out.push(r.cache_key());
-            }
-        }
-    }
-    out
-}
-
-/// Wait for one reply per key, then apply them all. Collected first
-/// because `drain_web_renders` empties the whole channel.
-pub(crate) fn settle(app: &mut App, n: usize) {
-    let mut msgs = Vec::new();
-    for _ in 0..n {
-        msgs.push(
-            app.web_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .expect("every accepted request is answered exactly once"),
-        );
-    }
-    for m in msgs {
-        app.web_tx.send(m).unwrap();
-    }
-    app.drain_web_renders();
-}
-
-/// A wide PNG, like a real Mermaid capture (they come back ~1500px).
-pub(crate) fn wide_png() -> Vec<u8> {
-    let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(1500, 300, |x, _| {
-        image::Rgb([if x > 1400 { 255 } else { 40 }, 40, 40])
-    }));
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
-    buf.into_inner()
-}
-
-/// Run the worker against a scripted backend and hand back everything
-/// it replies with, using the channel itself as the synchronisation —
-/// no sleeps, no wall-clock assumptions.
-pub(crate) fn worker_replies(
-    app: &mut App,
-    backend: Arc<cosense::webrender::FakeBackend>,
-    cache: cosense::webrender::ArtifactCache,
-    jobs: Vec<WebJob>,
-    expect: usize,
-) -> Vec<WebMsg> {
-    let handle = spawn_web_worker(
-        app.web_jobs_rx.take().unwrap(),
-        app.web_tx.clone(),
-        Arc::clone(&backend) as Arc<dyn WebBackend>,
-        Picker::halfblocks(),
-        cache,
-        Arc::clone(&app.web_gen),
-        Arc::clone(&app.src_epoch),
-    );
-    for job in jobs {
-        app.web_job_tx.send(job).unwrap();
-    }
-    let mut out = Vec::new();
-    for _ in 0..expect {
-        out.push(
-            app.web_rx
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .expect("the worker owes a reply"),
-        );
-    }
-    app.web_job_tx.send(WebJob::Stop).unwrap();
-    handle.join().expect("the worker joins on Stop");
-    out
 }
 
 /// A related section for tests: two 1-hop pages and one external.

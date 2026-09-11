@@ -71,11 +71,6 @@ path = "src/bin/edit_smoke.rs"
 required-features = ["dev-tools"]
 
 [[bin]]
-name = "web_smoke"
-path = "src/bin/web_smoke.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
 name = "ws_smoke"
 path = "src/bin/ws_smoke.rs"
 required-features = ["dev-tools"]
@@ -83,11 +78,6 @@ required-features = ["dev-tools"]
 [[bin]]
 name = "upload_smoke"
 path = "src/bin/upload_smoke.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
-name = "outline_probe"
-path = "src/bin/outline_probe.rs"
 required-features = ["dev-tools"]
 
 [[bin]]

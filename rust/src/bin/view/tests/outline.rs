@@ -722,7 +722,7 @@ fn outline_success_after_away_and_back_refreshes_instead_of_retargeting() {
 
     // The immutable page id is the same after an away/back trip, but
     // this is a newly installed snapshot that may predate the commit.
-    app.web_gen
+    app.install_gen
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     app.title = "current title".into();
     app.status = "current visit".into();

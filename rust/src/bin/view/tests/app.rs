@@ -1,6 +1,6 @@
 //! Cross-module application scenarios, grouped by the behavior under test.
 
-mod artifacts;
+mod polling;
 mod comments;
 mod index;
 mod interaction;

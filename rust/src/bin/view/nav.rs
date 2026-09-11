@@ -1431,13 +1431,6 @@ impl App {
         self.history_dropped = false;
         // Whatever the last page was waiting to become, it is not this one.
         self.create_state = CreateState::Idle;
-        // A different project is a different set of capabilities: what we
-        // learned about the old one (visibility, a refused browser) says
-        // nothing here. The sid is a property of the SESSION and survives.
-        if self.project != l.project {
-            self.caps = self.caps.for_new_project();
-            self.vis_asked = None;
-        }
         self.project = l.project;
         self.title = l.title;
         self.header_colors = l.header_colors;
@@ -1449,7 +1442,7 @@ impl App {
             self.redo_stack = redo;
             self.history_dropped = dropped;
         }
-        self.web_gen
+        self.install_gen
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.lines = l.lines;
         if !self.undo_stack.is_empty() || !self.redo_stack.is_empty() {
@@ -1533,13 +1526,6 @@ impl App {
         self.images.clear();
         self.image_errors.clear();
         self.pending.clear();
-        self.web_pending.clear();
-        self.web_errors.clear();
-        self.web_rescaling.clear();
-        self.web_missing.clear();
-        self.web_manual_wanted = false;
-        // Once per page, not once per diagram.
-        self.web_notice_shown = false;
         // A freshly fetched page IS the server's state.
         self.mark_synced();
         self.laid_width = 0; // force rebuild
@@ -1547,9 +1533,7 @@ impl App {
         self.cursor = 0;
         self.selection = None;
         self.follow = true;
-        self.web_dark = !ctx.light();
         self.start_image_loads(ctx);
-        self.start_web_renders(capability::Trigger::Auto);
         self.start_related_load(ctx);
     }
 

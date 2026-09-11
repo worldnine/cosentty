@@ -6,25 +6,14 @@ pub(crate) struct ImageInfo {
     pub(crate) sliced: SlicedProtocol,
     /// Display height in cells (from the sliced size), used for layout.
     pub(crate) cells_h: u16,
-    /// Display width in cells, and the column cap this was encoded for. A
-    /// diagram is re-encoded from its cached PNG when the pane crosses that
-    /// cap, so it never paints past the text column (the draw clips to the
-    /// pane, so an over-wide image simply loses its right-hand side).
+    /// Display width in cells.
     pub(crate) cells_w: u16,
-    pub(crate) built_for: u16,
 }
 
 /// Widest an inline image may be drawn, in cells. Images are capped at a
 /// fixed 64 columns regardless of the pane — that is long-standing
-/// behaviour and is left alone. A DIAGRAM additionally has to fit the pane:
-/// a clipped photo is still a photo, a clipped flowchart has lost its right
-/// half.
+/// behaviour and is left alone.
 pub(crate) const IMAGE_MAX_COLS: u16 = 64;
-
-/// Column cap for a diagram in a pane whose text area is `text_w` wide.
-pub(crate) fn diagram_max_cols(text_w: u16) -> u16 {
-    text_w.min(IMAGE_MAX_COLS).max(1)
-}
 
 /// How many pictures download at once. See `start_image_loads`.
 pub(crate) const IMAGE_PARALLEL: usize = 4;
@@ -108,13 +97,9 @@ pub(crate) type ImageMsg = (String, Result<ImageInfo, String>);
 /// where it landed, or why it failed.
 pub(crate) type FileMsg = (String, Result<std::path::PathBuf, String>);
 
-/// PNG bytes -> terminal image. Only image decoding happens here: no SVG or
-/// HTML from the browser is ever interpreted in this process.
-pub(crate) fn decode_web_png(
-    picker: &Picker,
-    png: &[u8],
-    max_cols: u16,
-) -> Result<ImageInfo, String> {
+/// PNG bytes -> terminal image, for tests that need a real `ImageInfo`.
+#[cfg(test)]
+pub(crate) fn decode_png(picker: &Picker, png: &[u8], max_cols: u16) -> Result<ImageInfo, String> {
     let img = image::load_from_memory(png).map_err(|e| e.to_string())?;
     build_image(picker, img, max_cols)
 }
@@ -268,7 +253,6 @@ pub(crate) fn build_image(
                 // for, since the cap is what keeps the diagram inside the
                 // pane.
                 cells_w: s.width.min(max_cols.max(1)),
-                built_for: max_cols.max(1),
             }
         })
         .map_err(|e| e.to_string())

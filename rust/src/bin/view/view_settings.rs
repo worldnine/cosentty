@@ -59,7 +59,6 @@ pub(crate) struct ViewSettings {
     /// As written (a `~` is expanded, `$VAR`s are not); `download_dir`
     /// below is the usable path.
     pub download_dir: (std::path::PathBuf, Origin),
-    pub diagrams: (capability::RenderPolicy, Origin),
     pub diagram_text: (mmd_text::DiagramText, Origin),
     /// `theme` names something neither embedded nor in the reader's themes
     /// directory: the default is in use, and the screen says so.
@@ -203,24 +202,6 @@ impl ViewSettings {
             (default_download.clone(), Origin::Auto),
         );
 
-        let diag_file = file
-            .diagrams
-            .as_deref()
-            .and_then(capability::RenderPolicy::parse);
-        file_parsed(
-            "diagrams",
-            &file.diagrams,
-            diag_file.is_some() || file.diagrams.is_none(),
-        );
-        let diagrams = pick(
-            None,
-            env("COSENSE_WEB_RENDER")
-                .as_deref()
-                .and_then(capability::RenderPolicy::parse),
-            diag_file,
-            (capability::RenderPolicy::Text, Origin::Default),
-        );
-
         let dtext_file = file
             .diagram_text
             .as_deref()
@@ -244,7 +225,6 @@ impl ViewSettings {
             preview,
             ime,
             download_dir,
-            diagrams,
             diagram_text,
             theme_missing,
             detected_bg,
@@ -313,7 +293,6 @@ impl ViewSettings {
             preview: (cosense::index::PreviewMode::Auto, Origin::Default),
             ime: (cosense::ime::ImeMode::Off, Origin::Default),
             download_dir: (std::env::temp_dir(), Origin::Default),
-            diagrams: (capability::RenderPolicy::Text, Origin::Default),
             diagram_text: (mmd_text::DiagramText::Box, Origin::Default),
             theme_missing: false,
             detected_bg: None,

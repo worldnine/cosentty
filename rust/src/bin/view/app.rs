@@ -157,9 +157,7 @@ pub(crate) struct App {
     pub(crate) pending: HashSet<String>,
     /// Clock the downloading pictures animate against — reset when new work
     /// is dispatched, so the band runs from the head of the row instead of
-    /// from whatever phase the page's first paint left behind. The diagrams
-    /// have their own (`web_anim`): the two are asked a different question,
-    /// and one page can wait on both.
+    /// from whatever phase the page's first paint left behind.
     pub(crate) image_anim: std::time::Instant,
     pub(crate) image_tx: mpsc::Sender<ImageMsg>,
     pub(crate) image_rx: mpsc::Receiver<ImageMsg>,
@@ -170,46 +168,16 @@ pub(crate) struct App {
     pub(crate) upload_tx: mpsc::Sender<UploadMsg>,
     pub(crate) upload_rx: mpsc::Receiver<UploadMsg>,
 
-    // --- web renderer (Mermaid today; see cosense::webrender) -------------
-    /// Bumped on every page install. Shared with the render worker, which
-    /// drops queued work for a page the reader has left before spending a
-    /// decode or a browser navigation on it. A result that comes back for
-    /// an older generation is dropped even if its key were to collide.
-    pub(crate) web_gen: Arc<std::sync::atomic::AtomicU64>,
-    /// Terminal background is dark (picks the browser's color scheme).
-    pub(crate) web_dark: bool,
-    /// Render keys currently in flight.
-    pub(crate) web_pending: HashSet<String>,
-    /// Why a key failed, for the status line. Its block falls back to code.
-    pub(crate) web_errors: HashMap<String, String>,
-    /// Source lines whose code block is being rendered right now, each with
-    /// `(row's position in the block, block row count)`. The draw pass runs
-    /// a band of brightness down them so the reader can see the renderer
-    /// working — rebuilt with the layout, empty whenever nothing is pending.
-    pub(crate) web_shimmer: HashMap<usize, (u16, u16)>,
-    /// Clock the shimmer animates against.
-    pub(crate) web_anim: std::time::Instant,
-    /// Column cap the on-screen diagrams are encoded for — `text_w` capped
-    /// at `IMAGE_MAX_COLS`. Updated by the layout; a change re-encodes the
-    /// artifacts from their cached PNGs (no browser).
-    pub(crate) web_cols: u16,
-    /// Rescales in flight, so a resize does not queue the same key twice.
-    pub(crate) web_rescaling: HashSet<String>,
     /// The local page may no longer match the server: a commit was refused
-    /// or never left the machine. The browser can only ever show what the
-    /// SERVER has, so while this is set no diagram is rendered — a render
-    /// would capture the server's version of a block and file it under the
-    /// LOCAL text's hash, quietly attaching the wrong picture to the source
-    /// the reader is looking at. Cleared only when an authoritative page
-    /// install proves the two agree again (see `mark_desynced`).
+    /// or never left the machine. Shown in the header as `未同期` until an
+    /// authoritative page install proves the two agree again (see
+    /// `mark_desynced`).
     pub(crate) web_unsynced: bool,
-    /// Jobs into the render worker, results back. Artifacts land in
-    /// `images` (they are images), so drawing needs no special case.
-    pub(crate) web_job_tx: mpsc::Sender<WebJob>,
-    /// Held until `main` spawns the worker; tests keep it and inspect jobs.
-    pub(crate) web_jobs_rx: Option<mpsc::Receiver<WebJob>>,
-    pub(crate) web_tx: mpsc::Sender<WebMsg>,
-    pub(crate) web_rx: mpsc::Receiver<WebMsg>,
+    /// Bumped on every page install. Work started against one install (a
+    /// pending load, a commit's origin) checks it against this before it
+    /// touches the page, so an answer for a page the reader has left is
+    /// dropped.
+    pub(crate) install_gen: Arc<std::sync::atomic::AtomicU64>,
 
     pub(crate) rows: Vec<Row>,
     pub(crate) laid_width: u16,
@@ -475,12 +443,10 @@ pub(crate) struct App {
     /// state is what drives it (see `sync_state`).
     pub(crate) poll_ctrl_tx: mpsc::Sender<Duration>,
     pub(crate) poll_ctrl_rx: Option<mpsc::Receiver<Duration>>,
-    /// What this session may do for the current project: sid presence,
-    /// project visibility, and whatever the renderer has been refused.
-    /// Never a single "authenticated" flag — see `cosense::capability`.
-    pub(crate) caps: capability::Capabilities,
-    /// How diagram blocks are shown (`[view] diagrams` / `COSENSE_WEB_RENDER`).
-    pub(crate) render_policy: capability::RenderPolicy,
+    /// A `connect.sid` exists for this session. It only ever decides how
+    /// the push channel is described — never whether the app works (a PAT
+    /// session without one reads, edits and commits). See `cosense::capability`.
+    pub(crate) has_sid: bool,
     /// lib 検証 spike 用のテキスト段旗。手書き分支と同名・同意味。
     pub(crate) mermaid_text: bool,
     /// テキスト段の字種(`[view] diagram_text`)。起動時と設定変更時に入る。
@@ -488,35 +454,10 @@ pub(crate) struct App {
     /// 数式のテキスト段旗(`COSENSE_MATH=off` で降ろす)。図とは別の
     /// ライブラリ・別のフォント事情なので、旗も分けて持つ。
     pub(crate) math_text: bool,
-    /// Visibility answers from the background probe (project, verdict).
-    pub(crate) vis_rx: mpsc::Receiver<(String, capability::Visibility)>,
-    pub(crate) vis_tx: mpsc::Sender<(String, capability::Visibility)>,
-    /// The project the probe was last asked about, so a page move inside
-    /// the same project does not re-ask.
-    pub(crate) vis_asked: Option<String>,
-    /// Artifacts a cache-only pass looked for and did not find. They are
-    /// NOT failures: they stay as source, stop shimmering, and `R` can
-    /// still render them.
-    pub(crate) web_missing: HashSet<String>,
-    /// `R` was pressed while the page-load cache probe was still out. The
-    /// probe owns those keys until it answers, so the keypress cannot queue
-    /// anything yet — it is remembered here and served the moment the
-    /// misses come back. Cleared per page.
-    pub(crate) web_manual_wanted: bool,
-    /// The "you need a cookie" notice has been shown for THIS page already.
-    /// Reset by `set_page`, so it is said once per page and not per block.
-    pub(crate) web_notice_shown: bool,
-
     /// Monotonic counter of the page SOURCE as the app holds it. Deliberately
     /// separate from `server_epoch`: that one guards poll responses against
-    /// local progress, this one guards a render in flight against the source
-    /// moving underneath it. Folding them together would either throw away
-    /// good poll snapshots on every keystroke or good renders on every poll.
-    ///
-    /// A render captures whatever the SERVER is showing at the moment the
-    /// browser looks. If the source has moved since the job was queued, that
-    /// screenshot belongs to a different text than the key it would be filed
-    /// under — and the artifact cache keeps it for a week.
+    /// local progress, this one keys caches of things derived from the
+    /// source (the link colouring) so they are rebuilt when the text moves.
     pub(crate) src_epoch: Arc<std::sync::atomic::AtomicU64>,
 
     /// Monotonic counter of everything that makes the server's state newer
@@ -688,13 +629,10 @@ impl App {
         let (image_tx, image_rx) = mpsc::channel();
         let (file_tx, file_rx) = mpsc::channel();
         let (upload_tx, upload_rx) = mpsc::channel();
-        let (web_job_tx, web_jobs_rx) = mpsc::channel();
-        let (web_tx, web_rx) = mpsc::channel();
         let (commit_tx, commit_jobs_rx) = mpsc::channel();
         let (commit_res_tx, commit_res_rx) = mpsc::channel();
         let (poll_tx, poll_rx) = mpsc::channel();
         let (poll_ctrl_tx, poll_ctrl_rx) = mpsc::channel();
-        let (vis_tx, vis_rx) = mpsc::channel();
         let (ws_tx, ws_rx) = mpsc::channel();
         let (ws_req_tx, ws_req_rx) = mpsc::channel();
         let (link_probe_res_tx, link_probe_rx) = mpsc::channel();
@@ -763,19 +701,8 @@ impl App {
             index_cache: HashMap::new(),
             projects_cache: None,
             index_sort_menu: None,
-            web_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            web_dark: true,
-            web_pending: HashSet::new(),
-            web_errors: HashMap::new(),
-            web_shimmer: HashMap::new(),
-            web_anim: std::time::Instant::now(),
-            web_cols: IMAGE_MAX_COLS,
-            web_rescaling: HashSet::new(),
             web_unsynced: false,
-            web_job_tx,
-            web_jobs_rx: Some(web_jobs_rx),
-            web_tx,
-            web_rx,
+            install_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             read_at: None,
             open_stamp: 0,
             palette: cosense::theme::Palette::for_light(false),
@@ -816,17 +743,10 @@ impl App {
             poll_tx,
             poll_ctrl_tx,
             poll_ctrl_rx: Some(poll_ctrl_rx),
-            caps: capability::Capabilities::default(),
-            render_policy: capability::RenderPolicy::from_env(),
+            has_sid: false,
             mermaid_text: !mmd_text::text_tier_off(),
             diagram_text: mmd_text::DiagramText::default(),
             math_text: !cosense::math::text_tier_off(),
-            vis_rx,
-            vis_tx,
-            vis_asked: None,
-            web_missing: HashSet::new(),
-            web_manual_wanted: false,
-            web_notice_shown: false,
             src_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sync_state: capability::SyncState::Polling,

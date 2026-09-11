@@ -1,6 +1,5 @@
 pub mod api;
 pub mod capability;
-pub mod chrome;
 pub mod clipboard;
 pub mod comment;
 pub mod config;
@@ -18,6 +17,5 @@ pub mod table;
 pub mod theme;
 pub mod upload;
 pub mod url;
-pub mod webrender;
 pub mod wrap;
 pub mod ws;

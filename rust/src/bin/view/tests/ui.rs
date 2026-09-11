@@ -350,82 +350,6 @@ fn navigating_while_already_polling_restarts_the_idle_backoff() {
     );
 }
 
-#[test]
-fn moving_to_another_project_forgets_the_old_one_s_verdict() {
-    let ctx = test_ctx();
-    let mut app = mermaid_page();
-    app.caps.visibility = capability::Visibility::Private;
-    app.caps.browser_denied = true;
-    app.caps.sid = true;
-    app.set_page(
-        Loaded {
-            project: "other".into(),
-            title: "t".into(),
-            page_id: "P2".into(),
-            commit_id: String::new(),
-            header_colors: HeaderColors::fallback(),
-            project_display: String::new(),
-            lines: Vec::new(),
-            blocks: Vec::new(),
-            srcs: Vec::new(),
-            hits: Vec::new(),
-            related: Vec::new(),
-            facts: PageFacts::default(),
-            read_at: None,
-            open_stamp: 0,
-            editable: true,
-            links: LinkTruth::default(),
-            palette: ctx.palette(),
-            telomere_tint: None,
-        },
-        &ctx,
-    );
-    assert_eq!(app.caps.visibility, capability::Visibility::Unknown);
-    assert!(!app.caps.browser_denied);
-    assert!(app.caps.sid, "the session's cookie did not go anywhere");
-}
-
-#[test]
-fn set_page_clears_the_state_a_dropped_job_would_have_answered() {
-    // The worker drops stale-generation jobs without replying, which is
-    // only safe because installing a page clears what those replies
-    // would have cleared. This pins that invariant.
-    let ctx = test_ctx();
-    let mut app = mermaid_page();
-    app.rebuild(80);
-    app.start_web_renders(capability::Trigger::Auto);
-    app.web_rescaling.insert("web:mermaid:whatever".into());
-    assert!(!app.web_pending.is_empty());
-    app.set_page(
-        Loaded {
-            project: "proj".into(),
-            title: "next".into(),
-            header_colors: HeaderColors::fallback(),
-            project_display: String::new(),
-            page_id: "p2".into(),
-            commit_id: String::new(),
-            lines: vec![],
-            blocks: vec![],
-            srcs: vec![],
-            hits: vec![],
-            read_at: None,
-            open_stamp: 0,
-            editable: true,
-            related: Vec::new(),
-            facts: PageFacts::default(),
-            links: LinkTruth::default(),
-            palette: ctx.palette(),
-            telomere_tint: None,
-        },
-        &ctx,
-    );
-    assert!(
-        app.web_pending.is_empty(),
-        "no request outlives the page it was for"
-    );
-    assert!(app.web_rescaling.is_empty());
-}
-
 /// READ のページ枠はヘッダ自身のアクセント色をまとう(サイトでページが
 /// プロジェクト色の中に置かれているのと同じ)。EDIT は枠を持たず、
 /// 本文全域の下敷きがモードを語る(描画側のテストは別)。
@@ -763,7 +687,7 @@ fn an_indented_line_keeps_its_bullet_when_it_holds_a_picture() {
     let mut app = page(&["t", &format!(" [{url}]ワイワイ")]);
     app.images.insert(
         url.to_string(),
-        decode_web_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap(),
+        decode_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap(),
     );
     app.rebuild(40);
     // The row knows it is an item, at its level's column.
@@ -977,7 +901,7 @@ fn an_indented_picture_gets_its_bullet() {
     let url = "https://example.com/a.png";
     let mut app = page(&["t", &format!(" [{url}]"), "  after"]);
     // Pretend the picture has landed.
-    let info = decode_web_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap();
+    let info = decode_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap();
     app.images.insert(url.to_string(), info);
     app.rebuild(40);
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -1004,7 +928,7 @@ fn an_indented_picture_gets_its_bullet() {
     let mut app = page(&["t", &format!(" [{url}]と本文が続く")]);
     app.images.insert(
         url.to_string(),
-        decode_web_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap(),
+        decode_png(&Picker::halfblocks(), &tiny_png(), 8).unwrap(),
     );
     app.rebuild(40);
     let rows = app.content_view(40);

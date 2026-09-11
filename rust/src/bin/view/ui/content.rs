@@ -198,10 +198,6 @@ impl App {
                     last_src,
                     indent,
                 } => {
-                    let key = kind
-                        .web()
-                        .and_then(|k| self.web_request(k, code, *last_src))
-                        .map(|r| r.cache_key());
                     // While the edit session is inside this block the reader
                     // is working on the raw source, so the picture steps
                     // aside — the existing source-editing contract wins.
@@ -215,25 +211,6 @@ impl App {
                         ArtifactKind::Mermaid => self.mermaid_text,
                         ArtifactKind::Math => self.math_text,
                     };
-                    // `image`: the browser's picture, when it has landed,
-                    // stands in for the text drawing. Until then (and when
-                    // the render failed) the text tier below still shows.
-                    let picture = if editing_here || self.render_policy != capability::RenderPolicy::Image {
-                        None
-                    } else {
-                        key.as_ref()
-                            .and_then(|k| self.images.get(k).map(|i| (k, i)))
-                    };
-                    if let Some((k, info)) = picture {
-                        content.push(Row::Image {
-                            url: k.clone(),
-                            height: info.cells_h.max(1),
-                            src: *last_src,
-                            indent: *indent,
-                            item: false,
-                        });
-                        continue;
-                    }
                     // 幅不足で描けなかったときだけ理由を持ち越し、コード行の
                     // 上に注記を出す(画像に落ちた場合は注記しない)。
                     let mut too_narrow: Option<usize> = None;
@@ -267,24 +244,8 @@ impl App {
                             continue;
                         }
                     }
-                    let art = if editing_here {
-                        None
-                    } else {
-                        key.as_ref()
-                            .and_then(|k| self.images.get(k).map(|i| (k, i)))
-                    };
-                    if let Some((k, info)) = art {
-                        content.push(Row::Image {
-                            url: k.clone(),
-                            height: info.cells_h.max(1),
-                            src: *last_src,
-                            indent: *indent,
-                            item: false,
-                        });
-                        continue;
-                    }
-                    // No artifact (yet, or ever): the plain code block, with
-                    // the session's caret row swapped to raw source.
+                    // Not drawn as text: the plain code block, with the
+                    // session's caret row swapped to raw source.
                     if let Some(needed) = too_narrow {
                         let have = text_w.saturating_sub(*indent);
                         content.push(Row::Aside {
@@ -584,11 +545,6 @@ impl App {
     /// attribution) plus inline comment cards inserted after each comment's
     /// anchor block. Called on resize and whenever comments change.
     pub(crate) fn rebuild(&mut self, width: u16) {
-        // Diagrams must fit the pane: the draw clips to the text column, so
-        // an image encoded wider than the pane loses its right-hand side.
-        // Recorded here (the layout is the only place the width is known)
-        // and acted on by `rescale_diagrams`.
-        self.web_cols = diagram_max_cols(Self::text_width(self.mode, width) as u16);
         // 1. Page rows and related rows are separate visual regions. The
         // page is boxed; related sections are appended after its FrameEnd.
         // The edit session (and source mode) hides the related sections:
@@ -702,7 +658,6 @@ impl App {
         rows.push(Row::FrameEnd);
         rows.extend(related);
         self.rows = rows;
-        self.web_shimmer = self.web_shimmer_rows();
         self.laid_width = width;
         self.clamp_cursor();
     }

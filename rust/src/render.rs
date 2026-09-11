@@ -59,9 +59,9 @@ pub enum Block {
         /// The plain code-block presentation: `(source line, styled line)`
         /// for the `code:` header and every continuation line.
         rows: Vec<(usize, Line<'static>)>,
-        /// Source line of the block's LAST content line. Cosense hangs the
-        /// preview element off THAT line's id, not the header's (verified
-        /// live — see NOTE-webrender-handoff.md).
+        /// Source line of the block's LAST content line: the line the text
+        /// drawing is attributed to (Cosense itself hangs its preview off
+        /// that line, not the header's).
         last_src: usize,
         /// Display columns the artifact is pushed right. Mermaid previews
         /// may nest two levels, but unlike ordinary list rows they wear no
@@ -79,18 +79,6 @@ pub enum ArtifactKind {
     Math,
 }
 
-impl ArtifactKind {
-    /// The browser fallback for this kind, where there is one. Cosense draws
-    /// formulas with KaTeX, but the element it hangs them off has not been
-    /// pinned down the way `#mermaid-preview-<lineId>` was, so math stops at
-    /// text and source rather than screenshotting a guess.
-    pub fn web(self) -> Option<crate::webrender::WebKind> {
-        match self {
-            ArtifactKind::Mermaid => Some(crate::webrender::WebKind::Mermaid),
-            ArtifactKind::Math => None,
-        }
-    }
-}
 
 /// One part of a mixed text-and-picture line (see [`Block::Inline`]).
 #[derive(Clone, Debug)]

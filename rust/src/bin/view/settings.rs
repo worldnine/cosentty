@@ -21,7 +21,6 @@ pub(crate) enum SettingField {
     Preview,
     Ime,
     DownloadDir,
-    Diagrams,
     DiagramText,
     // ---- [project.<slug>] ----
     ProjectTheme,
@@ -30,14 +29,13 @@ pub(crate) enum SettingField {
 }
 
 impl SettingField {
-    const VIEW: [SettingField; 8] = [
+    const VIEW: [SettingField; 7] = [
         SettingField::Lang,
         SettingField::Theme,
         SettingField::Appearance,
         SettingField::Preview,
         SettingField::Ime,
         SettingField::DownloadDir,
-        SettingField::Diagrams,
         SettingField::DiagramText,
     ];
     const PROJECT: [SettingField; 3] = [
@@ -54,7 +52,6 @@ impl SettingField {
             SettingField::Preview => t!("一覧の抜粋", "index excerpt"),
             SettingField::Ime => t!("IME", "IME"),
             SettingField::DownloadDir => t!("保存先", "downloads"),
-            SettingField::Diagrams => t!("図の表示", "diagrams"),
             SettingField::DiagramText => t!("図の罫線", "diagram glyphs"),
             SettingField::ProjectTheme => t!("テーマ", "theme"),
             SettingField::ProjectDisplayName => t!("表示名", "display name"),
@@ -71,7 +68,6 @@ impl SettingField {
             SettingField::Preview => ViewKey::Preview,
             SettingField::Ime => ViewKey::Ime,
             SettingField::DownloadDir => ViewKey::DownloadDir,
-            SettingField::Diagrams => ViewKey::Diagrams,
             SettingField::DiagramText => ViewKey::DiagramText,
             _ => return None,
         })
@@ -168,27 +164,6 @@ fn origin_note(origin: Origin) -> Option<String> {
     }
 }
 
-/// What `image` needs that this session does not have. Said on the row,
-/// so "I set image and nothing changed" has its answer where it was set.
-fn diagrams_note(ctx: &Ctx, policy: capability::RenderPolicy) -> Option<String> {
-    if policy != capability::RenderPolicy::Image {
-        return None;
-    }
-    if cosense::chrome::find_chrome().is_none() {
-        return Some(t!(
-            "ブラウザが見つかりません (COSENSE_CHROME)",
-            "no browser found (COSENSE_CHROME)"
-        ));
-    }
-    if ctx.client.sid().is_none() {
-        return Some(t!(
-            "非公開の図には connect.sid が必要 (COSENSE_SID)",
-            "private diagrams need a connect.sid (COSENSE_SID)"
-        ));
-    }
-    None
-}
-
 /// Recompute the rows from what the viewer now knows.
 fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
     let v = ctx.view();
@@ -264,12 +239,6 @@ fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
             value: v.download_dir.0.display().to_string(),
             origin: v.download_dir.1,
             note: origin_note(v.download_dir.1),
-        },
-        SettingRow {
-            field: SettingField::Diagrams,
-            value: v.diagrams.0.as_str().into(),
-            origin: v.diagrams.1,
-            note: origin_note(v.diagrams.1).or_else(|| diagrams_note(ctx, v.diagrams.0)),
         },
         SettingRow {
             field: SettingField::DiagramText,
@@ -747,12 +716,6 @@ fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
             view.mode = pick(with_unset(&["on", "off", "auto"]), cfg.view.preview.clone())
         }
         SettingField::Ime => view.mode = pick(with_unset(&["jp", "off"]), cfg.view.ime.clone()),
-        SettingField::Diagrams => {
-            view.mode = pick(
-                with_unset(&["text", "image"]),
-                cfg.view.diagrams.clone(),
-            )
-        }
         SettingField::DiagramText => {
             view.mode = pick(
                 with_unset(&["box", "ascii"]),
@@ -889,17 +852,12 @@ fn apply_view_change(app: &mut App, ctx: &Ctx) {
     let v = ctx.view();
     cosense::lang::set(v.lang.0);
     app.light = v.light;
-    app.web_dark = !v.light;
-    // The render worker waits from launch whatever the policy, so a switch
-    // to `image` takes effect here: the page is laid out again (pictures
-    // may now stand in for text drawings) and the misses are requested.
-    let was = (app.render_policy, app.diagram_text);
-    app.render_policy = v.diagrams.0;
+    // A change of glyph set takes effect here: the page is laid out again.
+    let was = app.diagram_text;
     app.diagram_text = v.diagram_text.0;
     repaint_page(app, ctx);
-    if was != (app.render_policy, app.diagram_text) {
+    if was != app.diagram_text {
         rerender(app, ctx);
-        app.start_web_renders(capability::Trigger::Auto);
     }
 }
 

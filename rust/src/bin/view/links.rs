@@ -686,8 +686,8 @@ pub(crate) fn osc52_copy(text: &str) -> bool {
     out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok()
 }
 
-/// Standard base64, for OSC 52. (The decoder lives in `chrome`; this is
-/// the only place that needs to encode.)
+/// Standard base64, for OSC 52. The only place that needs to encode; the
+/// viewer never decodes.
 pub(crate) fn b64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);

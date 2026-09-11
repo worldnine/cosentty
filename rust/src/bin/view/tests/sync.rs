@@ -5,14 +5,12 @@ use crate::*;
 fn a_failed_reload_at_the_newest_snapshot_also_stays_put() {
     let ctx = offline_ctx();
     let mut app = mermaid_page();
-    app.render_policy = capability::RenderPolicy::Image;
     in_history(&mut app);
     app.rebuild(80);
     // Right from the newest snapshot is the other way out of history.
     travel(&mut app, &ctx, 1);
     assert!(app.time.is_some());
     assert_ne!(app.toast_text(), "最新");
-    assert!(app.web_jobs_rx.as_ref().unwrap().try_recv().is_err());
 }
 
 #[test]
@@ -94,10 +92,6 @@ fn an_undo_that_restores_agreement_lets_diagrams_render_again() {
     );
     assert_eq!(app.lines[1].text, "b", "and it changed nothing else");
     assert_eq!(app.cursor, 0);
-
-    // ...so the next frame can render again.
-    app.rebuild(80);
-    app.start_web_renders(capability::Trigger::Auto);
 }
 
 #[test]
@@ -921,7 +915,7 @@ fn ordinary_commit_outcomes_never_mutate_the_page_opened_after_queueing() {
         app.project = "other-project".into();
         app.page_id = "other-id".into();
         app.title = "other title".into();
-        app.web_gen
+        app.install_gen
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let epoch = app.server_epoch_now();
         let outcome = match result {
@@ -957,7 +951,7 @@ fn an_old_installations_save_requests_resync_without_renaming_the_new_installati
     let ctx = test_ctx();
     let mut app = page(&["title", "body"]);
     let job = queue_commit(&mut app, "old edit", Vec::new()).unwrap();
-    app.web_gen
+    app.install_gen
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let epoch = app.server_epoch_now();
     handle_commit_outcome(

@@ -16,4 +16,3 @@ mod sync;
 mod toast;
 mod ui;
 mod upload;
-mod web;
