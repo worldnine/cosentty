@@ -445,13 +445,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ws_req_rx
             .take()
             .expect("ws request receiver is only handed out once");
-        cosense::ws::spawn_ws_sync(
+        cosense::ws::spawn_ws_sync_with_initial_page_id(
             ctx.client.clone(),
             sid.clone(),
             Arc::clone(&app.poll_target),
             ws_req_rx,
             app.ws_tx.clone(),
             Arc::clone(&app.server_epoch),
+            Some((
+                loaded.project.clone(),
+                loaded.title.clone(),
+                loaded.page_id.clone(),
+            )),
         );
     }
     app.set_page(loaded, &ctx);

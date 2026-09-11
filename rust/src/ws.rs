@@ -682,7 +682,23 @@ pub fn spawn_ws_sync(
     tx: Sender<WsEvent>,
     epoch: Arc<std::sync::atomic::AtomicU64>,
 ) {
+    spawn_ws_sync_with_initial_page_id(client, sid, target, req_rx, tx, epoch, None);
+}
+
+/// As [`spawn_ws_sync`], reusing the page ID from the initial page load when
+/// it belongs to the current target. The catch-up fetch after joining remains
+/// mandatory.
+pub fn spawn_ws_sync_with_initial_page_id(
+    client: Client,
+    sid: String,
+    target: Arc<Mutex<(String, String)>>,
+    req_rx: mpsc::Receiver<WsRequest>,
+    tx: Sender<WsEvent>,
+    epoch: Arc<std::sync::atomic::AtomicU64>,
+    initial_page_id: Option<(String, String, String)>,
+) {
     std::thread::spawn(move || {
+        let mut initial_page_id = initial_page_id;
         use crate::capability::SyncState;
         let api_domain = client.config().api_domain.clone();
         let mut backoff = Duration::from_secs(1);
@@ -708,24 +724,27 @@ pub fn spawn_ws_sync(
                 joined = Some((project.clone(), title.clone()));
                 last_commit_id = None; // new room: commit lineage is unknown
             }
-            // Resolve the room's ids over REST. This pre-join fetch is ONLY
-            // for the page id the join needs — its DATA is never published:
-            // any commit between this fetch and the join would be missing
-            // from it. The catch-up snapshot is fetched AFTER a successful
-            // join, see below.
-            let page = match client.get_page_in(&project, &title) {
-                Ok(p) => p,
-                Err(e) => {
-                    throttled_status(
-                        &tx,
-                        &mut last_status,
-                        &format!("ws: page lookup failed ({e})"),
-                    );
-                    state(&tx, &project, &title, SyncState::Reconnecting);
-                    std::thread::sleep(backoff);
-                    backoff = grow(backoff);
-                    continue;
-                }
+            // Resolve the room's ids over REST. The first page load already
+            // gave us the immutable page id, so reuse it once at startup.
+            // Navigation and reconnects still perform this pre-join fetch;
+            // its DATA is never published because the post-join catch-up
+            // below is the authoritative snapshot.
+            let page_id = match take_initial_page_id(&mut initial_page_id, &project, &title) {
+                Some(id) => id,
+                None => match client.get_page_in(&project, &title) {
+                    Ok(page) => page.id,
+                    Err(e) => {
+                        throttled_status(
+                            &tx,
+                            &mut last_status,
+                            &format!("ws: page lookup failed ({e})"),
+                        );
+                        state(&tx, &project, &title, SyncState::Reconnecting);
+                        std::thread::sleep(backoff);
+                        backoff = grow(backoff);
+                        continue;
+                    }
+                },
             };
             let project_id = match client.get_project_id(&project) {
                 Ok(p) => p,
@@ -753,7 +772,7 @@ pub fn spawn_ws_sync(
                 }
             };
             backoff = Duration::from_secs(1);
-            match link.join(&project_id, &page.id) {
+            match link.join(&project_id, &page_id) {
                 Ok(()) => {}
                 Err(e) => {
                     throttled_status(&tx, &mut last_status, &format!("ws: join failed ({e})"));
@@ -923,6 +942,15 @@ fn room_loop(
     }
 }
 
+fn take_initial_page_id(
+    seed: &mut Option<(String, String, String)>,
+    project: &str,
+    title: &str,
+) -> Option<String> {
+    let (seed_project, seed_title, page_id) = seed.take()?;
+    (seed_project == project && seed_title == title && !page_id.is_empty()).then_some(page_id)
+}
+
 /// Exponential backoff growth, capped at [`MAX_BACKOFF`].
 fn grow(b: Duration) -> Duration {
     (b * 2).min(MAX_BACKOFF)
@@ -964,6 +992,23 @@ mod tests {
             created: 0,
             updated: 0,
         }
+    }
+
+    #[test]
+    fn the_initial_page_id_is_consumed_only_for_its_original_target() {
+        let mut seed = Some(("proj".into(), "page".into(), "P1".into()));
+        assert_eq!(
+            take_initial_page_id(&mut seed, "proj", "page"),
+            Some("P1".into())
+        );
+        assert!(seed.is_none());
+
+        let mut stale = Some(("proj".into(), "page".into(), "P1".into()));
+        assert_eq!(take_initial_page_id(&mut stale, "proj", "other"), None);
+        assert!(
+            stale.is_none(),
+            "a stale seed must not leak into a later room"
+        );
     }
 
     #[test]
