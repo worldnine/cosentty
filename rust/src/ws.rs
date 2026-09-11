@@ -671,6 +671,12 @@ impl ResyncRequest {
     }
 }
 
+/// The page id the viewer has in hand for the page it is showing, as
+/// `(project, title, page id)`. Every page install refreshes it; the room
+/// joiner consumes it instead of asking the server for a fact it was just
+/// told (see `take_page_id_hint`).
+pub type PageIdHint = Arc<Mutex<Option<(String, String, String)>>>;
+
 /// Watch `target` (project, title — the same mutex the poller uses), keep a
 /// websocket room joined on it, forward commit events to `tx`, and serve
 /// `WsRequest::Resync` requests from the event loop.
@@ -682,23 +688,30 @@ pub fn spawn_ws_sync(
     tx: Sender<WsEvent>,
     epoch: Arc<std::sync::atomic::AtomicU64>,
 ) {
-    spawn_ws_sync_with_initial_page_id(client, sid, target, req_rx, tx, epoch, None);
+    spawn_ws_sync_with_page_id_hint(
+        client,
+        sid,
+        target,
+        req_rx,
+        tx,
+        epoch,
+        Arc::new(Mutex::new(None)),
+    );
 }
 
-/// As [`spawn_ws_sync`], reusing the page ID from the initial page load when
-/// it belongs to the current target. The catch-up fetch after joining remains
-/// mandatory.
-pub fn spawn_ws_sync_with_initial_page_id(
+/// As [`spawn_ws_sync`], reusing the page id the viewer already has for
+/// the page it is showing, rather than fetching the page again just to
+/// read its id. The catch-up fetch after joining remains mandatory.
+pub fn spawn_ws_sync_with_page_id_hint(
     client: Client,
     sid: String,
     target: Arc<Mutex<(String, String)>>,
     req_rx: mpsc::Receiver<WsRequest>,
     tx: Sender<WsEvent>,
     epoch: Arc<std::sync::atomic::AtomicU64>,
-    initial_page_id: Option<(String, String, String)>,
+    page_id_hint: PageIdHint,
 ) {
     std::thread::spawn(move || {
-        let mut initial_page_id = initial_page_id;
         use crate::capability::SyncState;
         let api_domain = client.config().api_domain.clone();
         let mut backoff = Duration::from_secs(1);
@@ -724,12 +737,14 @@ pub fn spawn_ws_sync_with_initial_page_id(
                 joined = Some((project.clone(), title.clone()));
                 last_commit_id = None; // new room: commit lineage is unknown
             }
-            // Resolve the room's ids over REST. The first page load already
-            // gave us the immutable page id, so reuse it once at startup.
-            // Navigation and reconnects still perform this pre-join fetch;
-            // its DATA is never published because the post-join catch-up
-            // below is the authoritative snapshot.
-            let page_id = match take_initial_page_id(&mut initial_page_id, &project, &title) {
+            // Resolve the room's ids over REST. The page install that moved
+            // the target already read the page, and the page id is
+            // immutable, so the hint answers this without a request — for
+            // the first page AND for every navigation after it. A reconnect
+            // with no hint left still performs this pre-join fetch; its DATA
+            // is never published, because the post-join catch-up below is
+            // the authoritative snapshot.
+            let page_id = match take_page_id_hint(&page_id_hint, &project, &title) {
                 Some(id) => id,
                 None => match client.get_page_in(&project, &title) {
                     Ok(page) => page.id,
@@ -942,13 +957,13 @@ fn room_loop(
     }
 }
 
-fn take_initial_page_id(
-    seed: &mut Option<(String, String, String)>,
-    project: &str,
-    title: &str,
-) -> Option<String> {
-    let (seed_project, seed_title, page_id) = seed.take()?;
-    (seed_project == project && seed_title == title && !page_id.is_empty()).then_some(page_id)
+/// Take the page id the viewer already knows for this target, if it is
+/// about this target. Consumed either way: a hint that names another page
+/// is stale, and one that named this page has now been used.
+fn take_page_id_hint(hint: &PageIdHint, project: &str, title: &str) -> Option<String> {
+    let mut hint = hint.lock().unwrap_or_else(|p| p.into_inner());
+    let (hint_project, hint_title, page_id) = hint.take()?;
+    (hint_project == project && hint_title == title && !page_id.is_empty()).then_some(page_id)
 }
 
 /// Exponential backoff growth, capped at [`MAX_BACKOFF`].
@@ -995,19 +1010,29 @@ mod tests {
     }
 
     #[test]
-    fn the_initial_page_id_is_consumed_only_for_its_original_target() {
-        let mut seed = Some(("proj".into(), "page".into(), "P1".into()));
+    fn the_page_id_hint_is_consumed_only_for_its_own_target() {
+        let hint: PageIdHint = Arc::new(Mutex::new(Some((
+            "proj".into(),
+            "page".into(),
+            "P1".into(),
+        ))));
+        assert_eq!(take_page_id_hint(&hint, "proj", "page"), Some("P1".into()));
+        assert!(hint.lock().unwrap().is_none(), "used once");
         assert_eq!(
-            take_initial_page_id(&mut seed, "proj", "page"),
-            Some("P1".into())
+            take_page_id_hint(&hint, "proj", "page"),
+            None,
+            "a reconnect with nothing left asks the server"
         );
-        assert!(seed.is_none());
 
-        let mut stale = Some(("proj".into(), "page".into(), "P1".into()));
-        assert_eq!(take_initial_page_id(&mut stale, "proj", "other"), None);
+        let stale: PageIdHint = Arc::new(Mutex::new(Some((
+            "proj".into(),
+            "page".into(),
+            "P1".into(),
+        ))));
+        assert_eq!(take_page_id_hint(&stale, "proj", "other"), None);
         assert!(
-            stale.is_none(),
-            "a stale seed must not leak into a later room"
+            stale.lock().unwrap().is_none(),
+            "a stale hint must not leak into a later room"
         );
     }
 

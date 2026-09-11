@@ -32,7 +32,68 @@ Cosense の REST API は、ページ取得・一覧・画像など複数の要�
   読み取り専用の仮ページを表示し、バックグラウンドの通常ページロードを一度だけ再試行する。
 - 429以外の起動エラーは従来どおり起動失敗として扱う。
 
+## 1回のページ表示にかかる要求数（2026-09-12 時点）
+
+「数ページ見ただけで429」という報告の実体は、1ページの表示が1要求では済まないこと。
+SID ありの場合、以前は次の6件を出していた。
+
+| 要求 | 出どころ | 備考 |
+| --- | --- | --- |
+| `GET /api/pages/v2/<p>/<t>` | 本文取得 | 画面に出るのはこれだけ |
+| `GET /api/pages/<p>/<t>` | 関連ページ | v1。大きいページでは数百KB |
+| `GET /api/page-snapshots/...` | 履歴の件数 | ヘッダの `N+1/N+1` 表示用 |
+| `GET /api/projects/<p>/users` | ws の projectId 解決 | **値は不変なのに毎回** |
+| `GET /api/pages/v2/<p>/<t>` | ws の join 前 pageId 解決 | **本文をもう一度取得** |
+| `GET /api/pages/v2/<p>/<t>` | ws の join 後 catch-up | 正本のスナップショット。残す |
+
+このうち下の2つを削り、1ページあたり6→4件にした。
+
+- **projectId をプロセス内でキャッシュ**（`Client::project_ids`）。不変の値なので
+  ページ移動のたびに聞き直す理由がない。
+- **join 前の pageId 解決を廃止**。直前のページ設置が pageId を知っているので、
+  `ws::PageIdHint` に置いて join 側が拾う（`App::ws_page_hint`）。起動時だけの
+  最適化だったものを、すべてのページ移動に広げた形。再接続でヒントが無いときは
+  従来どおり取得する。join 後の catch-up は正しさのために残す。
+
+画像は別ホスト（gyazo）なら影響しないが、Cosense にアップロードしたファイル
+（`/files/...`）は同じ origin なので同じ制限に乗る。
+
+## 429 が429を呼ぶ経路（塞いだ）
+
+関連ページの取得が失敗すると、リンクの生死が未知のままになる。従来はそこで
+**リンク1本ずつの問い合わせ**（`page_exists` の HEAD、外れたら v1 の backlink 取得）に
+縮退していた。ネットワーク障害ならそれでよいが、**失敗の理由が429のときは最悪**で、
+1要求で済むはずの関連ページの代わりに、リンク数×1〜2件の要求を投げることになる。
+
+`RelatedAnswer` で「失敗」と「拒否(429)」を区別し、拒否のときは
+`App::related_refused` を立ててプローバを止める。リンクは通常色のまま（安全側）で、
+次のページ設置か再読込が改めて聞く。
+
+## 連続した429は待ち時間を広げる
+
+サーバの制限窓は1要求分のバックオフより長い。従来は要求ごとに1秒から数え直して
+いたため、クールダウンが明けるたびに同じ勢いで叩き直していた。origin ごとに
+**連続拒否回数**（`RateLimitState::strikes`）を持ち、拒否のたびに待ちを倍へ広げる
+（上限60秒）。429以外の応答が返ったら回数を0に戻す。窓が開いた証拠はそれだけ。
+
+## 実測のしかた
+
+`COSENSE_HTTP_LOG=<path>` を設定すると、送信経路を通る全要求を1行ずつ追記する。
+
+```bash
+COSENSE_HTTP_LOG=/tmp/cosense-http.log cosentty <project> <title>
+# 1行: <epoch_ms> <所要ms> <status> <METHOD> <URL> try=<試行回数>
+awk '{print $3, $4, $5}' /tmp/cosense-http.log | sort | uniq -c | sort -rn   # 内訳
+awk '{print int($1/60000)}' /tmp/cosense-http.log | uniq -c                  # 毎分の件数
+```
+
+既定では何も書かない。環境変数が無ければ URL の組み立てもしない。
+
 ## 実装
 
-- `rust/src/api.rs`: `RATE_LIMIT_COOLDOWNS` と送信前待機を実装
+- `rust/src/api.rs`: `RATE_LIMIT_COOLDOWNS`（`RateLimitState`）と送信前待機、
+  `status_error`（429だけ `RateLimitedError` にする）、`http_log`、projectId キャッシュ
+- `rust/src/ws.rs`: `PageIdHint` と `take_page_id_hint`
+- `rust/src/bin/view/nav.rs`: `RelatedAnswer`、`App::ws_page_hint` の更新
+- `rust/src/bin/view/links.rs`: 拒否中はプローバを止める
 - 既存の `retry_backoff` を共有期限の計算にも使用

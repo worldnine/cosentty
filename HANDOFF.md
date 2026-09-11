@@ -110,6 +110,10 @@ RUSTUP_TOOLCHAIN=1.92 CARGO_TARGET_DIR="$PWD/target" \
   (太字/前景/背景)を取り出す。テストが緑でも「そう見えるか」は別問題で、
   日本語の桁数・テロメアの太さ・一致の敷き・IME のキャレット位置は
   ここでしか確かめられない。ファイル冒頭に使い方がある
+- `COSENSE_HTTP_LOG=/tmp/http.log` — **API 要求を1行ずつ記録する**。「数ページ見ただけで
+  429」の類は、1ページの表示が何要求かを数えないと始まらない。既定では何も書かない。
+  内訳は `awk '{print $3,$4,$5}' /tmp/http.log | sort | uniq -c | sort -rn`。
+  何がどれだけ要るかは `rust/docs/NOTE-rate-limit.md`
 - `rust/scripts/ime.swift` — macOS の入力ソース切替ヘルパ(swiftc でビルド)
 - `rust/scripts/pbimage.swift` — macOS のクリップボード画像を PNG に書き出す
   ヘルパ(同じ経路でビルド。`src/clipboard.rs` が埋め込む)

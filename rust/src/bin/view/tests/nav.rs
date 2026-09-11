@@ -401,14 +401,22 @@ fn the_related_block_landing_after_the_body_fills_in_sections_and_link_colours()
     // A block for a page the reader has already left says nothing about
     // this one, and must not lower the gate either.
     app.related_tx
-        .send(("proj".into(), "other".into(), Some(block())))
+        .send((
+            "proj".into(),
+            "other".into(),
+            RelatedAnswer::Block(Box::new(block())),
+        ))
         .unwrap();
     assert!(!app.drain_related());
     assert!(app.related_pending, "that answer was about another page");
     assert!(app.related.is_empty());
 
     app.related_tx
-        .send(("proj".into(), "me".into(), Some(block())))
+        .send((
+            "proj".into(),
+            "me".into(),
+            RelatedAnswer::Block(Box::new(block())),
+        ))
         .unwrap();
     assert!(
         app.drain_related(),
@@ -450,10 +458,52 @@ fn a_failed_related_fetch_lowers_the_gate_and_hands_the_links_to_the_prober() {
     assert!(probes.try_recv().is_err());
 
     app.related_tx
-        .send(("proj".into(), "me".into(), None))
+        .send(("proj".into(), "me".into(), RelatedAnswer::Failed))
         .unwrap();
     assert!(!app.drain_related(), "a failure changes nothing on screen");
     assert!(!app.related_pending);
+    app.probe_unknown_links();
+    assert_eq!(probes.try_recv().unwrap().title, "だれも書いていない");
+}
+
+/// A REFUSED related fetch is the opposite case: the server is already
+/// holding this viewer off, and the fallback costs one or two requests
+/// per link. The prober stays shut.
+#[test]
+fn a_refused_related_fetch_does_not_hand_the_links_to_the_prober() {
+    let mut app = App::new("proj".into());
+    app.title = "me".into();
+    app.page_id = "P".into();
+    app.lines = vec![PageLine {
+        id: "l0".into(),
+        text: "[だれも書いていない] [これも]".into(),
+        user_id: String::new(),
+        created: 0,
+        updated: 0,
+    }];
+    let (tx, probes) = mpsc::channel();
+    app.link_probe_tx = Some(tx);
+    app.related_pending = true;
+
+    app.related_tx
+        .send(("proj".into(), "me".into(), RelatedAnswer::Refused))
+        .unwrap();
+    assert!(!app.drain_related(), "a refusal changes nothing on screen");
+    assert!(!app.related_pending);
+    assert!(app.related_refused);
+    app.probe_unknown_links();
+    assert!(
+        probes.try_recv().is_err(),
+        "not one lookup goes out while the server is refusing"
+    );
+
+    // The next fetch that ANSWERS is what opens the prober again.
+    app.related_pending = true;
+    app.related_refused = false;
+    app.related_tx
+        .send(("proj".into(), "me".into(), RelatedAnswer::Failed))
+        .unwrap();
+    app.drain_related();
     app.probe_unknown_links();
     assert_eq!(probes.try_recv().unwrap().title, "だれも書いていない");
 }

@@ -249,6 +249,9 @@ pub(crate) fn adopt_created_page(app: &mut App, ctx: &Ctx, page: &cosense::api::
     // It exists now. Pages that link here are drawing it as uncreated on
     // the strength of a reading that is one commit out of date.
     app.links.learn(&app.title.clone(), true);
+    // …and the client's own memo of "has anyone written this" (see
+    // `Client::note_page_written`), which the link prober reads.
+    ctx.client.note_page_written(&app.project, &app.title);
     app.bump_server_epoch();
     app.mark_synced();
     let ops = cosense::editops::diff_to_ops(&server, &local);

@@ -462,6 +462,11 @@ pub(crate) struct App {
     /// What the web poller should watch (project, title); updated on every
     /// page install and rename.
     pub(crate) poll_target: Arc<std::sync::Mutex<(String, String)>>,
+    /// The page id for the page just installed, left for the websocket
+    /// room joiner to pick up (`cosense::ws::PageIdHint`). Without it the
+    /// joiner fetches the whole page again on every navigation purely to
+    /// read an id the install already had.
+    pub(crate) ws_page_hint: cosense::ws::PageIdHint,
     /// Pages the poller fetched (applied by `apply_remote`).
     pub(crate) poll_rx: mpsc::Receiver<PolledPage>,
     /// The poller's sender (kept for the spawn call in `main`).
@@ -573,6 +578,11 @@ pub(crate) struct App {
     /// rather than firing one request per link at a page the answer is
     /// already on its way for.
     pub(crate) related_pending: bool,
+    /// The related block for this page was REFUSED (`429`), not merely
+    /// missed. The prober stays shut while this is up: one lookup per link
+    /// is what the block was one request instead of, and spending it while
+    /// the server is holding the viewer off only keeps it held off.
+    pub(crate) related_refused: bool,
     /// Whether a page install may go and fetch its related block. Set once
     /// the viewer is really running; `false` in tests, which makes
     /// `start_related_load` a no-op — installing a page in a test must not
@@ -803,6 +813,7 @@ impl App {
             own_commits: std::collections::VecDeque::new(),
             gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             poll_target: Arc::new(std::sync::Mutex::new((String::new(), String::new()))),
+            ws_page_hint: Arc::new(std::sync::Mutex::new(None)),
             poll_rx,
             poll_tx,
             poll_ctrl_tx,
@@ -836,6 +847,7 @@ impl App {
             related_block: None,
             facts: PageFacts::default(),
             related_pending: false,
+            related_refused: false,
             related_fetch: false,
             uploads_on: false,
             related_tx,

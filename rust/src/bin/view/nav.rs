@@ -66,10 +66,39 @@ pub(crate) fn sort_related(
     }
 }
 
-/// A finished background related-pages fetch: which page it describes, and
-/// the block itself — `None` when the request failed, which still has to
-/// come back so the page stops waiting on it.
-pub(crate) type RelatedMsg = (String, String, Option<cosense::api::RelatedPages>);
+/// What a background related-pages fetch came back with.
+///
+/// The two failures are told apart because the right next move is
+/// opposite in each. An ordinary failure answers nothing, so the link
+/// prober may go and ask about the links one at a time. A refusal
+/// (`429`) means the server is already holding this viewer off, and a
+/// page's worth of one-title-at-a-time lookups is the surest way to stay
+/// refused — the block asked for one request and the fallback costs one
+/// or two per link.
+#[derive(Debug)]
+pub(crate) enum RelatedAnswer {
+    /// The block, which may legitimately be empty (nothing points here).
+    Block(Box<cosense::api::RelatedPages>),
+    /// The request failed for an ordinary reason.
+    Failed,
+    /// The server refused: `429`, after the polite retries.
+    Refused,
+}
+
+impl RelatedAnswer {
+    fn of(result: Result<cosense::api::RelatedPages, Box<dyn Error>>) -> Self {
+        match result {
+            Ok(block) => RelatedAnswer::Block(Box::new(block)),
+            Err(e) if cosense::api::is_rate_limited(e.as_ref()) => RelatedAnswer::Refused,
+            Err(_) => RelatedAnswer::Failed,
+        }
+    }
+}
+
+/// A finished background related-pages fetch: which page it describes,
+/// and what came back. A failure still has to come back, so the page
+/// stops waiting on it.
+pub(crate) type RelatedMsg = (String, String, RelatedAnswer);
 /// `(project, page id, stamps)` — `None` when the list could not be fetched.
 pub(crate) type SnapshotsMsg = (String, String, Option<Vec<cosense::api::SnapshotStamp>>);
 
@@ -1441,6 +1470,17 @@ impl App {
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
         }
+        // The room joiner reads the id from here instead of fetching this
+        // same page again to learn it (`cosense::ws::PageIdHint`).
+        if let Ok(mut hint) = self.ws_page_hint.lock() {
+            *hint = (!self.page_id.is_empty()).then(|| {
+                (
+                    self.project.clone(),
+                    self.title.clone(),
+                    self.page_id.clone(),
+                )
+            });
+        }
         // Navigating leaves the joined room. Until the websocket thread has
         // joined and caught up, fallback polling covers the gap. Sending the
         // fast interval even when we were already Polling also wakes an idle
@@ -1544,12 +1584,13 @@ impl App {
             return; // tests: no page install goes to the network
         }
         self.related_pending = true;
+        self.related_refused = false;
         let tx = self.related_tx.clone();
         let client = ctx.client.clone();
         let project = self.project.clone();
         let title = self.title.clone();
         std::thread::spawn(move || {
-            let rel = client.get_related_in(&project, &title).ok();
+            let rel = RelatedAnswer::of(client.get_related_in(&project, &title));
             let _ = tx.send((project, title, rel));
         });
     }
@@ -1570,6 +1611,15 @@ impl App {
                 continue;
             }
             self.related_pending = false;
+            // A refusal is not an answer about the links, and it is the
+            // one state in which asking about them one at a time must not
+            // happen: the prober stays shut for this page, every link
+            // keeps its ordinary colour, and the next page install (or a
+            // reload of this one) is what asks again.
+            self.related_refused = matches!(rel, RelatedAnswer::Refused);
+            if self.related_refused {
+                continue;
+            }
             // Parked on a snapshot: the related list describes the PRESENT
             // graph, and `show_snapshot` cleared it for that reason. Leaving
             // the time machine reloads the page, which asks again.
@@ -1579,7 +1629,10 @@ impl App {
             // The gate is down: whatever links this block does not answer
             // are asked about now, not on the next slow beat.
             self.link_scan_at = Instant::now() - LINK_SCAN_EVERY;
-            let Some(rel) = rel else { continue };
+            let RelatedAnswer::Block(rel) = rel else {
+                continue;
+            };
+            let rel = *rel;
             self.links.absorb(link_truth(&self.facts, Some(&rel)));
             self.related_block = Some(rel);
             self.rebuild_related();

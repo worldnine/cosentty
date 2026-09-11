@@ -41,6 +41,52 @@ pub fn is_rate_limited(error: &(dyn Error + 'static)) -> bool {
     error.downcast_ref::<RateLimitedError>().is_some()
 }
 
+/// A response that was not a success, carrying the status so callers can
+/// branch on it. Its text is the same `HTTP <status> for <url>` line the
+/// viewer showed before it had a type.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub status: reqwest::StatusCode,
+    pub url: String,
+}
+
+impl fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HTTP {} for {}", self.status, self.url)
+    }
+}
+
+impl Error for HttpStatusError {}
+
+/// "This credential may not have this, and asking again will not change
+/// that." A page's snapshot list on a project the reader is only a guest
+/// of answers 403 every time, and a viewer that opens fifty pages spends
+/// fifty requests learning it fifty times.
+pub fn is_denied(error: &(dyn Error + 'static)) -> bool {
+    matches!(
+        error.downcast_ref::<HttpStatusError>().map(|e| e.status),
+        Some(reqwest::StatusCode::UNAUTHORIZED) | Some(reqwest::StatusCode::FORBIDDEN)
+    )
+}
+
+/// The error for a status that is not a success. A refusal keeps its own
+/// type wherever it is raised, so every caller can tell "the server is
+/// holding us off" from "this went wrong" — the two call for opposite
+/// reactions, and asking more questions is only right for the second.
+fn status_error(status: reqwest::StatusCode, url: &str) -> Box<dyn Error> {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return RateLimitedError {
+            url: url.to_owned(),
+        }
+        .into();
+    }
+    HttpStatusError {
+        status,
+        url: url.to_owned(),
+    }
+    .into()
+}
+
 /// How long to wait before attempt `attempt` (1-based) after a 429, given
 /// the `Retry-After` header if any: the header's seconds, capped so a
 /// misconfigured server cannot park the viewer; else 1s, 2s, 4s….
@@ -54,13 +100,71 @@ pub fn retry_backoff(retry_after: Option<&str>, attempt: u32) -> Duration {
 
 const POLITE_ATTEMPTS: u32 = 4;
 
+/// The longest a single origin's shared cooldown may grow to while the
+/// server keeps refusing. A refusal that outlives this is not something
+/// waiting longer inside one request will fix.
+const COOLDOWN_CAP: Duration = Duration::from_secs(60);
+
+/// What this process knows about one origin's rate limit.
+///
+/// `strikes` is the point: the server's window is longer than any single
+/// request's backoff, so a refusal that is answered, waited out, and met
+/// with another refusal must widen the wait for EVERYTHING — not start
+/// again at one second per request. A response that is not a 429 clears
+/// the count, because that is the only evidence that the window reopened.
+#[derive(Debug, Clone, Copy)]
+struct RateLimitState {
+    until: Instant,
+    strikes: u32,
+}
+
 /// The server's rate limit applies across the viewer's concurrent requests.
 /// Keep one cooldown deadline per origin so a 429 from a page request also
 /// holds back an image or list request, without delaying unrelated hosts.
-static RATE_LIMIT_COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+static RATE_LIMIT_COOLDOWNS: OnceLock<Mutex<HashMap<String, RateLimitState>>> = OnceLock::new();
 
-fn rate_limit_cooldowns() -> &'static Mutex<HashMap<String, Instant>> {
+fn rate_limit_cooldowns() -> &'static Mutex<HashMap<String, RateLimitState>> {
     RATE_LIMIT_COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Append one line per HTTP attempt to `$COSENSE_HTTP_LOG`, when set.
+///
+/// Off by default and deliberately dumb: the question "why is a reader who
+/// opened four pages being refused" is a question about how many requests
+/// those four pages actually cost, and nothing short of a list of them
+/// answers it. Format: `elapsed_ms status METHOD url attempt`.
+fn http_log(method: &str, url: &str, status: &str, started: Instant, attempt: u32) {
+    use std::io::Write;
+    static LOG: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        let path = std::env::var("COSENSE_HTTP_LOG").ok()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
+        Some(Mutex::new(file))
+    });
+    let Some(file) = log.as_ref() else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let ms = started.elapsed().as_millis();
+    let mut file = file.lock().unwrap_or_else(|p| p.into_inner());
+    let _ = writeln!(file, "{now} {ms}ms {status} {method} {url} try={attempt}");
+}
+
+/// `(method, url)` for the log, or empty strings when the request cannot
+/// be inspected. Only called on the logging path's own terms.
+fn describe(req: &reqwest::blocking::RequestBuilder) -> (String, String) {
+    if std::env::var_os("COSENSE_HTTP_LOG").is_none() {
+        return (String::new(), String::new());
+    }
+    match req.try_clone().and_then(|b| b.build().ok()) {
+        Some(r) => (r.method().to_string(), r.url().to_string()),
+        None => ("?".to_owned(), "?".to_owned()),
+    }
 }
 
 fn rate_limit_key(req: &reqwest::blocking::RequestBuilder) -> String {
@@ -83,17 +187,13 @@ fn rate_limit_key(req: &reqwest::blocking::RequestBuilder) -> String {
 fn wait_for_rate_limit(key: &str) {
     loop {
         let wait = {
-            let mut cooldowns = rate_limit_cooldowns()
+            let cooldowns = rate_limit_cooldowns()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let now = Instant::now();
             match cooldowns.get(key).copied() {
-                Some(deadline) if deadline > now => deadline - now,
-                Some(_) => {
-                    cooldowns.remove(key);
-                    Duration::ZERO
-                }
-                None => Duration::ZERO,
+                Some(state) if state.until > now => state.until - now,
+                _ => Duration::ZERO,
             }
         };
         if wait.is_zero() {
@@ -103,14 +203,36 @@ fn wait_for_rate_limit(key: &str) {
     }
 }
 
+/// Record a refusal: count the strike and hold every request to this
+/// origin until the later of the current deadline and `delay` widened by
+/// how many refusals in a row this origin has now given.
 fn extend_rate_limit(key: &str, delay: Duration) {
-    let deadline = Instant::now() + delay;
     let mut cooldowns = rate_limit_cooldowns()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let current = cooldowns.entry(key.to_owned()).or_insert(deadline);
-    if *current < deadline {
-        *current = deadline;
+    let now = Instant::now();
+    let state = cooldowns.entry(key.to_owned()).or_insert(RateLimitState {
+        until: now,
+        strikes: 0,
+    });
+    state.strikes = state.strikes.saturating_add(1);
+    let widened = delay
+        .saturating_mul(1u32 << state.strikes.saturating_sub(1).min(6))
+        .min(COOLDOWN_CAP);
+    let deadline = now + widened;
+    if state.until < deadline {
+        state.until = deadline;
+    }
+}
+
+/// A response that was not a refusal: the window is open again, so the
+/// next 429 starts its widening from scratch.
+fn clear_rate_limit_strikes(key: &str) {
+    let mut cooldowns = rate_limit_cooldowns()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(state) = cooldowns.get_mut(key) {
+        state.strikes = 0;
     }
 }
 
@@ -140,22 +262,30 @@ fn send_with_attempts(
 ) -> reqwest::Result<reqwest::blocking::Response> {
     let mut req = req;
     let key = rate_limit_key(&req);
+    let (method, url) = describe(&req);
     for attempt in 1..=attempts {
         wait_for_rate_limit(&key);
         // A body that cannot be cloned (a stream) can only be sent once.
         let Some(again) = req.try_clone() else {
+            let started = Instant::now();
             let res = req.send()?;
+            http_log(&method, &url, res.status().as_str(), started, attempt);
             if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 let after = res
                     .headers()
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok());
                 extend_rate_limit(&key, retry_backoff(after, attempt));
+            } else {
+                clear_rate_limit_strikes(&key);
             }
             return Ok(res);
         };
+        let started = Instant::now();
         let res = req.send()?;
+        http_log(&method, &url, res.status().as_str(), started, attempt);
         if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            clear_rate_limit_strikes(&key);
             return Ok(res);
         }
         let after = res
@@ -696,7 +826,58 @@ pub fn new_line_id() -> String {
 pub struct Client {
     http: reqwest::blocking::Client,
     cfg: Config,
+    /// What this process has learned about projects, and the gate that
+    /// keeps two threads from learning it twice (see [`ProjectFacts`]).
+    facts: std::sync::Arc<ProjectFacts>,
 }
+
+/// The project-level answers worth remembering, and the lock that makes
+/// the asking single-file.
+///
+/// Both halves matter. Without the **cache**, the room joiner asks for a
+/// projectId that cannot change on every navigation. Without the
+/// **gate**, the two threads that start together on a page load (the UI
+/// thread wanting the theme, the load thread warming the same cache; the
+/// room joiner wanting the project id, the editability check wanting the
+/// member list — which is the SAME response) both miss the empty cache
+/// and both ask. Measured on one page open before this: `/projects/<p>`
+/// twice and `/projects/<p>/users` twice, for four requests' worth of two
+/// answers.
+#[derive(Default)]
+struct ProjectFacts {
+    /// Held across the request, so the second asker waits and then finds
+    /// the answer in the cache instead of making a second request.
+    gate: Mutex<()>,
+    data: Mutex<ProjectFactData>,
+}
+
+#[derive(Default)]
+struct ProjectFactData {
+    /// `project -> projectId`. Immutable, so kept for the whole run.
+    ids: HashMap<String, String>,
+    /// `project -> settings`. Only successes: a failure is the caller's
+    /// to remember (the viewer already keeps its own negative cache), and
+    /// a refusal must not become a permanent verdict.
+    settings: HashMap<String, ProjectSettings>,
+    /// Projects whose page history this credential may not read (401 /
+    /// 403). One refusal is the whole answer for the session.
+    history_denied: std::collections::HashSet<String>,
+    /// `project/title -> (was it written, when we asked)`. The HEAD that
+    /// answers it is the cheap half of every link lookup, and the answer
+    /// is about the page itself — not about who is asking — so it can be
+    /// shared for a short while (see `PAGE_EXISTS_TTL`).
+    written: HashMap<(String, String), (bool, Instant)>,
+}
+
+/// How long "somebody has written this page" is reused. Long enough that
+/// walking back and forth across a page's links does not re-ask about
+/// every one of them, short enough that a page created in another window
+/// turns up promptly.
+const PAGE_EXISTS_TTL: Duration = Duration::from_secs(60);
+/// A bound on the memo above: a long session must not accumulate a title
+/// table. Cleared wholesale rather than aged entry by entry — losing it
+/// costs one HEAD per link that comes up again.
+const PAGE_EXISTS_MAX: usize = 2048;
 
 impl Client {
     pub fn new(cfg: Config) -> Result<Self, Box<dyn Error>> {
@@ -705,7 +886,15 @@ impl Client {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()?;
-        Ok(Self { http, cfg })
+        Ok(Self {
+            http,
+            cfg,
+            facts: std::sync::Arc::new(ProjectFacts::default()),
+        })
+    }
+
+    fn facts(&self) -> std::sync::MutexGuard<'_, ProjectFactData> {
+        self.facts.data.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub fn config(&self) -> &Config {
@@ -732,13 +921,7 @@ impl Client {
         }
         let res = req.send_polite()?;
         if !res.status().is_success() {
-            if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(RateLimitedError {
-                    url: url.to_owned(),
-                }
-                .into());
-            }
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
+            return Err(status_error(res.status(), url));
         }
         Ok(res.json::<T>()?)
     }
@@ -834,7 +1017,7 @@ impl Client {
             return Ok(RelatedPages::default());
         }
         if !res.status().is_success() {
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
+            return Err(status_error(res.status(), &url));
         }
         Ok(res.json::<Wrapper>()?.related)
     }
@@ -856,6 +1039,12 @@ impl Client {
     /// and the caller is expected to keep saying nothing rather than
     /// guess.
     pub fn page_exists(&self, project: &str, title: &str) -> Result<bool, Box<dyn Error>> {
+        let key = (project.to_owned(), title.to_owned());
+        if let Some((written, asked)) = self.facts().written.get(&key).copied() {
+            if asked.elapsed() < PAGE_EXISTS_TTL {
+                return Ok(written);
+            }
+        }
         let url = format!(
             "{}/pages/{}/{}/text",
             self.cfg.base(),
@@ -868,13 +1057,31 @@ impl Client {
             req = req.header(name, value);
         }
         let res = req.send_polite()?;
-        if res.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(false);
+        let written = if res.status() == reqwest::StatusCode::NOT_FOUND {
+            false
+        } else if res.status().is_success() {
+            true
+        } else {
+            return Err(status_error(res.status(), &url));
+        };
+        let mut facts = self.facts();
+        if facts.written.len() >= PAGE_EXISTS_MAX {
+            facts.written.clear();
         }
-        if !res.status().is_success() {
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
-        }
-        Ok(true)
+        facts.written.insert(key, (written, Instant::now()));
+        Ok(written)
+    }
+
+    /// This page exists now (it was just created through this viewer), so
+    /// the memo above must not keep saying it does not for the next
+    /// minute. The other direction — a page deleted elsewhere — is left
+    /// to the TTL: drawing a link as live for a minute after someone else
+    /// removed the page is the harmless way round.
+    pub fn note_page_written(&self, project: &str, title: &str) {
+        self.facts().written.insert(
+            (project.to_owned(), title.to_owned()),
+            (true, Instant::now()),
+        );
     }
 
     /// The ids of the pages that link to `project/title`.
@@ -969,6 +1176,13 @@ impl Client {
     /// therefore used for this lookup and no other REST call. Page/edit
     /// calls keep their normal PAT / service-account precedence.
     pub fn get_project_settings(&self, project: &str) -> Result<ProjectSettings, Box<dyn Error>> {
+        if let Some(settings) = self.facts().settings.get(project) {
+            return Ok(settings.clone());
+        }
+        let _gate = self.facts.gate.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(settings) = self.facts().settings.get(project) {
+            return Ok(settings.clone());
+        }
         let url = format!("{}/projects/{}", self.cfg.base(), urlencoding(project));
         let mut req = self.http.get(&url).header("Accept", "application/json");
         let mut authenticated = false;
@@ -993,9 +1207,13 @@ impl Client {
                 .send_polite()?;
         }
         if !res.status().is_success() {
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
+            return Err(status_error(res.status(), &url));
         }
-        Ok(res.json::<ProjectSettings>()?)
+        let settings = res.json::<ProjectSettings>()?;
+        self.facts()
+            .settings
+            .insert(project.to_owned(), settings.clone());
+        Ok(settings)
     }
 
     /// Upload a file to the project's own storage and return the URL to
@@ -1104,6 +1322,25 @@ impl Client {
     /// endpoint the CLI uses, because `/api/projects/<name>` itself refuses
     /// PAT (401, verified).
     pub fn get_project_id(&self, project: &str) -> Result<String, Box<dyn Error>> {
+        if let Some(id) = self.facts().ids.get(project) {
+            return Ok(id.clone());
+        }
+        let _gate = self.facts.gate.lock().unwrap_or_else(|p| p.into_inner());
+        // Somebody may have answered it while we waited for the gate.
+        if let Some(id) = self.facts().ids.get(project) {
+            return Ok(id.clone());
+        }
+        let (id, _members) = self.fetch_project_users(project)?;
+        id.ok_or_else(|| "projects/<name>/users: no projectId in response".into())
+    }
+
+    /// `/api/projects/<name>/users`: the project's id AND its members, in
+    /// one response — which is why the two callers that each wanted one of
+    /// them used to cost two requests. The id is cached on the way past.
+    fn fetch_project_users(
+        &self,
+        project: &str,
+    ) -> Result<(Option<String>, Vec<Member>), Box<dyn Error>> {
         let url = format!(
             "{}/projects/{}/users",
             self.cfg.base(),
@@ -1116,27 +1353,32 @@ impl Client {
         }
         let res = req.send_polite()?;
         if !res.status().is_success() {
-            return Err(format!("HTTP {} for {}", res.status(), url).into());
+            return Err(status_error(res.status(), &url));
         }
         let v: serde_json::Value = res.json()?;
-        v.get("projectId")
+        let id = v
+            .get("projectId")
             .and_then(|s| s.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "projects/<name>/users: no projectId in response".into())
+            .map(str::to_string);
+        if let Some(id) = id.clone() {
+            self.facts().ids.insert(project.to_owned(), id);
+        }
+        let members: Vec<Member> = match serde_json::from_value::<MembersResponse>(v) {
+            Ok(MembersResponse::Bare(v)) => v,
+            Ok(MembersResponse::Wrapped { users }) => users,
+            Err(_) => Vec::new(),
+        };
+        Ok((id, members))
     }
 
     /// `list_members` for any project (see `list_pages_in`).
     pub fn list_members_in(&self, project: &str) -> Result<Vec<Member>, Box<dyn Error>> {
-        let url = format!(
-            "{}/projects/{}/users",
-            self.cfg.base(),
-            urlencoding(project)
-        );
-        let data: MembersResponse = self.get_json(&url, project)?;
-        Ok(match data {
-            MembersResponse::Bare(v) => v,
-            MembersResponse::Wrapped { users } => users,
-        })
+        // Not cached (the viewer refreshes members on its own schedule),
+        // but it goes through the same gate, so the room joiner asking for
+        // the project id at the same moment waits and reads the id this
+        // response leaves behind rather than fetching it again.
+        let _gate = self.facts.gate.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(self.fetch_project_users(project)?.1)
     }
 
     pub fn search_pages(
@@ -1216,7 +1458,17 @@ impl Client {
             urlencoding(project),
             urlencoding(page_id)
         );
-        let mut data: SnapshotListResponse = self.get_json(&url, project)?;
+        // Asked once per page open. On a project whose history this
+        // credential may not read, that is one refused request per page
+        // for the whole session, so the refusal is remembered instead.
+        if self.facts().history_denied.contains(project) {
+            return Err(status_error(reqwest::StatusCode::FORBIDDEN, &url));
+        }
+        let mut data: SnapshotListResponse = self.get_json(&url, project).inspect_err(|e| {
+            if is_denied(e.as_ref()) {
+                self.facts().history_denied.insert(project.to_owned());
+            }
+        })?;
         data.timestamps.sort_by_key(|t| t.created);
         Ok(data.timestamps)
     }
@@ -1412,24 +1664,72 @@ mod tests {
         assert_eq!(retry_backoff(None, 3), Duration::from_secs(4));
     }
 
+    fn deadline_of(key: &str) -> Instant {
+        rate_limit_cooldowns()
+            .lock()
+            .unwrap()
+            .get(key)
+            .copied()
+            .unwrap()
+            .until
+    }
+
     #[test]
     fn a_shared_cooldown_keeps_the_longest_deadline() {
         let key = "test://shared-cooldown";
         extend_rate_limit(key, Duration::from_millis(30));
-        let first = rate_limit_cooldowns()
-            .lock()
-            .unwrap()
-            .get(key)
-            .copied()
-            .unwrap();
+        let first = deadline_of(key);
+        clear_rate_limit_strikes(key);
         extend_rate_limit(key, Duration::from_millis(1));
-        let second = rate_limit_cooldowns()
-            .lock()
-            .unwrap()
-            .get(key)
-            .copied()
-            .unwrap();
+        let second = deadline_of(key);
         assert!(second >= first, "a shorter 429 must not shorten the wait");
         wait_for_rate_limit(key);
+    }
+
+    #[test]
+    fn refusals_in_a_row_widen_the_shared_wait() {
+        let key = "test://strikes";
+        extend_rate_limit(key, Duration::from_secs(1));
+        let first = deadline_of(key);
+        extend_rate_limit(key, Duration::from_secs(1));
+        let second = deadline_of(key);
+        extend_rate_limit(key, Duration::from_secs(1));
+        let third = deadline_of(key);
+        assert!(
+            second - first >= Duration::from_millis(900),
+            "a second refusal doubles the same base wait"
+        );
+        assert!(
+            third - second >= Duration::from_millis(1900),
+            "a third doubles again"
+        );
+        // Any answer that is not a refusal says the window reopened.
+        clear_rate_limit_strikes(key);
+        rate_limit_cooldowns()
+            .lock()
+            .unwrap()
+            .get_mut(key)
+            .unwrap()
+            .until = Instant::now();
+        extend_rate_limit(key, Duration::from_secs(1));
+        let after_clear = deadline_of(key);
+        assert!(
+            after_clear - Instant::now() <= Duration::from_millis(1100),
+            "a cleared count starts the widening again"
+        );
+        rate_limit_cooldowns().lock().unwrap().remove(key);
+    }
+
+    #[test]
+    fn the_widened_wait_is_capped() {
+        let key = "test://strike-cap";
+        for _ in 0..12 {
+            extend_rate_limit(key, Duration::from_secs(15));
+        }
+        assert!(
+            deadline_of(key) - Instant::now() <= COOLDOWN_CAP,
+            "no refusal parks the viewer for longer than the cap"
+        );
+        rate_limit_cooldowns().lock().unwrap().remove(key);
     }
 }

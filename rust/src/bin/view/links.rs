@@ -778,7 +778,7 @@ impl App {
         // `related_pending`). Asking now would fire one HEAD per link on
         // every page open — the very burst the related block exists to
         // avoid — and every answer would be superseded a moment later.
-        if self.related_pending {
+        if self.related_pending || self.related_refused {
             return;
         }
         let Some(tx) = self.link_probe_tx.as_ref() else {
