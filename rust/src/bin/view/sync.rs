@@ -381,6 +381,13 @@ pub(crate) fn apply_remote(app: &mut App, ctx: &Ctx, polled: PolledPage) {
     if polled.project != app.project || polled.title != app.title {
         return;
     }
+    if app
+        .pending_load
+        .as_ref()
+        .is_some_and(|p| matches!(p.intent, LoadIntent::Startup))
+    {
+        return;
+    }
     if page_is_uncreated(app) {
         // Until the create lands, every poll is the same empty template.
         // Installing it would wipe the page being typed.

@@ -203,6 +203,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // no credential there is no membership to list, so the public help
     // project stands in, as it always has.
     let mut start_at_projects = false;
+    let mut startup_notice = None;
     let (project, title, line_id) = match positional.first().and_then(|a| parse_page_url(a)) {
         Some(target) => target,
         None => match positional.first() {
@@ -239,13 +240,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start_at_index = title.is_none();
     let title = match title {
         Some(t) => t,
-        None => {
-            let (_, pages) = client.list_pages(1, 0, "updated")?;
-            pages
+        None => match client.list_pages(1, 0, "updated") {
+            Ok((_, pages)) => pages
                 .first()
                 .map(|p| p.title.clone())
-                .ok_or("empty project")?
-        }
+                .ok_or("empty project")?,
+            Err(e) if cosense::api::is_rate_limited(e.as_ref()) => {
+                startup_notice = Some(e.to_string());
+                // The index can retry the list once the cooldown expires.
+                String::new()
+            }
+            Err(e) => return Err(e),
+        },
     };
 
     let fetcher = Arc::new(ImageFetcher::new(gyazo_token, user_cred)?);
@@ -347,7 +353,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         project_theme_preview: std::sync::Mutex::new(None),
         send_target: SendTarget::detect(send_cmd, &|k| std::env::var(k).ok()),
     };
-    let loaded = load_page(&ctx, &project, &title)?;
+    let (loaded, startup_page_retry) = if title.is_empty() && startup_notice.is_some() {
+        (startup_placeholder(&ctx, &project, &title), false)
+    } else {
+        match load_page(&ctx, &project, &title) {
+            Ok(loaded) => (loaded, false),
+            Err(e) if cosense::api::is_rate_limited(e.as_ref()) => {
+                startup_notice = Some(e.to_string());
+                (startup_placeholder(&ctx, &project, &title), true)
+            }
+            Err(e) => return Err(e),
+        }
+    };
 
     let mut app = App::new(project.clone());
     app.light = ctx.light();
@@ -460,7 +477,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     app.set_page(loaded, &ctx);
-    if start_at_index {
+    if start_at_index && startup_notice.is_none() {
         let project = app.project.clone();
         open_index(&mut app, &ctx, &project, String::new());
     }
@@ -492,6 +509,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     if let Some(note) = download_note {
         app.status = note;
+    }
+    if let Some(error) = startup_notice {
+        app.toast_err(t!(
+            "起動時の取得を待機しています: {error}",
+            "waiting to retry startup request: {error}"
+        ));
+    }
+    if startup_page_retry {
+        start_page_load(&mut app, &ctx, &project, &title, LoadIntent::Startup);
     }
     // `#<lineId>` from the URL: start on that line (the first frame's layout
     // clamps it onto a rendered line and scrolls it into view).

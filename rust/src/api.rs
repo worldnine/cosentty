@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fmt;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,26 @@ use std::time::{Duration, Instant};
 pub trait SendPolite {
     fn send_polite(self) -> reqwest::Result<reqwest::blocking::Response>;
     fn send_edit_polite(self) -> reqwest::Result<reqwest::blocking::Response>;
+}
+
+/// The request exhausted its polite retries while the server was still
+/// rate-limiting it. Startup can keep the UI alive and retry in the
+/// background, while ordinary callers retain the full error text.
+#[derive(Debug)]
+pub struct RateLimitedError {
+    pub url: String,
+}
+
+impl fmt::Display for RateLimitedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HTTP 429 Too Many Requests for {}", self.url)
+    }
+}
+
+impl Error for RateLimitedError {}
+
+pub fn is_rate_limited(error: &(dyn Error + 'static)) -> bool {
+    error.downcast_ref::<RateLimitedError>().is_some()
 }
 
 /// How long to wait before attempt `attempt` (1-based) after a 429, given
@@ -711,6 +732,12 @@ impl Client {
         }
         let res = req.send_polite()?;
         if !res.status().is_success() {
+            if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(RateLimitedError {
+                    url: url.to_owned(),
+                }
+                .into());
+            }
             return Err(format!("HTTP {} for {}", res.status(), url).into());
         }
         Ok(res.json::<T>()?)
@@ -1365,6 +1392,11 @@ mod tests {
 
     #[test]
     fn a_429_waits_for_retry_after_or_doubles() {
+        let rate_limited = RateLimitedError {
+            url: "https://scrapbox.io/api/pages".into(),
+        };
+        assert!(is_rate_limited(&rate_limited));
+        assert!(!is_rate_limited(&std::io::Error::other("network")));
         assert_eq!(retry_backoff(Some("3"), 1), Duration::from_secs(3));
         assert_eq!(
             retry_backoff(Some("999"), 1),

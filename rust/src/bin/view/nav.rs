@@ -879,7 +879,9 @@ pub(crate) fn finish_load(
     // Last seen = later of the browser's and this viewer's previous visit;
     // then stamp this visit so the next open treats today's lines as read.
     let now = now_secs();
-    let local_prev = record_visit(ctx.visits_path.as_deref(), project, title, now);
+    let local_prev = (!title.is_empty())
+        .then(|| record_visit(ctx.visits_path.as_deref(), project, title, now))
+        .flatten();
     let read_at = match (page.last_accessed, local_prev) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -910,6 +912,33 @@ pub(crate) fn finish_load(
     }
 }
 
+/// Build a safe, read-only page shell while the first request is retried.
+/// The shell is never presented as an existing page: its empty page id keeps
+/// edits disabled until a real response is installed.
+pub(crate) fn startup_placeholder(ctx: &Ctx, project: &str, title: &str) -> Loaded {
+    let page = cosense::api::Page {
+        id: String::new(),
+        persistent: false,
+        title: title.to_string(),
+        commit_id: String::new(),
+        lines: vec![PageLine {
+            id: new_line_id(),
+            text: title.to_string(),
+            user_id: String::new(),
+            created: 0,
+            updated: 0,
+        }],
+        links: Vec::new(),
+        project_links: Vec::new(),
+        related: None,
+        updated: 0,
+        created: 0,
+        lines_count: 1,
+        last_accessed: None,
+    };
+    finish_load(ctx, project, title, page, false)
+}
+
 /// Why a page was asked for, and what to do with it when it arrives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LoadIntent {
@@ -921,6 +950,9 @@ pub(crate) enum LoadIntent {
     /// failure (or when a newer request supersedes this one) the popped
     /// destination goes back where it was taken from.
     History { back: bool, here: Place },
+    /// The initial page request was rate-limited. Install the result without
+    /// adding a duplicate place to navigation history.
+    Startup,
 }
 
 /// One page fetch in flight. The reader keeps the page (or list) they were
@@ -1096,6 +1128,10 @@ fn arrive(app: &mut App, ctx: &Ctx, loaded: Loaded, intent: LoadIntent) {
                 app.history.push(here);
             }
         }
+        LoadIntent::Startup => {
+            app.set_page(loaded, ctx);
+            app.toast(t!("ページを読み込みました", "page loaded"));
+        }
     }
 }
 
@@ -1123,6 +1159,16 @@ fn fail(app: &mut App, pending: PendingLoad, e: &str) {
                 app.forward.push(place);
             }
             app.toast_err(t!("履歴の移動に失敗しました: {e}", "history failed: {e}"));
+        }
+        LoadIntent::Startup => {
+            // Let the normal poller adopt a successful response after the
+            // one background retry gives up, instead of leaving the shell
+            // asleep in a Live websocket state.
+            app.set_sync_state(SyncState::Polling);
+            app.toast_err(t!(
+                "起動時のページ再取得に失敗しました: {e}",
+                "startup page retry failed: {e}"
+            ));
         }
     }
 }
