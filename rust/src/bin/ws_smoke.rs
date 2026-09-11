@@ -36,6 +36,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         page.id,
         project_id
     );
+    // The question the viewer's join depends on: is the `commitId` a page
+    // response carries the SAME id the next commit event names as its
+    // parent? If it is, the room can be joined without refetching the page
+    // to learn where the chain stands (see `sync::resync_head`).
+    println!("page commitId: {}", page.commit_id);
 
     let mut link =
         ws::RoomLink::connect("scrapbox.io", &sid).map_err(|e| format!("connect: {e}"))?;
@@ -58,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         c1.commit_id
     );
 
-    let (insert_seen, done) = wait_for_commit(
+    let (insert_seen, done, first_parent) = wait_for_commit(
         &mut link,
         &c1.commit_id,
         &marker,
@@ -69,6 +74,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "push: insert event seen in {:.1}s ({insert_seen})",
         done.as_secs_f64()
     );
+    match first_parent.as_deref() {
+        Some(parent) if parent == page.commit_id => println!(
+            "chain: the first event's parent IS the page's commitId ({parent}) \
+             — a join can start from the page in hand"
+        ),
+        Some(parent) => println!(
+            "chain: MISMATCH — page commitId {} but the first event's parent is {parent}",
+            page.commit_id
+        ),
+        None => println!("chain: no commit event was seen to compare"),
+    }
 
     // 2. delete it again and wait for that push too
     let after = client.get_page_in(&project, &title)?;
@@ -90,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         c2.commit_id
     );
 
-    let (delete_seen, _) = wait_for_commit(
+    let (delete_seen, _, _) = wait_for_commit(
         &mut link,
         &c2.commit_id,
         &line.id,
@@ -121,13 +137,19 @@ fn wait_for_commit(
     expected: &str,
     verify: fn(&EditOp, &str) -> bool,
     timeout: std::time::Duration,
-) -> Result<(String, std::time::Duration), Box<dyn std::error::Error>> {
+) -> Result<(String, std::time::Duration, Option<String>), Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
+    // The parent of the FIRST event this room delivered, for the chain
+    // check above.
+    let mut first_parent: Option<String> = None;
     while start.elapsed() < timeout {
         match link.recv() {
             Recv::Packet(IoPacket::Event { name, data }) if name == "commit" => {
                 if let Some(c) = ws::parse_commit(&data) {
                     let summary = summarize(&c);
+                    if first_parent.is_none() {
+                        first_parent = Some(c.parent_id.clone());
+                    }
                     println!(
                         "  event: commit {} (parent {}) user {}: {}",
                         c.commit_id,
@@ -142,7 +164,7 @@ fn wait_for_commit(
                     if c.commit_id == commit_id {
                         let ok = c.ops.iter().any(|op| verify(op, expected));
                         println!("  → {}", if ok { "MATCHES" } else { "MISMATCH" });
-                        return Ok((summary, start.elapsed()));
+                        return Ok((summary, start.elapsed(), first_parent));
                     }
                 }
             }

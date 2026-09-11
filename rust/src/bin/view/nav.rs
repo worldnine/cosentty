@@ -136,6 +136,11 @@ pub(crate) struct Loaded {
     pub(crate) project_display: String,
     /// Immutable page id (edit API / commit log).
     pub(crate) page_id: String,
+    /// The commit this body is at (`commitId`). Verified against a live
+    /// room (`ws_smoke`): it is exactly the id the NEXT commit event names
+    /// as its parent, so a page in hand tells the websocket where the
+    /// chain stands without fetching the page again after joining.
+    pub(crate) commit_id: String,
     pub(crate) lines: Vec<PageLine>,
     pub(crate) blocks: Vec<Block>,
     pub(crate) srcs: Vec<usize>,
@@ -924,6 +929,7 @@ pub(crate) fn finish_load(
         },
         project_display: ctx.project_display(project),
         page_id: live_page_id(&page),
+        commit_id: page.commit_id.clone(),
         lines,
         blocks: rendered.blocks,
         srcs: rendered.srcs,
@@ -1499,9 +1505,17 @@ impl App {
             }
         }
         // A fresh page install severs the websocket commit lineage: the
-        // room re-joins on the new target, and any remote head we tracked,
-        // events buffered, or resync held for the OLD page are meaningless.
-        self.ws_head = None;
+        // room re-joins on the new target, and any events buffered or
+        // resync held for the OLD page are meaningless.
+        //
+        // The new page's OWN commit is where the chain now stands: the
+        // next commit event for it names exactly this id as its parent
+        // (verified against a live room by `ws_smoke`). Saying so here is
+        // what lets the room be joined without refetching the body, and
+        // what makes a commit that slipped through while we were joining
+        // detectable — its parent will not be this id, and that is the
+        // signal to resync.
+        self.ws_head = (!l.commit_id.is_empty()).then(|| l.commit_id.clone());
         self.ws_pending.clear();
         self.ws_resync_pending = false;
         self.ws_held_resync = None;

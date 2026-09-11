@@ -484,9 +484,24 @@ pub(crate) fn ws_on_resync(app: &mut App, ctx: &Ctx, res: ws::ResyncPage) {
         return;
     }
     app.ws_pending.clear();
-    app.ws_head = res.head;
+    app.ws_head = resync_head(&res);
     let note = resync_note(app, &res.page);
     install_remote_lines(app, ctx, &res.page, note.as_deref());
+}
+
+/// Where the commit chain stands after installing this page.
+///
+/// The room's own last-seen commit when there is one. Otherwise the
+/// page's `commitId` — which is exactly what the lines we are about to
+/// install are at. That case is every JOIN: the room has forwarded
+/// nothing yet, and leaving the head empty meant the first commit anyone
+/// made afterwards could not chain onto anything, was declared a gap, and
+/// cost a whole second fetch of the page to "repair" a state that was
+/// never broken.
+fn resync_head(res: &ws::ResyncPage) -> Option<String> {
+    res.head
+        .clone()
+        .or_else(|| Some(res.page.commit_id.clone()).filter(|id| !id.is_empty()))
 }
 
 /// resync の status 文言 — ただし本文が実際に変わったときだけ。定期の
@@ -520,7 +535,7 @@ pub(crate) fn ws_apply_held_resync(app: &mut App, ctx: &Ctx) {
     for _ in 0..pre.min(app.ws_pending.len()) {
         app.ws_pending.pop_front();
     }
-    app.ws_head = res.head;
+    app.ws_head = resync_head(&res);
     let note = resync_note(app, &res.page);
     install_remote_lines(app, ctx, &res.page, note.as_deref());
 }

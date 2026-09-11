@@ -797,41 +797,24 @@ pub fn spawn_ws_sync_with_page_id_hint(
                     continue;
                 }
             }
-            // POST-JOIN catch-up: refetch the page so the published snapshot
-            // covers everything up to the join — commits between the pre-join
-            // fetch and the join are in neither the room stream we had nor
-            // the old snapshot. A failed catch-up fetch means the join does
-            // NOT count as live: reconnect and retry the whole cycle.
-            let at = epoch.load(std::sync::atomic::Ordering::SeqCst);
-            match client.get_page_in(&project, &title) {
-                Ok(page) => {
-                    let _ = tx.send(WsEvent::Resynced(ResyncPage {
-                        page,
-                        head: last_commit_id.clone(),
-                        epoch: at,
-                    }));
-                    // The join AND its catch-up both landed: this is the only place
-                    // the push channel counts as live, so the only place the
-                    // insurance poll is allowed to relax.
-                    state(&tx, &project, &title, SyncState::Live);
-                    throttled_status(
-                        &tx,
-                        &mut last_status,
-                        &crate::t!("ws: 接続済み (push sync)", "ws: connected (push sync)"),
-                    );
-                }
-                Err(e) => {
-                    throttled_status(
-                        &tx,
-                        &mut last_status,
-                        &format!("ws: catch-up fetch failed ({e}) — reconnecting"),
-                    );
-                    state(&tx, &project, &title, SyncState::Reconnecting);
-                    std::thread::sleep(backoff);
-                    backoff = grow(backoff);
-                    continue; // re-read the target, reconnect, rejoin, refetch
-                }
-            }
+            // The room is joined. NO catch-up fetch: the page the viewer is
+            // showing carries its own `commitId`, and the next commit event
+            // names that id as its parent (verified against a live room by
+            // `ws_smoke`). So a commit made in the gap between the page load
+            // and this join does not need to be hunted for in advance — it
+            // shows up as a parent that does not match, which the event loop
+            // answers with one resync, then and only then.
+            //
+            // What this trades away: a commit that lands in that gap and is
+            // followed by NO further commit is not noticed until the 60 s
+            // insurance poll. What it buys: the page is not fetched a second
+            // time on every single navigation.
+            state(&tx, &project, &title, SyncState::Live);
+            throttled_status(
+                &tx,
+                &mut last_status,
+                &crate::t!("ws: 接続済み (push sync)", "ws: connected (push sync)"),
+            );
 
             // Serve the joined room until it dies or the target moves on.
             let mut last_sync = Instant::now();
@@ -1096,10 +1079,12 @@ mod tests {
 
     #[test]
     #[ignore = "requires a live Cosense project and COSENSE_SID; run explicitly with --ignored"]
-    fn ws_sync_publishes_a_post_join_catch_up_snapshot() {
+    fn ws_sync_reports_itself_live_without_refetching_the_page() {
         // Explicit integration against the real server. Ordinary tests must
         // not acquire a network dependency from the developer's credentials.
-        // After joining, the worker must publish a fresh catch-up snapshot.
+        // Joining is the whole of going live: the page is NOT fetched again
+        // afterwards (the viewer's own copy carries the commit the chain
+        // continues from — see the comment at the join site).
         let sid = std::env::var("COSENSE_SID").expect("COSENSE_SID is required");
         assert!(!sid.is_empty(), "COSENSE_SID must not be empty");
         let project =
@@ -1128,20 +1113,11 @@ mod tests {
         );
 
         let deadline = Instant::now() + Duration::from_secs(15);
-        let mut catch_up: Option<crate::api::Page> = None;
+        let mut resynced = false;
         let mut connected = false;
         while Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(WsEvent::Resynced(res)) => {
-                    // the published snapshot is the CURRENT page — as read
-                    // post-join, not some pre-join fetch
-                    let now_page = client
-                        .get_page_in(&project, &title)
-                        .expect("current page read");
-                    assert_eq!(res.page.id, now_page.id, "catch-up is the live page");
-                    assert_eq!(res.page.title, now_page.title);
-                    catch_up = Some(now_page);
-                }
+                Ok(WsEvent::Resynced(_)) => resynced = true,
                 Ok(WsEvent::State {
                     state: crate::capability::SyncState::Live,
                     ..
@@ -1150,15 +1126,21 @@ mod tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(e) => panic!("ws channel died: {e}"),
             }
-            if catch_up.is_some() && connected {
+            if connected {
                 break;
             }
         }
         assert!(connected, "the thread reported itself connected");
         assert!(
-            catch_up.is_some(),
-            "a post-join catch-up snapshot was published"
+            !resynced,
+            "going live costs no page fetch: nothing is published before the first commit"
         );
+
+        // And the page's own commit is what the next event chains onto —
+        // the property the missing catch-up rests on (`ws_smoke` exercises
+        // it end to end with a real edit).
+        let page = client.get_page_in(&project, &title).expect("page read");
+        assert!(!page.commit_id.is_empty(), "a live page names its commit");
         // keep the request half alive so the thread exits its room cycle
         // cleanly when the channel closes (test process ends next anyway)
         drop(req_tx);

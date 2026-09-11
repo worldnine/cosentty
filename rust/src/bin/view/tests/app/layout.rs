@@ -229,6 +229,7 @@ fn a_word_this_page_shares_is_asked_about_again_after_navigating() {
             header_colors: HeaderColors::fallback(),
             project_display: String::new(),
             page_id: "pid-B".into(),
+            commit_id: String::new(),
             lines: vec![PageLine {
                 id: "b0".into(),
                 text: "B".into(),

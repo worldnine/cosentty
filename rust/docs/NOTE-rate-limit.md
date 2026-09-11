@@ -73,6 +73,36 @@ SID ありの場合、以前は次の6件を出していた。
 
 実測（help-jp で2ページを歩く）: **15本 → 13本**、うち2ページ目の分は **5本 → 3本**。
 
+### ws の join 後 catch-up も廃止（同日）
+
+join 直後にページを取り直していたのは、「ページ取得(T0)から join 完了(T1)までの間に
+起きた commit は、手元のスナップショットにもストリームにも無い」ため。これを先回りで
+埋める代わりに、**手元のページの `commitId` を commit 連鎖の頭に据える**ことにした。
+
+実サーバで確かめた（`cargo run --features dev-tools --bin ws_smoke -- <project> <title>`）:
+
+```
+page commitId: 6aa17214d041eaa66e29ccb5
+  event: commit 6aa3f753b7b2c4f22e806064 (parent 6aa17214d041eaa66e29ccb5)
+chain: the first event's parent IS the page's commitId — a join can start from the page in hand
+```
+
+つまりページ応答の `commitId` は、次の commit イベントが `parent` として名指す id
+そのもの。したがって:
+
+- 窓の間に何も起きていなければ、次のイベントの親が繋がる → **取得ゼロで差分が当たる**
+- 窓の間に commit があれば、次のイベントの親が繋がらない → **その時だけ**再同期する
+
+引き換えは「窓の中で1件 commit があり、その後誰も書かない」場合で、最大60秒
+（保険ポーリング）遅れる。副次的に、従来は join 後の最初の commit が必ず
+`ws_head = None` と衝突して全ページ再同期を1本呼んでいたのも消えた。
+
+実装は `nav.rs` の install（`Loaded::commit_id` を `App::ws_head` へ）と、
+`ws.rs` の join 直後（取得せず `SyncState::Live`）、`sync.rs` の `resync_head`
+（room が何も転送していないときはページ自身の commitId を頭にする）。
+
+実測（sandbox の243行ページを20秒開いたまま）: **本文の取得は1本だけ**。
+
 ## 429 が429を呼ぶ経路（塞いだ）
 
 関連ページの取得が失敗すると、リンクの生死が未知のままになる。従来はそこで

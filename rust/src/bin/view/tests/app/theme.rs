@@ -15,6 +15,7 @@ fn set_page_carries_the_page_palette() {
             project: "proj".into(),
             title: "t".into(),
             page_id: "P2".into(),
+            commit_id: String::new(),
             header_colors: HeaderColors::fallback(),
             project_display: String::new(),
             lines: Vec::new(),
