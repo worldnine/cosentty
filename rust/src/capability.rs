@@ -12,9 +12,11 @@
 
 use std::time::Duration;
 
-/// How fast the insurance poller runs while the push channel is not proven.
+/// The first fallback-poll delay while the push channel is not proven. The
+/// viewer backs off from here while the page stays unchanged.
 pub const FAST_POLL: Duration = Duration::from_secs(3);
-/// How fast it runs once a room is joined and caught up.
+/// How fast it runs once a room is joined and caught up, and the ceiling for
+/// an idle fallback poll.
 pub const LIVE_POLL: Duration = Duration::from_secs(60);
 
 /// Whether the project can be read with no credential at all.
@@ -59,8 +61,9 @@ pub enum SyncState {
 }
 
 impl SyncState {
-    /// The insurance poll interval for this state. Only a proven-live push
-    /// channel earns the slow poll; a stale sid costs 0 s, not 60 s.
+    /// The poller's starting interval for this state. Only a proven-live
+    /// push channel starts at the slow insurance interval; fallback polling
+    /// begins fast, then backs off while the page remains unchanged.
     pub fn poll_interval(self) -> Duration {
         match self {
             SyncState::Live => LIVE_POLL,

@@ -2,6 +2,45 @@ use super::support::*;
 use crate::*;
 
 #[test]
+fn an_unchanged_fallback_poll_backs_off_and_a_change_makes_it_fast_again() {
+    let mut cadence = PollCadence::new(capability::FAST_POLL);
+    assert_eq!(cadence.interval(), Duration::from_secs(3));
+
+    // The first success establishes the baseline; subsequent equal revisions
+    // walk the idle schedule to its one-minute ceiling.
+    for expected in [6, 12, 30, 60, 60] {
+        cadence.observed("proj", "page", 1);
+        assert_eq!(cadence.interval(), Duration::from_secs(expected));
+    }
+
+    cadence.observed("proj", "page", 2);
+    assert_eq!(cadence.interval(), Duration::from_secs(3));
+    cadence.observed("proj", "page", 2);
+    assert_eq!(cadence.interval(), Duration::from_secs(6));
+}
+
+#[test]
+fn a_new_target_restarts_the_idle_schedule_and_live_push_stays_fixed() {
+    let mut cadence = PollCadence::new(capability::FAST_POLL);
+    for _ in 0..4 {
+        cadence.observed("proj", "first", 1);
+    }
+    assert_eq!(cadence.interval(), Duration::from_secs(60));
+
+    cadence.retune(capability::FAST_POLL);
+    cadence.observed("proj", "second", 9);
+    assert_eq!(cadence.interval(), Duration::from_secs(6));
+
+    cadence.retune(capability::LIVE_POLL);
+    cadence.observed("proj", "second", 10);
+    assert_eq!(
+        cadence.interval(),
+        Duration::from_secs(60),
+        "a websocket room uses a fixed insurance poll"
+    );
+}
+
+#[test]
 fn speeding_up_the_poll_fetches_at_once_slowing_down_does_not() {
     let (tx, rx) = mpsc::channel::<Duration>();
     // Slow -> fast: the push channel just died; close the gap now.

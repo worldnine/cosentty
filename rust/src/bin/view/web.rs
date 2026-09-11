@@ -372,7 +372,7 @@ pub(crate) fn run_render_batch(
     }
 }
 
-/// A freshly polled page: how web-side edits reach the screen (~3 s).
+/// A freshly polled page: how web-side edits reach the screen without push.
 pub(crate) struct PolledPage {
     pub(crate) project: String,
     pub(crate) title: String,
@@ -385,11 +385,114 @@ pub(crate) struct PolledPage {
     pub(crate) epoch: u64,
 }
 
-/// The web-edit poller: refetches the CURRENT page every few seconds on
-/// its own thread and ships it to the event loop, which applies it only
-/// when nothing local is in flight (see `apply_remote`). Cosense proper
-/// uses a websocket; polling one small JSON keeps this dependency-free
-/// and is plenty "live" for a wiki.
+/// The fallback poll's idle cadence. It starts quickly so a web edit made
+/// while this page is active lands promptly, then relaxes while the server's
+/// revision stays still. One PAT-only viewer used to issue about 20 GETs per
+/// minute forever; the full sequence costs only four in its first minute and
+/// one per minute thereafter.
+const IDLE_POLL_STEPS: [Duration; 5] = [
+    capability::FAST_POLL,
+    Duration::from_secs(6),
+    Duration::from_secs(12),
+    Duration::from_secs(30),
+    capability::LIVE_POLL,
+];
+
+/// Timing and last-seen state for the page poller. Pure so the cadence can be
+/// tested without a clock or a live server.
+#[derive(Debug)]
+pub(crate) struct PollCadence {
+    interval: Duration,
+    adaptive: bool,
+    step: usize,
+    target: Option<(String, String)>,
+    revision: Option<u64>,
+}
+
+impl PollCadence {
+    pub(crate) fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            adaptive: interval == capability::FAST_POLL,
+            step: 0,
+            target: None,
+            revision: None,
+        }
+    }
+
+    pub(crate) fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// A push-state change woke the sleeper. Three seconds means fallback
+    /// polling and restarts its idle ramp; sixty means a proven-live room and
+    /// remains a fixed insurance poll rather than an adaptive one.
+    pub(crate) fn retune(&mut self, interval: Duration) {
+        self.interval = interval;
+        self.adaptive = interval == capability::FAST_POLL;
+        if self.adaptive {
+            self.step = 0;
+        }
+    }
+
+    /// Learn one successful response and choose the delay before the next.
+    /// A new target establishes a baseline; a changed revision returns to the
+    /// fast edge; an unchanged revision advances one idle step.
+    pub(crate) fn observed(&mut self, project: &str, title: &str, revision: u64) {
+        let target = (project.to_string(), title.to_string());
+        let same_target = self.target.as_ref() == Some(&target);
+        let changed = same_target && self.revision.is_some_and(|r| r != revision);
+        self.target = Some(target);
+        self.revision = Some(revision);
+
+        if !self.adaptive {
+            return;
+        }
+        self.step = if !same_target {
+            1
+        } else if changed {
+            0
+        } else {
+            (self.step + 1).min(IDLE_POLL_STEPS.len() - 1)
+        };
+        self.interval = IDLE_POLL_STEPS[self.step];
+    }
+}
+
+/// `commitId` is the ordinary revision. Templates and unusual replies may
+/// omit it, so hash the page's stable body fields as a fallback instead of
+/// mistaking every empty id for "unchanged".
+fn poll_revision(page: &cosense::api::Page) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if !page.commit_id.is_empty() {
+        0u8.hash(&mut h);
+        page.commit_id.hash(&mut h);
+    } else {
+        1u8.hash(&mut h);
+        page.id.hash(&mut h);
+        page.persistent.hash(&mut h);
+        page.title.hash(&mut h);
+        page.updated.hash(&mut h);
+        page.lines_count.hash(&mut h);
+        page.links.hash(&mut h);
+        page.project_links.hash(&mut h);
+        for line in &page.lines {
+            line.id.hash(&mut h);
+            line.text.hash(&mut h);
+            line.user_id.hash(&mut h);
+            line.created.hash(&mut h);
+            line.updated.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// The web-edit poller: refetches the CURRENT page on its own thread and
+/// ships it to the event loop, which applies it only when nothing local is
+/// in flight (see `apply_remote`). Without a live push room it begins at 3 s
+/// and backs off through [`IDLE_POLL_STEPS`] while the page is unchanged.
 pub(crate) fn spawn_web_poller(
     client: Client,
     target: Arc<std::sync::Mutex<(String, String)>>,
@@ -399,18 +502,21 @@ pub(crate) fn spawn_web_poller(
     interval: Duration,
 ) {
     std::thread::spawn(move || {
-        let mut interval = interval;
+        let mut cadence = PollCadence::new(interval);
         loop {
             // The sleep IS the control channel: a push channel that dies
-            // 2 s into a 60 s nap must not leave the reader waiting out the
-            // other 58. `recv_timeout` wakes on either.
-            let fetch_now = match absorb_interval(&ctrl, interval) {
-                Some((next, urgent)) => {
-                    interval = next;
-                    urgent
-                }
+            // during a 60 s nap must wake the reader. A control reply is
+            // recognisable even when it names the current delay: timeouts
+            // always fetch, while an equal retune does not.
+            let previous = cadence.interval();
+            let (next, fetch_now) = match absorb_interval(&ctrl, previous) {
+                Some(v) => v,
                 None => return, // app gone
             };
+            let controlled = !fetch_now || next != previous;
+            if controlled {
+                cadence.retune(next);
+            }
             if !fetch_now {
                 continue;
             }
@@ -425,6 +531,7 @@ pub(crate) fn spawn_web_poller(
             // while it is in flight makes the answer stale.
             let started_at = epoch.load(std::sync::atomic::Ordering::SeqCst);
             if let Ok(page) = client.get_page_in(&project, &title) {
+                cadence.observed(&project, &title, poll_revision(&page));
                 if tx
                     .send(PolledPage {
                         project,

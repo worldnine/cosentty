@@ -466,8 +466,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     // Say how we are authenticated (or that we are not): edits and private
     // reads depend on it, and `cosense login` is the fix when missing.
-    // `sync:` shows which live-update path is active (ws = websocket push,
-    // poll = 3 s polling).
+    // `sync:` shows which live-update path is active (ws = websocket push;
+    // poll = adaptive fallback polling).
     // `image:` says which picture protocol answered the terminal query.
     // Only `kitty` (unicode placeholders) and `halfblocks` are anchored to
     // cells, so this is the first thing to look at when pictures float

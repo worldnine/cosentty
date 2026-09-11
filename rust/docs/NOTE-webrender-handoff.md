@@ -535,7 +535,7 @@ a later commit succeeding says nothing about the edit that did not, so only an
 authoritative page install clears it — `set_page`, or `install_remote_lines` on a
 websocket resync. The conflict path already reloads through `set_page`, so it clears
 too, and nothing about the existing "never lose what you typed" contract changes. The
-~3 s poller is deliberately **not** a clear point: its apply gate is conditional, so
+fallback poller is deliberately **not** a clear point: its apply gate is conditional, so
 treating it as authoritative would re-open the window this exists to close.
 
 ## 7h. Render policy: a browser starts when you ask

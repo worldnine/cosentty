@@ -855,7 +855,7 @@ fn a_failed_create_can_be_retried_by_the_next_edit() {
 
 /// A web-side edit elsewhere on the page must not take the redo stack
 /// with it. Wiping the whole lineage on every remote refresh is what
-/// made `^r` look like a dead key: with 3 s polling, a single edit in
+/// made `^r` look like a dead key: with fallback polling, a single edit in
 /// the browser was enough to silently empty it.
 #[test]
 fn a_remote_edit_keeps_the_history_it_can_still_replay() {

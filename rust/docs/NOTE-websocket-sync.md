@@ -1,8 +1,9 @@
 # TASK: websocket push 同期（socket.io）の実装
 
-3秒ポーリング（`spawn_web_poller`）を、`connect.sid` があるときは websocket push
-（サブ秒・差分適用）に置き換える。sid が無い（PAT のみ）環境では現行ポーリングに
-フォールバックする。**プロトコルは 2026-08-28 に実機で完全偵察済み**。以下が全情報。
+固定3秒ポーリング（`spawn_web_poller`）を、`connect.sid` があるときは websocket push
+（サブ秒・差分適用）に置き換える。sid が無い（PAT のみ）環境ではポーリングに
+フォールバックする。固定間隔は 2026-09-11 にアイドル時の段階的な間隔へ変更した。
+詳細は末尾の追補を参照する。**プロトコルは 2026-08-28 に実機で完全偵察済み**。以下が全情報。
 
 ## 偵察済みプロトコル（scrapbox.io、実測）
 
@@ -58,8 +59,8 @@ tungstenite (blocking) + 手書きフレーミングを推奨（依存は tungst
 ## 統合ポイント（現行コード）
 
 - `rust/src/bin/view.rs`
-  - `spawn_web_poller` / `PolledPage` / `apply_remote`: 現行ポーリング。
-    ws 有効時はポーラーを起動しない（または间隔を60sに落として保険にする）。
+  - `spawn_web_poller` / `PolledPage` / `apply_remote`: フォールバックのポーリング。
+    ws 有効時も間隔を60sに落として保険として残す。
   - `apply_remote` の適用ガード（同一ページ・inflight==0・dirty無し・composer無し）は
     **ws 差分適用でも同じ規則を使う**こと。適用できない間はイベントをバッファし、
     ガードが解けたら順に適用（parentId の連続性が切れたら全文リロードにフォールバック）。
@@ -104,6 +105,34 @@ tungstenite (blocking) + 手書きフレーミングを推奨（依存は tungst
 ## 受け入れ基準
 
 - `COSENSE_SID` あり: ブラウザで編集 → 1秒以内に TUI に反映（telomere 未読表示）
-- PAT のみ: 現行どおり 3 秒ポーリングで動作
+- PAT のみ: 3 秒から始まり、未変更なら最大 60 秒まで間隔を延ばす
 - 自分の TUI 編集がエコーで二重適用されない
 - 接続断後、自動復帰して差分を取りこぼさない（復帰時全文同期）
+
+## 追補: フォールバックのアイドル間隔（2026-09-11）
+
+SID を外した実機で35秒測ると、起動後も `GET /api/pages/v2/...` が約3.2秒ごとに
+続いた。1プロセスだけで約20件/分、1日では約2.8万件になる。実際に
+`env -u COSENSE_SID` で起動した検証用プロセスが約70時間残り、8万件前後を
+送ったと見積もれる。429の制限単位や閾値は確定していないが、変更のないページを
+3秒固定で読み続ける必要はない。
+
+フォールバック時は 3→6→12→30→60 秒と間隔を延ばす。最初の1分は4回、以後は
+1分に1回になる。`commitId` が変わったときは3秒へ戻す。`commitId` が空の応答は、
+本文と行メタデータから作ったハッシュで変更を判定する。ページ移動と端末からの保存も
+3秒へ戻すため、別ページの長い待ち時間を引き継がず、共同編集を始めた直後も短い間隔で
+追従する。取得失敗では間隔を進めない。429専用の待機は別の対策として扱う。
+
+WebSocket の room が `Live` の間は、従来どおり60秒固定の保険ポーリングである。
+push が切れて `Polling` / `Reconnecting` へ移った時点で3秒から始め直す。
+
+実装後に SID を外して65秒測ると、ページ取得は起動時の1回に加え、開始から
+4.94、11.13、23.33、53.63秒の4回だった。起動処理の約2秒を除けば、意図した
+3→6→12→30秒の間隔になっている。
+
+テスト:
+
+- `an_unchanged_fallback_poll_backs_off_and_a_change_makes_it_fast_again`
+- `a_new_target_restarts_the_idle_schedule_and_live_push_stays_fixed`
+- `navigating_while_already_polling_restarts_the_idle_backoff`
+- `local_activity_restarts_fallback_polling_but_not_live_insurance_polling`

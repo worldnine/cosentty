@@ -1372,11 +1372,6 @@ impl App {
         }
         self.web_gen
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Navigating leaves the joined room. Until the thread has re-joined
-        // the new one AND caught it up, there is no push channel here, so
-        // the fast poll covers the gap — and `absorb_interval` fetches at
-        // once on the way down rather than waiting out a 60 s nap.
-        self.set_sync_state(SyncState::Polling);
         self.lines = l.lines;
         if !self.undo_stack.is_empty() || !self.redo_stack.is_empty() {
             let dropped_now = retain_replayable_history(&mut self.undo_stack, &self.lines)
@@ -1399,6 +1394,15 @@ impl App {
         self.link_pending.clear();
         if let Ok(mut t) = self.poll_target.lock() {
             *t = (self.project.clone(), self.title.clone());
+        }
+        // Navigating leaves the joined room. Until the websocket thread has
+        // joined and caught up, fallback polling covers the gap. Sending the
+        // fast interval even when we were already Polling also wakes an idle
+        // 60 s backoff for this newly installed page.
+        let was_polling = self.sync_state == SyncState::Polling;
+        self.set_sync_state(SyncState::Polling);
+        if was_polling {
+            self.reset_fallback_poll();
         }
         // A fresh page install severs the websocket commit lineage: the
         // room re-joins on the new target, and any remote head we tracked,

@@ -14,14 +14,16 @@ cargo run --bin cosentty <project> [title]     # またはページ URL をそ�
   で完結する。保存先は `~/.cosense/settings.json`。解決順序は `rust/KEYMAP.md` の「認証」を参照。
   `COSENSE_SID` の connect.sid が**どうしても要る**のは **ws push 同期**だけ
   (websocket は cookie 認証しか通らない。`NOTE-websocket-sync.md`)。それも
-  効くのは**ブラウザ→端末の向き**だけで(3 秒ポーリング→サブ秒)、端末で打った
+  効くのは**ブラウザ→端末の向き**だけで(未変更なら 3→6→12→30→60 秒に
+  伸びるポーリング→サブ秒)、端末で打った
   文字がブラウザに出る向きは PAT だけで入力中からリアルタイムに動く
   (`PLAN-live-edit.md`)。ひとりで書く用途なら sid は要らない、が現在の位置づけ。
   **プロジェクト設定の読み取り**(テーマ・表示名・アップロード先)も sid か
   Service Account が要るが、`,` の設定画面で `config.toml` に書けば代替できる。
   **図をブラウザの画像で出す `diagrams = image`**(既定は `text`)も非公開ページには
   SID を使う。設定画面 `,` か `COSENSE_WEB_RENDER=image` で有効にする。
-  無ければ 3秒ポーリング・アップロード先 `gcs` に縮退する(レンダラを上げて
+  無ければ 3 秒から最大 60 秒へ伸びるポーリング・アップロード先 `gcs` に
+  縮退する(レンダラを上げて
   いなければ図はテキストかコードで出る)
 - 自前の設定ファイルは `~/.config/cosentty/config.toml`(`[view]` `[upload]`
   `[project.<slug>]`。書き方は `rust/KEYMAP.md` の「設定ファイルと設定画面」か

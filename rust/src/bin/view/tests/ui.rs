@@ -296,6 +296,40 @@ fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
 }
 
 #[test]
+fn navigating_while_already_polling_restarts_the_idle_backoff() {
+    let ctx = test_ctx();
+    let mut app = page(&["a"]);
+    assert_eq!(app.sync_state, SyncState::Polling);
+    app.set_page(
+        Loaded {
+            project: "proj".into(),
+            title: "other".into(),
+            page_id: "P2".into(),
+            header_colors: HeaderColors::fallback(),
+            project_display: String::new(),
+            lines: Vec::new(),
+            blocks: Vec::new(),
+            srcs: Vec::new(),
+            hits: Vec::new(),
+            related: Vec::new(),
+            facts: PageFacts::default(),
+            read_at: None,
+            open_stamp: 0,
+            editable: true,
+            links: LinkTruth::default(),
+            palette: ctx.palette(),
+            telomere_tint: None,
+        },
+        &ctx,
+    );
+    assert_eq!(
+        app.poll_ctrl_rx_for_test().recv().unwrap(),
+        Duration::from_secs(3),
+        "a newly installed page must not inherit a one-minute idle sleep"
+    );
+}
+
+#[test]
 fn moving_to_another_project_forgets_the_old_one_s_verdict() {
     let ctx = test_ctx();
     let mut app = mermaid_page();

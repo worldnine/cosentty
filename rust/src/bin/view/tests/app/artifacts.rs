@@ -139,6 +139,27 @@ fn a_session_without_a_sid_is_never_called_reconnecting() {
     assert_eq!(app.sync_label(), "poll");
 }
 
+#[test]
+fn local_activity_restarts_fallback_polling_but_not_live_insurance_polling() {
+    let mut app = page(&["a"]);
+    app.reset_fallback_poll();
+    assert_eq!(
+        app.poll_ctrl_rx_for_test().recv().unwrap(),
+        capability::FAST_POLL
+    );
+
+    app.set_sync_state(SyncState::Live);
+    assert_eq!(
+        app.poll_ctrl_rx_for_test().recv().unwrap(),
+        capability::LIVE_POLL
+    );
+    app.reset_fallback_poll();
+    assert!(
+        app.poll_ctrl_rx_for_test().try_recv().is_err(),
+        "a live room needs no extra GET"
+    );
+}
+
 // ---------------------------------------------------------------
 // Web renderer (Mermaid). The browser itself is never launched here:
 // `FakeBackend` stands in at the request→artifact boundary.

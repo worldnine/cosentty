@@ -138,13 +138,17 @@ pub(crate) fn handle_commit_outcome(app: &mut App, ctx: &Ctx, outcome: CommitOut
                     *t = (app.project.clone(), app.title.clone());
                 }
             }
+            // Local activity makes collaboration likely again. A fallback
+            // poll that had reached its idle minute must return to the fast
+            // edge; a live websocket needs no extra request.
+            app.reset_fallback_poll();
             // A toast never displaces the standing status (a selection
             // hint, an upload in flight), so the tick can always be said.
             app.note(format!("✓ {label}"));
             // A page that just came into being has an id we do not know
-            // yet, and every edit until we do has to wait. Waiting for the
-            // next poll means up to 3 s (60 s on websocket sync) of held
-            // edits that a quit would take with it — so fetch it now.
+            // yet, and every edit until we do has to wait. An idle fallback
+            // poll and websocket insurance can both be 60 s away; a quit in
+            // that gap would lose held edits, so fetch it now.
             if page_is_uncreated(app) && app.create_state == CreateState::Sent {
                 adopt_after_create(app, ctx);
             }
@@ -310,7 +314,7 @@ pub(crate) fn install_remote_lines(
     // Remote lineage: an entry whose anchor line the server no longer has
     // cannot be replayed, but the rest still can. Dropping the WHOLE
     // history here is what made `^r` look dead: a single web-side edit (or
-    // one 3 s poll that differed) silently took the redo stack with it.
+    // one fallback poll that differed) silently took the redo stack with it.
     let dropped = retain_replayable_history(&mut app.undo_stack, &app.lines)
         + retain_replayable_history(&mut app.redo_stack, &app.lines);
     if dropped > 0 {
@@ -977,6 +981,15 @@ impl App {
         // A dead channel just means the poller is gone (shutdown).
         let _ = self.poll_ctrl_tx.send(st.poll_interval());
         self.refresh_sync_tag();
+    }
+
+    /// Restart an adaptive fallback poll after local activity or navigation.
+    /// A live room already carries changes and keeps its fixed 60 s insurance
+    /// poll, so waking it would only add a redundant GET.
+    pub(crate) fn reset_fallback_poll(&self) {
+        if self.sync_state != SyncState::Live {
+            let _ = self.poll_ctrl_tx.send(SyncState::Polling.poll_interval());
+        }
     }
 
     /// The `sync:` word inside the session summary, kept truthful as the
