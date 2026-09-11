@@ -4,8 +4,10 @@
 //! cookie as a fallback.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::error::Error;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// `send()` that takes "429 Too Many Requests" as the instruction it is:
 /// wait — for `Retry-After` when the server names a time, a doubling
@@ -30,6 +32,66 @@ pub fn retry_backoff(retry_after: Option<&str>, attempt: u32) -> Duration {
 }
 
 const POLITE_ATTEMPTS: u32 = 4;
+
+/// The server's rate limit applies across the viewer's concurrent requests.
+/// Keep one cooldown deadline per origin so a 429 from a page request also
+/// holds back an image or list request, without delaying unrelated hosts.
+static RATE_LIMIT_COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn rate_limit_cooldowns() -> &'static Mutex<HashMap<String, Instant>> {
+    RATE_LIMIT_COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn rate_limit_key(req: &reqwest::blocking::RequestBuilder) -> String {
+    let Some(request) = req.try_clone().and_then(|builder| builder.build().ok()) else {
+        return "*".to_owned();
+    };
+    let url = request.url();
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!(
+        "{}://{}{}",
+        url.scheme(),
+        url.host_str().unwrap_or_default(),
+        port
+    )
+}
+
+fn wait_for_rate_limit(key: &str) {
+    loop {
+        let wait = {
+            let mut cooldowns = rate_limit_cooldowns()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Instant::now();
+            match cooldowns.get(key).copied() {
+                Some(deadline) if deadline > now => deadline - now,
+                Some(_) => {
+                    cooldowns.remove(key);
+                    Duration::ZERO
+                }
+                None => Duration::ZERO,
+            }
+        };
+        if wait.is_zero() {
+            return;
+        }
+        std::thread::sleep(wait);
+    }
+}
+
+fn extend_rate_limit(key: &str, delay: Duration) {
+    let deadline = Instant::now() + delay;
+    let mut cooldowns = rate_limit_cooldowns()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current = cooldowns.entry(key.to_owned()).or_insert(deadline);
+    if *current < deadline {
+        *current = deadline;
+    }
+}
 
 /// How long a TCP + TLS handshake may take before a request is given up.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,13 +118,23 @@ fn send_with_attempts(
     attempts: u32,
 ) -> reqwest::Result<reqwest::blocking::Response> {
     let mut req = req;
+    let key = rate_limit_key(&req);
     for attempt in 1..=attempts {
+        wait_for_rate_limit(&key);
         // A body that cannot be cloned (a stream) can only be sent once.
         let Some(again) = req.try_clone() else {
-            return req.send();
+            let res = req.send()?;
+            if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let after = res
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok());
+                extend_rate_limit(&key, retry_backoff(after, attempt));
+            }
+            return Ok(res);
         };
         let res = req.send()?;
-        if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == attempts {
+        if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Ok(res);
         }
         let after = res
@@ -70,7 +142,10 @@ fn send_with_attempts(
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        std::thread::sleep(retry_backoff(after.as_deref(), attempt));
+        extend_rate_limit(&key, retry_backoff(after.as_deref(), attempt));
+        if attempt == attempts {
+            return Ok(res);
+        }
         req = again;
     }
     unreachable!("the loop returns on its last attempt")
@@ -1303,5 +1378,26 @@ mod tests {
         );
         assert_eq!(retry_backoff(None, 1), Duration::from_secs(1));
         assert_eq!(retry_backoff(None, 3), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_shared_cooldown_keeps_the_longest_deadline() {
+        let key = "test://shared-cooldown";
+        extend_rate_limit(key, Duration::from_millis(30));
+        let first = rate_limit_cooldowns()
+            .lock()
+            .unwrap()
+            .get(key)
+            .copied()
+            .unwrap();
+        extend_rate_limit(key, Duration::from_millis(1));
+        let second = rate_limit_cooldowns()
+            .lock()
+            .unwrap()
+            .get(key)
+            .copied()
+            .unwrap();
+        assert!(second >= first, "a shorter 429 must not shorten the wait");
+        wait_for_rate_limit(key);
     }
 }
