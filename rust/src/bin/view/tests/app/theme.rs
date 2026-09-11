@@ -153,7 +153,7 @@ fn the_projects_list_header_is_a_menu_not_a_project() {
 /// With the server unreadable, `[project.<slug>]` in config.toml stands in
 /// for the theme and the display name — and says so.
 #[test]
-fn the_file_stands_in_for_unreadable_project_settings() {
+fn the_file_wins_over_the_api_and_the_api_stands_in_for_it() {
     use cosense::config::Origin;
     let ctx = offline_ctx();
     // The cache says "asked, nothing there" so no fetch is attempted.
@@ -182,7 +182,7 @@ fn the_file_stands_in_for_unreadable_project_settings() {
         ("ACME".to_string(), Origin::File)
     );
 
-    // The API, once it answers, wins over the file.
+    // The API answering changes nothing while the file has a value…
     ctx.project_settings.lock().unwrap().insert(
         "acme".into(),
         Some(cosense::api::ProjectSettings {
@@ -194,7 +194,19 @@ fn the_file_stands_in_for_unreadable_project_settings() {
     );
     assert_eq!(
         ctx.project_theme_with("acme"),
+        (Some("paper-dark".into()), Origin::File),
+        "what the reader wrote is what is in force"
+    );
+    assert_eq!(ctx.project_display("acme"), "ACME");
+
+    // …and stands in once the file says nothing.
+    ctx.set_config(cosense::config::Config::default());
+    assert_eq!(
+        ctx.project_theme_with("acme"),
         (Some("blue".into()), Origin::Api)
     );
-    assert_eq!(ctx.project_display("acme"), "Acme Corp");
+    assert_eq!(
+        ctx.project_display_with("acme"),
+        ("Acme Corp".to_string(), Origin::Api)
+    );
 }

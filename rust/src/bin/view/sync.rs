@@ -778,11 +778,12 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
         // app afterwards, so scrubbing and a second ← are free.
         let listed = match app.snapshots.clone() {
             Some(points) => Ok(points),
-            None => ctx.client.list_snapshots(&app.project, &app.page_id).inspect(
-                |points: &Vec<cosense::api::SnapshotStamp>| {
+            None => ctx
+                .client
+                .list_snapshots(&app.project, &app.page_id)
+                .inspect(|points: &Vec<cosense::api::SnapshotStamp>| {
                     app.snapshots = Some(points.clone());
-                },
-            ),
+                }),
         };
         match listed {
             Ok(points) if !points.is_empty() => {

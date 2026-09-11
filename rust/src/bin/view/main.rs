@@ -697,11 +697,14 @@ impl Ctx {
         }
     }
 
-    /// The project's site theme. The web setting is the truth, so the API
-    /// wins whenever it answered with one; `[project.<slug>].theme` in
-    /// config.toml stands in when it did not (a private project without a
-    /// sid). Compare `upload::Destination::resolve`, where the FILE wins:
-    /// a destination is the reader's own choice, a theme is the project's.
+    /// The project's site theme: `[project.<slug>].theme` in config.toml
+    /// when the reader wrote one, else what the API says (a public project,
+    /// or a sid), else none. The file wins so that a value set on the
+    /// settings screen is always the value in force — the same order as
+    /// `upload::Destination::resolve`. (Until 2026-09-12 the API won for
+    /// the theme and the name, on the grounds that they are the project's
+    /// own; that made a hand-written value silently inert whenever the API
+    /// happened to be readable.)
     fn project_theme(&self, project: &str) -> Option<String> {
         self.project_theme_with(project).0
     }
@@ -710,7 +713,7 @@ impl Ctx {
     fn project_theme_with(&self, project: &str) -> (Option<String>, cosense::config::Origin) {
         use cosense::config::Origin;
         // A preview stands in for everything while it lasts: the picker
-        // shows what the page WOULD wear, whatever the API says now.
+        // shows what the page WOULD wear, whatever the file or API says.
         if let Ok(p) = self.project_theme_preview.lock() {
             if let Some((proj, theme)) = p.as_ref() {
                 if proj == project {
@@ -718,15 +721,15 @@ impl Ctx {
                 }
             }
         }
-        if let Some(t) = self
+        if let Some(t) = self.config().project_theme(project) {
+            return (Some(t), Origin::File);
+        }
+        match self
             .project_settings(project)
             .and_then(|s| s.theme)
             .filter(|t| !t.is_empty())
         {
-            return (Some(t), Origin::Api);
-        }
-        match self.config().project_theme(project) {
-            Some(t) => (Some(t), Origin::File),
+            Some(t) => (Some(t), Origin::Api),
             None => (None, Origin::Default),
         }
     }
@@ -739,8 +742,8 @@ impl Ctx {
         }
     }
 
-    /// The project's proper name for the header: the API's, else the
-    /// file's, else the slug — which is at least always true.
+    /// The project's proper name for the header: the file's, else the
+    /// API's, else the slug — which is at least always true.
     fn project_display(&self, project: &str) -> String {
         self.project_display_with(project).0
     }
@@ -748,14 +751,12 @@ impl Ctx {
     /// `project_display`, with where the answer came from.
     fn project_display_with(&self, project: &str) -> (String, cosense::config::Origin) {
         use cosense::config::Origin;
-        if let Some(s) = self.project_settings(project) {
-            if !s.display_name.trim().is_empty() {
-                return (s.display_name, Origin::Api);
-            }
+        if let Some(n) = self.config().project_display_name(project) {
+            return (n, Origin::File);
         }
-        match self.config().project_display_name(project) {
-            Some(n) => (n, Origin::File),
-            None => (project.to_string(), Origin::Default),
+        match self.project_settings(project) {
+            Some(s) if !s.display_name.trim().is_empty() => (s.display_name, Origin::Api),
+            _ => (project.to_string(), Origin::Default),
         }
     }
 

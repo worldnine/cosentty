@@ -192,7 +192,10 @@ mod tests {
             "timeline\n title T\n S : E",
             "xychart-beta\n title T\n x-axis [a]\n bar [1]",
         ] {
-            assert!(render_text(code, 80, DiagramText::Box).is_some(), "{code:?}");
+            assert!(
+                render_text(code, 80, DiagramText::Box).is_some(),
+                "{code:?}"
+            );
         }
     }
 
@@ -217,7 +220,8 @@ mod tests {
             remove_wide_continuation_cells("│ 開 始  │\n╔═[alt]══[成═功═]══╗"),
             "│ 開始 │\n╔═[alt]══[成功]══╗"
         );
-        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60, DiagramText::Box).expect("flowchart draws");
+        let out = render_text("flowchart TB\n A[開始]-->B{判断?}", 60, DiagramText::Box)
+            .expect("flowchart draws");
         let joined = out.join("\n");
         assert!(joined.contains("開始"), "phantom cell remains: {joined}");
         assert!(!joined.contains("開 始"), "phantom cell remains: {joined}");
@@ -273,7 +277,10 @@ mod tests {
             TextOutcome::Drawn(_)
         ));
         // 未知の型は幅不足ではなく Declined。
-        assert_eq!(render_text_outcome("foobar\n x", 20, DiagramText::Box), TextOutcome::Declined);
+        assert_eq!(
+            render_text_outcome("foobar\n x", 20, DiagramText::Box),
+            TextOutcome::Declined
+        );
     }
 
     #[test]

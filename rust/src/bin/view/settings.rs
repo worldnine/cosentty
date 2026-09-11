@@ -261,24 +261,18 @@ fn refresh_rows(view: &mut SettingsView, ctx: &Ctx) {
             cosense::upload::Decided::Project => Origin::Api,
             cosense::upload::Decided::Default => Origin::Default,
         };
-        // A file value under an API one is not in force: say so on the row.
-        let shadowed = |from: Origin, file_has: bool| -> Option<String> {
-            (from == Origin::Api && file_has)
-                .then(|| t!("API が読める間は API が優先", "the API wins while readable"))
-        };
-        let cfg = ctx.config();
         rows.extend([
             SettingRow {
                 field: SettingField::ProjectTheme,
                 value: theme.unwrap_or_else(|| t!("(なし)", "(none)")),
                 origin: theme_from,
-                note: shadowed(theme_from, cfg.project_theme(project).is_some()),
+                note: None,
             },
             SettingRow {
                 field: SettingField::ProjectDisplayName,
                 value: name,
                 origin: name_from,
-                note: shadowed(name_from, cfg.project_display_name(project).is_some()),
+                note: None,
             },
             SettingRow {
                 field: SettingField::ProjectImages,
@@ -717,10 +711,7 @@ fn begin_change(app: &mut App, ctx: &Ctx, field: SettingField) {
         }
         SettingField::Ime => view.mode = pick(with_unset(&["jp", "off"]), cfg.view.ime.clone()),
         SettingField::DiagramText => {
-            view.mode = pick(
-                with_unset(&["box", "ascii"]),
-                cfg.view.diagram_text.clone(),
-            )
+            view.mode = pick(with_unset(&["box", "ascii"]), cfg.view.diagram_text.clone())
         }
         SettingField::DownloadDir => {
             let current = cfg.view.download_dir.clone().unwrap_or_default();

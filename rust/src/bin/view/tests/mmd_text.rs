@@ -290,10 +290,12 @@ fn a_diagram_dims_its_rules_and_leaves_its_words_alone() {
 fn blank_lines_in_a_diagram_do_not_break_the_drawing() {
     // 空行が打てるようになったので、ブロックの中の空行は図に届く。
     // mermaid-text は空行を素通しさせる(壊れない)ことをここで固定する。
-    let with = mmd_text::render_text("flowchart LR\n A-->B\n\n ", 60, mmd_text::DiagramText::Box).expect("draws");
+    let with = mmd_text::render_text("flowchart LR\n A-->B\n\n ", 60, mmd_text::DiagramText::Box)
+        .expect("draws");
     assert_eq!(
         with,
-        mmd_text::render_text("flowchart LR\n A-->B", 60, mmd_text::DiagramText::Box).expect("draws")
+        mmd_text::render_text("flowchart LR\n A-->B", 60, mmd_text::DiagramText::Box)
+            .expect("draws")
     );
 }
 

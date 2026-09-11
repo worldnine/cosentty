@@ -218,7 +218,8 @@ impl App {
                         let draw_w = text_w.saturating_sub(*indent);
                         let drawn = match kind {
                             ArtifactKind::Mermaid => {
-                                match mmd_text::render_text_outcome(code, draw_w, self.diagram_text) {
+                                match mmd_text::render_text_outcome(code, draw_w, self.diagram_text)
+                                {
                                     mmd_text::TextOutcome::Drawn(lines) => Some(lines),
                                     mmd_text::TextOutcome::TooNarrow { needed } => {
                                         too_narrow = Some(needed);
@@ -306,7 +307,9 @@ impl App {
                     }) {
                         let w = text_w.saturating_sub(*indent + 2);
                         let drawn = match kind {
-                            ArtifactKind::Mermaid => mmd_text::render_text(&code, w, self.diagram_text),
+                            ArtifactKind::Mermaid => {
+                                mmd_text::render_text(&code, w, self.diagram_text)
+                            }
                             ArtifactKind::Math => cosense::math::render_text(&code, w),
                         };
                         if let Some(lines) = drawn {
