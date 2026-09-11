@@ -758,11 +758,16 @@ pub(crate) fn travel(app: &mut App, ctx: &Ctx, dir: i32) {
             app.toast(t!("すでに最新です", "already at NOW"));
             return;
         }
-        // The list fetched with the page is used as it stands; only when
-        // it is not known (yet) does ← ask the server itself.
+        // Entering the machine is what pays for the list — the page open
+        // itself no longer does (see `App::history_position`). Kept on the
+        // app afterwards, so scrubbing and a second ← are free.
         let listed = match app.snapshots.clone() {
             Some(points) => Ok(points),
-            None => ctx.client.list_snapshots(&app.project, &app.page_id),
+            None => ctx.client.list_snapshots(&app.project, &app.page_id).inspect(
+                |points: &Vec<cosense::api::SnapshotStamp>| {
+                    app.snapshots = Some(points.clone());
+                },
+            ),
         };
         match listed {
             Ok(points) if !points.is_empty() => {
@@ -826,7 +831,10 @@ pub(crate) fn show_revision(app: &mut App, ctx: &Ctx, id: &str) {
     {
         Some(p) => p,
         None => match ctx.client.list_snapshots(&app.project, &app.page_id) {
-            Ok(p) => p,
+            Ok(p) => {
+                app.snapshots = Some(p.clone());
+                p
+            }
             Err(e) => {
                 app.toast_err(t!(
                     "履歴一覧を取得できません: {e}",

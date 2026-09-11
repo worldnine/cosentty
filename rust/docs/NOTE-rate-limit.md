@@ -58,6 +58,21 @@ SID ありの場合、以前は次の6件を出していた。
 画像は別ホスト（gyazo）なら影響しないが、Cosense にアップロードしたファイル
 （`/files/...`）は同じ origin なので同じ制限に乗る。
 
+### さらに削った2件（同日）
+
+- **ページ移動直後の3秒ポーリングを、ws が live ならやめる**。移動のたびに
+  `SyncState::Polling`（3秒）へ落としていたため、今取ったばかりの本文をもう一度
+  取りに行っていた。push が現に動いていたなら、新しい部屋への join は1秒後で、
+  失敗すれば ws スレッドが `Reconnecting`（= 3秒）を自分で告げる。保険の60秒ポーリングは
+  そのまま。sid が無ければ従来どおり（常に Polling なので変わらない）。
+- **履歴件数の先読みをやめる**。生のページは定義上最新版なので、ヘッダの
+  `N+1/N+1` のためだけに毎ページ `page-snapshots` を叩いていた。一覧は
+  **← でタイムマシンに入ったときに取る**（`travel` / `show_revision` に元々あった経路）。
+  取ったら `App::snapshots` に残るので、スクラブも二度目の ← も追加要求なし。
+  ヘッダは入るまで日付だけを出す。背景取得の仕組み（`snapshots_tx`/`drain_snapshots`）は削除した。
+
+実測（help-jp で2ページを歩く）: **15本 → 13本**、うち2ページ目の分は **5本 → 3本**。
+
 ## 429 が429を呼ぶ経路（塞いだ）
 
 関連ページの取得が失敗すると、リンクの生死が未知のままになる。従来はそこで
@@ -96,4 +111,6 @@ awk '{print int($1/60000)}' /tmp/cosense-http.log | uniq -c                  # �
 - `rust/src/ws.rs`: `PageIdHint` と `take_page_id_hint`
 - `rust/src/bin/view/nav.rs`: `RelatedAnswer`、`App::ws_page_hint` の更新
 - `rust/src/bin/view/links.rs`: 拒否中はプローバを止める
+- `rust/src/bin/view/nav.rs`: live なら移動で `SyncState` を落とさない、履歴件数の先読み廃止
+- `rust/src/bin/view/sync.rs`: `travel` / `show_revision` が取った一覧を `App::snapshots` に残す
 - 既存の `retry_backoff` を共有期限の計算にも使用

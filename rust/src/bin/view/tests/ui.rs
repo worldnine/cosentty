@@ -240,7 +240,7 @@ fn the_composer_body_wraps_and_reports_where_the_caret_landed() {
 }
 
 #[test]
-fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
+fn navigating_away_from_a_live_room_keeps_the_insurance_poll() {
     let ctx = test_ctx();
     let mut app = page(&["a"]);
     app.title = "t".into();
@@ -257,9 +257,15 @@ fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
     );
     assert_eq!(app.sync_state, SyncState::Live);
     assert!(app.status.contains("同期: ws"));
+    // Going live retuned the poller to its 60 s insurance; from here on,
+    // anything in the channel came from the navigation.
+    while app.poll_ctrl_rx_for_test().try_recv().is_ok() {}
 
-    // The reader moves to another page. The old room is gone; nothing
-    // has joined the new one yet, so the insurance poll must be fast.
+    // The reader moves to another page. The old room is gone and the new
+    // one is not joined yet — but the push channel has PROVED it works, the
+    // join is a second away, and the page was just fetched. Dropping to the
+    // 3 s poll here only refetches it. The ws thread reports the new room
+    // either way (`Live`, or `Reconnecting` — which is the fast interval).
     app.set_page(
         Loaded {
             project: "proj".into(),
@@ -282,17 +288,30 @@ fn navigating_away_from_a_live_room_goes_back_to_the_fast_poll() {
         },
         &ctx,
     );
-    assert_eq!(app.sync_state, SyncState::Polling);
+    assert_eq!(app.sync_state, SyncState::Live);
     let rx = app.poll_ctrl_rx_for_test();
     let mut last = None;
     while let Ok(d) = rx.try_recv() {
         last = Some(d);
     }
-    assert_eq!(
-        last,
-        Some(Duration::from_secs(3)),
-        "the poller is retuned at once"
+    assert_eq!(last, None, "the poller is left on its insurance interval");
+
+    // A join that fails IS what wakes it.
+    handle_ws_event(
+        &mut app,
+        &ctx,
+        WsEvent::State {
+            project: "proj".into(),
+            title: "other".into(),
+            state: SyncState::Reconnecting,
+        },
     );
+    let rx = app.poll_ctrl_rx_for_test();
+    let mut last = None;
+    while let Ok(d) = rx.try_recv() {
+        last = Some(d);
+    }
+    assert_eq!(last, Some(Duration::from_secs(3)));
 }
 
 #[test]

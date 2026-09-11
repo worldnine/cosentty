@@ -607,13 +607,12 @@ pub(crate) struct App {
     pub(crate) page_loads_on: bool,
     pub(crate) page_load_tx: mpsc::Sender<PageLoadMsg>,
     pub(crate) page_load_rx: mpsc::Receiver<PageLoadMsg>,
-    /// The page's snapshot stamps (oldest → newest), fetched in the
-    /// background with the related block so the header can count NOW as
-    /// `N+1/N+1` before the reader ever presses ←. `None` = not known yet
-    /// (or the fetch failed; ← then asks again itself).
+    /// The page's snapshot stamps (oldest → newest), as fetched the first
+    /// time the reader entered this page's history. `None` = nobody has
+    /// asked, which is the state of every page just opened: the live page
+    /// is the newest revision, so the list is not worth a request until ←
+    /// is pressed (`travel`).
     pub(crate) snapshots: Option<Vec<cosense::api::SnapshotStamp>>,
-    pub(crate) snapshots_tx: mpsc::Sender<SnapshotsMsg>,
-    pub(crate) snapshots_rx: mpsc::Receiver<SnapshotsMsg>,
     /// Flattened related entries in render order. Entry `i` renders with
     /// the VIRTUAL source index `lines.len() + i`, so the cursor, Enter and
     /// mouse clicks address related rows exactly like body lines.
@@ -701,7 +700,6 @@ impl App {
         let (link_probe_res_tx, link_probe_rx) = mpsc::channel();
         let (related_tx, related_rx) = mpsc::channel();
         let (page_load_tx, page_load_rx) = mpsc::channel();
-        let (snapshots_tx, snapshots_rx) = mpsc::channel();
         App {
             mode: Mode::View,
             project,
@@ -858,8 +856,6 @@ impl App {
             page_load_tx,
             page_load_rx,
             snapshots: None,
-            snapshots_tx,
-            snapshots_rx,
             virtual_items: Vec::new(),
             light: false,
             visits_path: None,

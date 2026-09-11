@@ -99,8 +99,6 @@ impl RelatedAnswer {
 /// and what came back. A failure still has to come back, so the page
 /// stops waiting on it.
 pub(crate) type RelatedMsg = (String, String, RelatedAnswer);
-/// `(project, page id, stamps)` — `None` when the list could not be fetched.
-pub(crate) type SnapshotsMsg = (String, String, Option<Vec<cosense::api::SnapshotStamp>>);
 
 /// The page-level facts the related-pages block has to be read against.
 ///
@@ -1482,13 +1480,23 @@ impl App {
             });
         }
         // Navigating leaves the joined room. Until the websocket thread has
-        // joined and caught up, fallback polling covers the gap. Sending the
-        // fast interval even when we were already Polling also wakes an idle
-        // 60 s backoff for this newly installed page.
-        let was_polling = self.sync_state == SyncState::Polling;
-        self.set_sync_state(SyncState::Polling);
-        if was_polling {
-            self.reset_fallback_poll();
+        // joined, fallback polling covers the gap. Sending the fast interval
+        // even when we were already Polling also wakes an idle 60 s backoff
+        // for this newly installed page.
+        //
+        // Unless the room we just left was LIVE. Then the push channel is
+        // known to work, the join on the new page is a second away, and the
+        // ws thread says so either way (`SyncState::Live` when it lands,
+        // `Reconnecting` — which IS the fast interval — on any failure).
+        // Dropping to a 3 s poll in the meantime only refetches the page
+        // this install just fetched: measured as a third GET of the same
+        // body on every navigation.
+        if self.sync_state != SyncState::Live {
+            let was_polling = self.sync_state == SyncState::Polling;
+            self.set_sync_state(SyncState::Polling);
+            if was_polling {
+                self.reset_fallback_poll();
+            }
         }
         // A fresh page install severs the websocket commit lineage: the
         // room re-joins on the new target, and any remote head we tracked,
@@ -1497,6 +1505,9 @@ impl App {
         self.ws_pending.clear();
         self.ws_resync_pending = false;
         self.ws_held_resync = None;
+        // The list belongs to the page that is leaving (and is only ever
+        // fetched when the reader enters its history).
+        self.snapshots = None;
         self.related = l.related;
         self.related_block = None;
         self.facts = l.facts;
@@ -1526,44 +1537,16 @@ impl App {
         self.start_image_loads(ctx);
         self.start_web_renders(capability::Trigger::Auto);
         self.start_related_load(ctx);
-        self.start_snapshots_load(ctx);
-    }
-
-    /// Fetch the snapshot list in the background (same gate and reason as
-    /// the related block: nothing on screen waits for it). The header shows
-    /// `N+1/N+1` once it lands; until then, the date alone.
-    pub(crate) fn start_snapshots_load(&mut self, ctx: &Ctx) {
-        self.snapshots = None;
-        if !self.related_fetch || self.page_id.is_empty() {
-            return; // tests, or a page that does not exist yet
-        }
-        let tx = self.snapshots_tx.clone();
-        let client = ctx.client.clone();
-        let (project, page_id) = (self.project.clone(), self.page_id.clone());
-        std::thread::spawn(move || {
-            let stamps = client.list_snapshots(&project, &page_id).ok();
-            let _ = tx.send((project, page_id, stamps));
-        });
-    }
-
-    /// Install a snapshot list that arrived. `true` = the header changed.
-    pub(crate) fn drain_snapshots(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok((project, page_id, stamps)) = self.snapshots_rx.try_recv() {
-            if project != self.project || page_id != self.page_id {
-                continue; // for a page the reader has left
-            }
-            if let Some(stamps) = stamps {
-                self.snapshots = Some(stamps);
-                changed = true;
-            }
-        }
-        changed
     }
 
     /// Where the shown page stands in its history, counting NOW as the last
     /// position: `(position, total)` — `4/4` for the live page with three
-    /// snapshots, `3/4` one step back. `None` until the list is known.
+    /// snapshots, `3/4` one step back. `None` until the list is known,
+    /// which — since the list is only fetched when the reader enters the
+    /// time machine (`travel`) — is the usual state of a page just opened.
+    /// That is the right silence: the live page is the newest revision by
+    /// definition, and saying `12/12` before anyone asked cost one request
+    /// per page open.
     pub(crate) fn history_position(&self) -> Option<(usize, usize)> {
         match self.time.as_ref() {
             Some(tm) => Some((tm.pos + 1, tm.points.len() + 1)),
