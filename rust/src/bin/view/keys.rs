@@ -549,6 +549,22 @@ pub(crate) fn handle_key(app: &mut App, ctx: &Ctx, k: event::KeyEvent) -> Action
             enter_move_mode(app, ctx)
         }
 
+        // ---- reload: fetch the page again, now ----
+        // The fallback poll relaxes to a minute while nothing changes, so
+        // "is there anything new?" needs a key that does not wait for it.
+        // `reload_page` keeps the caret's line, and the install behind it
+        // asks for the related pages again and restarts the fast poll.
+        (KeyCode::Char('R'), false) => {
+            if app.time.is_some() {
+                app.toast(t!(
+                    "履歴中は読み直しません（Esc で最新へ）",
+                    "not reloading a snapshot (Esc goes to NOW)"
+                ));
+            } else if reload_page(app, ctx) {
+                app.toast(t!("読み直しました", "reloaded"));
+            }
+        }
+
         // ---- open in browser (moved from `e`: **w**eb) ----
         (KeyCode::Char('w'), false) => {
             let url = app.cursor_url();

@@ -32,16 +32,16 @@ pub(crate) fn help_keys(app: &App) -> Vec<String> {
             "mouse       click link/open · click row/move · drag/select · wheel/scroll"
         ),
         t!(
-            "表示        z ソース · w ブラウザ · t 行の詳細 · , 設定",
-            "view        z source · w browser · t line detail · , settings"
+            "表示        z ソース · w ブラウザ · t 行の詳細 · , 設定 · R 読み直す",
+            "view        z source · w browser · t line detail · , settings · R reload"
         ),
         t!(
             "履歴        ← 古い版 · → 新しい版 · Esc 最新へ（履歴中は読むだけ）",
             "history     ← older · → newer · Esc NOW (read-only back there)"
         ),
         t!(
-            "図          code:mmd は罫線で描く · 設定 diagrams=image で画像に · R で描き直す",
-            "diagram     code:mmd draws as text · diagrams=image shows the browser's picture · R retries"
+            "図          code:mmd / code:tex は罫線と記号で描く（diagram_text=ascii で罫線なし）",
+            "diagram     code:mmd / code:tex draw as text (diagram_text=ascii for no box glyphs)"
         ),
         t!(
             "出力        y カーソル行/選択をコピー · Y ページ全体",

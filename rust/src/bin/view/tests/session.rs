@@ -2098,3 +2098,41 @@ fn continuous_typing_saves_every_max_wait() {
         "the clock restarts with the next key"
     );
 }
+
+/// `R` in READ asks the server for the page again: the fallback poll
+/// relaxes to a minute while nothing changes, and the reader must not
+/// have to wait it out. Offline, the attempt itself is what shows.
+#[test]
+fn r_in_read_reloads_the_page_and_restarts_the_fast_poll() {
+    let ctx = offline_ctx();
+    let mut app = page(&["title", "body"]);
+    app.rebuild(80);
+    // Drain the install's own poll retune so the reload's is what we see.
+    while app.poll_ctrl_rx_for_test().try_recv().is_ok() {}
+    handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
+    assert!(
+        app.toast_text().contains("読み直しに失敗"),
+        "the fetch was attempted (and, offline, failed): {}",
+        app.toast_text()
+    );
+    assert!(
+        app.session.is_none(),
+        "R is a command in READ, not a character"
+    );
+}
+
+/// A snapshot is not reloaded: it is the past, and `Esc` is the way to NOW.
+#[test]
+fn r_in_history_does_not_reload() {
+    let ctx = offline_ctx();
+    let mut app = page(&["title", "body"]);
+    in_history(&mut app);
+    app.rebuild(80);
+    handle_key(&mut app, &ctx, key(KeyCode::Char('R')));
+    assert!(app.time.is_some(), "still in history");
+    assert!(
+        app.toast_text().contains("Esc"),
+        "and told how to leave it: {}",
+        app.toast_text()
+    );
+}
