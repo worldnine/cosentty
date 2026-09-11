@@ -37,14 +37,24 @@ pub(crate) fn test_ctx() -> Ctx {
     }
 }
 
-/// A Ctx whose every network call fails, fast and offline: `.invalid`
-/// is reserved by RFC 2606 and cannot resolve. Used to exercise the
-/// "the fetch did not work" branches without touching the network.
+/// A Ctx whose every network call fails, fast and offline. The target is
+/// a port on the loopback interface that nothing listens on: bind an
+/// ephemeral port, drop the listener, and point the client there. The
+/// connect is refused at once, and no resolver is involved.
+///
+/// (An earlier version used a `.invalid` host name. RFC 2606 says it
+/// cannot resolve, but *how fast* that failure comes back is up to the
+/// network: a slow or hijacking resolver held the lookup for tens of
+/// seconds, and tests that waited on the outcome came and went.)
 pub(crate) fn offline_ctx() -> Ctx {
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .expect("an ephemeral loopback port");
     let cfg = Config {
         project: "proj".into(),
         auth: AuthStore::default(),
-        api_domain: "cosentty-test.invalid".into(),
+        api_domain: format!("127.0.0.1:{port}"),
     };
     Ctx {
         client: Client::new(cfg).unwrap(),

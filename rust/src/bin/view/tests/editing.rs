@@ -1076,8 +1076,6 @@ fn only_a_failed_structural_save_holds_the_jobs_behind_it() {
     )
     .unwrap();
     let j4 = queue_commit(&mut app, "line 2", replace("x")).unwrap();
-    app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let j5 = queue_commit(&mut app, "line 2", replace("y")).unwrap();
     match res_rx.recv_timeout(wait()).expect("answered") {
         CommitOutcome::Failed {
             job, structural, ..
@@ -1091,6 +1089,11 @@ fn only_a_failed_structural_save_holds_the_jobs_behind_it() {
         res_rx.recv_timeout(wait()).expect("answered"),
         CommitOutcome::Skipped { job } if job == j4
     ));
+    // Bump `gen` only once j3 and j4 have been answered. Bumping earlier
+    // races the worker: a j3 it has not picked up yet is already stale
+    // and gets skipped instead of sent, which is not the story here.
+    app.gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let j5 = queue_commit(&mut app, "line 2", replace("y")).unwrap();
     assert!(matches!(
         res_rx.recv_timeout(wait()).expect("answered"),
         CommitOutcome::Failed { job, .. } if job == j5
